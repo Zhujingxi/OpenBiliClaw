@@ -606,7 +606,24 @@ async function postXhsTokens(
   }
 }
 
+async function postBangumiIdentity(payload: { uid: number; username: string }): Promise<void> {
+  if (!payload || !(payload.uid > 0)) return;
+  try {
+    await authenticatedFetch(await apiUrl("/sources/bangumi/identity"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid: payload.uid, username: payload.username || "" }),
+    });
+  } catch {
+    // Best-effort — the next bgm.tv page view re-reports the identity.
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.action === "BGM_IDENTITY_OBSERVED") {
+    void postBangumiIdentity(message.data as { uid: number; username: string });
+    return;
+  }
   if (message.action === "XHS_URLS_OBSERVED") {
     void postXhsObservedUrls(message.data as Record<string, unknown>);
     return;

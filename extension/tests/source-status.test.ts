@@ -15,8 +15,51 @@ const SourceStatus = (globalThis as Record<string, any>).OpenBiliClawSourceStatu
 test("the shared module publishes itself for classic-script consumers", () => {
   assert.ok(SourceStatus, "source-status.js did not define OpenBiliClawSourceStatus");
   assert.deepEqual([...SourceStatus.SOURCE_KEYS], [
+    // Bangumi is in the roster without being on the auth contract: the roster
+    // answers "which sources exist", and omitting it would drop the platform
+    // from all three settings surfaces at once. It renders off the legacy
+    // `state` fallback until it gets a provider — see the test below.
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
+    "bangumi",
   ]);
+});
+
+// Bangumi is the one source the backend sends `auth: null` for. Pinning the
+// fallback here because the honest-looking alternative is the dangerous one: a
+// default-constructed contract reads auth_required=true + credential="none",
+// which renders as「需要登录」for a source that works anonymously off the public
+// API. Under-reporting is fine; inventing a verdict is not (invariant I3).
+test("a source with no auth contract falls back to its legacy state", () => {
+  const view = SourceStatus.describeAccess({
+    state: "ready", detail: "Bangumi 使用官方公开 API，无需登录。", enabled: true, auth: null,
+  });
+
+  assert.equal(view.present, true);
+  assert.equal(view.known, true);
+  assert.equal(view.contract, false, "must not claim a contract it was not sent");
+  assert.equal(view.label, "凭据已就绪");
+  // No contract means no basis for rating the evidence, so no badge is shown.
+  assert.equal(view.evidence.text, "");
+});
+
+// A switched-off source still reports its state through the legacy field, and
+// the shared table has to name it — before this it fell through to「状态未知」.
+test("a disabled source says so rather than reading as unknown", () => {
+  const view = SourceStatus.describeAccess({ state: "disabled", enabled: false, auth: null });
+
+  assert.equal(view.label, "来源未启用");
+  assert.equal(view.tone, "muted");
+});
+
+// The desktop page and the side panel each carried their own copy of this rule
+// before, which is the duplication that let the two status tables drift (D6).
+test("a rejected personal token outranks the run-derived verdict", () => {
+  const view = SourceStatus.describeAccess({
+    state: "ready", enabled: true, auth: null, token_state: "rejected",
+  });
+
+  assert.equal(view.label, "令牌已失效");
+  assert.equal(view.tone, "danger");
 });
 
 // spec D6, reachable drift #1. Both states are really emitted — YouTube reports

@@ -15,6 +15,7 @@ from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
     DiscoveryConcurrencyController,
+    _prompt_visible_content_fields,
     compact_evaluation_profile_summary,
     discovery_raw_candidate_mode_enabled,
     llm_eval_candidate_limit,
@@ -75,6 +76,29 @@ class _SlowLLMService:
         await asyncio.sleep(self.delay)
         self.active_calls -= 1
         return _SlowResponse('{"score": 0.88, "reason": "still relevant"}')
+
+
+def test_prompt_catalog_metrics_are_only_emitted_when_present() -> None:
+    ordinary = _prompt_visible_content_fields(
+        DiscoveredContent(bvid="BV1", title="普通视频", source_strategy="search")
+    )
+    catalog = _prompt_visible_content_fields(
+        DiscoveredContent(
+            bvid="326",
+            title="目录条目",
+            source_strategy="bangumi-ranked",
+            rating_score=9.2,
+            rating_count=9_959,
+            source_rank=1,
+        )
+    )
+
+    assert "rating_score" not in ordinary
+    assert "rating_count" not in ordinary
+    assert "source_rank" not in ordinary
+    assert catalog["rating_score"] == 9.2
+    assert catalog["rating_count"] == 9_959
+    assert catalog["source_rank"] == 1
 
 
 class _DynamicBatchLLMService:

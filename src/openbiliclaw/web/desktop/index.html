@@ -376,6 +376,7 @@
             <label class="settings-field"><span>X (Twitter)</span><select id="twitterEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
             <label class="settings-field"><span>知乎</span><select id="zhihuEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
             <label class="settings-field"><span>Reddit</span><select id="redditEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
+            <label class="settings-field"><span>Bangumi</span><select id="bangumiEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
           </div>
           <p class="settings-section-title">来源接入状态</p>
           <p class="settings-note-inline">来源开关决定是否进入调度；接入状态只说明 cookie、令牌或插件任务是否可用。修改开关后需保存配置才会生效。</p>
@@ -436,9 +437,13 @@
                 <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
               </div>
             </div>
+            <div class="source-status-row" data-source-status="bangumi">
+              <div class="source-status-head"><strong>Bangumi</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
+              <p class="src-detail">加载中…</p>
+            </div>
           </div>
           <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
+          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
           <div id="sourceCredentialList" class="source-credential-list">
             <details class="source-credential-row" data-source-credential="bilibili">
               <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
@@ -472,6 +477,11 @@
             </details>
             <details class="source-credential-row" data-source-credential="reddit">
               <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
+            </details>
+            <details class="source-credential-row" data-source-credential="bangumi">
+              <summary><strong>Bangumi<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
               <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
@@ -554,6 +564,30 @@
             <label class="settings-field"><span>Reddit 命令间隔秒数</span><input id="redditRequestInterval" inputmode="numeric" placeholder="3"></label>
             <label class="settings-field"><span>Reddit 最小调度间隔分钟</span><input id="redditMinInterval" inputmode="numeric" placeholder="60"></label>
           </div>
+          <p class="settings-section-title">Bangumi</p>
+          <p class="settings-note-inline">使用 Bangumi 官方公开只读 API，无需 Cookie。用户名仅用于导入主动公开的收藏；留空仍可使用搜索、排名和按日期浏览。按日期浏览可能包含尚未播出的条目。</p>
+          <label class="settings-field"><span>公开用户名</span><input id="bangumiUsername" maxlength="128" autocomplete="off" placeholder="例如 sai（可留空）"></label>
+          <label class="settings-field"><span>个人令牌</span><input id="bangumiAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；填写以自动识别当前用户并读取私密收藏"></label>
+          <label class="settings-field"><span>清除已保存的令牌</span><input id="bangumiClearToken" type="checkbox"></label>
+          <p class="settings-note-inline">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变；勾选「清除已保存的令牌」则本次保存清空令牌并降级为匿名公开发现）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a>。</p>
+          <div class="inline-row">
+            <label class="settings-field"><span>搜索分支</span><input id="bangumiModeSearch" type="checkbox"></label>
+            <label class="settings-field"><span>排名分支</span><input id="bangumiModeRanked" type="checkbox"></label>
+            <label class="settings-field"><span>按日期浏览</span><input id="bangumiModeLatest" type="checkbox"></label>
+            <label class="settings-field"><span>动画</span><input id="bangumiTypeAnime" type="checkbox"></label>
+            <label class="settings-field"><span>书籍</span><input id="bangumiTypeBook" type="checkbox"></label>
+            <label class="settings-field"><span>游戏</span><input id="bangumiTypeGame" type="checkbox"></label>
+            <label class="settings-field"><span>音乐</span><input id="bangumiTypeMusic" type="checkbox"></label>
+            <label class="settings-field"><span>三次元</span><input id="bangumiTypeReal" type="checkbox"></label>
+          </div>
+          <div class="inline-row">
+            <label class="settings-field"><span>每日搜索条目</span><input id="bangumiDailySearchBudget" inputmode="numeric" placeholder="300"></label>
+            <label class="settings-field"><span>每日排名条目</span><input id="bangumiDailyRankedBudget" inputmode="numeric" placeholder="100"></label>
+            <label class="settings-field"><span>每日日期条目</span><input id="bangumiDailyLatestBudget" inputmode="numeric" placeholder="100"></label>
+            <label class="settings-field"><span>请求间隔秒数</span><input id="bangumiRequestInterval" inputmode="numeric" placeholder="1"></label>
+            <label class="settings-field"><span>最小调度间隔分钟</span><input id="bangumiMinInterval" inputmode="numeric" placeholder="60"></label>
+            <label class="settings-field"><span>初始化收藏上限</span><input id="bangumiBootstrapLimit" inputmode="numeric" placeholder="300"></label>
+          </div>
           <p class="settings-section-title">候选池来源占比</p>
           <p class="settings-note-inline">下面是候选池来源占比/权重，不是每日抓取任务数。例如 5 / 1 / 1 / 1 / 1 / 1 表示 B 站候选约占 5 份，其余来源各 1 份。</p>
           <div class="inline-row">
@@ -564,6 +598,7 @@
             <label class="settings-field"><span>X 占比</span><input id="shareTwitter" value="1" inputmode="numeric"></label>
             <label class="settings-field"><span>知乎占比</span><input id="shareZhihu" value="1" inputmode="numeric"></label>
             <label class="settings-field"><span>Reddit 占比</span><input id="shareReddit" value="1" inputmode="numeric"></label>
+            <label class="settings-field"><span>Bangumi 占比</span><input id="shareBangumi" value="1" inputmode="numeric"></label>
           </div>
           <div class="drawer-actions" style="grid-column: 1 / -1"><button class="pill-btn" id="suggestSharesBtn" type="button">按历史行为建议占比</button></div>
         </div>
@@ -657,13 +692,13 @@
           <label class="settings-field"><span>开机自启动</span><input id="autostartEnabled" type="checkbox"></label>
           <p class="settings-note-inline" id="autostartHint">开启后下次登录系统会自动拉起后端（不影响当前进程）。</p>
           <p class="settings-section-title">网络</p>
-          <label class="settings-field"><span>海外网络模式</span><select id="networkProxyMode"><option value="direct">直连（忽略系统代理）</option><option value="system">跟随系统代理</option><option value="custom">自定义代理</option></select></label>
+          <label class="settings-field"><span>海外网络模式</span><select id="networkProxyMode"><option value="direct">直连（忽略系统代理）</option><option value="system" selected>跟随系统代理</option><option value="custom">自定义代理</option></select></label>
           <label class="settings-field full"><span>自定义代理地址</span><input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>
           <div class="settings-probe-row">
             <button class="pill-btn" id="probeNetworkProxy" type="button">测试代理</button>
             <span class="settings-probe-status" id="probeNetworkProxyStatus" aria-live="polite"></span>
           </div>
-          <p class="settings-note-inline" id="networkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
+          <p class="settings-note-inline" id="networkProxyHint">仅作用于海外服务（海外 AI 服务、需要海外出网的内容来源、更新检查）；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。哪些来源需要海外出网，见「平台源」页每个来源的接入状态。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="frontend" hidden>

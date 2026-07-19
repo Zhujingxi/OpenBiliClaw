@@ -39,6 +39,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.sources.platforms import (
+    PLATFORM_BANGUMI as PLATFORM_BANGUMI,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_BILIBILI as PLATFORM_BILIBILI,
 )
 from openbiliclaw.sources.platforms import (

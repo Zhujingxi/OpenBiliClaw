@@ -244,6 +244,9 @@ class RecommendationOut(BaseModel):
     # so the card stats row is not left with a lone like count.
     favorite_count: int = 0
     comment_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
     up_mid: int = 0
 
 
@@ -329,6 +332,8 @@ class RuntimeStatusResponse(BaseModel):
     last_account_sync_at: str = ""
     last_account_sync_error: str = ""
     last_account_sync_error_kind: str = ""
+    last_account_sync_message: str = ""
+    last_account_sync_severity: str = ""
     auto_update_enabled: bool = False
     install_mode: str = ""
     current_version: str = ""
@@ -414,6 +419,9 @@ class PendingDelightOut(BaseModel):
     comment_count: int = 0
     danmaku_count: int = 0
     favorite_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
 
 
 class PendingDelightResponse(BaseModel):
@@ -631,9 +639,13 @@ class SourceStatusItem(BaseModel):
       or its saved credential file is invalid.
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
+    - ``disabled``   — source switched off in config (Bangumi only, and only
+      until it moves onto ``auth``, where scheduling and credential state are
+      separate dimensions rather than two values of one field).
 
     ``logged_in`` is a convenience flag (``state in {ok, ready, no_auth}``) so
-    the UI can pick a dot colour without re-deriving the rule.
+    the UI can pick a dot colour without re-deriving the rule. For anonymous
+    sources it represents local readiness, not a literal authenticated session.
 
     **``state`` and ``logged_in`` are superseded by ``auth``.** They pack four
     independent questions into one string, which is why the same ``ready`` can
@@ -648,7 +660,32 @@ class SourceStatusItem(BaseModel):
     detail: str = ""
     logged_in: bool = False
     feed_paused: bool = False
-    auth: SourceAuthContract = Field(default_factory=SourceAuthContract)
+    # ``None`` means "this source has no auth contract yet", which is a real and
+    # honest answer — not a missing value to be defaulted away. A
+    # default-constructed contract reads ``credential="none"`` +
+    # ``auth_required=True``, which the frontends render as 「需要登录」; for
+    # Bangumi (anonymous public API, token optional) that would be a fabricated
+    # verdict, exactly the overclaim invariant I3 forbids. Sources without a
+    # provider in ``source_auth/providers.py`` therefore send ``null`` and the
+    # three surfaces fall back to legacy ``state`` — a path ``describeAccess()``
+    # already had for older backends. Bangumi is the only such source today;
+    # wiring it in needs a contract shape for "auth optional", since
+    # ``auth_required`` is a bool and Bangumi is neither wholly public nor
+    # login-gated.
+    auth: SourceAuthContract | None = None
+    # Optional personal-token dimension (currently Bangumi only): ``"ok"`` when a
+    # token is configured and not rejected, ``"rejected"`` when Bangumi denied it
+    # and discovery degraded to anonymous, ``""`` when no token is configured.
+    token_state: str = ""
+    # Overseas-egress advisory, authored entirely by the backend so no settings
+    # surface has to keep its own platform list or re-read ``[network].mode``
+    # (both facts live in ``sources.platforms``). ``requires_overseas_network``
+    # is the static platform property; ``network_hint`` is ready-to-render copy
+    # that is non-empty ONLY when the user's current mode makes that platform
+    # unreachable-by-configuration. A surface renders ``network_hint`` verbatim
+    # when it is non-empty and the row is currently enabled.
+    requires_overseas_network: bool = False
+    network_hint: str = ""
 
 
 class SourcesStatusResponse(BaseModel):
@@ -667,6 +704,7 @@ class SourcesStatusResponse(BaseModel):
     twitter: SourceStatusItem = Field(default_factory=SourceStatusItem)
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
     reddit: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
 class SourceVerifyResponse(BaseModel):
@@ -836,6 +874,7 @@ class SourcesCredentialsResponse(BaseModel):
     twitter: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     reddit: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    bangumi: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
 
 
 class NotificationAckIn(BaseModel):
@@ -1867,6 +1906,23 @@ class RedditSourceConfigOut(BaseModel):
     min_interval_minutes: int = 60
 
 
+class BangumiSourceConfigOut(BaseModel):
+    enabled: bool = False
+    username: str = ""
+    # The personal access token itself is a secret and is NEVER echoed back;
+    # this flag only tells the settings UI whether one is stored so it can show
+    # a "已配置（留空保持不变）" affordance instead of a bare empty field.
+    access_token_set: bool = False
+    subject_types: list[str] = Field(default_factory=lambda: ["anime", "book", "game"])
+    source_modes: list[str] = Field(default_factory=lambda: ["search", "ranked", "latest"])
+    daily_search_budget: int = 300
+    daily_ranked_budget: int = 100
+    daily_latest_budget: int = 100
+    request_interval_seconds: int = 1
+    min_interval_minutes: int = 60
+    bootstrap_limit: int = 300
+
+
 class SourcesConfigOut(BaseModel):
     browser: SourcesBrowserConfigOut = Field(default_factory=SourcesBrowserConfigOut)
     bilibili: BilibiliSourceConfigOut = Field(default_factory=BilibiliSourceConfigOut)
@@ -1876,6 +1932,7 @@ class SourcesConfigOut(BaseModel):
     twitter: TwitterSourceConfigOut = Field(default_factory=TwitterSourceConfigOut)
     zhihu: ZhihuSourceConfigOut = Field(default_factory=ZhihuSourceConfigOut)
     reddit: RedditSourceConfigOut = Field(default_factory=RedditSourceConfigOut)
+    bangumi: BangumiSourceConfigOut = Field(default_factory=BangumiSourceConfigOut)
 
 
 class SchedulerConfigOut(BaseModel):

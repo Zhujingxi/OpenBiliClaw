@@ -278,6 +278,7 @@ class MemoryManager:
             "following_mids": [],
             "last_account_sync_at": "",
             "last_sync_error": "",
+            "last_sync_error_kind": "",
         }
         if not self._account_sync_state_path.exists():
             return default_state
@@ -299,6 +300,10 @@ class MemoryManager:
             "following_mids": self._as_str_list(loaded.get("following_mids", [])),
             "last_account_sync_at": str(loaded.get("last_account_sync_at", "")),
             "last_sync_error": str(loaded.get("last_sync_error", "")),
+            # Drives the UI's "re-login needed" branch. Missing from this
+            # whitelist since the field was introduced, so the desktop's
+            # auth_expired copy was unreachable and users saw raw English.
+            "last_sync_error_kind": str(loaded.get("last_sync_error_kind", "")),
         }
 
     def save_account_sync_state(self, state: dict[str, object]) -> None:
@@ -318,6 +323,7 @@ class MemoryManager:
             "following_mids": self._as_str_list(state.get("following_mids", [])),
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             "last_sync_error": str(state.get("last_sync_error", "")),
+            "last_sync_error_kind": str(state.get("last_sync_error_kind", "")),
         }
         with open(self._account_sync_state_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)

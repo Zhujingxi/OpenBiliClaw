@@ -32,6 +32,7 @@ from openbiliclaw.api.models import (
     AutostartConfigOut,
     AutostartStatusOut,
     BackendUpdateStatusOut,
+    BangumiSourceConfigOut,
     BehaviorEventBatchIn,
     BilibiliConfigOut,
     BilibiliCookieIn,
@@ -188,10 +189,13 @@ from openbiliclaw.soul.dislike_writeback import (
     topics_for_confirmed_avoidance,
 )
 from openbiliclaw.sources.platforms import (
-    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
+    CANONICAL_SOURCE_FAMILIES,
+    normalize_source_platform,
+    overseas_network_hint,
+    requires_overseas_network,
 )
 from openbiliclaw.sources.platforms import (
-    normalize_source_platform,
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
 
 if TYPE_CHECKING:
@@ -288,6 +292,7 @@ _SOURCE_SHARE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -297,6 +302,7 @@ _INIT_SOURCE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -1085,6 +1091,8 @@ def _fallback_recommendation_click_url(
     if source_platform == "reddit":
         reddit_id = item_id[3:] if item_id.startswith("t3_") else item_id
         return f"https://www.reddit.com/comments/{quote(reddit_id, safe='')}/"
+    if source_platform == "bangumi":
+        return f"https://bgm.tv/subject/{quote(item_id, safe='')}"
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
@@ -1315,12 +1323,25 @@ def create_app(
     # Mirror the overseas-outbound proxy into the process-level source of truth
     # before any LLM/updater client is built. CN-direct clients never read it.
     # getattr-guarded so a partial config object never hard-crashes app boot.
+    #
+    # The guard falls back to ``system``, not ``direct``. A config object missing
+    # ``network`` / ``mode`` is the in-memory analogue of an *absent* key, not of
+    # an invalid one: there is no user-written value here to disrespect, so it
+    # takes the same default an absent key takes in ``_build_network_config``.
+    # (``direct`` is reserved for present-but-broken values, where the user did
+    # write something and silently inheriting an env proxy would override it.)
+    # ``direct`` is also not the neutral choice — it actively sets
+    # ``trust_env=False`` and overrides the user's environment, whereas ``system``
+    # defers to it. When the config is too damaged to state a preference,
+    # deferring beats overriding, and matching the normal default keeps an
+    # already-degraded boot from growing a second, invisible failure mode
+    # (opaque overseas timeouts on a machine that has a working proxy).
     from openbiliclaw.network import set_outbound_proxy
 
     network_config = getattr(config, "network", None)
     set_outbound_proxy(
         getattr(network_config, "proxy", "") or "",
-        mode=getattr(network_config, "mode", "direct") or "direct",
+        mode=getattr(network_config, "mode", "system") or "system",
     )
 
     # Auto-generate the session signing secret on first enable so login state
@@ -1767,6 +1788,11 @@ def create_app(
             return await call_next(request)
         path = request.url.path
         method = request.method.upper()
+        static_recovery_surface = (
+            path == "/"
+            or path in {"/m", "/web", "/setup"}
+            or path.startswith(("/m/", "/web/", "/setup/"))
+        )
         allowed = (
             method == "OPTIONS"
             or path == "/api/ping"
@@ -1783,7 +1809,12 @@ def create_app(
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
             or path.startswith("/api/auth")
-            or path.startswith("/m")
+            # Keep every browser recovery shell loadable. Their static assets
+            # do not depend on the LLM registry, and the desktop/setup forms
+            # use the allowed config endpoints above to repair the blocking
+            # provider configuration. Blocking these paths exposes the raw 503
+            # envelope instead of the recovery UI.
+            or static_recovery_surface
         )
         if allowed:
             return await call_next(request)
@@ -1843,6 +1874,12 @@ def create_app(
     #  - /api/sources/*/task-result         — init bootstrap results (the handler
     #                                         self-guards: skips pool writes and
     #                                         only propagates init-owned results)
+    #  - /api/sources/bangumi/identity       — extension-reported Bangumi account
+    #                                         (public uid + username). Init is the
+    #                                         moment three-tier account resolution
+    #                                         (token > explicit username > extension
+    #                                         identity) needs the freshly-reported
+    #                                         identity, so it must land even mid-init.
     # (GET reads — /api/sources/*/next-task, /api/init-status, … — are never
     #  gated since only mutating methods are checked.)
     _init_write_allowlist = frozenset(
@@ -1850,6 +1887,7 @@ def create_app(
             "/api/init",
             "/api/init/cancel",
             "/api/bilibili/cookie",
+            "/api/sources/bangumi/identity",
         }
     )
 
@@ -2503,7 +2541,20 @@ def create_app(
         the panel. UI liveness indicators should hit this instead and keep
         ``/api/health`` for profile/embedding state.
         """
-        return JSONResponse({"status": "ok", "service": "openbiliclaw-api"})
+        body: dict[str, object] = {"status": "ok", "service": "openbiliclaw-api"}
+        if bool(getattr(ctx, "degraded", False)):
+            # Preserve pure liveness semantics (status stays "ok") while
+            # giving browser shells a provider-free fast path to avoid firing
+            # every intentionally-blocked business request before /config
+            # reveals the recovery state.
+            body.update(
+                {
+                    "degraded": True,
+                    "degraded_reason": str(getattr(ctx, "degraded_reason", "")),
+                    "issues": _degraded_issues_payload(),
+                }
+            )
+        return JSONResponse(body)
 
     @app.get("/api/qr-info")
     async def qr_info() -> JSONResponse:
@@ -2746,7 +2797,12 @@ def create_app(
                 pass
         return True, ""
 
-    async def _persist_guided_init_source_opt_in(effective_sources: set[str]) -> None:
+    async def _persist_guided_init_source_opt_in(
+        effective_sources: set[str],
+        *,
+        bangumi_username: str | None = None,
+        bangumi_token: str | None = None,
+    ) -> None:
         """Best-effort: checked guided-init sources become enabled settings.
 
         The run itself uses ``effective_sources`` directly, so a config write
@@ -2768,6 +2824,25 @@ def create_app(
             if source_cfg is not None and not bool(getattr(source_cfg, "enabled", False)):
                 source_cfg.enabled = True
                 changed = True
+        bangumi_cfg = getattr(sources_cfg, "bangumi", None)
+        if (
+            bangumi_cfg is not None
+            and "bangumi" in effective_sources
+            and bangumi_username is not None
+            and str(getattr(bangumi_cfg, "username", "") or "").strip() != bangumi_username
+        ):
+            bangumi_cfg.username = bangumi_username
+            changed = True
+        # Persist the validated token so background discovery and later syncs
+        # authenticate without re-prompting (rule 7: only after /v0/me passed).
+        if (
+            bangumi_cfg is not None
+            and "bangumi" in effective_sources
+            and bangumi_token is not None
+            and str(getattr(bangumi_cfg, "access_token", "") or "").strip() != bangumi_token
+        ):
+            bangumi_cfg.access_token = bangumi_token
+            changed = True
         if not changed:
             return
 
@@ -2798,7 +2873,10 @@ def create_app(
             logger.warning("guided init source opt-in hot-reload failed", exc_info=True)
 
     async def _run_guided_init_wrapper(
-        run_id: str, selected_sources: set[str] | None = None
+        run_id: str,
+        selected_sources: set[str] | None = None,
+        bangumi_username: str = "",
+        bangumi_token: str = "",
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -2861,6 +2939,9 @@ def create_app(
                 include_x="twitter" in effective,
                 include_zhihu="zhihu" in effective,
                 include_reddit="reddit" in effective,
+                include_bangumi="bangumi" in effective,
+                bangumi_username=bangumi_username,
+                bangumi_token=bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
@@ -2916,6 +2997,76 @@ def create_app(
         # for this local guided-init run.
         raw_sources = body.get("sources") if isinstance(body, dict) else None
         selected_sources = {str(s) for s in raw_sources} if isinstance(raw_sources, list) else None
+        source_options = body.get("source_options") if isinstance(body, dict) else None
+        if source_options is not None and not isinstance(source_options, dict):
+            return JSONResponse(
+                {"error": "invalid_source_options", "detail": "source_options 必须是对象"},
+                status_code=400,
+            )
+        source_options = source_options or {}
+        unknown_source_options = sorted(set(source_options) - {"bangumi"})
+        if unknown_source_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": f"不支持的 source_options: {', '.join(unknown_source_options)}",
+                },
+                status_code=400,
+            )
+        bangumi_options = source_options.get("bangumi", {})
+        if not isinstance(bangumi_options, dict):
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": "source_options.bangumi 必须是对象",
+                },
+                status_code=400,
+            )
+        unknown_bangumi_options = sorted(set(bangumi_options) - {"username", "access_token"})
+        if unknown_bangumi_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": (
+                        "不支持的 source_options.bangumi 字段: "
+                        + ", ".join(unknown_bangumi_options)
+                    ),
+                },
+                status_code=400,
+            )
+        scoped_bangumi_username = "username" in bangumi_options
+        legacy_bangumi_username = isinstance(body, dict) and "bangumi_username" in body
+        bangumi_username_supplied = scoped_bangumi_username or legacy_bangumi_username
+        selected_bangumi_username: str | None = None
+        if bangumi_username_supplied:
+            from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+            try:
+                raw_bangumi_username = (
+                    bangumi_options.get("username")
+                    if scoped_bangumi_username
+                    else body.get("bangumi_username")
+                )
+                selected_bangumi_username = validate_bangumi_username(raw_bangumi_username)
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_bangumi_username", "detail": str(exc)},
+                    status_code=400,
+                )
+        scoped_bangumi_token = "access_token" in bangumi_options
+        selected_bangumi_token: str | None = None
+        if scoped_bangumi_token:
+            from openbiliclaw.sources.bangumi_client import validate_bangumi_access_token
+
+            try:
+                selected_bangumi_token = validate_bangumi_access_token(
+                    bangumi_options.get("access_token")
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_bangumi_access_token", "detail": str(exc)},
+                    status_code=400,
+                )
 
         coord = ctx.init_coordinator
 
@@ -2944,8 +3095,138 @@ def create_app(
                 {"error": "no_sources_selected", "detail": "至少选择一个有效数据来源"},
                 status_code=409,
             )
+        configured_bangumi_username = str(
+            getattr(
+                getattr(
+                    getattr(getattr(ctx, "config", None), "sources", None),
+                    "bangumi",
+                    None,
+                ),
+                "username",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_bangumi_username = (
+            configured_bangumi_username
+            if selected_bangumi_username is None
+            else selected_bangumi_username
+        )
+        configured_bangumi_token = str(
+            getattr(
+                getattr(
+                    getattr(getattr(ctx, "config", None), "sources", None),
+                    "bangumi",
+                    None,
+                ),
+                "access_token",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_bangumi_token = (
+            configured_bangumi_token if selected_bangumi_token is None else selected_bangumi_token
+        )
+        warnings: list[str] = []
+        # A personal access token identifies the account via /v0/me, so validate
+        # it live and resolve the username BEFORE reserving a run or persisting —
+        # reject a bad/expired token with its real cause (project rule 7) instead
+        # of writing an unusable secret.
+        if "bangumi" in effective_sources and effective_bangumi_token:
+            from openbiliclaw.sources.bangumi_client import (
+                BangumiAPIError,
+                resolve_access_token_identity,
+            )
+
+            try:
+                resolved_bangumi_username = await resolve_access_token_identity(
+                    effective_bangumi_token
+                )
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    return JSONResponse(
+                        {
+                            "error": "invalid_bangumi_access_token",
+                            "detail": (
+                                "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 "
+                                "https://next.bgm.tv/demo/access-token 重新生成后重试。"
+                            ),
+                        },
+                        status_code=400,
+                    )
+                return JSONResponse(
+                    {"error": "bangumi_token_check_failed", "detail": str(exc)},
+                    status_code=502,
+                )
+            if (
+                effective_bangumi_username
+                and effective_bangumi_username != resolved_bangumi_username
+            ):
+                warnings.append(
+                    f"Bangumi 令牌对应用户为 {resolved_bangumi_username}，已覆盖填写的用户名。"
+                )
+            effective_bangumi_username = resolved_bangumi_username
+        # Zero-config fallback: the content script on bgm.tv reports the
+        # logged-in account's public uid + username. Priority ladder:
+        # token /v0/me > explicit/configured username > extension-reported
+        # username > reject. Never overrides an explicit choice.
+        if (
+            "bangumi" in effective_sources
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            identity_loader = getattr(app.state, "load_bangumi_identity", None)
+            extension_bangumi_username, extension_identity_verified = (
+                identity_loader() if callable(identity_loader) else ("", False)
+            )
+            if extension_bangumi_username:
+                effective_bangumi_username = extension_bangumi_username
+                # Say which one it is. An unverified identity is a best-effort
+                # DOM read that bgm.tv never confirmed, so the user has to be
+                # able to catch a wrong account instead of trusting the same
+                # confident sentence for both cases.
+                warnings.append(
+                    f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}。"
+                    if extension_identity_verified
+                    else (
+                        f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}"
+                        "（未经 bgm.tv 校验，可能不准）。如果不是你本人，请填写公开用户名"
+                        "或个人令牌后重新初始化。"
+                    )
+                )
+        if (
+            effective_sources == {"bangumi"}
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            return JSONResponse(
+                {
+                    "error": "no_profile_signal_sources",
+                    "detail": (
+                        "只选择 Bangumi 初始化时，需提供个人令牌（推荐，自动识别当前用户）、"
+                        "公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别。"
+                    ),
+                },
+                status_code=409,
+            )
+        if (
+            "bangumi" in effective_sources
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            warnings.append("Bangumi 未填写令牌或公开用户名：本次仅启用条目发现，不提供画像信号。")
         if selected_sources is not None:
-            await _persist_guided_init_source_opt_in(effective_sources)
+            # With a token the username was resolved from /v0/me; persist that so
+            # status/config reflect the real account. Otherwise keep the explicit
+            # supplied value (None = leave the configured username untouched).
+            username_to_persist = (
+                effective_bangumi_username if effective_bangumi_token else selected_bangumi_username
+            )
+            await _persist_guided_init_source_opt_in(
+                effective_sources,
+                bangumi_username=username_to_persist,
+                bangumi_token=selected_bangumi_token,
+            )
 
         run_id = uuid.uuid4().hex
         if not coord.try_start(run_id):
@@ -2984,11 +3265,29 @@ def create_app(
 
         registry = getattr(ctx, "task_registry", None)
         if registry is not None:
-            task = registry.track("guided_init", _run_guided_init_wrapper(run_id, selected_sources))
+            task = registry.track(
+                "guided_init",
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                    effective_bangumi_token,
+                ),
+            )
         else:
-            task = asyncio.create_task(_run_guided_init_wrapper(run_id, selected_sources))
+            task = asyncio.create_task(
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                    effective_bangumi_token,
+                )
+            )
         coord.attach_task(run_id, task)
-        return JSONResponse({"run_id": run_id, **coord.get_status()}, status_code=202)
+        return JSONResponse(
+            {"run_id": run_id, **coord.get_status(), "warnings": warnings},
+            status_code=202,
+        )
 
     # ── embedding one-click repair (v0.3.155+) ──────────────────────────
     # Single-flight background `ollama pull` so the popup's "语义去重未启用"
@@ -3710,6 +4009,9 @@ def create_app(
                     or 0
                 ),
                 comment_count=int(getattr(item.content, "comment_count", 0) or 0),
+                rating_score=float(getattr(item.content, "rating_score", 0.0) or 0.0),
+                rating_count=int(getattr(item.content, "rating_count", 0) or 0),
+                source_rank=int(getattr(item.content, "source_rank", 0) or 0),
                 up_mid=int(getattr(item.content, "up_mid", 0) or 0),
             )
             for item in items
@@ -3955,6 +4257,11 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        bangumi_client = getattr(ctx, "bangumi_client", None)
+        close_bangumi = getattr(bangumi_client, "aclose", None)
+        if callable(close_bangumi):
+            with suppress(Exception):
+                await close_bangumi()
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -4529,6 +4836,9 @@ def create_app(
                         row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
                     ),
                     comment_count=int(row.get("comment_count", 0) or 0),
+                    rating_score=float(row.get("rating_score", 0.0) or 0.0),
+                    rating_count=int(row.get("rating_count", 0) or 0),
+                    source_rank=int(row.get("source_rank", 0) or 0),
                     up_mid=int(row.get("up_mid", 0) or 0),
                 )
                 for row in rows
@@ -8263,6 +8573,327 @@ def create_app(
             updated_at=result.updated_at,
         )
 
+    # ── Bangumi extension identity channel ──────────────────────────
+    # The content script on bgm.tv / bangumi.tv reads the page's public
+    # ``CHOBITS_UID`` global (MAIN-world bridge) plus the nav's own
+    # ``/user/<username>`` link and reports both. Only uid + username are
+    # collected — both public, no cookies — so guided init can identify
+    # the account with zero configuration when neither an access token
+    # nor an explicit username was supplied.
+
+    def _normalize_bangumi_identity(raw: Any) -> dict[str, str] | None:
+        """Validate an extension-reported Bangumi identity payload.
+
+        Returns ``{"uid": ..., "username": ...}`` when the uid is a positive
+        integer; malformed usernames are dropped (treated as missing) rather
+        than persisted, per the defensive-parse rule.
+        """
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        if not isinstance(raw, dict):
+            return None
+        try:
+            uid = int(str(raw.get("uid", "") or "").strip())
+        except (TypeError, ValueError):
+            return None
+        if uid <= 0:
+            return None
+        try:
+            username = validate_bangumi_username(raw.get("username"))
+        except ValueError:
+            logger.warning("bangumi identity: dropping malformed username from extension report")
+            username = ""
+        return {"uid": str(uid), "username": username}
+
+    def _persist_bangumi_identity(
+        identity: dict[str, str], *, verified: bool
+    ) -> dict[str, Any] | None:
+        """Save the extension-reported identity into discovery runtime state.
+
+        ``verified`` records whether bgm.tv positively confirmed the pair. It
+        is persisted alongside uid/username so every consumer can tell a
+        confirmed identity from a fail-open best-effort one instead of
+        treating both as equally true (project rule 7), and it is sticky-true
+        per identity so a later unreachable-bgm.tv report cannot erase a
+        confirmation we already hold (see ``_sticky_record``).
+
+        Returns the record as actually written, or ``None`` when it could not
+        be persisted at all. Callers MUST NOT report a state this did not
+        store — an unpersisted "verified" would be a claim the next read
+        contradicts.
+        """
+        memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
+        if memory_manager is None:
+            # No persistence backend: the report is dropped. Say so rather
+            # than echoing a flag nothing will read back (rule 7).
+            logger.warning(
+                "bangumi identity: no memory manager; cannot persist uid=%s",
+                identity.get("uid", ""),
+            )
+            return None
+
+        def _sticky_record(previous: object) -> dict[str, Any]:
+            """This round's record, upgraded to verified if ``previous`` proved it.
+
+            Evidence of a successful cross-check belongs to a specific
+            uid↔username pair and does not expire when bgm.tv is later
+            unreachable — downgrading it would erase proof we already hold and
+            make consumers call a genuinely checked identity "未经 bgm.tv 校验"
+            (flipping the flag, and rewriting the file, on every hiccup). So
+            the flag only ratchets up, and only for the SAME identity: a
+            changed uid or username is a different claim the old evidence says
+            nothing about, so it starts from this round's result.
+
+            Inheritance also requires the previous record to be one the current
+            rules could have produced, i.e. a non-empty username. Before the
+            flag meant "confirmed", the 404 path wrote
+            ``{"username": "", "verified": true}``; re-reporting that same 404
+            user matched on uid and on username (both ``""``) and inherited the
+            stale ``true``, pinning a record that contradicts the
+            verified-implies-a-username invariant. An illegal record is not
+            evidence, so it is not inherited.
+            """
+            sticky = bool(verified)
+            previous_username = previous.get("username") if isinstance(previous, dict) else None
+            if (
+                not sticky
+                and isinstance(previous, dict)
+                and previous.get("verified") is True
+                # A confirmed record always names someone; an empty username
+                # with verified=true can only come from the superseded rules.
+                and isinstance(previous_username, str)
+                and previous_username
+                and previous.get("uid") == identity["uid"]
+                and previous_username == identity["username"]
+            ):
+                sticky = True
+            return {**identity, "verified": sticky}
+
+        record: dict[str, Any] = {}
+        try:
+            update_state = getattr(memory_manager, "update_discovery_runtime_state", None)
+            if callable(update_state):
+
+                def _mutate(runtime_state: dict[str, Any]) -> None:
+                    # The merge runs ONLY here. update_json_state holds a
+                    # process + file lock and re-reads from disk before calling
+                    # us, so this sees the authoritative current value; a
+                    # pre-read outside the lock could be stale by now and was
+                    # how a concurrent confirmation used to get reported away.
+                    record.update(_sticky_record(runtime_state.get("bangumi_self_info")))
+                    runtime_state["bangumi_self_info"] = record
+
+                # Deliberately no lock-free write-avoidance fast path.
+                # update_json_state writes unconditionally, so re-reporting an
+                # unchanged identity costs one idempotent rewrite — accepted,
+                # because the only way to decide "unchanged" without the lock
+                # is a snapshot that a concurrent writer can already have
+                # invalidated, and answering from that snapshot contradicts
+                # what the next read returns.
+                update_state(_mutate)
+            else:
+                # Non-atomic fallback for runtimes without the atomic entry
+                # point (stubs). Same merge, weaker concurrency guarantee.
+                state = memory_manager.load_discovery_runtime_state()
+                record.update(_sticky_record(state.get("bangumi_self_info")))
+                state["bangumi_self_info"] = record
+                memory_manager.save_discovery_runtime_state(state)
+        except Exception:
+            logger.exception(
+                "Failed to persist bangumi identity (uid=%s); reporting it as not stored",
+                identity.get("uid", ""),
+            )
+            return None
+        logger.info(
+            "bangumi identity persisted: uid=%s username=%r verified=%s",
+            record.get("uid", ""),
+            record.get("username", ""),
+            record.get("verified"),
+        )
+        return record
+
+    def _load_bangumi_identity() -> tuple[str, bool]:
+        """Extension-reported Bangumi ``(username, verified)`` from runtime state.
+
+        Returns ``("", False)`` on any miss. Records written before the
+        ``verified`` flag existed have no way to prove they were cross-checked,
+        so they read back as UNVERIFIED rather than silently claiming a check
+        that may never have run — the next bgm.tv page view re-reports and
+        upgrades the record in place.
+
+        Records that cannot be legal under the current rules are normalised
+        here too: a ``verified`` record with no username (what the superseded
+        404 path used to write) reads back as unverified. Doing this on read as
+        well as on write means an installation that never revisits bgm.tv
+        still stops seeing the stale claim, instead of waiting for a report
+        that may never come.
+        """
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
+        if memory_manager is None:
+            return "", False
+        try:
+            state = memory_manager.load_discovery_runtime_state()
+            info = state.get("bangumi_self_info")
+            if not isinstance(info, dict):
+                return "", False
+            username = validate_bangumi_username(info.get("username"))
+            return username, bool(username) and info.get("verified") is True
+        except Exception:
+            logger.debug("bangumi identity: runtime state unavailable", exc_info=True)
+            return "", False
+
+    # Publish for start_guided_init's username fallback ladder — that route is
+    # defined earlier in this factory, so it reads the hook off app.state at
+    # request time (by then create_app has finished wiring everything).
+    app.state.load_bangumi_identity = _load_bangumi_identity
+
+    async def _verify_bangumi_identity(identity: dict[str, str]) -> tuple[dict[str, str], bool]:
+        """Authoritatively cross-check an extension-reported identity.
+
+        A real-page E2E (2026-07-18) showed a DOM-scraped username can be a
+        timeline stranger's, so the DOM value is never trusted as-is. The
+        anonymous public endpoint ``GET /v0/users/{username}`` returns the
+        account's ``id``; users without a custom slug keep ``str(uid)`` as
+        their username, so a uid-only report also resolves for them.
+
+        Returns ``(identity, verified)``. ``verified`` is True only when bgm.tv
+        actually answered — the caller persists that flag so a fail-open value
+        is never mistaken for a checked one.
+
+        ``verified`` is True **only when bgm.tv positively confirmed this
+        uid↔username pair** — i.e. ``get_user`` returned and its ``id`` equals
+        the reported uid, yielding a non-empty username. Everything else is
+        False, including cases where bgm.tv answered clearly: a 404 *refutes*
+        the username, it does not confirm who the uid belongs to, and a
+        uid-only lookup that 404s never checked anything at all. Treating
+        "bgm.tv replied" as "identity confirmed" would let sticky-true pin an
+        account we never actually established as ``verified`` forever.
+
+        Rules (never cache failures; ``trust_env=False`` via BangumiClient):
+        - API ``id`` matches the reported uid → persist the API's username,
+          VERIFIED.
+        - Username resolves to a DIFFERENT id, or does not exist → keep the
+          uid, DISCARD the username, log WARNING (plausible-but-wrong guard);
+          NOT verified — a refutation is not a confirmation.
+        - Network / upstream failure → accept the DOM username best-effort but
+          mark it UNVERIFIED and log WARNING with the real cause. Staying
+          fail-open keeps zero-config users working when bgm.tv is unreachable
+          (bgm.tv sits behind overseas CF, and the default ``[network] mode =
+          system`` only reaches it when the machine already has a working
+          proxy), so the guard's honesty has to come from the flag + log rather
+          than from rejecting the report.
+        """
+        from openbiliclaw.sources.bangumi_client import (
+            BangumiAPIError,
+            BangumiClient,
+            validate_bangumi_username,
+        )
+
+        uid = identity["uid"]
+        reported_username = identity["username"]
+        lookup = reported_username or uid
+        try:
+            async with BangumiClient(request_interval_seconds=0) as bangumi_client:
+                user = await bangumi_client.get_user(lookup)
+        except BangumiAPIError as exc:
+            if exc.code == "not_found":
+                if reported_username:
+                    logger.warning(
+                        "bangumi identity: reported username %r does not exist; "
+                        "keeping uid=%s only (NOT verified — a 404 refutes the "
+                        "username, it does not confirm the uid's owner)",
+                        reported_username,
+                        uid,
+                    )
+                    return {"uid": uid, "username": ""}, False
+                # uid-only report from a custom-slug user: bgm.tv answered, but
+                # nothing about this uid's owner was established, so not verified.
+                return identity, False
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                exc.code,
+                exc,
+            )
+            return identity, False
+        except Exception as exc:
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return identity, False
+        api_id = user.get("id")
+        try:
+            api_uid = str(int(str(api_id).strip()))
+        except (TypeError, ValueError):
+            api_uid = ""
+        if api_uid != uid:
+            logger.warning(
+                "bangumi identity: reported username %r belongs to uid %s, not %s; "
+                "discarding username (NOT verified)",
+                reported_username or lookup,
+                api_uid or "?",
+                uid,
+            )
+            return {"uid": uid, "username": ""}, False
+        try:
+            api_username = validate_bangumi_username(user.get("username"))
+        except ValueError:
+            api_username = ""
+        confirmed_username = api_username or reported_username
+        # Only a non-empty username makes this a confirmed *pair*. bgm.tv
+        # returning an unusable username leaves nothing to have confirmed, so
+        # the flag stays False rather than claiming a pair that does not exist.
+        return {"uid": uid, "username": confirmed_username}, bool(confirmed_username)
+
+    @app.post("/api/sources/bangumi/identity")
+    async def ingest_bangumi_identity(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist the extension-observed Bangumi account (uid + username).
+
+        Both values are public page data; no cookies or tokens are accepted
+        here. A payload without a positive uid is rejected so a logged-out
+        page can never overwrite a previously known identity. The username is
+        cross-checked against ``GET /v0/users/{username}`` before persisting —
+        a mismatching or unknown username is dropped (uid kept) so a DOM
+        drift can never store a stranger's identity. When bgm.tv is
+        unreachable the report is still stored (zero-config users must keep
+        working) but flagged ``verified: false``.
+
+        The whole body is read back off the record that was actually written,
+        so a 200 always describes what a subsequent read returns. If the
+        identity could not be persisted the request fails with 500 instead of
+        echoing a state nothing stored — the extension treats a failed report
+        as best-effort and re-reports on the next bgm.tv page view.
+        """
+        identity = _normalize_bangumi_identity(payload)
+        if identity is None:
+            raise HTTPException(status_code=422, detail="uid must be a positive integer")
+        identity, verified = await _verify_bangumi_identity(identity)
+        stored = _persist_bangumi_identity(identity, verified=verified)
+        if stored is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Bangumi identity could not be persisted; see server logs. "
+                    "The next bgm.tv page view will re-report it."
+                ),
+            )
+        return {
+            "ok": True,
+            "uid": stored["uid"],
+            "username": stored["username"],
+            "verified": stored["verified"],
+        }
+
     # ── Bilibili extension search fallback endpoints ────────────────
 
     from openbiliclaw.sources.bili_tasks import (
@@ -8715,6 +9346,95 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
+    def _bangumi_status_item(cfg: Any) -> SourceStatusItem:
+        """Bangumi's status, still on the pre-contract code path.
+
+        Every other source is answered by a provider in
+        ``source_auth/providers.py``; Bangumi is not, so its logic lives here
+        rather than inline in the aggregator — a per-platform block in
+        ``sources_status()`` is the 424-line shape that refactor removed, and
+        re-opening it for one source would re-open it for the next.
+
+        It deliberately ships **no** ``auth`` contract. A default-constructed
+        one reads ``auth_required=True`` + ``credential="none"``, which renders
+        as 「需要登录」 — false for a source that works anonymously off the
+        public API. Sending ``null`` instead makes the frontends fall back to
+        the legacy ``state``, a path ``describeAccess()`` already carries for
+        older backends, so the wording stays exactly what main shipped and no
+        evidence badge is claimed. Honest under-reporting beats a fabricated
+        verdict (invariant I3).
+
+        Giving it a real contract is a separate task: ``auth_required`` is a
+        bool, and Bangumi is a third shape — anonymous by default, with an
+        optional token that unlocks private collections.
+        """
+        from openbiliclaw.runtime.bangumi_producer import (
+            bangumi_disabled_detail,
+            bangumi_source_status,
+        )
+
+        srcs = cfg.sources
+        bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
+        bgm_token_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
+        )
+        bgm_username_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "username", "") or "").strip()
+        )
+        bgm_status = (
+            bangumi_source_status(
+                ctx.database,
+                enabled=bgm_enabled,
+                token_configured=bgm_token_configured,
+                username_configured=bgm_username_configured,
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if bgm_enabled else "disabled",
+                # No ledger to read here, so a saved token can only be reported
+                # as "ok" — but the disabled wording still has to name it.
+                "detail": (
+                    "Bangumi 使用官方公开 API，尚未运行内容发现。"
+                    if bgm_enabled
+                    else bangumi_disabled_detail(
+                        token_state="ok" if bgm_token_configured else "",
+                        username_configured=bgm_username_configured,
+                    )
+                ),
+                **({"token_state": "ok"} if bgm_token_configured else {}),
+            }
+        )
+        bgm_state = str(bgm_status.get("state") or "unverified")
+        return SourceStatusItem(
+            enabled=bgm_enabled,
+            state=bgm_state,
+            detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
+            # Bangumi is anonymous and has no login session. This legacy field
+            # follows SourceStatusItem's readiness semantics instead of merely
+            # mirroring the config switch.
+            logged_in=bgm_state in {"ok", "ready", "no_auth"},
+            token_state=str(bgm_status.get("token_state") or ""),
+        )
+
+    def _attach_network_hints(statuses: SourcesStatusResponse, cfg: Any) -> None:
+        """Attach the overseas-egress advisory to every source in *statuses*.
+
+        A separate pass from assembling the auth status, and separate on
+        purpose: this one is uniform over all families and reads a table in
+        ``sources.platforms``, so it never grows a per-platform branch the way
+        the aggregator it sits next to once did. The platform list AND both
+        wordings live in that table; the settings surfaces render
+        ``network_hint`` verbatim and never learn a platform name
+        (``tests/test_source_network_hints.py`` pins that).
+        """
+        network_mode = str(getattr(getattr(cfg, "network", None), "mode", "") or "")
+        for family in CANONICAL_SOURCE_FAMILIES:
+            item = getattr(statuses, family, None)
+            if not isinstance(item, SourceStatusItem):
+                continue
+            item.requires_overseas_network = requires_overseas_network(family)
+            item.network_hint = overseas_network_hint(family, network_mode=network_mode)
+
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
@@ -8731,6 +9451,10 @@ def create_app(
         promises byte-identical output), while the new ``auth`` sub-object
         exposes the same knowledge as independent dimensions. See
         :class:`SourceAuthContract` and ``source_auth/legacy.py``.
+
+        Bangumi is the one source not yet on the contract and answers through
+        ``_bangumi_status_item`` with ``auth=None``; see that helper for why it
+        sends no contract rather than an invented one.
         """
         from openbiliclaw.api.source_auth.providers import (
             SOURCE_AUTH_PROVIDERS,
@@ -8740,7 +9464,8 @@ def create_app(
         )
         from openbiliclaw.config import load_config
 
-        auth_ctx = SourceAuthContext(cfg=load_config(), database=ctx.database)
+        cfg = load_config()
+        auth_ctx = SourceAuthContext(cfg=cfg, database=ctx.database)
         items: dict[str, SourceStatusItem] = {}
         for slug, provider in SOURCE_AUTH_PROVIDERS.items():
             contract = provider(auth_ctx)
@@ -8752,7 +9477,10 @@ def create_app(
                 feed_paused=source_feed_paused(auth_ctx, slug),
                 auth=contract,
             )
-        return SourcesStatusResponse(**items)
+        items["bangumi"] = _bangumi_status_item(cfg)
+        statuses = SourcesStatusResponse(**items)
+        _attach_network_hints(statuses, cfg)
+        return statuses
 
     @app.post("/api/sources/{slug}/verify", response_model=SourceVerifyResponse)
     async def verify_source_credential(slug: str) -> SourceVerifyResponse:
@@ -9138,6 +9866,29 @@ def create_app(
                 summary=credential_summary(form, label=label, available=available, detail=detail),
             )
 
+        def _bangumi_credential_detail(sources: Any) -> str:
+            base = (
+                "Bangumi 公开收藏走官方只读 API 无需凭据；如需自动识别当前用户或读取"
+                "私密收藏，可在下方填写个人令牌（后端仅保存该令牌，不保存 Cookie）。"
+            )
+            token_set = bool(
+                str(getattr(getattr(sources, "bangumi", None), "access_token", "") or "").strip()
+            )
+            if not token_set or not hasattr(ctx.database, "conn"):
+                return base
+            from openbiliclaw.runtime.bangumi_producer import _read_token_rejection
+
+            try:
+                rejected = _read_token_rejection(ctx.database) is not None
+            except Exception:
+                rejected = False
+            if rejected:
+                return (
+                    "已配置的个人令牌已被 Bangumi 拒绝（可能过期），当前已降级为匿名公开发现；"
+                    "请到 https://next.bgm.tv/demo/access-token 重新生成后在下方填写替换。"
+                )
+            return base
+
         return SourcesCredentialsResponse(
             bilibili=item("bilibili", "Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
             xiaohongshu=item(
@@ -9167,6 +9918,13 @@ def create_app(
                 "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
                 "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。",
                 secret=False,
+            ),
+            bangumi=SourceCredentialItem(
+                label="可选个人令牌",
+                available=bool(
+                    str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
+                ),
+                detail=_bangumi_credential_detail(srcs),
             ),
         )
 
@@ -10231,6 +10989,19 @@ def create_app(
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
                 ),
+                bangumi=BangumiSourceConfigOut(
+                    enabled=cfg.sources.bangumi.enabled,
+                    username=cfg.sources.bangumi.username,
+                    access_token_set=bool(str(cfg.sources.bangumi.access_token or "").strip()),
+                    subject_types=list(cfg.sources.bangumi.subject_types),
+                    source_modes=list(cfg.sources.bangumi.source_modes),
+                    daily_search_budget=cfg.sources.bangumi.daily_search_budget,
+                    daily_ranked_budget=cfg.sources.bangumi.daily_ranked_budget,
+                    daily_latest_budget=cfg.sources.bangumi.daily_latest_budget,
+                    request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
+                    bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -10695,10 +11466,15 @@ def create_app(
                 mode_raw = str(network_data.get("mode", ""))
             try:
                 proxy = normalize_outbound_proxy(proxy_raw)
+                # A payload without ``mode`` is the "never configured" case, so it
+                # resolves the same way ``_build_network_config`` resolves an absent
+                # key: legacy proxy-only clients stay ``custom``, everything else
+                # takes the ``system`` default. Probing ``direct`` here would report
+                # on a policy the runtime would not actually use.
                 mode = (
                     normalize_outbound_proxy_mode(mode_raw)
                     if mode_raw.strip()
-                    else ("custom" if proxy else "direct")
+                    else ("custom" if proxy else "system")
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -11144,6 +11920,143 @@ def create_app(
                         if key in reddit_data:
                             setattr(cfg.sources.reddit, key, int(reddit_data[key]))
 
+                bangumi_data = sources_data.get("bangumi")
+                if isinstance(bangumi_data, dict):
+                    from openbiliclaw.sources.bangumi_client import (
+                        validate_bangumi_access_token,
+                        validate_bangumi_username,
+                    )
+
+                    if "enabled" in bangumi_data:
+                        cfg.sources.bangumi.enabled = _as_bool(bangumi_data["enabled"])
+                    if "username" in bangumi_data:
+                        try:
+                            cfg.sources.bangumi.username = validate_bangumi_username(
+                                bangumi_data["username"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    # A masked echo (the GET response never returns the real token)
+                    # means "unchanged" — skip it so a settings round-trip cannot
+                    # clobber a stored token with dots.
+                    if "access_token" in bangumi_data and not _is_masked_echo(
+                        str(bangumi_data["access_token"] or "").strip()
+                    ):
+                        try:
+                            new_bangumi_token = validate_bangumi_access_token(
+                                bangumi_data["access_token"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if new_bangumi_token:
+                            # A new personal token identifies the account via
+                            # /v0/me. Mirror the guided-init path: validate it
+                            # live BEFORE persisting so a bad/expired token is
+                            # rejected with its real cause (project rule 7), and
+                            # record the /v0/me username as the source of truth.
+                            from openbiliclaw.sources.bangumi_client import (
+                                BangumiAPIError,
+                                resolve_access_token_identity,
+                            )
+
+                            try:
+                                resolved_username = await resolve_access_token_identity(
+                                    new_bangumi_token
+                                )
+                            except BangumiAPIError as exc:
+                                if exc.code == "unauthorized":
+                                    return JSONResponse(
+                                        {
+                                            "error": "invalid_bangumi_access_token",
+                                            "message": (
+                                                "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。"
+                                                "请到 https://next.bgm.tv/demo/access-token "
+                                                "重新生成后重试。"
+                                            ),
+                                        },
+                                        status_code=400,
+                                    )
+                                return JSONResponse(
+                                    {
+                                        "error": "bangumi_token_check_failed",
+                                        "message": (
+                                            "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。"
+                                        ),
+                                    },
+                                    status_code=502,
+                                )
+                            cfg.sources.bangumi.access_token = new_bangumi_token
+                            cfg.sources.bangumi.username = resolved_username
+                        else:
+                            # Explicit clear ("" submitted): drop the stored token
+                            # with no network call.
+                            cfg.sources.bangumi.access_token = ""
+                        # Whether re-armed with a validated token or cleared, any
+                        # stale rejection marker no longer applies.
+                        if hasattr(ctx.database, "conn"):
+                            from openbiliclaw.runtime.bangumi_producer import (
+                                _clear_token_rejection,
+                            )
+
+                            with suppress(Exception):
+                                _clear_token_rejection(ctx.database)
+                    if "subject_types" in bangumi_data:
+                        raw_types = bangumi_data["subject_types"]
+                        if not isinstance(raw_types, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 必须是数组"
+                            )
+                        selected_types = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_types)
+                        )
+                        if not selected_types or any(
+                            value not in {"book", "anime", "music", "game", "real"}
+                            for value in selected_types
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.subject_types = selected_types
+                    if "source_modes" in bangumi_data:
+                        raw_modes = bangumi_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in {"search", "ranked", "latest"} for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_ranked_budget",
+                        "daily_latest_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                        "bootstrap_limit",
+                    ):
+                        if key not in bangumi_data:
+                            continue
+                        try:
+                            value = int(bangumi_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 必须是整数"
+                            ) from exc
+                        minimum = 1 if key == "bootstrap_limit" else 0
+                        maximum = 1000 if key == "bootstrap_limit" else None
+                        if value < minimum or (maximum is not None and value > maximum):
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 超出允许范围"
+                            )
+                        setattr(cfg.sources.bangumi, key, value)
+
         # Apply scheduler updates
         if "scheduler" in update:
             sdata = update["scheduler"]
@@ -11356,7 +12269,10 @@ def create_app(
                     setattr(cfg.logging, key, int(ldata[key]))
 
         # Apply the overseas routing policy. Proxy-only payloads from older UI
-        # versions retain their historical meaning: non-empty = custom, empty = direct.
+        # versions carry no opinion about ``mode``, so they resolve exactly as an
+        # absent ``[network].mode`` key does in ``_build_network_config``: a
+        # non-empty proxy is still custom, and clearing the proxy falls back to
+        # the ``system`` default rather than pinning the user to direct.
         if "network" in update:
             ndata = update["network"]
             if isinstance(ndata, dict):
@@ -11375,7 +12291,7 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         if not mode_supplied:
-                            cfg.network.mode = "custom" if cfg.network.proxy else "direct"
+                            cfg.network.mode = "custom" if cfg.network.proxy else "system"
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 

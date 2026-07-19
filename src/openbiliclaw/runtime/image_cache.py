@@ -263,12 +263,17 @@ ALLOWED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
     "douyinvod.com",
     "ytimg.com",
     "ggpht.com",
+    "lain.bgm.tv",
 )
 # CN CDNs must be fetched DIRECT: env/system proxies (Clash & co.) route them
 # through exit IPs their risk control blocks or throttles — the same failure
 # mode that broke the Bilibili login probe (see bilibili/api.py
 # trust_env=False). Overseas CDNs (YouTube thumbnails) stay on trust_env so
 # users who NEED the proxy to reach them keep working.
+# lain.bgm.tv (Bangumi covers) is deliberately NOT here: it is Cloudflare-
+# fronted and resolves overseas, so a 2026-07-18 curl showed direct fetch
+# timing out while the env/system proxy returned 200 in ~0.5s — the ytimg
+# overseas pattern, not the CN-CDN risk-control pattern. It stays on trust_env.
 _DIRECT_FETCH_HOST_SUFFIXES: tuple[str, ...] = (
     "hdslb.com",
     "xhscdn.com",

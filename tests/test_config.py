@@ -142,6 +142,7 @@ class TestConfigDefaults:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -1003,6 +1004,7 @@ youtube = 3
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -1093,6 +1095,79 @@ def test_sources_reddit_defaults() -> None:
     assert config.sources.reddit.daily_related_budget == 300
     assert config.sources.reddit.request_interval_seconds == 3
     assert config.sources.reddit.min_interval_minutes == 60
+
+
+def test_sources_bangumi_defaults() -> None:
+    config = Config()
+
+    assert config.sources.bangumi.enabled is False
+    assert config.sources.bangumi.username == ""
+    assert config.sources.bangumi.access_token == ""
+    assert config.sources.bangumi.subject_types == ("anime", "book", "game")
+    assert config.sources.bangumi.source_modes == ("search", "ranked", "latest")
+    assert config.sources.bangumi.daily_search_budget == 300
+    assert config.sources.bangumi.daily_ranked_budget == 100
+    assert config.sources.bangumi.daily_latest_budget == 100
+    assert config.sources.bangumi.request_interval_seconds == 1
+    assert config.sources.bangumi.min_interval_minutes == 60
+    assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_save_config_round_trips_sources_bangumi(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.bangumi.enabled = True
+    config.sources.bangumi.username = "sai"
+    config.sources.bangumi.access_token = "tok-abc123"
+    config.sources.bangumi.subject_types = ("anime", "music")
+    config.sources.bangumi.source_modes = ("search", "ranked")
+    config.sources.bangumi.daily_search_budget = 42
+    config.sources.bangumi.daily_ranked_budget = 21
+    config.sources.bangumi.daily_latest_budget = 11
+    config.sources.bangumi.request_interval_seconds = 2
+    config.sources.bangumi.min_interval_minutes = 45
+    config.sources.bangumi.bootstrap_limit = 123
+    config.scheduler.pool_source_shares["bangumi"] = 2
+
+    target = tmp_path / "config.toml"
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.sources.bangumi == config.sources.bangumi
+    assert loaded.scheduler.pool_source_shares["bangumi"] == 2
+
+
+def test_save_config_rejects_invalid_bangumi_username(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.username = "bad/name"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.username" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
+
+
+def test_save_config_rejects_invalid_bangumi_access_token(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.access_token = "bad token\nwith newline"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.access_token" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
 
 
 def test_build_config_supports_sources_xiaohongshu(tmp_path: Path) -> None:
@@ -1287,6 +1362,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
     save_config(config, config_path)
@@ -1300,6 +1376,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
 
@@ -2874,8 +2951,33 @@ class TestNetworkProxyConfig:
         config = _build_config({"network": {"mode": mode, "proxy": proxy}})
         assert config.network.mode == mode
 
-    def test_build_config_defaults_missing_network_mode_to_direct(self) -> None:
+    def test_build_config_defaults_missing_network_mode_to_system(self) -> None:
+        """An unconfigured [network].mode inherits env/OS proxies.
+
+        Every consumer of this setting is an overseas-only service, so
+        ``direct`` made the out-of-the-box experience in mainland China an
+        opaque timeout. ``system`` without a proxy configured is identical
+        to a direct connection, so nobody else is affected.
+        """
         config = _build_config({"network": {}})
+        assert config.network.mode == "system"
+
+    def test_build_config_defaults_absent_network_table_to_system(self) -> None:
+        """No ``[network]`` table at all is the same "never configured" case."""
+        assert _build_config({}).network.mode == "system"
+
+    def test_network_config_dataclass_default_is_system(self) -> None:
+        """The field default and the missing-key branch must not drift apart."""
+        assert config_module.NetworkConfig().mode == "system"
+
+    def test_build_config_keeps_explicitly_configured_direct_mode(self) -> None:
+        """An explicit ``direct`` still means direct after the default moved.
+
+        Only "never configured" takes the new default; a user who wrote
+        ``mode = "direct"`` asked to ignore env/system proxies and keeps
+        doing so.
+        """
+        config = _build_config({"network": {"mode": "direct", "proxy": ""}})
         assert config.network.mode == "direct"
 
     def test_build_config_migrates_legacy_nonempty_proxy_to_custom(self) -> None:
@@ -2885,6 +2987,12 @@ class TestNetworkProxyConfig:
     def test_build_config_clamps_custom_without_proxy_to_direct(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """Invalid values clamp to ``direct``, not to the ``system`` default.
+
+        The user did write something here, so the conservative reading wins:
+        a broken value must not silently start routing traffic through an
+        inherited env proxy.
+        """
         with caplog.at_level("WARNING"):
             config = _build_config({"network": {"mode": "custom", "proxy": ""}})
         assert config.network.mode == "direct"
@@ -2924,3 +3032,31 @@ class TestNetworkProxyConfig:
         monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "system")
         config = load_config(config_path)
         assert config.network.mode == "system"
+
+    def test_on_disk_explicit_direct_survives_the_new_system_default(self, tmp_path: Path) -> None:
+        """A real config.toml saying ``direct`` still loads as ``direct``.
+
+        The whole-file path, not just ``_build_config``: this is the one
+        guarantee the default change is not allowed to break.
+        """
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[general]\nlanguage = "zh"\n\n[network]\nmode = "direct"\nproxy = ""\n',
+            encoding="utf-8",
+        )
+        assert load_config(config_path).network.mode == "direct"
+
+    def test_env_override_can_explicitly_select_direct_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``OPENBILICLAW_NETWORK_MODE=direct`` is explicit too (Docker opt-out)."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "direct")
+        assert load_config(config_path).network.mode == "direct"
+
+    def test_config_without_network_table_loads_as_system(self, tmp_path: Path) -> None:
+        """A pre-[network] config file takes the new default on upgrade."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        assert load_config(config_path).network.mode == "system"

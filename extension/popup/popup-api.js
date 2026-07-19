@@ -336,12 +336,33 @@ export async function verifySource(slug) {
   });
 }
 
-export async function startInit({ force = false, sources } = {}) {
+export async function startInit({
+  force = false,
+  sources,
+  bangumiUsername = null,
+  bangumiToken = null,
+} = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
     payload.sources = sources;
+  }
+  // Send explicit Bangumi options only when the caller has one to send.
+  // `null`/`undefined` means "leave the configured value untouched" (the backend
+  // treats an omitted field as keep-existing); an empty string is a deliberate
+  // clear the user asked for. A token, when present, auto-resolves the account.
+  if (Array.isArray(sources) && sources.includes("bangumi")) {
+    const bangumi = {};
+    if (bangumiUsername != null) {
+      bangumi.username = String(bangumiUsername).trim();
+    }
+    if (bangumiToken != null) {
+      bangumi.access_token = String(bangumiToken).trim();
+    }
+    if (Object.keys(bangumi).length > 0) {
+      payload.source_options = { bangumi };
+    }
   }
   return requestJson("/init", {
     method: "POST",

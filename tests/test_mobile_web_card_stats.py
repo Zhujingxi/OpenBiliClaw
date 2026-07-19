@@ -50,6 +50,8 @@ def test_view_models_exposes_stats_formatter() -> None:
     assert "⭐ " in js
     assert "弹幕 " in js
     assert 'segments.join(" · ")' in js
+    assert "formatCountCn(item.source_rank)" not in js
+    assert "segments.push(`排名 #${sourceRank}`)" in js
 
 
 def test_normalizers_thread_count_fields() -> None:
@@ -63,6 +65,9 @@ def test_normalizers_thread_count_fields() -> None:
         "comment_count",
         "favorite_count",
         "danmaku_count",
+        "rating_score",
+        "rating_count",
+        "source_rank",
     ):
         # Appears in both normalizeRecommendation and normalizeDelightCandidate.
         assert js.count(f"{field}: Number(item?.{field}") >= 2, field

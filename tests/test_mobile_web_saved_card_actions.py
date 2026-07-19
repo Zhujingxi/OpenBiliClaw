@@ -46,7 +46,8 @@ def test_mobile_web_saved_cards_build_light_row_no_owning_no_dismiss() -> None:
     wire = _fn_body(saved, "wireSavedCardActions")
 
     assert 'actionsRow.className = "card-actions saved-card-feedback";' in wire
-    # like / dislike / comment grouped, then ONE cross toggle — four controls, no owning, no dismiss.
+    # like / dislike / comment grouped, then ONE cross toggle — four controls,
+    # no owning, no dismiss.
     assert "actionsRow.append(likeBtn, dislikeBtn, commentBtn, crossBtn);" in wire
     assert 'card.querySelector(".saved-card-body")?.appendChild(actionsRow);' in wire
     labels = ('ariaLabel: "喜欢"', 'ariaLabel: "不感兴趣"', 'ariaLabel: "聊一聊"')

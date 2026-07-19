@@ -133,6 +133,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "twitter": 1,
     "zhihu": 1,
     "reddit": 1,
+    "bangumi": 1,
 }
 _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
@@ -398,21 +399,35 @@ class NetworkConfig:
     """Outbound proxy for OVERSEAS clients only.
 
     Applies to the LLM SDKs (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/
-    openai_compatible chat+embedding), YouTube (yt-dlp), the GitHub updater,
-    and Codex OAuth token refresh. CN-direct clients (bilibili / douyin /
+    openai_compatible chat+embedding), YouTube (yt-dlp), Bangumi (api.bgm.tv
+    is Cloudflare-fronted and resolves overseas), the GitHub updater, and
+    Codex OAuth token refresh. Bangumi's cover CDN (lain.bgm.tv) is overseas
+    too but rides the image cache's own ``trust_env`` path rather than this
+    setting. CN-direct clients (bilibili / douyin /
     ollama / CN-CDN image cache) never consume it — that isolation is pinned
     by tests/test_network_proxy_isolation.py. This is deliberately distinct
     from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
 
-    ``mode`` is one of ``direct`` (default; ignore env/system proxies),
-    ``system`` (inherit HTTP(S)_PROXY / OS settings), or ``custom`` (use
+    ``mode`` is one of ``system`` (default; inherit HTTP(S)_PROXY / OS
+    settings), ``direct`` (ignore env/system proxies), or ``custom`` (use
     ``proxy`` explicitly). Accepted proxy schemes: http / https / socks5 /
     socks5h.
+
+    The default is ``system`` because every consumer listed above is an
+    overseas-only service. Under ``direct`` a mainland-China user's first
+    run dies on an opaque timeout — before they could plausibly find this
+    setting — even though their machine already has a working proxy. With
+    no proxy configured, ``system`` behaves exactly like a direct
+    connection, so users outside that situation lose nothing.
+
+    Only the "never configured" case moves. An explicit ``mode`` on disk is
+    always honored verbatim, including ``mode = "direct"``; the explicit /
+    defaulted split is decided by key presence in ``_build_network_config``.
 
     See docs/plans/2026-07-11-network-proxy-config-spec.md.
     """
 
-    mode: str = "direct"
+    mode: str = "system"
     proxy: str = ""
 
 
@@ -668,6 +683,27 @@ class RedditSourceConfig:
 
 
 @dataclass
+class BangumiSourceConfig:
+    """Bangumi official anonymous API discovery configuration."""
+
+    enabled: bool = False
+    username: str = ""
+    # Optional Bangumi personal access token (https://next.bgm.tv/demo/access-token).
+    # When set, discovery/init resolve the account via /v0/me and read private
+    # collections with a Bearer header. Empty means the historical anonymous
+    # public-username path. Never log the value — only presence/length.
+    access_token: str = ""
+    subject_types: tuple[str, ...] = ("anime", "book", "game")
+    source_modes: tuple[str, ...] = ("search", "ranked", "latest")
+    daily_search_budget: int = 300
+    daily_ranked_budget: int = 100
+    daily_latest_budget: int = 100
+    request_interval_seconds: int = 1
+    min_interval_minutes: int = 60
+    bootstrap_limit: int = 300
+
+
+@dataclass
 class BilibiliSourceConfig:
     """Bilibili discovery source switch."""
 
@@ -698,6 +734,7 @@ class SourcesConfig:
     twitter: TwitterSourceConfig = field(default_factory=TwitterSourceConfig)
     zhihu: ZhihuSourceConfig = field(default_factory=ZhihuSourceConfig)
     reddit: RedditSourceConfig = field(default_factory=RedditSourceConfig)
+    bangumi: BangumiSourceConfig = field(default_factory=BangumiSourceConfig)
 
 
 @dataclass
@@ -823,8 +860,8 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
-    # Overseas-outbound proxy (LLM SDKs / YouTube / updater). CN-direct clients
-    # never use it — see NetworkConfig docstring.
+    # Overseas-outbound proxy (LLM SDKs / YouTube / Bangumi / updater).
+    # CN-direct clients never use it — see NetworkConfig docstring.
     network: NetworkConfig = field(default_factory=NetworkConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -953,6 +990,7 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
         ("twitter", sources.twitter),
         ("zhihu", sources.zhihu),
         ("reddit", sources.reddit),
+        ("bangumi", sources.bangumi),
     ]
     for source_name, source_config in source_configs:
         for source_field in fields(source_config):
@@ -1016,9 +1054,22 @@ def normalize_outbound_proxy(value: str) -> str:
 def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     """Assemble ``NetworkConfig`` from the raw ``[network]`` table.
 
+    The ``mode`` **key's presence** — not its resolved value — separates a
+    deliberate choice from an unset one. Absent means the user never
+    configured overseas routing, so it takes the ``system`` default (see
+    :class:`NetworkConfig`); present is honored verbatim, so an explicit
+    ``mode = "direct"`` keeps ignoring env/system proxies. ``mode`` reaches
+    here from ``config.toml`` and from ``OPENBILICLAW_NETWORK_MODE``, which
+    ``_apply_env_overrides`` injects into this same table — an env var is
+    an explicit choice too, and lands on the present branch for free.
+
     Invalid on-disk values are logged at WARNING and dropped to the empty
     default rather than crashing load (pitfall rule 4 clamp-to-default); the
-    save-time API guard is what rejects invalid *writes* with a 400.
+    save-time API guard is what rejects invalid *writes* with a 400. Both
+    invalid-value clamps below deliberately land on ``direct`` rather than
+    on the ``system`` field default: the user did write *something* there,
+    and refusing to silently start routing their traffic through an
+    inherited env proxy is the conservative reading of a broken value.
     """
     network_raw = raw.get("network", {})
     if not isinstance(network_raw, dict):
@@ -1034,7 +1085,8 @@ def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     if not mode_present:
         # Backward-compatible migration: legacy non-empty [network].proxy was
         # explicitly configured by the user and therefore remains custom.
-        mode = "custom" if proxy else "direct"
+        # Everything else is genuinely unconfigured and takes the default.
+        mode = "custom" if proxy else "system"
     else:
         try:
             mode = normalize_outbound_proxy_mode(mode_raw)
@@ -1133,6 +1185,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     twitter_raw = sources_raw.get("twitter", {})
     zhihu_raw = sources_raw.get("zhihu", {})
     reddit_raw = sources_raw.get("reddit", {})
+    bangumi_raw = sources_raw.get("bangumi", {})
     sources = SourcesConfig(
         browser_cdp_url=sources_browser_raw.get("cdp_url", ""),
         browser_headed=sources_browser_raw.get("headed", False),
@@ -1207,6 +1260,33 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_related_budget=int(reddit_raw.get("daily_related_budget", 300)),
             request_interval_seconds=int(reddit_raw.get("request_interval_seconds", 3)),
             min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
+        ),
+        bangumi=BangumiSourceConfig(
+            enabled=bool(bangumi_raw.get("enabled", False)),
+            username=str(bangumi_raw.get("username", "") or "").strip(),
+            access_token=str(bangumi_raw.get("access_token", "") or "").strip(),
+            subject_types=tuple(
+                value
+                for value in _coerce_str_list(
+                    bangumi_raw.get("subject_types", ["anime", "book", "game"])
+                )
+                if value in {"book", "anime", "music", "game", "real"}
+            )
+            or ("anime", "book", "game"),
+            source_modes=tuple(
+                value
+                for value in _coerce_str_list(
+                    bangumi_raw.get("source_modes", ["search", "ranked", "latest"])
+                )
+                if value in {"search", "ranked", "latest"}
+            )
+            or ("search",),
+            daily_search_budget=max(0, int(bangumi_raw.get("daily_search_budget", 300))),
+            daily_ranked_budget=max(0, int(bangumi_raw.get("daily_ranked_budget", 100))),
+            daily_latest_budget=max(0, int(bangumi_raw.get("daily_latest_budget", 100))),
+            request_interval_seconds=max(0, int(bangumi_raw.get("request_interval_seconds", 1))),
+            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 60))),
+            bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
         ),
     )
     _warn_suspicious_budgets(sources)
@@ -1891,6 +1971,32 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
 
+    try:
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        validate_bangumi_username(config.sources.bangumi.username)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.bangumi.username",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+
+    try:
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_access_token
+
+        validate_bangumi_access_token(config.sources.bangumi.access_token)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.bangumi.access_token",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+
     if config.api.auth.enabled and not config.api.auth.password_hash.strip():
         issues.append(
             ConfigIssue(
@@ -2464,7 +2570,16 @@ def save_config(
     autostart_authoritative: bool = False,
 ) -> Path:
     """Persist a Config dataclass to TOML."""
+    from openbiliclaw.sources.bangumi_client import (
+        validate_bangumi_access_token,
+        validate_bangumi_username,
+    )
+
     _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
+    config.sources.bangumi.username = validate_bangumi_username(config.sources.bangumi.username)
+    config.sources.bangumi.access_token = validate_bangumi_access_token(
+        config.sources.bangumi.access_token
+    )
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -2569,9 +2684,9 @@ def _render_config_toml(
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
             "",
             "[network]",
-            "# Overseas routing mode: direct (ignore env proxy), system (inherit",
-            "# HTTP(S)_PROXY / OS proxy), custom (use proxy below). Applies to",
-            "# LLM SDKs, YouTube,",
+            "# Overseas routing mode: system (default; inherit HTTP(S)_PROXY /",
+            "# OS proxy), direct (ignore env proxy), custom (use proxy below).",
+            "# Applies to LLM SDKs, YouTube, Bangumi,",
             "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
             "# 始终直连,不受此项影响。",
             "# 支持 http:// | https:// | socks5:// | socks5h://",
@@ -2640,6 +2755,19 @@ def _render_config_toml(
             f"request_interval_seconds = {config.sources.reddit.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.reddit.min_interval_minutes}",
             "",
+            "[sources.bangumi]",
+            f"enabled = {_toml_bool(config.sources.bangumi.enabled)}",
+            f"username = {_toml_string(config.sources.bangumi.username)}",
+            f"access_token = {_toml_string(config.sources.bangumi.access_token)}",
+            f"subject_types = {_toml_str_list(list(config.sources.bangumi.subject_types))}",
+            f"source_modes = {_toml_str_list(list(config.sources.bangumi.source_modes))}",
+            f"daily_search_budget = {config.sources.bangumi.daily_search_budget}",
+            f"daily_ranked_budget = {config.sources.bangumi.daily_ranked_budget}",
+            f"daily_latest_budget = {config.sources.bangumi.daily_latest_budget}",
+            f"request_interval_seconds = {config.sources.bangumi.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.bangumi.min_interval_minutes}",
+            f"bootstrap_limit = {config.sources.bangumi.bootstrap_limit}",
+            "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
             "pause_on_extension_disconnect = "
@@ -2693,6 +2821,7 @@ def _render_config_toml(
             f"twitter = {int(config.scheduler.pool_source_shares.get('twitter', 1))}",
             f"zhihu = {int(config.scheduler.pool_source_shares.get('zhihu', 1))}",
             f"reddit = {int(config.scheduler.pool_source_shares.get('reddit', 1))}",
+            f"bangumi = {int(config.scheduler.pool_source_shares.get('bangumi', 1))}",
             "",
             "[discovery]",
             "unified_keyword_planner_enabled = "

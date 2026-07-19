@@ -134,6 +134,7 @@ const SOURCE_LABEL_MAP = {
   twitter: "X (Twitter)",
   zhihu: "知乎",
   reddit: "Reddit",
+  bangumi: "Bangumi",
   web: "Web",
 };
 
@@ -154,6 +155,8 @@ const SOURCE_ALIAS_MAP = {
   zhihu: "zhihu",
   rd: "reddit",
   reddit: "reddit",
+  bgm: "bangumi",
+  bangumi: "bangumi",
 };
 
 const RUNTIME_TOPIC_LABEL_MAP = {
@@ -195,6 +198,12 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "reddit-hot": "Reddit 热门",
   "reddit-subreddit": "Reddit 社区",
   "reddit-related": "Reddit 相关",
+  bangumi_search: "Bangumi 搜索",
+  bangumi_ranked: "Bangumi 排名",
+  bangumi_latest: "Bangumi 按日期浏览",
+  "bangumi-search": "Bangumi 搜索",
+  "bangumi-ranked": "Bangumi 排名",
+  "bangumi-latest": "Bangumi 按日期浏览",
 };
 
 function urlHostMatches(url, hostnames) {
@@ -222,6 +231,7 @@ export function normalizeSourcePlatform(item) {
     if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
     if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
     if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
+    if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
     return "web";
   }
   if (normalizeText(item?.bvid)) return "bilibili";
@@ -259,6 +269,7 @@ function formatRuntimeTopicLabel(value) {
   if (key.startsWith("dy-plugin-") || key.startsWith("douyin-")) return "抖音";
   if (key.startsWith("yt-") || key.startsWith("youtube-")) return "YouTube";
   if (key.startsWith("reddit-")) return "Reddit";
+  if (key.startsWith("bangumi-")) return "Bangumi";
   return text;
 }
 
@@ -304,6 +315,7 @@ export function buildContentUrl(item) {
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "twitter") return buildTwitterUrl(vid);
+  if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }
@@ -334,7 +346,7 @@ export function normalizeRecommendation(item) {
     id: Number(item?.id ?? 0),
     bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
-    up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
+    up_name: normalizeText(item?.up_name) || (sourcePlatform === "bangumi" ? "" : DEFAULT_UP_NAME),
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
@@ -353,6 +365,9 @@ export function normalizeRecommendation(item) {
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+    rating_score: Number(item?.rating_score ?? 0),
+    rating_count: Number(item?.rating_count ?? 0),
+    source_rank: Number(item?.source_rank ?? 0),
   };
 }
 
@@ -414,11 +429,15 @@ export function formatCountCn(n) {
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
 export function recommendationStats(item) {
   const segments = [];
+  const sourceRank = Math.trunc(Number(item?.source_rank) || 0);
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
+  if (item?.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+  if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
   return segments.join(" · ");
 }
 
@@ -507,6 +526,9 @@ export function normalizeDelightCandidate(item) {
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+    rating_score: Number(item?.rating_score ?? 0),
+    rating_count: Number(item?.rating_count ?? 0),
+    source_rank: Number(item?.source_rank ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),

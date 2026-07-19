@@ -255,7 +255,11 @@ account_sync_state = memory.load_account_sync_state()
 #   "following_mids": ["99"],
 #   "last_account_sync_at": "2026-03-14T12:05:00+00:00",
 #   "last_sync_error": "",
+#   "last_sync_error_kind": "",  # "auth_expired" 驱动三端的“需重新登录”呈现
 # }
+#
+# 读写两侧都是显式 key 白名单：新增字段必须同时加进 load / save 和默认状态，
+# 否则会被静默丢弃 —— last_sync_error_kind 就这样丢了整整一个版本周期。
 
 source_bootstrap_state = memory.load_source_bootstrap_state()
 # {

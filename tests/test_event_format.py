@@ -446,6 +446,17 @@ def test_twitter_label_and_context_render() -> None:
     assert "《A thread on systems》" in rendered
 
 
+def test_bangumi_label_and_context_render() -> None:
+    rendered = format_event_context(
+        event_type="favorite",
+        source_platform="bangumi",
+        title="Cowboy Bebop",
+    )
+
+    assert rendered.startswith("在Bangumi")
+    assert "《Cowboy Bebop》" in rendered
+
+
 # ---------------------------------------------------------------------------
 # Comment-text capture (event-capture-completion Phase 2/3)
 

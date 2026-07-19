@@ -305,6 +305,7 @@ body {
 .card-source[data-source="twitter"] { background: rgba(15, 23, 42, 0.08); color: #0f172a; }
 .card-source[data-source="zhihu"] { background: rgba(15, 136, 235, 0.1); color: #0f88eb; }
 .card-source[data-source="reddit"] { background: rgba(255, 69, 0, 0.1); color: #d93f00; }
+.card-source[data-source="bangumi"] { background: rgba(105, 80, 161, 0.12); color: #6950a1; }
 
 .card-expression {
   margin-top: 8px;

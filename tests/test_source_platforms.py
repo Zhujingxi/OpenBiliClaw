@@ -26,6 +26,7 @@ from openbiliclaw.sources.zhihu_tasks import ZHIHU_DISCOVERY_SCOPE_STRATEGIES
         ("zh", "zhihu-creator", "zhihu"),
         ("", "zhihu_hot", "zhihu"),
         ("zhihu", "zhihu-related", "zhihu"),
+        ("bgm", "bangumi-ranked", "bangumi"),
     ],
 )
 def test_source_family_aliases(platform: str, source: str, expected: str) -> None:
@@ -41,6 +42,7 @@ def test_registry_contains_every_runtime_platform() -> None:
         "twitter",
         "zhihu",
         "reddit",
+        "bangumi",
     )
 
 
@@ -54,6 +56,8 @@ def test_registry_contains_every_runtime_platform() -> None:
         ("https://x.com/user/status/1", "twitter"),
         ("https://www.zhihu.com/question/1/answer/2", "zhihu"),
         ("https://www.reddit.com/r/python/comments/a/title", "reddit"),
+        ("https://bgm.tv/subject/326", "bangumi"),
+        ("https://bangumi.tv/subject/326", "bangumi"),
     ],
 )
 def test_url_inference_uses_registry(url: str, expected: str) -> None:

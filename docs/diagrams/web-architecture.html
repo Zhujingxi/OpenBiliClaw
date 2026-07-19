@@ -309,7 +309,7 @@
         </div>
         <div class="box static">
           <strong>根路径跳转</strong>
-          <span>`/` 302 到 `/web`；手机入口由插件二维码生成 `/m/` URL。</span>
+          <span>`/` 302 到 `/web`；`/setup` 承载首次配置；降级时四个静态入口及其资源仍可达。</span>
         </div>
       </div>
 
@@ -393,12 +393,12 @@
       <div class="step">
         <span class="step-num">3</span>
         <strong>首屏 REST hydration</strong>
-        <p>推荐列表、runtime status、health/profile/activity/config 次级资源分成三个独立 hydration 分支，任一慢请求不阻塞其余分支渲染。</p>
+        <p>先用 provider-free `/api/ping` 判断是否降级；正常时再并行加载推荐、runtime、health/profile/activity/config，降级时只读配置并停止业务 hydration。</p>
       </div>
       <div class="step">
         <span class="step-num">4</span>
         <strong>连接 runtime-stream</strong>
-        <p>建立 WebSocket 后接收池子、探针、画像、活动和降级事件。</p>
+        <p>建立 WebSocket 后接收池子、探针、画像、活动和降级事件；桌面端遇 degraded 会进入模型设置恢复面。</p>
       </div>
       <div class="step">
         <span class="step-num">5</span>

@@ -409,6 +409,7 @@ SOURCE_YOUTUBE = "youtube"
 SOURCE_TWITTER = "twitter"
 SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
+SOURCE_BANGUMI = "bangumi"
 
 # Human-readable platform labels used to render the context string.
 # Keys must match the source_platform values stored in event metadata.
@@ -421,6 +422,7 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_TWITTER: "X",
     SOURCE_ZHIHU: "知乎",
     SOURCE_REDDIT: "Reddit",
+    SOURCE_BANGUMI: "Bangumi",
 }
 
 # Action verbs per event_type. Designed so the rendered sentence reads

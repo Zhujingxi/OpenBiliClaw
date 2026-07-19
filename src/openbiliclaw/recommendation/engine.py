@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.base import classify_llm_failure_kind
-from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
+from openbiliclaw.llm.json_utils import (
+    extract_llm_json_list,
+    extract_llm_json_object,
+    validated_text_field,
+)
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.saved_sync.identity import content_storage_key
@@ -163,6 +167,47 @@ def _batch_results_by_content_key(
         matched[raw_key] = item
 
     return matched if saw_identifier else None
+
+
+def _validated_expression_fields(
+    result: object,
+    *,
+    content_key: str,
+) -> tuple[str, str] | None:
+    """Return (expression, topic_label) only when both are non-empty strings.
+
+    The LLM occasionally answers with the whole batch nested under
+    ``expression`` (``{"expression": [{...}, {...}], "topic_label": "..."}``).
+    An unconditional ``str()`` turned that list into its Python repr, which
+    passed the non-empty check and was persisted as card copy — users saw
+    ``[{'expression': ..., 'topic_label': ...}]`` in the recommendation.
+    Reject non-strings here instead, so the caller can fall back or retry.
+    """
+    if not isinstance(result, dict):
+        return None
+    expression = result.get("expression")
+    topic_label = result.get("topic_label")
+    if not isinstance(expression, str) or not isinstance(topic_label, str):
+        logger.warning(
+            "Discarding expression payload with non-string fields for %s "
+            "(expression=%s, topic_label=%s)",
+            content_key,
+            type(expression).__name__,
+            type(topic_label).__name__,
+        )
+        return None
+    expression = expression.strip()
+    topic_label = topic_label.strip()
+    if not expression or not topic_label:
+        logger.warning(
+            "Discarding blank expression payload for %s "
+            "(expression_empty=%s, topic_label_empty=%s)",
+            content_key,
+            not expression,
+            not topic_label,
+        )
+        return None
+    return (expression, topic_label)
 
 
 class SupportsCoreMemoryTask(Protocol):
@@ -1608,8 +1653,18 @@ class RecommendationEngine:
             if not isinstance(score_value, (int, float, str)):
                 score_value = 0.0
             score = max(0.0, min(1.0, float(score_value)))
-            reason = str(result.get("reason", "")).strip()
-            topic_group = str(result.get("topic_group", "")).strip()
+            reason = validated_text_field(
+                result.get("reason", ""), field="reason", content_key=content.bvid
+            )
+            topic_group = validated_text_field(
+                result.get("topic_group", ""), field="topic_group", content_key=content.bvid
+            )
+            if reason is None or topic_group is None:
+                # relevance_reason feeds user-visible delight copy, so a
+                # non-string here must not be repr'd into the pool.
+                content.relevance_score = 0.01
+                content.relevance_reason = "classification_failed"
+                continue
             style_key = normalize_style_key(result.get("style_key", ""))
 
             content.relevance_score = score or 0.01  # never leave at 0.0
@@ -2042,10 +2097,12 @@ class RecommendationEngine:
                 )
             if not isinstance(result, dict):
                 continue
-            expression = str(result.get("expression", "")).strip()
-            topic_label = str(result.get("topic_label", "")).strip()
-            if not expression or not topic_label:
+            validated = _validated_expression_fields(result, content_key=item.bvid)
+            if validated is None:
+                # Leave this item missing so the caller retries it rather than
+                # persisting a repr'd payload as card copy.
                 continue
+            expression, topic_label = validated
             gathered.append((item, expression, topic_label))
 
         bvids_by_expression: dict[str, set[str]] = defaultdict(set)
@@ -2334,10 +2391,9 @@ class RecommendationEngine:
             )
             if payload is None:
                 raise ValueError("Expression response must be a JSON object.")
-            expression = str(payload.get("expression", "")).strip()
-            topic_label = str(payload.get("topic_label", "")).strip()
-            if expression and topic_label:
-                return (expression, topic_label)
+            validated = _validated_expression_fields(payload, content_key=content.bvid)
+            if validated is not None:
+                return validated
         except Exception:
             logger.exception("Failed to generate recommendation expression: %s", content.bvid)
         return None

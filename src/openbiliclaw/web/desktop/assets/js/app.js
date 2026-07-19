@@ -50,6 +50,10 @@
       initReason: "",
       initBusy: false,
       initSelectedSources: ["bilibili"],
+      initBangumiUsername: "",
+      initBangumiUsernameTouched: false,
+      initBangumiUsernamePrefilled: false,
+      initBangumiToken: "",
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -59,6 +63,7 @@
       delights: [],
       delightIndex: 0,
       delight: null,
+      degraded: false,
       config: null,
       sourceStatus: null,
       sourceCredentials: null,
@@ -90,11 +95,12 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -106,9 +112,10 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -118,6 +125,9 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+      invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+      bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -162,6 +172,7 @@
     let desktopRecommendationRecoveryInFlight = false;
     let desktopRuntimeRecoveryInFlight = false;
     let desktopRuntimeGeneration = 0;
+    let degradedRecoveryPresented = false;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -549,6 +560,7 @@
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let autoLoadCheckRaf = 0;
+    let autoLoadCheckFallbackTimer = 0;
     let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
@@ -996,7 +1008,7 @@
         item_key: canonical.item_key,
         content_id: contentId,
         title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
-        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
+        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? (canonical.source_platform === "bangumi" ? "" : "未知创作者")),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
         content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
@@ -1010,6 +1022,9 @@
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
         published_at: String(item?.published_at ?? "").trim(),
         published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
@@ -1084,7 +1099,7 @@
     function configErrorMessage(details) {
       if (!details) return "";
       if (typeof details === "string") return details;
-      const issues = details.config?.issues || details.detail?.config?.issues;
+      const issues = details.issues || details.config?.issues || details.detail?.config?.issues;
       if (Array.isArray(issues) && issues.length) {
         return issues.map((issue) => `${issue.severity || "warning"}: ${issue.message || issue.code || JSON.stringify(issue)}`).join("\n");
       }
@@ -1092,6 +1107,24 @@
         return details.detail.map((item) => `${item.loc?.join(".") || "字段"}: ${item.msg || JSON.stringify(item)}`).join("\n");
       }
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
+    }
+
+    function presentDegradedConfigRecovery(snapshot) {
+      if (snapshot?.degraded !== true) return;
+      state.degraded = true;
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const diagnostic = configErrorMessage(snapshot);
+      const configStatus = $("#configStatus");
+      if (configStatus) {
+        configStatus.setAttribute("role", "alert");
+        configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
+      }
+      $("#statusLabel").textContent = "模型配置待修复";
+      $("#runtimeSummary").textContent = "后端已安全降级；推荐功能暂停，模型设置仍可修改。";
+      if (degradedRecoveryPresented) return;
+      degradedRecoveryPresented = true;
+      openSettingsPage("models");
+      showToast("模型配置不可用，已打开恢复设置");
     }
 
     const toastManager = {
@@ -1576,7 +1609,16 @@
         const label = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
         return `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(opt.key)}" data-init-source="${escapeHtml(opt.key)}"${checked}><span>${escapeHtml(label)}</span></label>`;
       }).join("");
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      const bangumiDisabled = selected.has("bangumi") ? "" : " disabled";
+      const bangumiUsername = state.initBangumiUsernameTouched
+        ? state.initBangumiUsername
+        : state.config?.sources?.bangumi?.username || state.initBangumiUsername || "";
+      const bangumiInput = `<label class="init-source-row"><span>Bangumi 公开用户名（可留空，仅启用发现）</span><input id="initBangumiUsername" maxlength="128" autocomplete="off" value="${escapeHtml(bangumiUsername)}"${bangumiDisabled}></label>`;
+      // Optional personal access token: identifies the account via /v0/me and
+      // reads private collections; when set, the username above is auto-resolved.
+      const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
+      const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -1724,6 +1766,11 @@
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
           state.initSelectedSources = selectedInitSourcesFromDom();
+          const bangumiChecked = state.initSelectedSources.includes("bangumi");
+          const bangumiUsername = grid.querySelector("#initBangumiUsername");
+          if (bangumiUsername) bangumiUsername.disabled = !bangumiChecked;
+          const bangumiToken = grid.querySelector("#initBangumiToken");
+          if (bangumiToken) bangumiToken.disabled = !bangumiChecked;
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -1731,6 +1778,13 @@
             checklist.innerHTML = initChecklistMarkup(state.initStatus, state.initSelectedSources);
           }
         });
+      });
+      grid.querySelector("#initBangumiUsername")?.addEventListener("input", (event) => {
+        state.initBangumiUsername = event.currentTarget.value || "";
+        state.initBangumiUsernameTouched = true;
+      });
+      grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
+        state.initBangumiToken = event.currentTarget.value || "";
       });
     }
 
@@ -1840,6 +1894,26 @@
         renderAll();
         return;
       }
+      const bangumiUsername = String(
+        $("#initBangumiUsername")?.value || state.initBangumiUsername || ""
+      ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        state.initBangumiUsernameTouched &&
+        (bangumiUsername !== "" || state.initBangumiUsernamePrefilled);
+      const bangumiToken = String(
+        $("#initBangumiToken")?.value || state.initBangumiToken || ""
+      ).trim();
+      // No client-side Bangumi-only admission check here on purpose. The
+      // backend owns a THREE-tier account ladder (token → explicit username →
+      // browser-extension-reported identity); a local "username or token
+      // required" copy of it can't see the third tier and silently blocked
+      // zero-config extension users from ever reaching /api/init. The backend
+      // answers 409 no_profile_signal_sources when all three are genuinely
+      // missing, and the catch below renders it.
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         state.initReason = "还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。";
         state.initBusy = false;
@@ -1853,15 +1927,31 @@
         return;
       }
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
+          const bangumi = {};
+          if (sendBangumiUsername) bangumi.username = bangumiUsername;
+          // Only send a token the user actually typed; omit otherwise so the
+          // backend keeps any configured token.
+          if (bangumiToken) bangumi.access_token = bangumiToken;
+          payload.source_options = { bangumi };
+        }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
           timeoutMs: 60000
         });
         state.initStatus = { ...(state.initStatus || {}), ...started };
         state.initBusy = false;
-        showToast("初始化已开始");
+        // The 202 response may carry backend warnings (e.g. Bangumi selected
+        // without a public username → discovery-only). Surface them in the
+        // onboarding reason and the toast instead of a bare "已开始".
+        const startWarnings = Array.isArray(started?.warnings)
+          ? started.warnings.filter((text) => typeof text === "string" && text.trim())
+          : [];
+        state.initReason = startWarnings.join(" ");
+        showToast(startWarnings.length ? startWarnings.join(" ") : "初始化已开始");
         renderAll();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
@@ -1987,8 +2077,10 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -2669,16 +2761,28 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     function scheduleAutoLoadCheck() {
-      if (!state.autoLoadOnScroll || autoLoadCheckRaf) return;
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf || autoLoadCheckFallbackTimer) return;
+      let settled = false;
       const run = () => {
+        if (settled) return;
+        settled = true;
+        const rafId = autoLoadCheckRaf;
+        const fallbackTimer = autoLoadCheckFallbackTimer;
         autoLoadCheckRaf = 0;
+        autoLoadCheckFallbackTimer = 0;
+        if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
         if (!refreshAutoLoadSentinelVisibility()) return;
         void autoLoadMoreIfNeeded().catch(() => {});
       };
       if (typeof requestAnimationFrame === "function") {
         autoLoadCheckRaf = requestAnimationFrame(run);
+        // Intersection/scroll loading is functional work, not just paint polish.
+        // A backgrounded or busy browser may throttle rAF indefinitely, so keep
+        // a short watchdog that runs the same coalesced geometry check once.
+        autoLoadCheckFallbackTimer = setTimeout(run, 120);
       } else {
-        autoLoadCheckRaf = setTimeout(run, 0);
+        autoLoadCheckFallbackTimer = setTimeout(run, 0);
       }
     }
 
@@ -2861,6 +2965,7 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
       if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
       if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "bangumi" && item.content_id) return `https://bgm.tv/subject/${encodeURIComponent(item.content_id)}`;
       if (platform === "reddit") return "";
       return "";
     }
@@ -2930,11 +3035,15 @@ ${savedCardFeedbackBarHtml(listKind)}
 
     function recommendationStats(item) {
       const segments = [];
+      const sourceRank = Math.trunc(Number(item.source_rank) || 0);
       if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
       if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
       if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      if (item.rating_score > 0) segments.push(`评分 ${item.rating_score.toFixed(1)}`);
+      if (item.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+      if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
       return segments.join(" · ");
     }
 
@@ -3506,18 +3615,19 @@ ${cardFeedbackBarHtml()}`;
       scheduleActivityRailHeightSync();
     }
 
-    // 用户是否正在惊喜卡上互动：聊天输入框展开 / 有焦点 / 有未发送草稿。
-    // 后台推送（新候选、队列刷新）在此期间不得切卡或重渲染——setActiveDelight
-    // 会 closeDelightComposer 收起输入框（field report 2026-07-05「打着打着惊喜
-    // 推荐突然变了」），切卡更会让随后的发送把这条反馈记到换上来的新卡上。
-    // 有未发送草稿也算互动中：草稿属于当前这张卡，换卡同样会串。
+    // 用户是否正在首页内容上互动：惊喜聊天框展开 / 有焦点 / 有未发送草稿，
+    // 或正在普通推荐卡上悬停、输入、提交可撤销反馈。后台推送与惊喜自动轮播
+    // 在此期间不得切卡或重渲染——否则会让下方卡片在点击中途发生位移，或把
+    // 惊喜聊天反馈记到换上来的新卡上。
     function delightUserEngaged() {
       const input = document.getElementById("delightCommentInput");
-      if (!input) return false;
       const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
       const focused = document.activeElement === input;
-      const hasDraft = Boolean(String(input.value || "").trim());
-      return composing || focused || hasDraft;
+      const hasDraft = Boolean(String(input?.value || "").trim());
+      const recommendationEngaged = Boolean(document.querySelector(
+        "#videoGrid:hover, #videoGrid:focus-within, #videoGrid .is-feedback-pending, #videoGrid .card-actions.is-composing"
+      ));
+      return composing || focused || hasDraft || recommendationEngaged;
     }
 
     // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
@@ -5463,6 +5573,10 @@ ${cardFeedbackBarHtml()}`;
         last_account_sync_at: String(merged.last_account_sync_at ?? ""),
         last_account_sync_error: String(merged.last_account_sync_error ?? ""),
         last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
+        // This is an explicit-key whitelist: a field missing here is dropped
+        // silently, which is how the backend copy stopped reaching the chip.
+        last_account_sync_message: String(merged.last_account_sync_message ?? ""),
+        last_account_sync_severity: String(merged.last_account_sync_severity ?? ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
     }
@@ -5579,17 +5693,20 @@ ${cardFeedbackBarHtml()}`;
         return;
       }
       el.hidden = false;
-      if (runtime.last_account_sync_error_kind === "auth_expired") {
+      // The backend renders the sentence so every surface says the same thing;
+      // the literals here are only a fallback for an older backend.
+      const message = String(runtime?.last_account_sync_message || "");
+      if (kind === "auth_expired") {
         el.classList.add("is-auth-expired");
         el.classList.remove("is-error");
-        el.textContent = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        el.textContent = message || "B 站登录已失效，账号同步已停止 — 请重新登录";
         return;
       }
       el.classList.add("is-error");
       el.classList.remove("is-auth-expired");
-      const when = String(runtime?.last_account_sync_at || "");
-      const detail = error || "账号同步出错";
-      el.textContent = when ? `账号同步出错：${detail}（上次同步 ${when}）` : `账号同步出错：${detail}`;
+      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
+      const detail = message || "账号同步出错";
+      el.textContent = when ? `${detail}（上次同步 ${when}）` : detail;
     }
 
     function applyRuntimeStatus(payload) {
@@ -5690,6 +5807,39 @@ ${cardFeedbackBarHtml()}`;
       return selected.length > 0 ? selected : ["search"];
     }
 
+    const BANGUMI_SOURCE_MODE_FIELDS = [
+      ["search", "bangumiModeSearch"],
+      ["ranked", "bangumiModeRanked"],
+      ["latest", "bangumiModeLatest"],
+    ];
+    const BANGUMI_SUBJECT_TYPE_FIELDS = [
+      ["anime", "bangumiTypeAnime"],
+      ["book", "bangumiTypeBook"],
+      ["game", "bangumiTypeGame"],
+      ["music", "bangumiTypeMusic"],
+      ["real", "bangumiTypeReal"],
+    ];
+
+    function setCheckedValues(fields, rawValues) {
+      const fallback = fields.map(([value]) => value);
+      const selected = new Set(
+        (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+          .map((value) => String(value).trim())
+          .filter(Boolean),
+      );
+      fields.forEach(([value, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = selected.has(value);
+      });
+    }
+
+    function collectCheckedValues(fields, fallback) {
+      const selected = fields
+        .filter(([, id]) => document.getElementById(id)?.checked === true)
+        .map(([value]) => value);
+      return selected.length > 0 ? selected : fallback;
+    }
+
     function joinPath(directory, filename) {
       const dir = String(directory || "").trim();
       const name = String(filename || "").trim();
@@ -5728,7 +5878,9 @@ ${cardFeedbackBarHtml()}`;
     // shape all come from /shared/source-status.js, which the extension side
     // panel and the setup wizard load too. Keeping a private copy here is what
     // let the two surfaces drift into painting `no_auth` and `unverified` the
-    // same colour (spec D6).
+    // same colour (spec D6). The roster it exports includes Bangumi, so this
+    // page keeps rendering that row even though the backend sends it no `auth`
+    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
     const SourceStatus = globalThis.OpenBiliClawSourceStatus;
     const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_ENABLE_SELECT_IDS = {
@@ -5738,7 +5890,8 @@ ${cardFeedbackBarHtml()}`;
       youtube: "youtubeEnabled",
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
-      reddit: "redditEnabled"
+      reddit: "redditEnabled",
+      bangumi: "bangumiEnabled"
     };
 
     function setSourceBadge(badge, text, tone) {
@@ -5764,6 +5917,27 @@ ${cardFeedbackBarHtml()}`;
       // so it cannot drift from the glyph it explains.
       if (shown && evidence.hint) badge.title = evidence.hint;
       else badge.removeAttribute("title");
+    }
+
+    // The overseas-egress advisory is authored by the backend
+    // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+    // verbatim. This function must never learn a platform name nor read
+    // [network].mode: adding a platform must stay a one-line backend change.
+    // Only the `enabled` gate lives here, because "is this row live right now"
+    // is a UI fact the backend cannot see (the desktop select can be pending).
+    function applySourceNetworkHint(row, hint, enabled) {
+      const text = enabled ? String(hint || "") : "";
+      let node = row.querySelector(".source-network-hint");
+      if (!text) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.className = "source-network-hint";
+        row.appendChild(node);
+      }
+      node.textContent = text;
     }
 
     function getPendingSourceEnabled(key, item) {
@@ -5794,6 +5968,9 @@ ${cardFeedbackBarHtml()}`;
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
           setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
           if (detail) detail.textContent = access.detail;
+          // No status means no basis for an egress advisory either; drop any
+          // hint left over from the last successful poll.
+          applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
           row.dataset.accessTone = access.tone;
@@ -5807,6 +5984,7 @@ ${cardFeedbackBarHtml()}`;
         setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
         if (detail) detail.textContent = detailPrefix + (access.detail || "暂无更多状态细节。");
+        applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
         row.dataset.accessTone = access.tone;
@@ -6067,6 +6245,7 @@ ${cardFeedbackBarHtml()}`;
 
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
+      state.degraded = config.degraded === true;
       state.config = config;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
@@ -6091,6 +6270,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
+      setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -6115,7 +6295,9 @@ ${cardFeedbackBarHtml()}`;
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
-      setSelect("networkProxyMode", config.network?.mode || "direct");
+      // Mirrors the [network].mode backend default (system since v0.3.175);
+      // only reached if /api/config omits the field.
+      setSelect("networkProxyMode", config.network?.mode || "system");
       setInput("networkProxy", config.network?.proxy || "");
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
@@ -6231,8 +6413,46 @@ ${cardFeedbackBarHtml()}`;
       setInput("redditDailyRelatedBudget", config.sources?.reddit?.daily_related_budget);
       setInput("redditRequestInterval", config.sources?.reddit?.request_interval_seconds);
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      setSelect("bangumiEnabled", config.sources?.bangumi?.enabled === true ? "on" : "off");
+      setInput("bangumiUsername", config.sources?.bangumi?.username);
+      {
+        // The token itself is never returned by GET (secret); access_token_set
+        // only tells us whether one is stored. Keep the field empty and signal
+        // the stored state via placeholder so an untouched save never clobbers it.
+        const bangumiToken = document.getElementById("bangumiAccessToken");
+        if (bangumiToken) {
+          bangumiToken.value = "";
+          bangumiToken.placeholder = config.sources?.bangumi?.access_token_set
+            ? "已配置（留空保持不变；填写新令牌以替换）"
+            : "可留空；填写以自动识别当前用户并读取私密收藏";
+        }
+        // Clear-token is a per-save action; never leave it pre-checked after a
+        // reload, and hide it when nothing is stored to clear.
+        const bangumiClearToken = document.getElementById("bangumiClearToken");
+        if (bangumiClearToken) {
+          bangumiClearToken.checked = false;
+          bangumiClearToken.disabled = !config.sources?.bangumi?.access_token_set;
+        }
+      }
+      setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, config.sources?.bangumi?.source_modes);
+      setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, config.sources?.bangumi?.subject_types);
+      setInput("bangumiDailySearchBudget", config.sources?.bangumi?.daily_search_budget);
+      setInput("bangumiDailyRankedBudget", config.sources?.bangumi?.daily_ranked_budget);
+      setInput("bangumiDailyLatestBudget", config.sources?.bangumi?.daily_latest_budget);
+      setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
+      setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
+      setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      if (!state.initBangumiUsernameTouched) {
+        state.initBangumiUsername = config.sources?.bangumi?.username || "";
+        // A successful prefill populated the field; a later explicit clear is
+        // then a deliberate reset (sends ""), while an untouched or config-failed
+        // empty field omits the username to keep the configured value.
+        state.initBangumiUsernamePrefilled = true;
+      }
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -6291,6 +6511,9 @@ ${cardFeedbackBarHtml()}`;
         comment_count: Number(item?.comment_count ?? 0) || 0,
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
@@ -6437,11 +6660,12 @@ ${cardFeedbackBarHtml()}`;
         scheduleActivityRailHeightSync();
         return;
       }
+      const shouldAnimateTransition = Boolean(state.delight);
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
       // 锁定容器高度防止下方布局跳变
       const banner = $("#delightBanner");
-      if (banner) {
+      if (banner && shouldAnimateTransition) {
         banner.style.height = `${banner.offsetHeight}px`;
         banner.classList.add("is-height-locked");
         banner.classList.remove("is-height-settling");
@@ -6475,7 +6699,7 @@ ${cardFeedbackBarHtml()}`;
         if (copy) copy.classList.remove("is-exiting");
         if (thumb) thumb.classList.remove("is-exiting");
         // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
-        if (banner) {
+        if (banner && shouldAnimateTransition) {
           if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
           const startH = parseFloat(banner.style.height) || banner.offsetHeight;
           banner.style.height = `${startH}px`;
@@ -6507,11 +6731,14 @@ ${cardFeedbackBarHtml()}`;
             }
           };
           banner._heightRaf = requestAnimationFrame(step);
+        } else if (banner) {
+          banner.style.removeProperty("height");
+          banner.classList.remove("is-height-locked", "is-height-settling");
         }
       };
-      if (copy) copy.classList.add("is-exiting");
-      if (thumb) thumb.classList.add("is-exiting");
-      if (copy || thumb) {
+      if (copy && shouldAnimateTransition) copy.classList.add("is-exiting");
+      if (thumb && shouldAnimateTransition) thumb.classList.add("is-exiting");
+      if (shouldAnimateTransition && (copy || thumb)) {
         setTimeout(applyContent, 250);
       } else {
         applyContent();
@@ -6716,6 +6943,13 @@ ${cardFeedbackBarHtml()}`;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      if (event.type === "degraded") {
+        presentDegradedConfigRecovery({
+          degraded: true,
+          degraded_reason: event.reason || "",
+          issues: event.issues || [],
+        });
+      }
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
       // (/api/recommendations only returns the latest top window). Header/pool counts
@@ -6913,7 +7147,16 @@ ${cardFeedbackBarHtml()}`;
       }
 
       function applyHealthSnapshot(snapshot) {
-        if (snapshot) $("#statusLabel").textContent = "已连接本地后端";
+        if (!snapshot) return;
+        if (snapshot.degraded === true) {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: snapshot.degraded_reason || "",
+            issues: snapshot.issues || [],
+          });
+          return;
+        }
+        $("#statusLabel").textContent = "已连接本地后端";
       }
 
       function applyInitStatusSnapshot(snapshot) {
@@ -6982,7 +7225,9 @@ ${cardFeedbackBarHtml()}`;
       }
 
       function applyConfigSnapshot(snapshot) {
-        applyConfig(snapshot?.config || snapshot);
+        const configSnapshot = snapshot?.config || snapshot;
+        applyConfig(configSnapshot);
+        presentDegradedConfigRecovery(configSnapshot);
         renderFilters();
         syncSourceMetric();
       }
@@ -7008,6 +7253,17 @@ ${cardFeedbackBarHtml()}`;
         }
       }
 
+      // /api/ping is deliberately provider-free and carries recovery
+      // metadata only when the backend is degraded. Pay one loopback RTT
+      // before normal parallel hydration so a broken LLM registry does not
+      // generate a console storm from intentionally-blocked business APIs.
+      const pingSnapshot = await requestJson(ENDPOINTS.ping);
+      applyHealthSnapshot(pingSnapshot);
+      if (pingSnapshot?.degraded === true) {
+        applyConfigSnapshot(await requestJson(ENDPOINTS.config));
+        return;
+      }
+
       const recommendationsPromise = readRecommendationSnapshot();
       const runtimePromise = readRuntimeSnapshot();
 
@@ -7025,7 +7281,6 @@ ${cardFeedbackBarHtml()}`;
       );
 
       const secondaryPromises = [
-        requestJson(ENDPOINTS.ping).then(applyHealthSnapshot),
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),
@@ -7203,6 +7458,28 @@ ${cardFeedbackBarHtml()}`;
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
             min_interval_minutes: getIntInput("redditMinInterval", 60)
+          },
+          bangumi: {
+            enabled: $("#bangumiEnabled").value === "on",
+            username: getInput("bangumiUsername"),
+            // Precedence: an explicit "clear token" checkbox sends access_token:""
+            // (backend clears the stored token + rejection marker). Otherwise
+            // send the token only when the user typed one; an empty field means
+            // "leave the stored token unchanged", so omit the key rather than
+            // clobbering it with "".
+            ...(document.getElementById("bangumiClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("bangumiAccessToken") || "") !== ""
+                ? { access_token: getInput("bangumiAccessToken") }
+                : {}),
+            subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+            source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("bangumiDailySearchBudget", 300),
+            daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
+            daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
+            request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 60),
+            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },
         scheduler: {
@@ -7227,7 +7504,8 @@ ${cardFeedbackBarHtml()}`;
             youtube: getIntInput("shareYoutube", 1),
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
-            reddit: getIntInput("shareReddit", 1)
+            reddit: getIntInput("shareReddit", 1),
+            bangumi: getIntInput("shareBangumi", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -7285,7 +7563,9 @@ ${cardFeedbackBarHtml()}`;
       already_applying: "正在更新中"
     };
 
-    function formatUpdateCheckTime(iso) {
+    // Shared by update checks and account-sync status: the backend hands out
+    // raw ISO strings (UTC, microseconds), which are unreadable as-is.
+    function formatLocalTime(iso) {
       if (!iso) return "";
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return "";
@@ -7297,7 +7577,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "disabled":
@@ -7343,7 +7623,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -7371,7 +7651,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -7888,7 +8168,7 @@ ${cardFeedbackBarHtml()}`;
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -7898,6 +8178,7 @@ ${cardFeedbackBarHtml()}`;
         if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");

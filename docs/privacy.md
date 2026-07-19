@@ -77,6 +77,8 @@ OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有�
 
 `http://127.0.0.1/*` 和 `http://localhost/*` 用于连接用户自己的本机 OpenBiliClaw 后端。内容采集脚本只声明在受支持内容平台上运行；发布包不声明 `http://*/*`、`https://*/*` 或 `<all_urls>` 这类所有网站权限。
 
+`*://*.bgm.tv/*` 和 `*://*.bangumi.tv/*` 的主机权限仅用于**账号身份识别**：读取页面公开的用户 uid（`CHOBITS_UID`）与导航栏用户名，实现零配置识别你的 Bangumi 账号，供画像初始化时读取你的公开收藏。在这两个站点上插件不读取 Cookie、不采集浏览行为、也不上传任何个人令牌；Bangumi 内容本身由本地后端通过官方匿名只读 API 获取。
+
 ## 远程代码
 
 OpenBiliClaw 浏览器插件不使用远程代码。插件运行所需的 JavaScript 会打包在扩展程序包内，不会通过远程 `<script>`、远程模块、远程 Wasm 或 `eval()` 下载并执行第三方代码。

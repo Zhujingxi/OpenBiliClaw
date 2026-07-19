@@ -347,6 +347,39 @@ def test_probe_network_mode_uses_runtime_policy(
     assert "proxy" not in recorder
 
 
+@pytest.mark.parametrize(
+    "config_payload",
+    [
+        pytest.param({"network": {"proxy": ""}}, id="empty-proxy-no-mode"),
+        pytest.param({}, id="no-network-table"),
+    ],
+)
+def test_probe_network_mode_omitted_probes_system_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    config_payload: dict[str, Any],
+) -> None:
+    """A payload without ``mode`` probes the policy an unset config actually gets.
+
+    Omitting the key is the "never configured" case, which resolves to
+    ``system`` in ``_build_network_config``. Probing ``direct`` instead would
+    report on a policy the runtime would never use — the probe would pass or
+    fail for reasons unrelated to what the user is about to save.
+    """
+    recorder = _patch_proxy_client(monkeypatch, 204)
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": config_payload},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert recorder["trust_env"] is True
+    assert "proxy" not in recorder
+
+
 def test_probe_network_proxy_unreachable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

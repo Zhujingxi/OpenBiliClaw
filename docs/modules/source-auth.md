@@ -13,7 +13,8 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 正交契约 `SourceAuthContract` | 四个维度互不覆盖：要不要凭据 / 凭据在不在 / 验证结论 / **结论有多硬** | ✅ |
-| 每平台 provider | `providers.py` 的 7 个纯函数取代 424 行 if/elif 聚合器（现 38 行） | ✅ |
+| 每平台 provider | `providers.py` 的 7 个纯函数取代 424 行 if/elif 聚合器（现 46 行） | ✅ |
+| Bangumi 接入契约 | 第 8 个平台仍走 legacy `state`，后端对它发 `auth: null` | ⏳ 见下方「Bangumi 的过渡态」 |
 | 显式验证动作 | `POST /api/sources/{slug}/verify`，7/7 平台可用，三态结果 | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
@@ -126,6 +127,32 @@ class SourceAuthContract(BaseModel):
 **X 的成功属于某一份凭据，不属于这个平台。** 只记「成功过」不记「谁成功的」，换 cookie 就会继承上一份的结论——实测新 cookie 直接拿到旧 cookie 的 `verified`**连时间戳都一字未变**。这与上一条按平台取缓存是同一个错误，只是换了个 store。`last_success_credential` 记下产生该成功的凭据指纹（由 producer 在解析 cookie、构造 `XClient` 的同一处绑定，所以「记录成功的那份凭据」就是「发出请求的那份凭据」），读取时与当前 cookie 比对，不符即非证据。**不挂在写入路径上而是比对身份**：cookie 也可能经环境变量或直接改 data file 变更，那些路径一个钩子都不经过；`clear_relogin_block()` 更救不了——健康行本就是 `ok` 时它返回 `False`，什么都不清。build 期绑定也是安全方向：若 cookie 变了而 producer 未重建，指纹仍跟着**真正在发请求**的那份凭据走,新 cookie 显示 `unverified` 而非冒领他人战绩。
 
 **X 的 `ok` 不等于验证通过。** `x_source_health` 的行是以 `state='ok'` 为**默认值**建出来的,所以「从未发过任何请求」与「上次请求成功」在 `state` 上完全同形。照 `ok` 直接映射 `verified`,意味着全新数据库里第一次写入的 X cookie——哪怕它几个月前就过期了——会立刻宣称 `verification=verified` + `verify_method=passive_health`,而 `passive_health` 恰恰是唯一无法主动重跑来自证的方式。现新增 `last_success_at` 列(只由 `record_success` 写),没有它就报 `unverified`。`clear_relogin_block()` 会**清空**该列：它是凭新 cookie 给出的乐观解封,不是用新 cookie 拿到的结果,留着旧成功等于让新凭据继承别人的战绩。迁移**不回填**——老行里没有任何信号能区分这两种情况,猜一个就是把同一个伪造推迟一次迁移;代价是升级后 X 显示 `unverified` 直到下一轮 discovery 成功。
+
+## Bangumi 的过渡态
+
+Bangumi 在 v0.3.174 作为第 8 个平台合入，**尚未接进本契约**。后端对它发
+`auth: null`，三端因此走 `describeAccess()` 早已为老后端准备的 legacy `state`
+兜底分支，渲染的文案与色调与它合入时逐字一致。
+
+**为什么不给它一个默认契约。** `SourceAuthContract()` 的默认值是
+`auth_required=True` + `credential="none"`，前端会把它渲染成「需要登录」——而
+Bangumi 走官方公开 API，匿名即可用。那是一个**凭空捏造的结论**，正是 I3 禁止的
+过度声称。发 `null` 是如实说「这个源还没有契约」，少报而不误报。
+
+因此 `SourceStatusItem.auth` 的类型是 `SourceAuthContract | None`：`None` 是一个
+有意义的取值，不是待填的缺省。
+
+它的逻辑落在 `api/app.py` 的 `_bangumi_status_item()` 而不是 `sources_status()`
+函数体内——聚合器里写 per-platform 分支正是本次重构消灭的那个 424 行形态，为一个
+平台重开这个口子就等于为下一个平台重开。
+
+**接进契约需要先解决一个设计问题**：`auth_required` 是布尔，而 Bangumi 是第三种
+形态——匿名可用、个人令牌可选（令牌只解锁私密收藏）。它还带一个别人没有的
+`token_state` 维度（`ok` / `rejected` / `""`）。这两件事都需要契约本身扩形，不是
+填几个字段就能了事，所以单独排期。
+
+在此之前，`scripts/source_contract_metrics.py` 的第 6 项（承载平台源设置的前端）
+与 Bangumi 无关，仍卡在移动 Web 缺口上；其余五项不受本过渡态影响。
 
 ## 新增平台的强制契约
 

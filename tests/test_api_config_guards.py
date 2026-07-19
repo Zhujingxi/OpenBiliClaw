@@ -575,6 +575,32 @@ def test_put_config_switches_to_direct_and_ignores_environment_proxy(monkeypatch
     assert network.outbound_httpx_kwargs() == {"trust_env": False}
 
 
+def test_put_config_proxy_only_payload_clears_to_system_not_direct(monkeypatch, tmp_path) -> None:
+    """Clearing the proxy without sending ``mode`` lands on the ``system`` default.
+
+    A proxy-only payload (older UI build, third-party API client) carries no
+    opinion about ``mode``, so it must resolve the way an absent
+    ``[network].mode`` key resolves in ``_build_network_config`` rather than
+    silently pinning the user to ``direct``.
+    """
+    from openbiliclaw import network
+
+    network.reset_outbound_proxy_for_tests()
+    client, _cfg, config_path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://127.0.0.1:1080")
+    )
+
+    response = client.put("/api/config", json={"network": {"proxy": ""}})
+
+    assert response.status_code == 200
+    saved = load_config_from_path(config_path)
+    assert saved.network.mode == "system"
+    assert saved.network.proxy == ""
+    # Hot path mirrored the same policy into the process-level source of truth.
+    assert network.outbound_proxy_mode() == "system"
+    network.reset_outbound_proxy_for_tests()
+
+
 def test_put_config_rejects_custom_mode_without_proxy(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
     before = config_path.read_text(encoding="utf-8")

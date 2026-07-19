@@ -123,14 +123,14 @@ def test_web_surfaces_no_longer_block_reddit_only_init() -> None:
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
-    assert "no_profile_signal_sources" not in setup_html
+    assert "no_profile_signal_sources" in setup_html
     assert "Reddit 当前只启用 discovery" not in setup_html
     assert "连接你的 B站 账号" not in setup_html
     assert "连接浏览器扩展和平台账号" in setup_html
     assert "reddit.com" in setup_html
     assert "先检查 B站 登录 / AI 服务 / 向量模型" not in setup_html
     assert "所选平台的登录状态" in setup_html
-    assert "no_profile_signal_sources" not in app_js
+    assert "no_profile_signal_sources" in app_js
     assert "Reddit 当前只启用 discovery" not in app_js
 
 
@@ -158,7 +158,16 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     # pages do not know about (spec I6).
     assert "SourceStatus.SOURCE_KEYS.map" in setup_html
     assert 'src="/shared/source-status.js"' in setup_html
-    for source in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"):
+    for source in (
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+        "bangumi",
+    ):
         assert f'"{source}"' in shared
         assert f'key: "{source}"' in app_js
 

@@ -198,6 +198,17 @@ test("desktop saved API uses bounded strict requests and propagates failures", a
     content_type: "tweet",
     item_key: "twitter:1900000000000000002",
   });
+  assert.deepEqual(core.normalizeSavedItem({
+    content_id: "326",
+    content_url: "https://bangumi.tv/subject/326",
+    content_type: "subject",
+  }), {
+    content_id: "326",
+    content_url: "https://bangumi.tv/subject/326",
+    content_type: "subject",
+    item_key: "bangumi:326",
+    source_platform: "bangumi",
+  });
   await api.save("favorite", xItem);
   await api.remove("favorite", xItem.item_key);
   await api.list("favorite");

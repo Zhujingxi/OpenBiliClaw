@@ -64,6 +64,12 @@
   /** Platform slugs the contract covers, in settings-page display order. */
   const SOURCE_KEYS = Object.freeze([
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
+    // Not on the auth contract yet: the backend sends `auth: null` for it and
+    // the legacy-`state` fallback below renders it. It belongs in the roster
+    // regardless — the roster answers "which sources exist", not "which sources
+    // have a contract", and leaving it out would hide the platform from all
+    // three settings surfaces at once.
+    "bangumi",
   ]);
 
   /**
@@ -81,6 +87,7 @@
     twitter: "X",
     zhihu: "知乎",
     reddit: "Reddit",
+    bangumi: "Bangumi",
   });
 
   function sourceLabel(key) {
@@ -132,6 +139,12 @@
     expired: { tone: "danger", label: "凭据失效" },
     expired_cookie: { tone: "danger", label: "Cookie 失效" },
     blocked: { tone: "danger", label: "接入受阻" },
+    // Only reachable from Bangumi, the one source still on this legacy path.
+    // It is exactly the conflation the contract removes — a scheduling switch
+    // occupying the field that should describe the credential — so it stays a
+    // legacy-table entry and gets no equivalent on the `auth` side, where
+    // `enabled` lives on SourceStatusItem instead.
+    disabled: { tone: "muted", label: "来源未启用" },
   });
 
   /**
@@ -142,6 +155,19 @@
    * is fine" rather than "we do not recognise this".
    */
   const UNKNOWN_ACCESS = Object.freeze({ tone: "muted", label: "状态未知" });
+
+  /**
+   * A personal token the platform itself rejected.
+   *
+   * Outranks every other verdict because it is the one the user can act on: a
+   * revoked Bangumi token leaves the last discovery run's `ready` sitting in
+   * `state`, so without this the row stays green while private collections
+   * silently stop loading. Keyed on the `token_state` field, never on a
+   * platform name (invariant I4) — the desktop page and the side panel each
+   * carried their own copy of this rule before, which is precisely the
+   * duplication that let the two status tables drift apart (spec D6).
+   */
+  const ACCESS_TOKEN_REJECTED = Object.freeze({ tone: "danger", label: "令牌已失效" });
 
   // ── the orthogonal contract's presentation ─────────────────────────────
   //
@@ -424,8 +450,9 @@
     const auth = authContract(item);
     const verdict = describeAuthVerdict(auth);
     const legacy = SOURCE_ACCESS_STATE[state];
-    const entry = verdict || legacy || UNKNOWN_ACCESS;
-    const known = Boolean(verdict || legacy);
+    const tokenRejected = text(item.token_state) === "rejected";
+    const entry = tokenRejected ? ACCESS_TOKEN_REJECTED : verdict || legacy || UNKNOWN_ACCESS;
+    const known = tokenRejected || Boolean(verdict || legacy);
     const enabled = Boolean(item.enabled);
     const evidence = describeEvidence(auth, options && options.now);
     // The backend's own words for this platform, never rewritten here.

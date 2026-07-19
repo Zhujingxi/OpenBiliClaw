@@ -13,6 +13,7 @@ import {
   buildNextCognitionHistoryState,
   buildVideoUrl,
   getDelightUiState,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
@@ -44,17 +45,73 @@ import {
   normalizeProfileSummary,
   normalizeRuntimeStatus,
   platformDisplayName,
+  resolveInitBangumiUsername,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
 
+test("formatRecommendationAuthorLine keeps the UP prefix Bilibili-only", () => {
+  // "UP 主" is Bilibili jargon — it stays on Bilibili cards.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "机械工厂" }),
+    "这位 UP：机械工厂",
+  );
+  // Missing platform still means Bilibili (legacy payloads).
+  assert.equal(formatRecommendationAuthorLine({ up_name: "机械工厂" }), "这位 UP：机械工厂");
+
+  // Every other source shows the bare name — 押井守 directed Ghost in the
+  // Shell, he is not an UP 主. Matches desktop / mobile web rendering.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bgm", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "youtube", up_name: "Veritasium" }),
+    "Veritasium",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "zhihu", author_name: "张三" }),
+    "张三",
+  );
+});
+
+test("formatRecommendationAuthorLine returns empty text when no creator is known", () => {
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "" }), "");
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili" }), "");
+  assert.equal(formatRecommendationAuthorLine({}), "");
+  assert.equal(formatRecommendationAuthorLine(undefined), "");
+  // Whitespace-only names must not render a dangling prefix.
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "   " }), "");
+});
+
 test("platformDisplayName maps known platforms and passes through unknown", () => {
   assert.equal(platformDisplayName("bilibili"), "B 站");
   assert.equal(platformDisplayName("ZHIHU"), "知乎");
   assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("bgm"), "Bangumi");
   assert.equal(platformDisplayName("newtube"), "newtube");
   assert.equal(platformDisplayName(""), "");
+});
+
+test("Bangumi cards keep canonical subject links and catalog metadata", () => {
+  const item = normalizeRecommendation({
+    content_id: "253",
+    source_platform: "bangumi",
+    title: "Cowboy Bebop",
+    rating_score: 8.9,
+    rating_count: 12345,
+    source_rank: 12,
+  });
+  assert.equal(item.up_name, "");
+  assert.equal(buildContentUrl(item), "https://bgm.tv/subject/253");
+  assert.equal(item.rating_score, 8.9);
+  assert.equal(item.rating_count, 12345);
+  assert.equal(item.source_rank, 12);
 });
 
 test("empty reshuffle preserves the visible recommendation batch", () => {
@@ -593,6 +650,9 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     comment_count: 0,
     favorite_count: 0,
     danmaku_count: 0,
+    rating_score: 0,
+    rating_count: 0,
+    source_rank: 0,
     turns: [],
     composer_open: false,
     chat_draft: "",
@@ -1889,4 +1949,53 @@ test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("weird"), {
     tone: "info",
   });
+});
+
+test("resolveInitBangumiUsername sends a deliberately typed username", () => {
+  // Successful prefill, then the user types a real name → send it.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: " sai " }),
+    "sai",
+  );
+});
+
+test("resolveInitBangumiUsername sends '' to clear a successfully prefilled value", () => {
+  // Explicit clear of a prefilled field is a deliberate reset → send "".
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: "" }),
+    "",
+  );
+});
+
+test("resolveInitBangumiUsername omits an untouched field so config is kept", () => {
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: true, value: "sai" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits an empty field when prefill failed", () => {
+  // Config fetch failed/never populated the field → an empty value must not
+  // erase a configured username.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits on early submission before any prefill", () => {
+  // Nothing touched, nothing prefilled (fetch still pending) → omit.
+  assert.equal(resolveInitBangumiUsername({}), null);
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername still sends a typed name when prefill failed", () => {
+  // A deliberately typed value is trustworthy even without a prior prefill.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "kite" }),
+    "kite",
+  );
 });

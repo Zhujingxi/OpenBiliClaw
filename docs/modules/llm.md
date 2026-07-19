@@ -349,6 +349,16 @@ LLMServiceError           # Service 层基类
 - `describe_llm_failure(exc) -> str | None`：识别 moderation、鉴权、额度/限流、超时、provider 全部不可用、provider/service 空响应。
 - `safe_llm_failure_message(exc) -> str`：公共边界使用；未知异常退化为固定安全提示，不回传上游异常文本。
 
+### `json_utils.validated_text_field`
+
+```python
+validated_text_field(value: object, *, field: str, content_key: str) -> str | None
+```
+
+校验结构化响应里的单个文本字段：返回去空白后的字符串，遇到非字符串返回 `None` 并记 WARNING。
+
+调用方**必须**把 `None` 当作"该字段不可用"处理(重试或丢弃),不能退回 `str()`。模型偶尔会把整批结果嵌进标量字段(`{"reason": [{...}, {...}]}`),`str()` 会把它转成 Python repr —— 非空、能过校验、最终作为推荐文案展示给用户。
+
 ## 配置项
 
 ```toml

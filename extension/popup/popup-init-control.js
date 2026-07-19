@@ -19,6 +19,10 @@ const REASON_TEXT = {
   already_initialized: "已经初始化过了；如需重建，请到设置页。",
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
+  no_profile_signal_sources:
+    "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+  invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+  bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   analyze_failed: "偏好分析未完成。",
   profile_failed: "画像生成未完成。",
   discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -242,12 +246,13 @@ export const INIT_SOURCE_OPTIONS = [
   { key: "twitter", label: "X" },
   { key: "zhihu", label: "知乎" },
   { key: "reddit", label: "Reddit" },
+  { key: "bangumi", label: "Bangumi" },
 ];
 
 // Reminder under the source checkboxes: each selected platform is pulled THROUGH
 // this browser, so the user must be logged into it here.
 export const INIT_SOURCE_LOGIN_HINT =
-  "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号——否则这个来源拿不到你的数据。勾选会同时开启该来源。";
+  "勾选要纳入初始化的平台。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
 
 // Human labels for a list of platform keys (unknown keys pass through).
 export function initSourceLabels(keys) {

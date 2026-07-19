@@ -468,11 +468,22 @@ def measure_platforms_with_verify() -> Metric:
 # Metric 5 -- naming shapes among credential-write endpoints
 # --------------------------------------------------------------------------
 
-# Vocabulary of credential-carrying leaf segments. ``identity`` is kept even
-# though bangumi is unmerged, so the number does not jump when that branch
-# lands; ``credential`` / ``token`` are the shapes Phase 3 converges on.
+# Vocabulary of credential-carrying leaf segments; ``credential`` / ``token``
+# are the shapes Phase 3 converges on.
+#
+# ``identity`` used to be in this set, on spec D5's assumption -- written while
+# feat/bangumi-source was unmerged and therefore unreadable -- that
+# ``POST /api/sources/bangumi/identity`` carried a 令牌. Reading the merged
+# branch falsifies that: the handler takes a public uid + username scraped off a
+# bgm.tv page, rejects any payload without a positive uid, and says in its own
+# docstring that "no cookies or tokens are accepted here". Bangumi's
+# ``access_token`` is written by ``PUT /api/config`` and ``POST /api/init``
+# instead. Leaving the leaf in would report two credential-write shapes to a
+# client that in fact faces one, so it is dropped: this is invariant I7's
+# mandatory semantic re-check overruling the syntactic proxy, which is the only
+# direction that rule permits (门可以用代理，结论不行).
 _CREDENTIAL_LEAVES = frozenset(
-    {"cookie", "cookies", "tokens", "token", "identity", "login-state", "credential"}
+    {"cookie", "cookies", "tokens", "token", "login-state", "credential"}
 )
 _DEPRECATED_KWARG = re.compile(r"deprecated\s*=\s*True")
 
