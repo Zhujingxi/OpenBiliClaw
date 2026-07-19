@@ -278,6 +278,14 @@ docker compose logs -f openbiliclaw-backend
 - 健康检查地址：`http://127.0.0.1:8420/api/health`
 - 容器设置为 `restart: unless-stopped`，异常退出后自动重启
 
+## E2E 测试栈（deploy/e2e/）
+
+仓库内置一套独立的 E2E Compose 栈（`deploy/e2e/`），供自动化 E2E 测试使用：
+
+- 后端容器 `obc-e2e-backend` 发布在宿主 **18421** 端口，与 8420 的主栈完全隔离
+- 使用独立的 named volumes（`obc-e2e-main_openbiliclaw_*`），可长期保持首次运行（未走完设置向导）状态
+- 构建 / 重建 / 重置步骤见 [deploy/e2e/README.md](../deploy/e2e/README.md)
+
 ## 数据与存储
 
 Docker 部署默认与宿主机项目目录**完全隔离**，所有数据保存在 Docker named volumes 中。
