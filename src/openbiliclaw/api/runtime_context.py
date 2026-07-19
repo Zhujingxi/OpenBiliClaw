@@ -1166,10 +1166,12 @@ class RuntimeContext:
         # per-family visible-pool targets so under-share sources win freed slots
         # ahead of an over-supplied source's backlog. Bound after controller
         # construction so the pipeline reuses the controller's canonical
-        # ``_source_target_counts`` (family-keyed) share口径.
-        new_candidate_pipeline.source_share_targets = (
-            new_runtime_controller._source_target_counts  # noqa: SLF001
-        )
+        # ``_source_target_counts`` (family-keyed) share口径. Guarded so test
+        # doubles / alternate controllers without the helper keep legacy (None)
+        # admission instead of raising at bootstrap.
+        _source_target_counts = getattr(new_runtime_controller, "_source_target_counts", None)
+        if callable(_source_target_counts):
+            new_candidate_pipeline.source_share_targets = _source_target_counts
         for producer in (
             new_douyin_producer,
             new_youtube_producer,
