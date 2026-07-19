@@ -104,7 +104,18 @@ def test_try_reserve_is_single_flight(tmp_path: Path) -> None:
 def test_reconcile_fails_stale_active_runs_on_boot(tmp_path: Path) -> None:
     db = _db(tmp_path)
     db.try_reserve_init_starting("run-1")
-    db.update_init_run("run-1", status="running", stage=3)
+    db.update_init_run(
+        "run-1",
+        status="running",
+        stage=3,
+        stages_json=json.dumps(
+            [
+                {"n": 1, "status": "ok", "reason": None},
+                {"n": 2, "status": "running", "reason": None, "progress": 0.5},
+                {"n": 3, "status": "pending", "reason": None},
+            ]
+        ),
+    )
 
     reconciled = db.reconcile_init_runs_on_boot()
     assert reconciled == 1
@@ -113,6 +124,19 @@ def test_reconcile_fails_stale_active_runs_on_boot(tmp_path: Path) -> None:
     assert run["status"] == "failed"
     assert run["error_reason"] == "interrupted"
     assert run["finished_at"] is not None
+
+    # A user-facing detail is written so /api/init-status is diagnosable.
+    assert run["error_detail"] == "初始化后台任务已结束，但未能写入终态；已自动释放运行锁。"
+
+    # Running/pending stages are downgraded to failed/interrupted (no phantom
+    # "running" stage survives a restart); completed stages are left intact.
+    stages = json.loads(run["stages_json"])
+    assert stages[0]["status"] == "ok"
+    assert stages[1]["status"] == "failed"
+    assert stages[1]["reason"] == "interrupted"
+    assert "progress" not in stages[1]
+    assert stages[2]["status"] == "failed"
+    assert stages[2]["reason"] == "interrupted"
 
     # Idempotent: a completed run is not touched a second time.
     assert db.reconcile_init_runs_on_boot() == 0

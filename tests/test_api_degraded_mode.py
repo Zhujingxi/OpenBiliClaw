@@ -243,6 +243,47 @@ def test_degraded_runtime_stream_sends_degraded_event_and_stays_open(
         assert event["issues"]
 
 
+def test_degraded_init_post_rejects_with_actionable_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """POST /api/init while degraded must explain the LLM-config cause, not
+    return a bare error or crash on a missing coordinator (project rule 7)."""
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    app = create_app()
+    app.state.auth_gate.is_trusted_local = lambda request: True
+    client = TestClient(app)
+
+    response = client.post("/api/init", json={})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "degraded"
+    assert "降级" in body["detail"]
+    assert "LLM" in body["detail"]
+
+
+def test_degraded_init_status_reports_degraded_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """GET /api/init-status while degraded must surface a degraded-aware reason
+    with an actionable detail instead of a generic 'AI 服务不可用' line."""
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.get("/api/init-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reason"] == "degraded"
+    assert "降级" in body["detail"]
+    assert "LLM" in body["detail"]
+    assert body["can_start"] is False
+
+
 def test_normal_boot_health_payload_reports_profile_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

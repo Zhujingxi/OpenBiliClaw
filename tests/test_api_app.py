@@ -12494,9 +12494,17 @@ def test_cap_keeping_user_added_keeps_manual_entries_past_limit() -> None:
 class _FakeInitPrereqs:
     """Controllable stand-in for InitPrereqs (E2 endpoint tests)."""
 
-    def __init__(self, *, bili: str = "ok", chat: bool = True, platforms=None) -> None:
+    def __init__(
+        self,
+        *,
+        bili: str = "ok",
+        chat: bool = True,
+        platforms=None,
+        chat_detail: str = "",
+    ) -> None:
         self._bili = bili
         self._chat = chat
+        self._chat_detail = chat_detail
         self._platforms = list(platforms or [])
         self.bilibili_check_calls = 0
         self.chat_ready_calls = 0
@@ -12517,6 +12525,9 @@ class _FakeInitPrereqs:
 
     def peek_chat(self) -> bool:
         return self._chat
+
+    def peek_chat_detail(self) -> str:
+        return self._chat_detail
 
     def has_cached_readiness(self) -> bool:
         return True
@@ -12699,6 +12710,35 @@ class TestGuidedInitEndpoints:
         assert resp.json()["error"] == "llm_not_ready"
         assert db.get_latest_init_run()["status"] == "idle"
         assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_init_llm_not_ready_propagates_classified_detail(self, tmp_path: Path) -> None:
+        """The 409 must carry the probe's classified cause (defect 3) so the
+        user can tell an invalid API key from an unreachable service."""
+        from fastapi.testclient import TestClient
+
+        detail = "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "llm_not_ready"
+        assert resp.json()["detail"] == detail
+
+    def test_init_status_llm_not_ready_surfaces_classified_detail(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        detail = "无法连接到 AI 服务（网络连接失败）。请检查网络与代理设置后重试。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        assert body["reason"] == "llm_not_ready"
+        assert body["detail"] == detail
 
     def test_init_missing_configured_embedding_resets_to_idle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -14664,14 +14704,16 @@ class TestEmbeddingDiagnosisAndRepair:
         assert "正在下载" in response.json().get("detail", "")
         assert pulled == ["bge-m3"]
 
-    def test_init_autostart_skips_not_running_diagnosis(
+    def test_init_autostart_skips_not_running_when_management_disallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import ollama_supervisor as sup
 
         pulled: list[str] = []
+        started: list[str] = []
 
         async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
             return od.DIAG_NOT_RUNNING, "Ollama is down"
@@ -14682,6 +14724,9 @@ class TestEmbeddingDiagnosisAndRepair:
 
         monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
         monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        # We are not allowed to manage this endpoint → no start, no pull.
+        monkeypatch.setattr(sup, "may_manage_ollama_endpoint", lambda endpoint: False)
+        monkeypatch.setattr(sup, "ensure_managed_ollama", lambda endpoint: started.append(endpoint))
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
         app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
 
@@ -14691,6 +14736,52 @@ class TestEmbeddingDiagnosisAndRepair:
         assert response.status_code == 409
         assert response.json()["detail"].startswith("向量模型还没就绪")
         assert pulled == []
+        assert started == []
+
+    def test_init_autostart_starts_managed_ollama_when_not_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DIAG_NOT_RUNNING is self-healed: the auto path starts managed Ollama
+        (same helper the manual repair uses) then re-diagnoses so a missing
+        model still gets auto-pulled (defect 4)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        pulled: list[str] = []
+        started: list[str] = []
+        diagnoses = iter([od.DIAG_NOT_RUNNING, od.DIAG_MODEL_MISSING])
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return next(diagnoses, od.DIAG_MODEL_MISSING), "state"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        def fake_ensure(endpoint: str) -> bool:
+            started.append(endpoint)
+            return True
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        monkeypatch.setattr(sup, "may_manage_ollama_endpoint", lambda endpoint: True)
+        monkeypatch.setattr(sup, "ollama_required", lambda cfg: True)
+        monkeypatch.setattr(sup, "ensure_managed_ollama", fake_ensure)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+            deadline = time.monotonic() + 1.0
+            while not pulled and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert response.status_code == 409
+        assert "正在下载" in response.json().get("detail", "")
+        assert started  # managed Ollama was started before pulling
+        assert pulled == ["bge-m3"]
 
     def test_init_autostart_skips_non_ollama_provider(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

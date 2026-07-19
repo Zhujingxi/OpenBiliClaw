@@ -1783,6 +1783,31 @@ def create_app(
             "issues": _degraded_issues_payload(),
         }
 
+    # Shared copy for the degraded-mode init rejection (POST /api/init) and the
+    # degraded-aware /api/init-status reason detail, so both surfaces explain
+    # the same actionable cause: the backend could not build its LLM registry,
+    # so init is impossible until the LLM config is repaired (mirrors the
+    # config-recovery message on PUT /api/config).
+    _degraded_init_detail = (
+        "后端处于降级模式：LLM 配置有误导致无法启动 AI 服务，暂时无法初始化。"
+        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
+        "然后 restart daemon 让新配置生效后再试。"
+    )
+
+    def _init_blocked_by_degraded() -> bool:
+        """True when the backend is degraded because the LLM registry never
+        built — the one degraded reason that makes guided init impossible.
+
+        Gated on the canonical ``llm_registry_unavailable`` reason (the only
+        value ``build_degraded_runtime_context`` ever emits) rather than the
+        bare ``degraded`` flag, so this stays a precise "LLM config is broken"
+        signal and does not swallow other, init-compatible degraded states.
+        """
+        return (
+            bool(getattr(ctx, "degraded", False))
+            and str(getattr(ctx, "degraded_reason", "")) == "llm_registry_unavailable"
+        )
+
     @app.middleware("http")
     async def _degraded_mode_guard(request: Request, call_next: Any) -> Any:
         if not bool(getattr(ctx, "degraded", False)):
@@ -2703,6 +2728,11 @@ def create_app(
 
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
+        elif _init_blocked_by_degraded():
+            # LLM registry never built → init is impossible until config is
+            # repaired. Surface the same actionable cause as POST /api/init so
+            # the checklist doesn't read as a generic "AI 服务不可用".
+            reason, detail = "degraded", _degraded_init_detail
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
@@ -2735,7 +2765,12 @@ def create_app(
             detail = str(run.get("detail") or "")
         elif not chat:
             reason = "llm_not_ready"
-            detail = account_profile_error or "AI 服务还没配好或当前不可用"
+            # Prefer the classified probe cause (无效 API Key / 服务不可达 /
+            # 模型不存在) so the checklist explains WHY chat is down; a stored
+            # account-analysis failure still wins as the more specific history.
+            detail = (
+                account_profile_error or prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用"
+            )
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
@@ -2990,6 +3025,15 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
+        # Degraded mode reaches this handler (the guard allow-lists /api/init so
+        # the recovery UI stays live), but no LLM registry means init cannot run.
+        # Reject with an actionable cause instead of crashing on a missing
+        # coordinator or bubbling a bare error (project rule 7).
+        if _init_blocked_by_degraded():
+            return JSONResponse(
+                {"error": "degraded", "detail": _degraded_init_detail},
+                status_code=409,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -3254,7 +3298,11 @@ def create_app(
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
-            return JSONResponse({"error": "llm_not_ready"}, status_code=409)
+            # Propagate the classified cause the live probe just diagnosed
+            # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
+            # actionable rather than a generic "not ready" (project rule 7).
+            chat_detail = ctx.init_prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用。"
+            return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
@@ -3389,7 +3437,14 @@ def create_app(
             logger.warning("Embedding repair: pull %s failed: %s", model, error)
 
     async def _maybe_autostart_embedding_pull() -> bool:
-        """Best-effort auto-pull for a locally hosted missing/broken model."""
+        """Best-effort auto-pull for a locally hosted missing/broken model.
+
+        Also self-heals ``DIAG_NOT_RUNNING`` (managed Ollama simply not up yet)
+        by starting it first — reusing the same guards the manual repair
+        endpoint applies — then re-diagnosing so a genuinely missing/broken
+        model still gets auto-pulled. Any guard miss or start failure just
+        leaves the manual "修复向量模型" path to fix it (stays non-blocking).
+        """
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
         if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
             return False
@@ -3398,10 +3453,17 @@ def create_app(
             from openbiliclaw.llm.ollama_diagnostics import (
                 DIAG_MODEL_BROKEN,
                 DIAG_MODEL_MISSING,
+                DIAG_NOT_RUNNING,
                 diagnose_ollama_embedding,
                 ollama_embedding_disk_space_error,
             )
-            from openbiliclaw.runtime.ollama_supervisor import is_loopback
+            from openbiliclaw.runtime.ollama_supervisor import (
+                effective_ollama_endpoint,
+                ensure_managed_ollama,
+                is_loopback,
+                may_manage_ollama_endpoint,
+                ollama_required,
+            )
 
             if not is_loopback(base_url):
                 return False
@@ -3411,6 +3473,20 @@ def create_app(
                 ):
                     return True
                 code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_NOT_RUNNING:
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage or not ensure_managed_ollama(endpoint):
+                        return False
+                    # Re-diagnose now that the daemon is up: a missing/broken
+                    # model falls through to the auto-pull below.
+                    code, _detail = await diagnose_ollama_embedding(base_url, model)
                 if code not in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
                     return False
                 if ollama_embedding_disk_space_error(model):

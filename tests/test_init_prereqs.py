@@ -87,6 +87,55 @@ async def test_chat_ready_false_when_no_registry() -> None:
     assert await pr.chat_ready() is False
 
 
+class _RaisingProvider:
+    """Provider whose health_check raises a classifiable outage exception."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    async def health_check(self) -> bool:
+        self.calls += 1
+        raise self._exc
+
+
+async def test_chat_detail_empty_when_ready() -> None:
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True)))
+    assert await pr.chat_ready() is True
+    assert pr.peek_chat_detail() == ""
+
+
+async def test_chat_detail_classifies_invalid_api_key() -> None:
+    pr = InitPrereqs(_ctx(provider=_RaisingProvider(RuntimeError("HTTP 401 Unauthorized"))))
+    assert await pr.chat_ready() is False
+    detail = pr.peek_chat_detail()
+    assert "401" in detail
+    assert "key" in detail.lower()
+
+
+async def test_chat_detail_classifies_service_unreachable() -> None:
+    pr = InitPrereqs(_ctx(provider=_RaisingProvider(ConnectionError("connection refused"))))
+    assert await pr.chat_ready() is False
+    assert "无法连接" in pr.peek_chat_detail()
+
+
+async def test_chat_detail_classifies_missing_model() -> None:
+    pr = InitPrereqs(
+        _ctx(provider=_RaisingProvider(RuntimeError("model 'bge' not found, try pulling it first")))
+    )
+    assert await pr.chat_ready() is False
+    assert "模型" in pr.peek_chat_detail()
+
+
+async def test_chat_detail_prefers_primary_cause_over_fallback() -> None:
+    """When both providers fail, the primary's classified cause is surfaced."""
+    default = _RaisingProvider(RuntimeError("HTTP 401 Unauthorized"))
+    fallback = _RaisingProvider(ConnectionError("connection refused"))
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is False
+    assert "401" in pr.peek_chat_detail()
+
+
 def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:
     """Context whose registry carries a chat-capable fallback provider."""
     ctx = _ctx(provider=default)
