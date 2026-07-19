@@ -215,6 +215,7 @@ const elements = {
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
+  emptyAction: document.getElementById("emptyAction"),
   initPanel: document.getElementById("initPanel"),
   initSources: document.getElementById("initSources"),
   initChecklist: document.getElementById("initChecklist"),
@@ -1171,6 +1172,10 @@ function showRecommendationEmptyState(title, message) {
   elements.emptyState.hidden = false;
   elements.emptyTitle.textContent = title;
   elements.emptyText.textContent = message;
+  // Only the degraded branch re-shows the action button after this reset.
+  if (elements.emptyAction instanceof HTMLElement) {
+    elements.emptyAction.hidden = true;
+  }
   // The guided-init panel is only for the uninitialized state; the
   // uninitialized branch re-shows it via renderInitPanelIdle().
   if (elements.initPanel instanceof HTMLElement) {
@@ -6177,6 +6182,16 @@ function renderRecommendationState(stateShape) {
     return;
   }
 
+  if (stateShape.kind === "degraded") {
+    showRecommendationEmptyState("AI 服务配置需要修复", stateShape.message);
+    if (elements.emptyAction instanceof HTMLElement) {
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint("后端处于降级模式：修好 LLM 配置并重启后端即可恢复。", "error");
+    return;
+  }
+
   if (stateShape.kind === "error") {
     showRecommendationEmptyState("推荐暂时没刷出来", stateShape.message);
     setHint("后端连上了，但推荐接口这会儿没回。", "error");
@@ -8034,6 +8049,10 @@ function bindSettings() {
       if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
     });
   }
+
+  // The degraded empty state's "去设置修复" button routes through the gear so
+  // the overlay opens with the same banners / degraded save mode as always.
+  document.getElementById("emptyAction")?.addEventListener("click", () => gearBtn.click());
 
   gearBtn.addEventListener("click", async () => {
     overlay.hidden = false;

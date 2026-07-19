@@ -924,6 +924,45 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
   assert.equal(ready.items[0]?.bvid, "BV1ready");
 });
 
+test("getPopupState surfaces a degraded backend as its own actionable state", () => {
+  const degradedError = Object.assign(new Error("/recommendations request failed: 503"), {
+    status: 503,
+    details: {
+      status: "degraded",
+      reason: "llm_registry_unavailable",
+      issues: [
+        { field: "llm", message: "默认 provider `deepseek` 缺少 `api_key`。", severity: "blocking" },
+        { field: "llm", message: "LLM registry unavailable.", severity: "blocking" },
+      ],
+    },
+  });
+  assert.deepEqual(getPopupState({ online: true, items: [], error: degradedError }), {
+    kind: "degraded",
+    message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+    items: [],
+  });
+
+  // Envelope without issue detail still classifies, with fallback copy.
+  const bareDegraded = Object.assign(new Error("boom"), {
+    status: 503,
+    details: { status: "degraded" },
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: bareDegraded }).kind,
+    "degraded",
+  );
+
+  // Ordinary failures keep the generic error state.
+  const plainError = Object.assign(new Error("/recommendations request failed: 500"), {
+    status: 500,
+    details: null,
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: plainError }).kind,
+    "error",
+  );
+});
+
 test("getPopupState does not show init prompt while refresh or pool signals are active", () => {
   assert.deepEqual(
     getPopupState({

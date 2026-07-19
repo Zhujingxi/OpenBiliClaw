@@ -1260,6 +1260,23 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   }
 
   if (error) {
+    // A degraded backend answers every business route with a 503 envelope
+    // ({status:"degraded", issues:[...]}) that requestJson preserves on
+    // error.details. Lumping it into the generic error copy ("接口这会儿没回")
+    // hides the only actionable fact — the LLM config is broken and the
+    // settings panel can repair it — so surface it as its own state.
+    const details = typeof error === "object" && error !== null ? error.details : null;
+    if (details && typeof details === "object" && details.status === "degraded") {
+      const issueMessages = (Array.isArray(details.issues) ? details.issues : [])
+        .map((issue) => normalizeText(issue?.message))
+        .filter(Boolean);
+      return {
+        kind: "degraded",
+        message: issueMessages.join("；")
+          || "后端的 AI 服务配置有问题，修复并重启后恢复。",
+        items: [],
+      };
+    }
     return {
       kind: "error",
       message: "推荐暂时没刷出来，稍后再试",
