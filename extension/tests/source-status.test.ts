@@ -527,3 +527,51 @@ test("the side panel is wired to the copied shared module", () => {
     "build.mjs no longer copies the shared module into the package",
   );
 });
+
+// A no-auth source can still carry a verifiable credential. YouTube and Bangumi
+// both report auth_required=false, but only one has a token to check. Treating
+// them alike hid a network-confirmed Bangumi verdict behind a flat 无需登录 with
+// no badge and no button (found in real-machine E2E, 2026-07-19).
+const BANGUMI_TOKEN_VERIFIED = {
+  state: "ready",
+  enabled: true,
+  detail: "个人令牌有效，已识别 Bangumi 账号。",
+  auth: {
+    auth_required: false,
+    credential: "present",
+    credential_origin: "config",
+    verification: "verified",
+    verify_method: "live_probe",
+    verified_at: "2026-07-18T09:57:00+00:00",
+    verify_ttl_seconds: 21600,
+    can_verify_now: true,
+  },
+};
+
+const YOUTUBE_NO_AUTH = {
+  state: "no_auth",
+  enabled: true,
+  detail: "公开源 · 无需登录。",
+  auth: {
+    auth_required: false,
+    credential: "none",
+    verification: "unverified",
+    verify_method: "none",
+    can_verify_now: false,
+  },
+};
+
+test("a no-auth source with a verified token shows its evidence, unlike YouTube", () => {
+  const bgm = SourceStatus.describeAccess(BANGUMI_TOKEN_VERIFIED, { now: NOW });
+  const yt = SourceStatus.describeAccess(YOUTUBE_NO_AUTH, { now: NOW });
+
+  // Bangumi's token was confirmed against the network, so it reads as verified
+  // with a live-probe badge — not folded into a flat 无需登录.
+  assert.equal(bgm.evidence.rank, "direct");
+  assert.ok(bgm.evidence.text.includes("◆ 联网验证"));
+  assert.notEqual(bgm.label, "无需登录");
+
+  // YouTube genuinely has nothing to verify: no badge, the public tier.
+  assert.equal(yt.evidence.rank, "none");  // EVIDENCE_ABSENT.rank
+  assert.equal(yt.label, "无需登录");
+});

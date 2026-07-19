@@ -107,6 +107,11 @@ class _Case:
     detail: str
     enabled: bool
     feed_paused: bool = False
+    # Bangumi's optional-token axis (``ok`` / ``rejected`` / ``""``); "" for the
+    # seven cookie/heartbeat platforms, which never set it. Frozen because it is
+    # what the frontend overlays as 「令牌已失效」, and a refactor moving Bangumi
+    # onto the contract must not silently drop it.
+    token_state: str = ""
 
 
 # ── seeding helpers ──────────────────────────────────────────────────
@@ -393,6 +398,52 @@ def _reddit_credential_missing(env: _Env) -> None:
 def _reddit_credential_without_session(env: _Env) -> None:
     env.cfg.sources.reddit.enabled = True
     _write_rdt_credential(env.rdt_credential_path, cookies={"other": "x"}, age_days=1)
+
+
+# ── bangumi preconditions ────────────────────────────────────────────
+# Bangumi is anonymous-public, so ``enabled`` is set on purpose per case. The
+# discovery-health detail is "尚未运行 Bangumi 内容发现。" for a fresh db (no
+# ``bangumi_discovery_runs`` rows), which every case here uses.
+
+_BANGUMI_TOKEN = "bgm-personal-access-token"
+
+
+def _bangumi_no_token(env: _Env) -> None:
+    """Enabled, anonymous — the public-source default, no credential at all."""
+    env.cfg.sources.bangumi.enabled = True
+
+
+def _bangumi_token_unverified(env: _Env) -> None:
+    """A token is configured but never live-checked (no cached verdict)."""
+    env.cfg.sources.bangumi.enabled = True
+    env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+
+
+def _bangumi_token_verified(env: _Env) -> None:
+    """A token whose /v0/me probe verdict is cached — like douyin's live case.
+
+    Seeded with the token's own fingerprint because that is what the probe
+    records: a verdict has to say *which* credential earned it (the same
+    credential-bound rule the cookie platforms follow).
+    """
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+    env.cfg.sources.bangumi.enabled = True
+    env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+    LIVE_PROBES.record(
+        "bangumi",
+        authenticated=True,
+        detail="ok",
+        network_error=False,
+        fingerprint=credential_fingerprint("bangumi", _BANGUMI_TOKEN),
+        username="215952",
+    )
+
+
+def _bangumi_token_disabled(env: _Env) -> None:
+    """A saved token on a switched-off source — the credential is idle."""
+    env.cfg.sources.bangumi.enabled = False
+    env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
 
 
 # ── the frozen contract ──────────────────────────────────────────────
@@ -696,6 +747,49 @@ _CASES: dict[str, _Case] = {
         detail="rdt credential 缺少 reddit_session，请在已连接插件的浏览器重新登录 Reddit。",
         enabled=True,
     ),
+    # bangumi — anonymous-public (auth_required=False) with an optional token.
+    # ``state`` is always ``no_auth`` and the discovery-health string lives in
+    # ``detail``; the optional-token verdict rides the ``auth`` contract and the
+    # ``token_state`` axis, never the legacy ``state`` (that conflation is D1).
+    "bangumi-no-token": _Case(
+        "bangumi",
+        _bangumi_no_token,
+        "no_auth",
+        True,
+        detail="尚未运行 Bangumi 内容发现。",
+        enabled=True,
+        token_state="",
+    ),
+    "bangumi-token-unverified": _Case(
+        "bangumi",
+        _bangumi_token_unverified,
+        "no_auth",
+        True,
+        detail="尚未运行 Bangumi 内容发现。",
+        enabled=True,
+        token_state="ok",
+    ),
+    "bangumi-token-verified": _Case(
+        "bangumi",
+        _bangumi_token_verified,
+        "no_auth",
+        True,
+        detail="尚未运行 Bangumi 内容发现。",
+        enabled=True,
+        token_state="ok",
+    ),
+    "bangumi-token-disabled": _Case(
+        "bangumi",
+        _bangumi_token_disabled,
+        "no_auth",
+        True,
+        # Frozen literal (not derived from the producer) so a wording change has
+        # to be a conscious edit here. noqa: a CJK string ruff format keeps on one
+        # line but pycodestyle counts as >100 — the codebase's standard escape.
+        detail="已保存个人令牌，但它现在不会被使用；把 Bangumi 来源开关切到「启用」并保存后才会生效。",  # noqa: E501
+        enabled=False,
+        token_state="ok",
+    ),
 }
 
 
@@ -783,7 +877,15 @@ def test_sources_status_legacy_fields_are_frozen(case_id: str, contract_env: _En
         item["detail"],
         item["enabled"],
         item["feed_paused"],
-    ) == (case.state, case.logged_in, case.detail, case.enabled, case.feed_paused)
+        item["token_state"],
+    ) == (
+        case.state,
+        case.logged_in,
+        case.detail,
+        case.enabled,
+        case.feed_paused,
+        case.token_state,
+    )
 
     # The orthogonal contract ships alongside the legacy verdict, and the two
     # views must never contradict each other. Not equality: ``ready`` maps
@@ -808,10 +910,11 @@ def test_contract_covers_every_platform_with_at_least_three_preconditions() -> N
         "twitter",
         "zhihu",
         "reddit",
+        "bangumi",
     }
     thin = {platform: n for platform, n in per_platform.items() if n < 3}
     assert not thin, f"platforms with fewer than 3 preconditions: {thin}"
-    assert len(_CASES) >= 21
+    assert len(_CASES) >= 24
 
 
 def test_auth_dimensions_are_orthogonal() -> None:
@@ -960,6 +1063,12 @@ _EXPECTED_VERIFY_METHODS = {
     "twitter": "passive_health",
     "zhihu": "browser_heartbeat",
     "reddit": "local_file",
+    # ``none`` here because this suite runs with *no credentials*: Bangumi's
+    # contract reports ``live_probe`` only once a token is configured (there is
+    # something to probe), and ``none`` when anonymous — the same state-dependent
+    # method 知乎 has. The action ``VERIFY_ACTIONS['bangumi']`` is still
+    # ``live_probe`` (see the bangumi verify tests below, which supply a token).
+    "bangumi": "none",
 }
 
 
@@ -1206,6 +1315,204 @@ def test_transport_failure_is_not_logged_out(contract_env: _Env, payload: object
     # An indeterminate result must not masquerade as a dated verdict.
     assert contract.verified_at == ""
     assert check_legacy_consistency("douyin", contract) == []
+
+
+# ── Bangumi: anonymous-public with an optional, live-verifiable token ─────
+# The eighth platform breaks the auth_required boolean: it works with no
+# credential (like YouTube) yet its optional personal token *can* be verified
+# against /v0/me. These reproduce the 2026-07-19 stripped-control result — real
+# token identifies the account, forged/absent is rejected — and pin the three
+# outcomes the button must draw (verified / failed / indeterminate).
+
+
+def _install_bangumi_probe(
+    env: _Env, *, payload: object = None, error: Exception | None = None
+) -> list[str]:
+    """Fake Bangumi's ``/v0/me`` transport; return the tokens it was called with.
+
+    Patched at ``BangumiClient`` rather than at ``run_live_probe`` so the real
+    error-code → verdict mapping runs (an ``unauthorized`` must become ``failed``
+    while a timeout must become ``indeterminate``); stubbing the probe would keep
+    passing if that mapping were simplified away.
+    """
+    calls: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, *, access_token: str | None = None, **_kw: object) -> None:
+            self._token = access_token
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def get_me(self) -> object:
+            calls.append(str(self._token or ""))
+            if error is not None:
+                raise error
+            return payload
+
+    env.monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+    return calls
+
+
+def test_bangumi_verify_with_a_valid_token_is_verified(contract_env: _Env) -> None:
+    """A real token identifies the account, so /v0/me confirms it (verified)."""
+    contract_env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+    calls = _install_bangumi_probe(
+        contract_env, payload={"username": "215952", "nickname": "demo", "id": 215952}
+    )
+
+    body = _verify_post(contract_env, "bangumi")
+
+    assert calls == [_BANGUMI_TOKEN], "verify must actually hit /v0/me with the token"
+    contract = SourceAuthContract.model_validate(body["auth"])
+    assert contract.verify_method == "live_probe"
+    assert contract.verification == "verified"
+    assert contract.verified_at
+    assert body["outcome"] == "verified"
+    assert check_legacy_consistency("bangumi", contract) == []
+
+
+def test_bangumi_verify_with_a_forged_token_is_failed(contract_env: _Env) -> None:
+    """An invalid / expired token is rejected with ``unauthorized`` → failed.
+
+    This is the real negative verdict, the half of the discriminator that makes
+    ``live_probe`` honest (§0.1 requires a *difference* between the groups, not
+    one group merely looking normal).
+    """
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    contract_env.cfg.sources.bangumi.access_token = "forged-token"
+    _install_bangumi_probe(
+        contract_env, error=BangumiAPIError("unauthorized", "rejected", status_code=401)
+    )
+
+    body = _verify_post(contract_env, "bangumi")
+    contract = SourceAuthContract.model_validate(body["auth"])
+
+    assert contract.verification == "failed"
+    assert contract.verify_method == "live_probe"
+    assert body["outcome"] == "failed"
+    assert check_legacy_consistency("bangumi", contract) == []
+
+
+def test_bangumi_verify_without_a_token_is_indeterminate(contract_env: _Env) -> None:
+    """No token is the anonymous-public default, never a "logged out" verdict.
+
+    The probe returns before any network call — a public source with no token to
+    check has nothing to verify, so the honest answer is "cannot tell", not
+    "failed". The outbound guard proves the no-token path stays offline.
+    """
+    contract_env.cfg.sources.bangumi.enabled = True  # enabled, but no token
+
+    contract_env.monkeypatch.setattr(
+        "openbiliclaw.config.load_config", lambda *_a, **_kw: contract_env.cfg
+    )
+    app = create_app(memory_manager=object(), database=contract_env.db, soul_engine=object())
+
+    def _refuse(*_args: object, **_kw: object) -> object:
+        raise AssertionError("a token-less bangumi verify went to the network")
+
+    with TestClient(app) as client, contract_env.monkeypatch.context() as guard:
+        guard.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _refuse)
+        response = client.post("/api/sources/bangumi/verify")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    contract = SourceAuthContract.model_validate(body["auth"])
+    assert contract.verify_method == "none"
+    assert contract.verification == "unverified"
+    assert body["outcome"] == "indeterminate"
+    assert "令牌" in body["message"]
+    assert check_legacy_consistency("bangumi", contract) == []
+
+
+def test_bangumi_verify_transport_failure_is_not_a_dead_token(contract_env: _Env) -> None:
+    """A proxy/timeout says nothing about the token — indeterminate, not failed.
+
+    On the current box the custom proxy cannot reach api.bgm.tv, so this is the
+    realistic outcome of a real verify, and it must never read as "your token
+    expired" (invariant I3).
+    """
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    contract_env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+    _install_bangumi_probe(contract_env, error=BangumiAPIError("timeout", "timed out"))
+
+    body = _verify_post(contract_env, "bangumi")
+    contract = SourceAuthContract.model_validate(body["auth"])
+
+    assert contract.verification == "unverified"
+    assert contract.verification != "failed"
+    assert body["outcome"] == "indeterminate"
+    assert contract.verified_at == ""
+    assert check_legacy_consistency("bangumi", contract) == []
+
+
+def test_bangumi_status_reflects_a_cached_token_verdict(contract_env: _Env) -> None:
+    """A cached /v0/me verdict drives the status contract, like douyin's.
+
+    ``legacy_state`` stays ``no_auth`` (Bangumi never *needs* a login) whatever
+    the token verdict is — the optional-token verdict rides ``verification``,
+    the axis that can honestly move.
+    """
+    contract_env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+    LIVE_PROBES.clear()
+    try:
+        LIVE_PROBES.record(
+            "bangumi",
+            authenticated=False,
+            detail="unauthorized",
+            network_error=False,
+            fingerprint=credential_fingerprint("bangumi", _BANGUMI_TOKEN),
+        )
+        item = _status_payload(contract_env)["bangumi"]
+    finally:
+        LIVE_PROBES.clear()
+
+    assert item["state"] == "no_auth"  # anonymous-public, verdict aside
+    contract = SourceAuthContract.model_validate(item["auth"])
+    assert contract.auth_required is False
+    assert contract.credential == "present"
+    assert contract.verify_method == "live_probe"
+    assert contract.verification == "failed"
+    assert check_legacy_consistency("bangumi", contract) == []
+
+
+def test_optional_credential_may_carry_a_live_method_but_none_may_not() -> None:
+    """The consistency refinement Bangumi needed, both directions (invariant I3).
+
+    An ``auth_required=False`` source with a credential *present* legitimately
+    verifies it (Bangumi's token). The same source with *no* credential must
+    not claim a live method — that is YouTube-style overclaim, and the guard
+    that catches it has to survive the refinement that lets Bangumi through.
+    """
+    optional_present = SourceAuthContract(
+        auth_required=False,
+        credential="present",
+        credential_origin="config",
+        verification="unverified",
+        verify_method="live_probe",
+        verify_ttl_seconds=3600,
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+    assert check_legacy_consistency("bangumi", optional_present) == []
+
+    overclaim = SourceAuthContract(
+        auth_required=False,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="live_probe",
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+    assert check_legacy_consistency("bangumi", overclaim) != []
 
 
 # ── B站: one credential, one verdict, two endpoints ──────────────────

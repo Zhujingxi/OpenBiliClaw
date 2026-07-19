@@ -80,6 +80,25 @@ _HEARTBEAT_TTL_SECONDS = 72 * 3600
 _PROBE_OK_TTL_SECONDS = PROBE_OK_TTL_SECONDS
 _PROBE_FAIL_TTL_SECONDS = PROBE_FAIL_TTL_SECONDS
 
+# The window a *user-visible* "已验证" stays fresh, distinct from the probe
+# cache's reuse window above. The two answer different questions and must not
+# share a constant:
+#   * ``PROBE_OK_TTL_SECONDS`` (60s) throttles outbound probes — short on
+#     purpose, so a settings page polling every 30s never fires a real request,
+#     and 抖音's per-``msToken`` cookie churn can't storm the platform.
+#   * ``_VERIFIED_FRESH_SECONDS`` drives ``verify_ttl_seconds`` → the "验证已
+#     过期" badge. At 60s a user who clicked 测试连接 saw it flip to expired
+#     within a minute — technically the probe window lapsed, but a login that
+#     was live one minute ago is not meaningfully stale, and the copy read as a
+#     problem where there was none.
+# Calibration (2026-07-19): 6h. Chosen as a human-scale "recently confirmed"
+# window — long enough that a verify earlier in a session still reads as fresh,
+# short enough that a day-old verdict correctly invites a re-check. It is a UX
+# threshold, not a security one: an expired badge only nudges a re-verify, it
+# never grants or denies access. Reopen if the probe endpoints' real-world
+# freshness turns out shorter (CLAUDE.md pitfall #3).
+_VERIFIED_FRESH_SECONDS = 6 * 3600
+
 # rdt-cli's own credential lifetime (``reddit_tasks._RDT_CREDENTIAL_TTL_SECONDS``).
 _RDT_TTL_SECONDS = 7 * 24 * 3600
 
@@ -154,6 +173,27 @@ _BILIBILI_READY_DETAIL: dict[str, str] = {
     "stale": "Cookie 就绪；上次联网确认已超出有效期，可点「测试连接」重新确认。",
     "unverified": "Cookie 就绪（含 SESSDATA / bili_jct / DedeUserID）。",
 }
+
+# Contract-side ``detail`` for Bangumi when a personal token IS configured, keyed
+# on what the ``/v0/me`` probe concluded. Bangumi is anonymous-public, so this
+# text is about the *optional* token, never about being able to use the source
+# at all — the source works with none of these.
+#
+# Note this is the contract's own ``detail``; the settings chip renders the
+# discovery-health ``detail`` that ``_bangumi_status_item`` keeps (Bangumi
+# carries a discovery-health axis the seven cookie/heartbeat platforms do not).
+_BANGUMI_TOKEN_DETAIL: dict[str, str] = {
+    "verified": "个人令牌有效，已识别 Bangumi 账号，可读取你的私密收藏。",
+    "failed": (
+        "个人令牌已被 Bangumi 拒绝（可能过期或无效）—— 公开发现不受影响；如需私密收藏，"
+        "请到 https://next.bgm.tv/demo/access-token 重新生成后替换。"
+    ),
+    "stale": "个人令牌上次联网确认已超出有效期，可点「测试连接」用 /v0/me 重新确认。",
+    "unverified": "已保存个人令牌，尚未联网确认；可点「测试连接」用 /v0/me 验证。",
+}
+
+# Contract-side ``detail`` for Bangumi with no token — the anonymous default.
+_BANGUMI_ANONYMOUS_DETAIL = "公开源 · 无需登录；可选填个人令牌以识别账号或读取私密收藏。"
 
 
 @dataclass
@@ -284,8 +324,15 @@ def _fingerprint(slug: str, cookie: str) -> str:
 
 
 def _probe_ttl(verification: Verification) -> int:
-    """Freshness window that applies to the current live-probe verdict."""
-    return _PROBE_FAIL_TTL_SECONDS if verification == "failed" else _PROBE_OK_TTL_SECONDS
+    """User-visible freshness window for a live-probe verdict (``verify_ttl_seconds``).
+
+    A ``verified`` verdict stays fresh for the human-scale window; a ``failed``
+    one keeps the short re-check window so a credential the user just repaired
+    turns green promptly rather than sitting red. This is the *display* policy —
+    it is not the probe-reuse throttle, which lives in ``probe_cache`` and stays
+    at 60s so status polling never triggers outbound traffic.
+    """
+    return _PROBE_FAIL_TTL_SECONDS if verification == "failed" else _VERIFIED_FRESH_SECONDS
 
 
 def _row_value(row: Any, key: str, index: int) -> Any:
@@ -1002,6 +1049,87 @@ def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
     )
 
 
+# ── Bangumi ──────────────────────────────────────────────────────────
+
+
+def auth_bangumi(ctx: SourceAuthContext) -> SourceAuthContract:
+    """Bangumi: anonymous-public, with an *optional* personal token it can verify.
+
+    Bangumi is the one source that breaks the ``auth_required`` boolean. It is
+    the honest ``False`` — the discovery pipeline reads public collections and
+    rankings straight off the official v0 API with no credential at all, so a
+    user is never told 「需要登录」 and never sees a 「失效 / 待验证」 warning for
+    not having a token. That is the same public-source treatment as YouTube, and
+    it is why the no-token branch below is byte-for-byte YouTube's shape.
+
+    What makes it *not* YouTube is the optional personal access token
+    (https://next.bgm.tv/demo/access-token). When one is configured it unlocks
+    private collections and identifies the account, and — unlike YouTube — it
+    *can* be checked: ``GET /v0/me`` returns the account for a valid token and
+    ``BangumiAPIError(code='unauthorized')`` for a missing / wrong / expired one.
+    A stripped-control run on 2026-07-19 pinned the discriminator (invariant I3 /
+    §0.1): real token → ``username='215952'``, forged token → ``unauthorized``,
+    no token → ``unauthorized`` — a genuine difference *between* the groups, not
+    one group merely looking normal. So a configured token legitimately reports
+    ``verify_method='live_probe'`` and the verdict is read from the shared probe
+    cache exactly as B站 / 抖音's cookie verdicts are.
+
+    The two states therefore differ in the one field that can honestly move:
+
+    * no token  → ``verify_method='none'`` — nothing to verify, like YouTube.
+    * has token → ``verify_method='live_probe'`` — the /v0/me probe backs it.
+
+    ``auth_required`` stays ``False`` in both, because you never *need* a token.
+    ``legacy_state`` stays ``'no_auth'`` for the same reason; the discovery-health
+    string (``尚未运行`` / cooldown / ``rejected``) and the ``token_state`` axis
+    live on the ``SourceStatusItem`` that ``_bangumi_status_item`` assembles, not
+    in this contract — Bangumi carries a discovery dimension the other seven do
+    not, and folding it back into ``legacy_state`` would re-create the D1
+    conflation the contract exists to remove.
+
+    **Known contract-shape gap (reported, not papered over):** because
+    ``auth_required=False``, the frontends render Bangumi as 「无需登录」 and
+    suppress the evidence badge even when a token is verified — ``source-auth.md``
+    is explicit that a no-credential source has no evidence to grade. The token
+    verdict is still carried honestly in these fields and surfaced via the verify
+    button's message and the ``token_state`` chip; showing it as a persistent
+    ◆ 联网验证 badge would need the contract extended with an "optional credential"
+    tier plus a frontend change, which is out of scope for this zero-frontend PR.
+    """
+    bgm = ctx.source_cfg("bangumi")
+    token = str(getattr(bgm, "access_token", "") or "").strip()
+
+    if not token:
+        return SourceAuthContract(
+            auth_required=False,
+            credential="none",
+            credential_origin="none",
+            verification="unverified",
+            verify_method="none",
+            verify_ttl_seconds=None,
+            can_verify_now=False,
+            detail=_BANGUMI_ANONYMOUS_DETAIL,
+            legacy_state="no_auth",
+            legacy_logged_in=True,
+        )
+
+    verification, verified_at = _probe_verdict(ctx, "bangumi", credential="present", cookie=token)
+    return SourceAuthContract(
+        # Still False: a configured token is an *enhancement*, not a requirement.
+        auth_required=False,
+        credential="present",
+        credential_origin="config",
+        verification=verification,
+        verify_method="live_probe",
+        verified_at=verified_at,
+        verify_ttl_seconds=_probe_ttl(verification),
+        can_verify_now=True,
+        detail=_BANGUMI_TOKEN_DETAIL.get(verification, _BANGUMI_TOKEN_DETAIL["unverified"]),
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
 # ── registry ─────────────────────────────────────────────────────────
 
 #: Slug -> provider. Keys and order define the ``SourcesStatusResponse`` fields,
@@ -1015,6 +1143,7 @@ SOURCE_AUTH_PROVIDERS: dict[str, Callable[[SourceAuthContext], SourceAuthContrac
     "twitter": auth_twitter,
     "zhihu": auth_zhihu,
     "reddit": auth_reddit,
+    "bangumi": auth_bangumi,
 }
 
 

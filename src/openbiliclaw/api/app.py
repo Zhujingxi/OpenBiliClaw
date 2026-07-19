@@ -9346,28 +9346,29 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
-    def _bangumi_status_item(cfg: Any) -> SourceStatusItem:
-        """Bangumi's status, still on the pre-contract code path.
+    def _bangumi_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Bangumi's status item: the auth contract plus its two extra axes.
 
-        Every other source is answered by a provider in
-        ``source_auth/providers.py``; Bangumi is not, so its logic lives here
-        rather than inline in the aggregator — a per-platform block in
-        ``sources_status()`` is the 424-line shape that refactor removed, and
-        re-opening it for one source would re-open it for the next.
+        Bangumi's *auth* verdict now comes from ``auth_bangumi`` like every other
+        source (``auth_required=False`` — anonymous-public — with an optional,
+        live-verifiable personal token). But it carries two dimensions the
+        uniform ``SourceStatusItem`` the loop builds cannot express, so it is
+        assembled here rather than inline in ``sources_status()``:
 
-        It deliberately ships **no** ``auth`` contract. A default-constructed
-        one reads ``auth_required=True`` + ``credential="none"``, which renders
-        as 「需要登录」 — false for a source that works anonymously off the
-        public API. Sending ``null`` instead makes the frontends fall back to
-        the legacy ``state``, a path ``describeAccess()`` already carries for
-        older backends, so the wording stays exactly what main shipped and no
-        evidence badge is claimed. Honest under-reporting beats a fabricated
-        verdict (invariant I3).
+        * a **discovery-health** ``detail`` (``尚未运行`` / 退避冷却 / run outcomes)
+          — the chip the settings page renders, distinct from the contract's own
+          auth-focused ``detail``. Keeping it means moving to the contract does
+          not silently drop the discovery status users already saw.
+        * the **``token_state``** axis (``ok`` / ``rejected`` / ``""``), which the
+          frontend overlays as 「令牌已失效」 when discovery rejected the token.
 
-        Giving it a real contract is a separate task: ``auth_required`` is a
-        bool, and Bangumi is a third shape — anonymous by default, with an
-        optional token that unlocks private collections.
+        ``state`` / ``logged_in`` follow the contract (``no_auth`` / ``True``): the
+        discovery-health string lives in ``detail`` now, not in ``state``, so the
+        legacy field stops conflating scheduling and discovery with auth
+        readiness — the D1 conflation the contract exists to remove. The
+        ``enabled`` switch stays its own field, never folded back into ``state``.
         """
+        from openbiliclaw.api.source_auth.providers import auth_bangumi
         from openbiliclaw.runtime.bangumi_producer import (
             bangumi_disabled_detail,
             bangumi_source_status,
@@ -9404,16 +9405,17 @@ def create_app(
                 **({"token_state": "ok"} if bgm_token_configured else {}),
             }
         )
-        bgm_state = str(bgm_status.get("state") or "unverified")
+        # ``state`` / ``logged_in`` now come from the auth contract (always
+        # ``no_auth`` / ``True`` for an anonymous-public source); the
+        # discovery-health string moves to ``detail``, and ``token_state`` stays
+        # its own axis. The contract itself carries the optional-token verdict.
         return SourceStatusItem(
             enabled=bgm_enabled,
-            state=bgm_state,
+            state="no_auth",
             detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
-            # Bangumi is anonymous and has no login session. This legacy field
-            # follows SourceStatusItem's readiness semantics instead of merely
-            # mirroring the config switch.
-            logged_in=bgm_state in {"ok", "ready", "no_auth"},
+            logged_in=True,
             token_state=str(bgm_status.get("token_state") or ""),
+            auth=auth_bangumi(auth_ctx),
         )
 
     def _attach_network_hints(statuses: SourcesStatusResponse, cfg: Any) -> None:
@@ -9452,9 +9454,9 @@ def create_app(
         exposes the same knowledge as independent dimensions. See
         :class:`SourceAuthContract` and ``source_auth/legacy.py``.
 
-        Bangumi is the one source not yet on the contract and answers through
-        ``_bangumi_status_item`` with ``auth=None``; see that helper for why it
-        sends no contract rather than an invented one.
+        Bangumi is answered by ``auth_bangumi`` like the rest, but its item is
+        re-assembled by ``_bangumi_status_item`` to carry two axes the uniform
+        item cannot: a discovery-health ``detail`` and the ``token_state`` chip.
         """
         from openbiliclaw.api.source_auth.providers import (
             SOURCE_AUTH_PROVIDERS,
@@ -9477,7 +9479,10 @@ def create_app(
                 feed_paused=source_feed_paused(auth_ctx, slug),
                 auth=contract,
             )
-        items["bangumi"] = _bangumi_status_item(cfg)
+        # Bangumi's uniform item (built above) is replaced: it carries a
+        # discovery-health detail and the token_state axis the loop cannot model.
+        # Do not delete this line thinking the loop covers it — it does not.
+        items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
         statuses = SourcesStatusResponse(**items)
         _attach_network_hints(statuses, cfg)
         return statuses
@@ -9889,6 +9894,31 @@ def create_app(
                 )
             return base
 
+        def _bangumi_credential_item(sources: Any, config: Any) -> SourceCredentialItem:
+            """Bangumi's credential row: no pasteable value, but a real form.
+
+            The token is write-only through the config / init form, never shown
+            back (privacy: it reads private collections), so ``value`` stays empty
+            and ``available`` only reports whether one is configured. The form
+            descriptor (``form_kind='none'`` + verify / 去获取令牌 actions) is what
+            gives the settings page its 「测试连接」 button and login link without a
+            paste box that would write nowhere.
+            """
+            token_set = bool(
+                str(getattr(getattr(sources, "bangumi", None), "access_token", "") or "").strip()
+            )
+            detail = _bangumi_credential_detail(sources)
+            form = build_credential_form("bangumi", cfg=config)
+            return SourceCredentialItem(
+                label="可选个人令牌",
+                available=token_set,
+                detail=detail,
+                form=form,
+                summary=credential_summary(
+                    form, label="个人令牌", available=token_set, detail=detail
+                ),
+            )
+
         return SourcesCredentialsResponse(
             bilibili=item("bilibili", "Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
             xiaohongshu=item(
@@ -9919,13 +9949,7 @@ def create_app(
                 "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。",
                 secret=False,
             ),
-            bangumi=SourceCredentialItem(
-                label="可选个人令牌",
-                available=bool(
-                    str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
-                ),
-                detail=_bangumi_credential_detail(srcs),
-            ),
+            bangumi=_bangumi_credential_item(srcs, cfg),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────

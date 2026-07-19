@@ -220,6 +220,21 @@
   const ACCESS_NO_AUTH = Object.freeze({ tone: "public", label: "无需登录" });
 
   /**
+   * A source needing no login can still carry a verifiable credential.
+   *
+   * YouTube and Bangumi both report `auth_required: false`, but they are not the
+   * same case. YouTube has nothing to verify (`verify_method: "none"`); Bangumi
+   * is anonymously readable yet, once a personal token is supplied, that token
+   * *can* be checked against /v0/me (`verify_method: "live_probe"`). Treating
+   * `auth_required === false` as a blanket "no evidence to show" hid a real,
+   * network-confirmed verdict on Bangumi. The honest test is not "is login
+   * required" but "is there a verification method at all".
+   */
+  function hasVerifiableCredential(auth) {
+    return !!auth && text(auth.verify_method) !== "" && text(auth.verify_method) !== "none";
+  }
+
+  /**
    * Evidence strength, keyed on `auth.verify_method`. **The point of the whole
    * refactor.**
    *
@@ -369,7 +384,10 @@
   /** Verdict from the contract: no-auth tier, then credential, then verification. */
   function describeAuthVerdict(auth) {
     if (!auth) return null;
-    if (auth.auth_required === false) return ACCESS_NO_AUTH;
+    // No-auth AND nothing to verify → the public tier. A no-auth source that
+    // carries a verifiable token (Bangumi) falls through to its verification,
+    // so a confirmed token reads as 已验证 rather than a flat 无需登录.
+    if (auth.auth_required === false && !hasVerifiableCredential(auth)) return ACCESS_NO_AUTH;
     return SOURCE_ACCESS_CREDENTIAL[text(auth.credential)]
       || SOURCE_ACCESS_VERIFICATION[text(auth.verification)]
       || UNKNOWN_ACCESS;
@@ -381,7 +399,12 @@
    * @returns {{rank: string, symbol: string, label: string, freshness: string, text: string}}
    */
   function describeEvidence(auth, now) {
-    if (!auth || auth.auth_required === false) return EVIDENCE_ABSENT;
+    // A no-auth source shows an evidence badge only when it actually has a
+    // verifiable credential (Bangumi with a token); YouTube, with nothing to
+    // verify, shows none — the same distinction describeAuthVerdict draws.
+    if (!auth || (auth.auth_required === false && !hasVerifiableCredential(auth))) {
+      return EVIDENCE_ABSENT;
+    }
     const method = text(auth.verify_method);
     if (!method) return EVIDENCE_ABSENT;
     const spec = VERIFY_EVIDENCE[method] || UNKNOWN_EVIDENCE;

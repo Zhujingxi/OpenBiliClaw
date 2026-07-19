@@ -660,18 +660,16 @@ class SourceStatusItem(BaseModel):
     detail: str = ""
     logged_in: bool = False
     feed_paused: bool = False
-    # ``None`` means "this source has no auth contract yet", which is a real and
-    # honest answer — not a missing value to be defaulted away. A
-    # default-constructed contract reads ``credential="none"`` +
-    # ``auth_required=True``, which the frontends render as 「需要登录」; for
-    # Bangumi (anonymous public API, token optional) that would be a fabricated
-    # verdict, exactly the overclaim invariant I3 forbids. Sources without a
-    # provider in ``source_auth/providers.py`` therefore send ``null`` and the
-    # three surfaces fall back to legacy ``state`` — a path ``describeAccess()``
-    # already had for older backends. Bangumi is the only such source today;
-    # wiring it in needs a contract shape for "auth optional", since
-    # ``auth_required`` is a bool and Bangumi is neither wholly public nor
-    # login-gated.
+    # ``None`` means "this source has no auth contract", the honest answer for a
+    # backend older than the contract — not a missing value to be defaulted away
+    # (a default-constructed contract reads ``auth_required=True`` +
+    # ``credential="none"``, which renders as 「需要登录」 and would be a fabricated
+    # verdict for a public source — the overclaim invariant I3 forbids). All eight
+    # sources now ship a real contract: Bangumi resolved the "auth optional" shape
+    # by staying ``auth_required=False`` (anonymous-public) while its optional
+    # personal token reports ``verify_method='live_probe'`` when configured. The
+    # ``| None`` is kept for the three surfaces' older-backend fallback path, not
+    # because any provider emits it today.
     auth: SourceAuthContract | None = None
     # Optional personal-token dimension (currently Bangumi only): ``"ok"`` when a
     # token is configured and not rejected, ``"rejected"`` when Bangumi denied it

@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Canonical platform slugs the contract has to cover (spec "Goal" / D2 table).
+# Bangumi joined as the 8th platform when main merged in; it now carries a full
+# contract and a verify action like the rest, so metric 4's denominator has to
+# include it or the gate would pass at 7/8 and quietly excuse a missing action.
 PLATFORMS: tuple[str, ...] = (
     "bilibili",
     "xiaohongshu",
@@ -54,6 +57,7 @@ PLATFORMS: tuple[str, ...] = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 
 # HTTP routes address platforms by short alias; normalise before counting.
@@ -555,15 +559,26 @@ _SOURCE_SETTINGS_MARKERS: tuple[str, ...] = (
     "source-status.js",
 )
 
+# Frontends expected to carry source settings. Mobile Web is a deliberate
+# exclusion, not an unfinished surface (decided with the user 2026-07-19): the
+# phone is a lean-back "刷推荐" surface, and supplying a cookie / clicking 测试
+# 连接 belongs on the desktop or extension, where the browser session that owns
+# those credentials actually lives. Mobile still *surfaces* per-platform login
+# needs through saved-sync (``views/saved.js``), so a user is never blind to a
+# logged-out source there — they just fix it on a full surface. CLAUDE.md
+# pitfall #5 requires the exclusion be explicit; this is that statement, and it
+# is why the target is 2 of 3 rather than 3 of 3.
+_SETTINGS_EXPECTED_SURFACES: tuple[Path, ...] = (DESKTOP_APP_JS, POPUP_JS)
+
 
 def measure_frontends_with_source_settings() -> Metric:
     """Metric 6: surfaces carrying platform-source settings (spec D10, I6).
 
-    Counting rule: of the three HTML surfaces, how many reference at least one
-    marker. Baseline: desktop and popup fetch ``/api/sources/status``; mobile
-    ``web/js/app.js`` references none of them, so 2. The CLI is the fourth
-    contract surface but is not a frontend file, which is why the spec's
-    denominator is 3.
+    Counting rule: how many of the three HTML surfaces reference at least one
+    marker. Target is 2 — desktop and popup — because mobile Web is an explicit
+    exclusion (see ``_SETTINGS_EXPECTED_SURFACES``). Reporting mobile in the
+    evidence when it unexpectedly *gains* a marker is still useful, so the scan
+    stays over all three surfaces and only the target reflects the exclusion.
     """
     evidence: list[str] = []
     for path in FRONTEND_SURFACES:
@@ -576,9 +591,9 @@ def measure_frontends_with_source_settings() -> Metric:
         key="frontends_with_source_settings",
         label="承载平台源设置的前端",
         value=len(evidence),
-        target=len(FRONTEND_SURFACES),
+        target=len(_SETTINGS_EXPECTED_SURFACES),
         direction="at_least",
-        rule="桌面 / popup / 移动三端中引用平台源状态接口或共享渲染模块的文件数",
+        rule="桌面 / popup 两端引用平台源接口或共享渲染模块的文件数（移动端有意排除，见注释）",
         evidence=tuple(evidence),
     )
 

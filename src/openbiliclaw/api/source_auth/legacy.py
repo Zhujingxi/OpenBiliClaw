@@ -154,10 +154,21 @@ def check_legacy_consistency(platform: str, contract: SourceAuthContract) -> lis
             f"{platform}: verification={contract.verification!r} with verify_method='none' "
             f"— a verdict must state how it was reached (I3)"
         )
-    if contract.verify_method != "none" and not contract.auth_required:
+    # An ``auth_required=False`` source with *no* credential has nothing to
+    # verify, so a live method there is an overclaim (YouTube must stay ``none``).
+    # But an anonymous source with an *optional* credential present — Bangumi and
+    # its personal token — genuinely can verify that credential, and saying so is
+    # honest, not an overclaim. The gate is credential presence, not
+    # ``auth_required`` alone: a method only needs backing when there is a
+    # credential it could be about.
+    if (
+        contract.verify_method != "none"
+        and not contract.auth_required
+        and contract.credential == "none"
+    ):
         problems.append(
-            f"{platform}: auth_required=False should not carry verify_method="
-            f"{contract.verify_method!r}"
+            f"{platform}: auth_required=False with credential='none' should not carry "
+            f"verify_method={contract.verify_method!r} — nothing to verify (I3)"
         )
 
     # A verdict that expires must say when it was reached, or the TTL is unusable.

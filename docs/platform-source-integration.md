@@ -66,6 +66,8 @@
 
 对照实验本身也要防伪：同一次实验里 `/aweme/v1/web/query/user/` 在两组返回**完全相同**的 12 位 uid（那是设备级标识，由 `ttwid` / `odin_tt` 驱动）。只看"有没有返回 uid"会得出"可以验证"的错误结论。**判据必须是两组之间有差异，而不是单组看起来正常。**
 
+**第三种形态：匿名可用 + 可选可验证凭据（Bangumi）。** `auth_required` 是布尔，但有的源既不「必须登录」也不「无凭据可验」。Bangumi 公开收藏 / 排行匿名即可发现（`auth_required=false`），但配了个人令牌就能验证令牌——`GET /v0/me` 有效令牌返回账号、无效令牌返回 `unauthorized`（2026-07-19 对照：真令牌→`username='215952'`，伪造 / 无令牌→`unauthorized`，两组有差异，故 `live_probe` 名副其实）。接法：`auth_required` 恒 `false`（无令牌时即 YouTube 形状、零告警），配了令牌才 `credential=present` + `verify_method=live_probe`；`verify_method` 因此**随状态在 `none`/`live_probe` 间变**（像知乎在 `browser_heartbeat`/`task_history` 间变），而 `VERIFY_ACTIONS` 里的动作是固定的 `live_probe`。为此 `legacy.py` 的一致性检查放宽了一处：原「`auth_required=false` 不得带 live 方法」收紧成「**且 `credential='none'`** 才禁止」——有可选凭据时验证它是诚实，YouTube 那种无凭据的过度声称仍被拦。**已知缺口**：因 `auth_required=false`，前端渲染成「无需登录」并抑制证据徽章，令牌的 `verified`/`failed` 虽如实写进契约却不出常驻徽章（经「测试连接」消息与 `token_state` 暴露）；要做成常驻徽章需给契约加「可选凭据」档并改前端。详见 `docs/modules/source-auth.md`「Bangumi 的接入」。
+
 完整设计与诊断见 `docs/plans/2026-07-18-source-auth-contract-spec.md`。
 
 ### 0.2 验证动作：`POST /api/sources/{slug}/verify`

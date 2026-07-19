@@ -73,6 +73,14 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     "twitter": "passive_health",
     "zhihu": "browser_heartbeat",
     "reddit": "local_file",
+    # Fixed as ``live_probe`` even though Bangumi's contract reports
+    # ``verify_method='none'`` when no token is configured: the *action* is a
+    # constant property of the platform (a click hits /v0/me when a token
+    # exists), while the contract's ``verify_method`` legitimately varies with
+    # whether there is anything to probe — the same action-vs-method split 知乎
+    # makes. With no token the probe returns ``has_credential=False`` and the
+    # click resolves to ``indeterminate`` without going out.
+    "bangumi": "live_probe",
 }
 
 # The user-facing tri-state. Deliberately computed here rather than in each
@@ -459,6 +467,117 @@ async def _probe_douyin(
     )
 
 
+async def _probe_bangumi(
+    cfg: Config, probes: LiveProbeCache, *, cookie: str | None, record: bool
+) -> LiveProbeOutcome:
+    """Live probe on Bangumi's ``GET /v0/me`` for the *optional* personal token.
+
+    Bangumi works anonymously, so "no credential" is a normal state, not a
+    failure — ``has_credential=False`` is returned before any network call and
+    the click resolves to ``indeterminate`` ("公开源，填令牌后可验证"), never a
+    logged-out verdict.
+
+    With a token the discriminator is clean (stripped-control run 2026-07-19,
+    §0.1 / I3): a valid token identifies the account, an invalid / expired one
+    is rejected with ``BangumiAPIError(code='unauthorized')``. That rejection is
+    a real ``failed`` verdict. Every other ``BangumiAPIError`` — timeout,
+    transport, 429 rate-limit, 5xx, a schema drift — is a transport-class
+    "cannot tell": it says nothing about the token, so it maps to
+    ``network_error=True`` (→ ``indeterminate``), never ``failed``. On this box
+    the custom proxy cannot reach api.bgm.tv, so a real probe lands here — a
+    configuration matter, correctly reported as indeterminate rather than as an
+    expired token.
+
+    The client is built from :func:`outbound_httpx_kwargs` (Bangumi is an
+    overseas source), so it honours ``[network].mode`` rather than connecting
+    bare.
+    """
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+    from openbiliclaw.sources.bangumi_client import (
+        BangumiAPIError,
+        BangumiClient,
+        me_username,
+    )
+
+    if cookie is None:
+        bgm_cfg = getattr(cfg.sources, "bangumi", None)
+        cookie = str(getattr(bgm_cfg, "access_token", "") or "")
+    token = str(cookie or "").strip()
+
+    if not token:
+        if record:
+            probes.clear("bangumi")
+        return LiveProbeOutcome(
+            slug="bangumi",
+            has_credential=False,
+            authenticated=False,
+            network_error=False,
+            message=(
+                "未配置 Bangumi 个人令牌 —— 公开发现无需令牌；如需识别账号或读取私密收藏，"
+                "请填写个人令牌后再验证。"
+            ),
+        )
+
+    fingerprint = credential_fingerprint("bangumi", token)
+    try:
+        async with BangumiClient(access_token=token) as client:
+            payload = await client.get_me()
+        username = me_username(payload)
+    except BangumiAPIError as exc:
+        if exc.code == "unauthorized":
+            if record:
+                probes.record(
+                    "bangumi",
+                    authenticated=False,
+                    detail=str(exc),
+                    network_error=False,
+                    fingerprint=fingerprint,
+                )
+            return LiveProbeOutcome(
+                slug="bangumi",
+                has_credential=True,
+                authenticated=False,
+                network_error=False,
+                message="Bangumi 拒绝了该个人令牌（缺失、无效或已过期）。",
+            )
+        # timeout / network_error / rate_limited / upstream_error / schema drift:
+        # a round trip that could not conclude, so it is not evidence about the
+        # token (invariant I3 — a flaky proxy is not an expired token).
+        if record:
+            probes.record(
+                "bangumi",
+                authenticated=False,
+                detail=str(exc),
+                network_error=True,
+                fingerprint=fingerprint,
+            )
+        return LiveProbeOutcome(
+            slug="bangumi",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message=f"Bangumi 令牌验证未能完成（{exc}），暂时无法判定。",
+        )
+
+    if record:
+        probes.record(
+            "bangumi",
+            authenticated=True,
+            detail=f"已识别 Bangumi 账号（{username}）。",
+            network_error=False,
+            fingerprint=fingerprint,
+            username=username,
+        )
+    return LiveProbeOutcome(
+        slug="bangumi",
+        has_credential=True,
+        authenticated=True,
+        network_error=False,
+        message=f"个人令牌有效，已识别 Bangumi 账号（{username}）。",
+        username=username,
+    )
+
+
 async def run_live_probe(
     slug: str,
     *,
@@ -480,6 +599,8 @@ async def run_live_probe(
         return await _probe_bilibili(cfg, probes, cookie=cookie, record=record)
     if slug == "douyin":
         return await _probe_douyin(cfg, probes, cookie=cookie, record=record)
+    if slug == "bangumi":
+        return await _probe_bangumi(cfg, probes, cookie=cookie, record=record)
     raise KeyError(slug)
 
 

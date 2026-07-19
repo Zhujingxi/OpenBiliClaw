@@ -20,7 +20,7 @@
 | 有统一命名的 verify 路由的平台 | 0 / 7（能力上是 1/7，见 D7 修正） | 7 / 7 | `POST /api/sources/{k}/verify` |
 | 后端可活体验证的平台 | 1 / 7（仅 B 站，且藏在 `init-status` 等端点下） | 2 / 7（+ 抖音，D11 实测） | 见 Phase 1 映射表 |
 | 凭据写入端点命名形态 | **5** 种（含 `PUT /api/config`，见 D5 修正） | 1 种 + 旧端点转发 | `openapi.json` 断言 |
-| 承载平台源设置的前端 | **3 / 4**（desktop + popup + setup 引导页；移动 Web 缺失） | 4 / 4 | 见 Phase 5 |
+| 承载平台源设置的前端 | 2（desktop + popup） | 2（移动端有意排除，见下） | `scripts/source_contract_metrics.py` 第 6 项 |
 
 基线数字复现：
 

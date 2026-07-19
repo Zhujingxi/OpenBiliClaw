@@ -91,6 +91,13 @@ class CredentialSpec:
     kinds: tuple[CredentialKind, ...] = ()
     required_keys: tuple[str, ...] = ()
     any_of_keys: tuple[str, ...] = ()
+    #: The credential is one opaque secret (a bearer token), not a ``name=value``
+    #: cookie jar, so its identity fingerprint covers the whole value rather than
+    #: named keys. Bangumi's personal access token is the only one today. Kept
+    #: separate from ``required_keys`` because the structural gate has nothing to
+    #: count here — validity is a live ``/v0/me`` question, not a field-presence
+    #: one — while the probe cache still needs a stable per-credential digest.
+    opaque_credential: bool = False
     invalid_error_code: str = "cookie_invalid"
     invalid_message: str = ""
     #: Whether a live probe runs before persisting. True only where a control
@@ -251,6 +258,34 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
         form_label="YouTube",
         help_text="YouTube 按公开源接入，不需要登录，也没有任何凭据要填。",
     ),
+    "bangumi": CredentialSpec(
+        slug="bangumi",
+        # ``kinds=()``: the unified write endpoint does not accept Bangumi's
+        # token. It is anonymous-optional, written through the config / init form
+        # (``sources.bangumi.access_token``) which validates it structurally and,
+        # from the settings save path, live via ``/v0/me``. Routing it through
+        # here too would need a distinct token kind and a config-mirror writer,
+        # duplicating a path that already exists — so this stays a config-only
+        # credential and the form offers a verify button + a "去获取令牌" link
+        # rather than a paste box that would write nowhere.
+        kinds=(),
+        # The token has no field structure; its whole value is its identity, so
+        # the probe cache can tell one token from another (pitfall #2 in spirit:
+        # a verdict is about a credential, not a platform).
+        opaque_credential=True,
+        unverified_reason=(
+            "Bangumi 公开发现无需凭据；个人令牌是可选项，在设置 / 初始化里填写"
+            "（保存时会用 /v0/me 校验），这里不单独接收令牌写入。"
+        ),
+        form_kind="none",
+        form_label="Bangumi 个人令牌（可选）",
+        login_url="https://next.bgm.tv/demo/access-token",
+        help_text=(
+            "Bangumi 公开收藏 / 排行匿名即可发现，无需登录。可选个人令牌用于识别当前账号、"
+            "读取私密收藏：点「去获取令牌」生成后，在初始化 / 设置里填写，保存时会真的向 "
+            "Bangumi 校验一次。填好后可点「测试连接」用 /v0/me 复验。"
+        ),
+    ),
 }
 
 
@@ -370,6 +405,15 @@ def credential_fingerprint(slug: str, value: str) -> str:
     spec = CREDENTIAL_SPECS.get(slug)
     if spec is None:
         return ""
+
+    if spec.opaque_credential:
+        # A bearer token has no ``name=value`` structure to select from, so the
+        # whole secret is its own identity. Domain-separated by slug, as below.
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        material = "\x00".join([slug, text])
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     from openbiliclaw.sources.douyin_direct import parse_cookie_header
 

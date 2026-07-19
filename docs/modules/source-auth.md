@@ -13,9 +13,9 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 正交契约 `SourceAuthContract` | 四个维度互不覆盖：要不要凭据 / 凭据在不在 / 验证结论 / **结论有多硬** | ✅ |
-| 每平台 provider | `providers.py` 的 7 个纯函数取代 424 行 if/elif 聚合器（现 46 行） | ✅ |
-| Bangumi 接入契约 | 第 8 个平台仍走 legacy `state`，后端对它发 `auth: null` | ⏳ 见下方「Bangumi 的过渡态」 |
-| 显式验证动作 | `POST /api/sources/{slug}/verify`，7/7 平台可用，三态结果 | ✅ |
+| 每平台 provider | `providers.py` 的 8 个纯函数取代 424 行 if/elif 聚合器（现 49 行） | ✅ |
+| Bangumi 接入契约 | 第 8 个平台接入：匿名公开 `auth_required=False` + 可选个人令牌 `live_probe` 验证 `/v0/me` | ✅ 见下方「Bangumi 的接入」 |
+| 显式验证动作 | `POST /api/sources/{slug}/verify`，8/8 平台可用，三态结果 | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
 | 三端共享渲染 | `web/shared/source-status.js`，desktop / popup / setup 引导页共用 | ✅ |
@@ -45,12 +45,12 @@ class SourceAuthContract(BaseModel):
 
 | 取值 | 含义 | 当前平台 |
 | --- | --- | --- |
-| `live_probe` | 当场出网问平台 | bilibili、douyin |
+| `live_probe` | 当场出网问平台 | bilibili、douyin、bangumi（配置了个人令牌时） |
 | `passive_health` | 由真实流量的错误反推 | twitter |
 | `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu |
 | `local_file` | 只读了本地凭据文件 | reddit |
 | `task_history` | 由历史任务结果反推 | zhihu（无心跳时回落） |
-| `none` | 无验证能力，或不需要 | youtube |
+| `none` | 无验证能力，或不需要 | youtube、bangumi（未配置令牌时） |
 
 ### 三端如何渲染这份契约
 
@@ -65,7 +65,7 @@ class SourceAuthContract(BaseModel):
 | `rate_limited` | 频率受限 | pending |
 | `blocked` | 接入受阻 | danger |
 
-`auth_required=false` 单独一档：**无需登录**（public 灰），既非已验证也非待验证，且不显示证据徽章——不需要凭据的源没有证据可评级。
+`auth_required=false` 单独一档：**无需登录**（public 灰），既非已验证也非待验证，且不显示证据徽章——不需要凭据的源没有证据可评级。**Bangumi 的可选令牌是这条规则今天的例外**：它 `auth_required=false`（匿名可用），但配了令牌时 `verification` 会诚实地带上 `verified`/`failed`，只是前端仍按本行渲染成「无需登录」、不出徽章——令牌结论目前经由「测试连接」的消息与 `token_state` 徽章暴露，要把它做成常驻的 ◆ 联网验证 徽章需要给契约加一档「可选凭据」并改前端，见下方「Bangumi 的接入」。
 
 证据强度是**独立于结论**的第二维度，同时用三种方式编码，其中没有一种是颜色（色觉障碍用户读不到颜色）：
 
@@ -128,31 +128,58 @@ class SourceAuthContract(BaseModel):
 
 **X 的 `ok` 不等于验证通过。** `x_source_health` 的行是以 `state='ok'` 为**默认值**建出来的,所以「从未发过任何请求」与「上次请求成功」在 `state` 上完全同形。照 `ok` 直接映射 `verified`,意味着全新数据库里第一次写入的 X cookie——哪怕它几个月前就过期了——会立刻宣称 `verification=verified` + `verify_method=passive_health`,而 `passive_health` 恰恰是唯一无法主动重跑来自证的方式。现新增 `last_success_at` 列(只由 `record_success` 写),没有它就报 `unverified`。`clear_relogin_block()` 会**清空**该列：它是凭新 cookie 给出的乐观解封,不是用新 cookie 拿到的结果,留着旧成功等于让新凭据继承别人的战绩。迁移**不回填**——老行里没有任何信号能区分这两种情况,猜一个就是把同一个伪造推迟一次迁移;代价是升级后 X 显示 `unverified` 直到下一轮 discovery 成功。
 
-## Bangumi 的过渡态
+## Bangumi 的接入
 
-Bangumi 在 v0.3.174 作为第 8 个平台合入，**尚未接进本契约**。后端对它发
-`auth: null`，三端因此走 `describeAccess()` 早已为老后端准备的 legacy `state`
-兜底分支，渲染的文案与色调与它合入时逐字一致。
+Bangumi 在 v0.3.174 作为第 8 个平台合入，起初走 `auth: null` 过渡态。现在它有了
+真契约（`providers.py::auth_bangumi`），但它打破了 `auth_required` 布尔的隐含假设，
+解法值得记下来。
 
-**为什么不给它一个默认契约。** `SourceAuthContract()` 的默认值是
-`auth_required=True` + `credential="none"`，前端会把它渲染成「需要登录」——而
-Bangumi 走官方公开 API，匿名即可用。那是一个**凭空捏造的结论**，正是 I3 禁止的
-过度声称。发 `null` 是如实说「这个源还没有契约」，少报而不误报。
+**它是第三种形态：匿名可用 + 可选可验证凭据。** 前七个平台里，YouTube 是
+`auth_required=false` + `verify_method=none`——没东西可验；其余六个 `auth_required=true`。
+Bangumi 两者都不是：公开收藏 / 排行**匿名即可发现**（所以从「能不能用这个源」看它
+`auth_required=false`），**但给了个人令牌就能验证令牌**（`GET /v0/me` 有效令牌返回账号、
+无效令牌返回 `unauthorized`）。
 
-因此 `SourceStatusItem.auth` 的类型是 `SourceAuthContract | None`：`None` 是一个
-有意义的取值，不是待填的缺省。
+**契约怎么表达这个组合（本次的选择）：**
 
-它的逻辑落在 `api/app.py` 的 `_bangumi_status_item()` 而不是 `sources_status()`
-函数体内——聚合器里写 per-platform 分支正是本次重构消灭的那个 424 行形态，为一个
-平台重开这个口子就等于为下一个平台重开。
+- `auth_required` **恒为 `False`**——你从不「需要」登录 Bangumi。无令牌时它就是
+  YouTube 的形状（`credential=none` / `verify_method=none`），前端渲染「无需登录」、
+  零告警，满足「匿名可读是正常状态」这条硬约束。
+- 配了令牌时 `credential=present`、`verify_method=live_probe`、`can_verify_now=true`，
+  `verification` 读共享探针缓存的 `/v0/me` 结论：从未验 → `unverified`，令牌被拒
+  （`unauthorized`）→ `failed`，验证通过 → `verified`+`verified_at`，网络/超时/限流
+  → `unverified`（indeterminate，绝不 `failed`）。出网走 `outbound_httpx_kwargs()` 代理策略。
+- **控制实验（§0.1 / I3）**：2026-07-19 实测 `/v0/me`——真实令牌→`username='215952'`，
+  伪造令牌→`unauthorized`，无令牌→`unauthorized`。判据是**两组之间有差异**，不是单组
+  看着正常，所以 `live_probe` 名副其实。复现见
+  `tests/test_source_auth_contract.py::test_bangumi_verify_with_a_valid_token_is_verified`
+  等四个用例。
 
-**接进契约需要先解决一个设计问题**：`auth_required` 是布尔，而 Bangumi 是第三种
-形态——匿名可用、个人令牌可选（令牌只解锁私密收藏）。它还带一个别人没有的
-`token_state` 维度（`ok` / `rejected` / `""`）。这两件事都需要契约本身扩形，不是
-填几个字段就能了事，所以单独排期。
+**契约表达不了的那半（如实记录，没硬塞）：** 因为 `auth_required=false`，前端按上面
+「auth_required=false 单独一档」那条规则渲染成「无需登录」并**抑制证据徽章**——所以
+令牌验证结论虽然如实写进了 `verification`/`verified_at`，却不会以常驻的 ◆ 联网验证
+徽章出现。它今天经由两条既有通道对用户可见：「测试连接」按钮的消息，以及 discovery
+在真跑时把死令牌标成 `token_state="rejected"`（前端覆盖成「令牌已失效」）。要把令牌
+结论做成常驻徽章，需要给契约加一档「可选凭据」语义并改前端——本次零前端改动，故未做。
 
-在此之前，`scripts/source_contract_metrics.py` 的第 6 项（承载平台源设置的前端）
-与 Bangumi 无关，仍卡在移动 Web 缺口上；其余五项不受本过渡态影响。
+**legacy 与两条额外维度。** `legacy_state` 恒为 `no_auth`（保持一致性检查严格；
+discovery 健康串落到 `detail`，`token_state` 单独成轴）。Bangumi 的 `SourceStatusItem`
+仍由 `api/app.py::_bangumi_status_item()` 装配，因为它带两条 uniform item 装不下的维度：
+一条 discovery 健康 `detail`（`尚未运行` / 退避冷却 / 运行结果），和 `token_state`
+（`ok` / `rejected` / `""`）。`state` 不再吞 `enabled`（D12 的旧毛病），停用只体现在
+独立的 `enabled` 字段上。
+
+**一致性检查放宽了一处。** `legacy.py` 原规则「`auth_required=false` 不得带
+非-`none` 的 `verify_method`」是给 YouTube 写的（无凭据可验）。Bangumi 的可选令牌是
+合法反例，故规则收紧成「`auth_required=false` **且 `credential='none'`** 才禁止 live
+方法」——有凭据时验证它是诚实，不是过度声称；YouTube 的过度声称仍被拦（见
+`test_optional_credential_may_carry_a_live_method_but_none_may_not`）。
+
+**令牌写入仍走 config。** Bangumi 令牌由 config / init 表单写入
+（`sources.bangumi.access_token`，保存时用 `/v0/me` 校验），不经统一 `/credential`
+端点，所以它的 `CredentialSpec` 是 `kinds=()` + `form_kind='none'`——表单只给「测试连接」
+和「去获取令牌」链接，不给会写到空处的粘贴框。探针缓存要区分不同令牌，故 `CredentialSpec`
+新增 `opaque_credential=True`，指纹覆盖整串令牌而非 cookie 字段名。
 
 ## 新增平台的强制契约
 
