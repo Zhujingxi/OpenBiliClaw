@@ -1390,7 +1390,10 @@
     // extension/popup/popup-init-control.js — the three GUI surfaces share no
     // module system, so keep the formulas in lock-step when editing either.
     const STAGE_FRACTION_CAP = 0.95;
-    const STAGE_FRACTION_FALLBACK = 0.5;
+    // A stage with no real done/total contributes NOTHING to the bar. It used
+    // to contribute a flat half-step (0.5), which implied a progress the stage
+    // had not made; such stages now render indeterminate instead.
+    const STAGE_FRACTION_UNKNOWN = 0;
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
@@ -1408,7 +1411,9 @@
       const maxSeconds = Number(stage?.progress?.max_seconds || 0);
       return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
     }
-    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或模型较慢时可能超过 1 小时，只要仍有进展就不会被中断。期间可离开此页面，进度会保留。";
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+    // Said ONCE while the user waits, not repeated on every stage row.
+    const INIT_RUNNING_HINT = "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -1416,7 +1421,7 @@
       let st = _runViewState.get(runId);
       if (!st) {
         st = {
-          stageStartMs: new Map(), maxPct: 0,
+          maxPct: 0,
           lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
           lastProgressMark: null, lastProgressChangeMs: 0,
           slowestProgressIntervalSeconds: 0
@@ -1430,53 +1435,43 @@
       return st;
     }
 
-    function _runningStageFraction(stage, st, nowMs) {
-      const prog = stage?.progress;
-      if (prog?.mode === "indeterminate") {
-        const eta = Number(stage?.eta_seconds || 0);
-        if (eta > 0 && st) {
-          let startMs = st.stageStartMs.get(stage.n);
-          if (startMs === undefined) {
-            startMs = nowMs;
-            st.stageStartMs.set(stage.n, startMs);
-          }
-          return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta));
-        }
-        return STAGE_FRACTION_FALLBACK;
+    // Only REAL sub-progress moves the bar. The old elapsed/eta pseudo-progress
+    // (1 - e^-t/eta) is gone with the forecasts that fed it: faking a moving
+    // bar from a made-up duration is the same lie in another shape. A stage
+    // without done/total contributes nothing and renders indeterminate.
+    function _runningStageFraction(stage) {
+      const total = Number(stage?.progress?.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(stage?.progress?.done || 0), total));
+        return Math.min(STAGE_FRACTION_CAP, done / total);
       }
-      const progTotal = prog ? Number(prog.total || 0) : 0;
-      if (progTotal > 0) {
-        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-      }
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta > 0 && st) {
-        let startMs = st.stageStartMs.get(stage.n);
-        if (startMs === undefined) {
-          startMs = nowMs;
-          st.stageStartMs.set(stage.n, startMs);
-        }
-        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-      }
-      return STAGE_FRACTION_FALLBACK;
+      return STAGE_FRACTION_UNKNOWN;
     }
 
-    // Show the calibrated duration before it elapses; afterwards stop repeating
-    // an already-broken estimate and surface the real hard ceiling instead.
-    function stageEtaText(stage) {
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta <= 0) return "";
-      const elapsed = Number(stage?.progress?.elapsed_seconds || 0);
-      if (elapsed > eta) {
-        const maxSeconds = Number(stage?.progress?.max_seconds || 0);
-        if (maxSeconds > 0) {
-          return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-        }
-        return "已超常见用时；AI 或平台仍可能在处理";
+    // A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+    // duration we cannot honour is worse than none: every wrong estimate reads
+    // as "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and
+    // stage 4 announced 5, both legitimately ran far longer). So the running
+    // row reports only observed facts the backend already publishes: how long
+    // this stage has been running, and real sub-progress counts when they
+    // exist. No estimate, no ceiling, no extrapolation.
+    function formatElapsedText(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+    }
+
+    function stageDetailText(stage) {
+      const prog = stage?.progress;
+      if (!prog) return "";
+      const parts = [];
+      const elapsed = Number(prog.elapsed_seconds || 0);
+      if (elapsed > 0) parts.push(formatElapsedText(elapsed));
+      const total = Number(prog.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), total));
+        parts.push(`已完成 ${done}/${total}`);
       }
-      const halfMinutes = Math.ceil(eta / 30) / 2;
-      return `本阶段通常约 ${halfMinutes} 分钟`;
+      return parts.join(" · ");
     }
 
     // Split connection liveness from substantive work progress. A healthy 30s
@@ -1543,13 +1538,21 @@
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
-      const indeterminate = Boolean(running && currentStage?.progress?.mode === "indeterminate");
+      // Indeterminate covers both the backend's explicit flag and any
+      // running stage with no real done/total — with the eta gone there is
+      // nothing honest left to fill such a bar with.
+      const indeterminate = Boolean(
+        running &&
+          currentStage &&
+          (currentStage.progress?.mode === "indeterminate" ||
+            !(Number(currentStage.progress?.total || 0) > 0)),
+      );
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
       const note = currentStage?.progress?.note;
       if (stageLabel && note) stageLabel += ` · ${note}`;
       const runningStages = stages.filter((stage) => stage.status === "running");
       const inFlight = runningStages.length
-        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage, st, nowMs), 0) /
+        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage), 0) /
           runningStages.length
         : 0;
       const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
@@ -1565,7 +1568,7 @@
         indeterminate,
         pct,
         stageLabel,
-        etaText: running ? stageEtaText(currentStage) : "",
+        stageDetailText: running ? stageDetailText(currentStage) : "",
         failedReason: failedStage?.reason || ""
       };
     }
@@ -1701,7 +1704,7 @@
         const staleness = stalenessView(status);
         const stallText = Boolean(status?.running)
           ? staleness.fresh
-            ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+            ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
             : staleness.text
           : "";
         stallHint.textContent = stallText;
@@ -1753,12 +1756,17 @@
       const staleness = stalenessView(status);
       const stallText = isRunning
         ? staleness.fresh
-          ? [staleness.text, displayProgress.etaText].filter(Boolean).join(" · ")
+          ? [staleness.text, displayProgress.stageDetailText].filter(Boolean).join(" · ")
           : staleness.text
         : "";
       // Expectation management near the start button while a run can begin.
-      const expectationText =
-        !isRunning && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
+      // Idle: orient the user about variability. Running: the one
+      // reassurance that is literally true after v0.3.180.
+      const expectationText = isRunning
+        ? INIT_RUNNING_HINT
+        : alreadyInitialized
+          ? ""
+          : INIT_EXPECTATION_HINT;
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);

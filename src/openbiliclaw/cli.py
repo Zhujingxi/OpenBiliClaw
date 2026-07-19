@@ -7615,19 +7615,26 @@ def init(
 
     _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
-        "拉 B 站历史 / 收藏 / 关注（≈ 20–60s，看你的列表大小）"
+        "拉 B 站历史 / 收藏 / 关注（时长看你的列表大小）"
         if include_bili
         else "拉取所选平台数据（B 站已跳过）"
     )
+    # No total-duration forecast: it depends on the selected platforms, the
+    # collected history AND the provider's latency, so any number here would be
+    # wrong for someone and make a healthy long run read as broken (field
+    # report 2026-07-20). State the variability, then let the per-step heartbeat
+    # report elapsed time as evidence of progress.
     console.print(
-        "[bold yellow]⏱  这一步首次运行通常需要 4–20 分钟，"
-        "请保持网络畅通别中断。[/bold yellow]\n"
+        "[bold yellow]⏱  这一步首次运行耗时差别很大，取决于你勾了几个平台、"
+        "拉到多少历史，以及 AI 服务的快慢，请保持网络畅通别中断。[/bold yellow]\n"
+        "  只要还在出结果就不会被打断，慢一些是正常的。\n"
         "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
-        "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成并保存完整画像（LLM 调用，≈ 30–70s）\n"
-        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案，≈ 2–5 分钟）\n"
-        "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
+        "    2/4  分析偏好（LLM 调用，按事件量分片，每片单独计时）\n"
+        "    3/4  生成并保存完整画像（单次 LLM 调用）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案）\n"
+        "[dim]全程会打印已用时和已完成的量，不要以为卡住了——"
+        "远程 AI 服务单次响应就可能要几分钟。[/dim]\n"
     )
     if not include_bili:
         console.print(
