@@ -189,9 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.178 (2026-07-20)**
+📌 Latest: **v0.3.179 (2026-07-20)**
 
-- **A degraded backend that was never initialized now opens guided init** — instead of only offering "repair in settings", the extension still renders the init panel and the checklist states the blocking reason.
+- **A broken AI-service config no longer takes platform settings down with it** — source status, test-connection and embedding repair keep working, so platform logins can be set up while the LLM config is being fixed.
+- **Plain-language errors** — the internal "degraded mode" wording is gone; every surface now says the AI service config is broken and needs a backend restart after repair.
+- **A fresh install with a broken AI config still opens guided init** — the extension renders the init panel as usual and the checklist states the blocking reason.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
