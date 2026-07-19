@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import textwrap
 import tomllib
@@ -204,6 +205,17 @@ def test_aggregate_release_python_picker_discovers_future_versioned_binary(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
 
+    # Hermetic toolchain: the picker needs bash/awk/sort from PATH, but we
+    # must not leak host ``python3.N`` interpreters into the test. Symlink
+    # only the required tools into a dedicated directory and use that as the
+    # sole non-fake PATH entry.
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    for tool in ("bash", "awk", "sort"):
+        tool_path = shutil.which(tool)
+        assert tool_path is not None, f"{tool} not found on host PATH"
+        (toolchain / tool).symlink_to(tool_path)
+
     # Old unversioned python3 (simulates macOS system python3 = 3.9).
     fake_old_python3 = bin_dir / "python3"
     fake_old_python3.write_text(
@@ -272,7 +284,7 @@ def test_aggregate_release_python_picker_discovers_future_versioned_binary(
     driver.chmod(0o755)
 
     env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    env["PATH"] = f"{bin_dir}:{toolchain}"
 
     result = subprocess.run(
         ["bash", str(driver)],
@@ -300,7 +312,7 @@ def test_aggregate_release_python_picker_discovers_future_versioned_binary(
     )
     modern_python3.chmod(0o755)
     env2 = os.environ.copy()
-    env2["PATH"] = f"{bin2}:{bin_dir}:/usr/bin:/bin"
+    env2["PATH"] = f"{bin2}:{bin_dir}:{toolchain}"
     result2 = subprocess.run(
         ["bash", str(driver)],
         cwd=PROJECT_ROOT,
@@ -328,7 +340,7 @@ def test_aggregate_release_python_picker_discovers_future_versioned_binary(
     )
     (bin3 / "python3.10").chmod(0o755)
     env3 = os.environ.copy()
-    env3["PATH"] = f"{bin3}:/usr/bin:/bin"
+    env3["PATH"] = f"{bin3}:{toolchain}"
     result3 = subprocess.run(
         ["bash", str(driver)],
         cwd=PROJECT_ROOT,
