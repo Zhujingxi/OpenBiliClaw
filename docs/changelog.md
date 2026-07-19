@@ -10,6 +10,14 @@
 
 ---
 
+## 质量基线比较器复审修复（评审 t_e03bfeff 第二轮 P1×3）
+
+- **基线指纹同步新语法（P1）**：`tests/contracts/quality-baseline.json` 的聚合发布 known-failure 指纹从旧两行语法（含字面 `\n`）重生成到现行三行语法（headline + traceback frame + nested cause，whitespace 折叠后单行存储）；新增端到端回归直接以 checked-in baseline 运行比较器——真实 nested message 原样通过（exit 0），`ModuleNotFoundError → SecurityError` 变异被拒（exit 1），防止 baseline 与 normalizer 再次漂移。baseline description 与 `scripts/generate_quality_baseline.py` 发射文案同步更新为准确描述指纹语法。
+- **mypy 摘要按 occurrence 对账（P1）**：`parse_mypy_output()` 内部拆出 `_parse_mypy_rows()` 同时返回去重 identity 集合与解析 occurrence 计数；新增 `count_mypy_error_occurrences()`。摘要 `Found N errors` 现在与 occurrence 数（去重前）对账：同一条 message 在两行各报一次时 summary 2 ↔ occurrence 2 通过（identity 仍只有一条，baseline 比较不变）；`Found 1 error` 但零诊断行的截断场景依旧 fail closed。新增 3 个回归用例。
+- **集成分支到 `origin/main @ 1ac6af67`（P1）**：整支 rebase 到 PR #14 合入点之上，`git merge-base --is-ancestor origin/main HEAD` 通过；pyproject.toml / uv.lock 与 origin/main 完全一致（Click 8.4 / Typer 0.27 floors 保留），两条既有 changelog 条目完整保留，无无关改动。
+
+---
+
 ## 设置向导与配置页收口到共享模型配置模块
 
 - **新增共享渲染层 `web/shared/model-config-render.js`**：把桌面 `web/js/views/model-settings.js` 与 `desktop/assets/js/model-settings.js` 中重复实现的 descriptor 字段、credential 编辑器与连接类型分组渲染抽到同一 ES module，桌面与移动两个 model-settings 入口改为 thin adapter；渲染器接受 `classPrefix`（桌面默认 `model`，移动传入 `mobile-model`）以输出各表面 stylesheet 实际覆盖的类名；`/setup/` 向导复用其中的 `escapeHtml` 转义原语（删除本地 fork），其 descriptor/credential/连接类型渲染因向导布局（`.model-field` 包装结构）仍保留本地实现，统一收敛为后续项（计划 §10）；插件 popup 继续以同步副本对齐状态机。

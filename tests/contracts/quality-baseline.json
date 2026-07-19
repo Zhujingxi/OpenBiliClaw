@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "description": "Normalized quality baseline for the incremental architecture refactor. New pytest failures / mypy diagnostics are rejected by scripts/check_quality_baseline.py; removals are always allowed. known_failures entries are fingerprinted: a failure at the same node with a different exception type/headline is rejected as a new bug. Update intentionally by re-running scripts/generate_quality_baseline.py and reviewing the diff.",
+  "description": "Normalized quality baseline for the incremental architecture refactor. New pytest failures / mypy diagnostics are rejected by scripts/check_quality_baseline.py; removals are always allowed. known_failures entries are fingerprinted over the first three lines of the failure message (exception headline + traceback frame + nested cause), whitespace-collapsed with numbers/tmp paths scrubbed: a failure at the same node with a different exception type, headline, or nested cause is rejected as a new bug. Update intentionally by re-running scripts/generate_quality_baseline.py and reviewing the diff.",
   "pytest": {
     "known_failures": [
       {
         "node_id": "tests/test_aggregate_release_workflow.py::test_aggregate_release_helper_does_not_backfill_previous_channel_assets",
-        "fingerprint": "AssertionError: Traceback (most recent call last):\\n File \"<stdin>\", line <N>, in <module>"
+        "fingerprint": "AssertionError: Traceback (most recent call last): File \"<stdin>\", line <N>, in <module> ModuleNotFoundError: No module named 'tomllib'"
       }
     ],
     "known_skips": [

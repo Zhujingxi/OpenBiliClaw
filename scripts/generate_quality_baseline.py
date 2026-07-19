@@ -66,8 +66,11 @@ def main(argv: list[str] | None = None) -> int:
             "Normalized quality baseline for the incremental architecture refactor. "
             "New pytest failures / mypy diagnostics are rejected by "
             "scripts/check_quality_baseline.py; removals are always allowed. "
-            "known_failures entries are fingerprinted: a failure at the same node "
-            "with a different exception type/headline is rejected as a new bug. "
+            "known_failures entries are fingerprinted over the first three lines of "
+            "the failure message (exception headline + traceback frame + nested "
+            "cause), whitespace-collapsed with numbers/tmp paths scrubbed: a failure "
+            "at the same node with a different exception type, headline, or nested "
+            "cause is rejected as a new bug. "
             "Update intentionally by re-running scripts/generate_quality_baseline.py "
             "and reviewing the diff."
         ),

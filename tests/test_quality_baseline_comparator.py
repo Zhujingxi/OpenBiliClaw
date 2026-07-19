@@ -1114,3 +1114,149 @@ def test_compare_pytest_error_rejected_unit() -> None:
     }
     problems = compare_pytest(baseline, {}, {"tests/test_x.py::test_y": "anything"}, set(), [])
     assert problems and "never allowlisted" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff (repair t_6e6575ed): checked-in baseline end-to-end probe
+# ---------------------------------------------------------------------------
+
+_CHECKED_IN_BASELINE = Path(__file__).resolve().parent / "contracts" / "quality-baseline.json"
+
+# The real aggregate-release nested failure message as pytest reports it in a
+# JUnit ``<failure message="...">`` attribute: headline line, traceback frame
+# line, nested cause line.
+AGGREGATE_RELEASE_NODE = (
+    "tests/test_aggregate_release_workflow.py"
+    "::test_aggregate_release_helper_does_not_backfill_previous_channel_assets"
+)
+AGGREGATE_RELEASE_MESSAGE = (
+    "AssertionError: Traceback (most recent call last):\n"
+    '  File "<stdin>", line 1, in <module>\n'
+    "ModuleNotFoundError: No module named 'tomllib'"
+)
+
+
+def test_checked_in_baseline_tolerates_unchanged_nested_cause(tmp_path: Path) -> None:
+    """End-to-end regression against the CHECKED-IN baseline (not one
+    synthesized from the current normalizer): the unchanged real nested
+    cause must be tolerated. Guards the baseline fingerprint and the
+    normalizer grammar from drifting apart again."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={AGGREGATE_RELEASE_NODE: AGGREGATE_RELEASE_MESSAGE},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(_CHECKED_IN_BASELINE),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 0
+
+
+def test_checked_in_baseline_rejects_mutated_nested_cause(tmp_path: Path) -> None:
+    """ModuleNotFoundError -> SecurityError at the same allowlisted node must
+    be rejected by the checked-in baseline fingerprint."""
+    mutated = AGGREGATE_RELEASE_MESSAGE.replace("ModuleNotFoundError", "SecurityError")
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={AGGREGATE_RELEASE_NODE: mutated},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(_CHECKED_IN_BASELINE),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff (repair t_6e6575ed): summary reconciles with occurrences
+# ---------------------------------------------------------------------------
+
+MYPY_TWO_SAME_MESSAGE = (
+    "src/openbiliclaw/foo.py:10:5: error: Incompatible types  [assignment]\n"
+    "src/openbiliclaw/foo.py:42:9: error: Incompatible types  [assignment]\n"
+    "Found 2 errors in 1 file (checked 227 source files)\n"
+)
+
+
+def test_mypy_same_message_two_lines_reconciles_and_passes(tmp_path: Path) -> None:
+    """Two same-message diagnostics at different lines: summary declares 2,
+    one normalized identity, comparator must return 0 when the identity is
+    known. The summary count reconciles against parsed occurrences, not
+    deduplicated identities."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_TWO_SAME_MESSAGE)
+    baseline = _baseline(tmp_path / "baseline.json")
+    parsed = parse_mypy_output(MYPY_TWO_SAME_MESSAGE)
+    assert len(parsed) == 1  # identity dedup still applies for baseline keys
+    data = json.loads(baseline.read_text())
+    data["mypy"]["known_diagnostics"] = parsed
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 0
+
+
+def test_mypy_truncated_summary_with_zero_rows_still_fails(tmp_path: Path) -> None:
+    """Truncation guard: 'Found 1 error' with zero parsed rows remains a
+    contradiction under occurrence-based reconciliation."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Found 1 error in 1 file (checked 227 source files)\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+def test_count_mypy_error_occurrences_unit() -> None:
+    assert _checker.count_mypy_error_occurrences(MYPY_CLEAN) == 0
+    assert _checker.count_mypy_error_occurrences(MYPY_WITH_ERROR) == 1
+    assert _checker.count_mypy_error_occurrences(MYPY_TWO_SAME_MESSAGE) == 2

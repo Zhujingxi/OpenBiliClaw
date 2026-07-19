@@ -14,7 +14,9 @@ Rules (per docs/plans/2026-07-19-incremental-architecture-refactor-plan.md §7.2
 - mypy diagnostics are keyed by ``{path, error_code, normalized_message}``
   (line numbers stripped, ``note:`` lines ignored). New diagnostics are
   rejected even if the total count is unchanged. Removed diagnostics are
-  always allowed.
+  always allowed. The ``Found N errors`` summary is reconciled against the
+  number of parsed error *occurrences* (before identity dedup), so two
+  same-message diagnostics at different lines count as two.
 - Coverage is recorded in the baseline as ``coverage.line_percent`` and may
   not drop more than ``coverage.noise_tolerance`` percentage points.
 
@@ -126,14 +128,42 @@ def parse_mypy_output(text: str) -> list[dict[str, str]]:
     """Extract keyed diagnostics from mypy stdout.
 
     Ignores ``note:`` lines (overload listing noise). Returns a sorted list
-    of dicts with keys ``path``, ``error_code``, ``message`` (normalized).
+    of deduplicated identity dicts with keys ``path``, ``error_code``,
+    ``message`` (normalized). Identity dedup is for baseline comparison
+    only; the number of parsed error *occurrences* (two same-message
+    diagnostics at different lines count twice) is tracked separately by
+    ``count_mypy_error_occurrences`` for summary reconciliation
+    (review-t_e03bfeff P1-2 follow-up).
 
     Raises ``MypyOutputError`` when the stream is empty, ends without a
     recognizable summary line, or contains non-empty lines that are neither
     diagnostics nor recognized noise. This makes the comparator fail closed
     on mypy crashes, config errors, or missing output.
     """
+    identities, _occurrences = _parse_mypy_rows(text)
+    return sorted(
+        ({"path": p, "error_code": c, "message": m} for (p, c, m) in identities),
+        key=lambda d: (d["path"], d["error_code"], d["message"]),
+    )
+
+
+def count_mypy_error_occurrences(text: str) -> int:
+    """Count parsed mypy error occurrences (before identity dedup).
+
+    Two diagnostics at different lines with the same normalized
+    ``{path, code, message}`` collapse to one identity but remain two
+    occurrences; the mypy summary's declared error count is reconciled
+    against occurrences, not identities. Raises ``MypyOutputError`` under
+    the same fail-closed grammar rules as ``parse_mypy_output``.
+    """
+    _identities, occurrences = _parse_mypy_rows(text)
+    return occurrences
+
+
+def _parse_mypy_rows(text: str) -> tuple[set[tuple[str, str, str]], int]:
+    """Parse mypy stdout into ``(deduplicated identities, occurrence count)``."""
     out: set[tuple[str, str, str]] = set()
+    occurrences = 0
     lines = [line.rstrip() for line in text.splitlines()]
     if not any(line.strip() for line in lines):
         raise MypyOutputError("mypy output is empty")
@@ -162,6 +192,7 @@ def parse_mypy_output(text: str) -> list[dict[str, str]]:
             code = m.group("code") or ""
             message = _normalize_mypy_message(m.group("message"))
             out.add((path, code, message))
+            occurrences += 1
             continue
         # Non-empty line that is not a diagnostic, not a summary, and not
         # recognized noise — treat as unparseable (crash/config error).
@@ -174,10 +205,7 @@ def parse_mypy_output(text: str) -> list[dict[str, str]]:
             "'Found N errors in M files')"
         )
 
-    return sorted(
-        ({"path": p, "error_code": c, "message": m} for (p, c, m) in out),
-        key=lambda d: (d["path"], d["error_code"], d["message"]),
-    )
+    return out, occurrences
 
 
 def _normalize_failure_fingerprint(raw: str) -> str:
@@ -559,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     mypy_text = args.mypy_output.read_text(encoding="utf-8", errors="replace")
     try:
         live_mypy = parse_mypy_output(mypy_text)
+        mypy_error_occurrences = count_mypy_error_occurrences(mypy_text)
     except MypyOutputError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
@@ -598,13 +627,17 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # Reconcile the mypy summary's declared error count against the number
-    # of parsed diagnostic occurrences (review-t_e03bfeff P1-2). A summary
-    # claiming N errors with zero parsed diagnostics is contradictory.
-    if mypy_summary_error_count is not None and mypy_summary_error_count != len(live_mypy):
+    # of parsed error *occurrences* (review-t_e03bfeff P1-2 and follow-up).
+    # Occurrences count every error row before identity dedup: two
+    # same-message diagnostics at different lines are one identity for
+    # baseline comparison but two occurrences for summary reconciliation.
+    # A summary claiming N errors with zero parsed rows remains a
+    # contradiction (truncation) and fails closed.
+    if mypy_summary_error_count is not None and mypy_summary_error_count != mypy_error_occurrences:
         problems.append(
             f"mypy summary declares {mypy_summary_error_count} error(s) "
-            f"but {len(live_mypy)} diagnostic(s) were parsed; refusing "
-            "to accept a contradictory artifact (fail closed)"
+            f"but {mypy_error_occurrences} diagnostic occurrence(s) were parsed; "
+            "refusing to accept a contradictory artifact (fail closed)"
         )
 
     problems.extend(compare_pytest(baseline, failures, errors, skips, collection_errors))
