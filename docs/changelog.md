@@ -4,6 +4,14 @@
 
 ---
 
+## 质量基线比较器第五轮 Fail-Closed 修复（评审 t_e03bfeff run 180 P2×2）
+
+- **P2-1 基线 schema 强制指纹语法（fail closed）**：`scripts/check_quality_baseline.py` 新增 `BaselineSchemaError` 与 `validate_known_failures()`——`pytest.known_failures` 的每个条目必须是精确的 `{node_id, fingerprint}` 对象，`node_id` 为非空字符串，`fingerprint` 必须完整匹配比较器自身语法 `<preview> | sha256:<64 hex>`。旧版纯 node-ID 字符串条目、无 fingerprint 的对象、畸形指纹、重复 node_id、未知键、非 list 形态一律视为 corrupt baseline，在比较发生之前以 exit 2 拒绝。此前 run 180 端到端探针证明：legacy 字符串条目与无指纹对象会完全跳过指纹强制，live 失败原因从 `AssertionError` 变异为 `SecurityError: replacement cause` 后 main() 仍打印 OK / 返回 0——checked-in baseline 一旦 stale/legacy/malformed，cause fingerprinting 即失效。当前 checked-in baseline `known_failures` 为空，属于零成本收紧窗口，直接迁移为 fail-closed。
+- **P2-2 指纹覆盖完整 JUnit 失败内容（消除属性盲区）**：新增 `_failure_outcome_content()`，把归一化后的 `message` 属性与完整 element text（含罕见嵌套子标记的序列化）以固定通道分隔符拼接后再进入 `_normalize_failure_fingerprint()` 做 SHA-256。标准 JUnit `<failure>` 可以省略可选 `message` 属性、或只放一个通用 headline 而把真正的异常/原因放在元素正文；此前只哈希属性，探针 baseline `<failure>ModuleNotFoundError: old</failure>` 后仅把正文改为 `<failure>SecurityError: replacement</failure>`，两次都解析为空字符串的 SHA-256 并通过。现在正文与属性两通道全部参与摘要——无 message 属性时正文变异、或 message 相同而正文变异，指纹都会改变并被拒绝。
+- **测试**：`tests/test_quality_baseline_comparator.py` 移除「legacy 字符串条目任意指纹通过」的旧断言，新增端到端/单元回归：legacy 字符串与无指纹对象基线非零退出、畸形指纹/未知键/重复 node 拒绝、无 message 属性正文变异 exit 1、相同通用 message 正文变异 exit 1；比较器测试合计 81 passed。`_minimal_junit` 测试辅助的 element text 默认取与 message 相同内容（对齐真实 pytest JUnit 形态），并新增 `failure_bodies` 覆盖入口。`tests/contracts/quality-baseline.json` description 与 `scripts/generate_quality_baseline.py` 发射文案同步更新为「属性 + 正文全量摘要 + 严格 schema」语义；checked-in baseline 当前无 known_failures，无需重生成指纹。
+
+---
+
 ## Unreleased
 
 - **依赖地板：Click >= 8.4、Typer >= 0.27**：`pyproject.toml` 在 `[project.dependencies]` 中新增 `click>=8.4`，并把 `typer>=0.12` 提升为 `typer>=0.27`（仅地板，不加上限）。CI 使用 `pip install -e ".[dev,x]"` 一直解析到 PyPI 最新的 click 8.4.x / typer 0.27.x，而本地 `uv sync` 仍锁在 click 8.3.1 / typer 0.24.1，两端 Click/Typer 漂移曾掩盖 `cli_models.py` 在 Click 8.4 下的 typing 变化；本次把地板写进 pyproject 后，pip 与 uv 两条安装路径当前解析到同一主版本，当前 lock 与当前 CI 对齐。`click>=8.4` 允许 Click 9+、`typer>=0.27` 允许 Typer 1+，CI 仍会有意安装最新版，因此后续 CI 可能再次领先 lock，直到下一次 lock 刷新。`uv.lock` 通过 `uv lock --upgrade-package click --upgrade-package typer` 重新生成：click 由 8.3.1 升级到 8.4.2、typer 由 0.24.1 升级到 0.27.0（两者的 package 记录、源码/轮子 URL、hash、size 全部替换；typer 的依赖列表从 click 变为 colorama）；openbiliclaw 自身的 `dependencies` / `requires-dist` 元数据同步更新（新增 click、typer specifier 从 >=0.12 升至 >=0.27）；click、typer 与 openbiliclaw 三个 `[[package]]` 记录变更，其余 112 个 package 记录未动。本条不提升版本号；后端 API、模块边界、CLI 命令面均无变更。

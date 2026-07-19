@@ -25,6 +25,7 @@ _spec.loader.exec_module(_checker)
 
 JUnitStructureError = _checker.JUnitStructureError
 MypyOutputError = _checker.MypyOutputError
+BaselineSchemaError = _checker.BaselineSchemaError
 compare_pytest = _checker.compare_pytest
 main = _checker.main
 parse_coverage_line_percent = _checker.parse_coverage_line_percent
@@ -45,8 +46,16 @@ def _minimal_junit(
     failures: dict[str, str] | None = None,
     errors: dict[str, str] | None = None,
     skips: list[str] | None = None,
+    failure_bodies: dict[str, str] | None = None,
 ) -> Path:
-    """Write a minimal JUnit XML with one passing test plus any outcomes."""
+    """Write a minimal JUnit XML with one passing test plus any outcomes.
+
+    ``failures``/``errors`` map node ID → ``message`` attribute. The element
+    TEXT defaults to the same content as the message attribute (mirroring
+    real pytest output, where the traceback body carries the exception);
+    ``failure_bodies`` overrides the body per node for body-mutation
+    regressions.
+    """
     import html
 
     cases = ['<testcase classname="tests.test_ok" name="test_pass"/>']
@@ -56,9 +65,11 @@ def _minimal_junit(
     for node, fingerprint in (failures or {}).items():
         cls, _, name = node.partition("::")
         cls_attr = cls.replace("/", ".").removesuffix(".py")
+        body = (failure_bodies or {}).get(node, fingerprint)
         cases.append(
             f'<testcase classname="{cls_attr}" name="{name}">'
-            f'<failure message="{html.escape(fingerprint, quote=True)}">boom</failure>'
+            f'<failure message="{html.escape(fingerprint, quote=True)}">'
+            f"{html.escape(body)}</failure>"
             "</testcase>"
         )
         failure_count += 1
@@ -67,7 +78,8 @@ def _minimal_junit(
         cls_attr = cls.replace("/", ".").removesuffix(".py")
         cases.append(
             f'<testcase classname="{cls_attr}" name="{name}">'
-            f'<error message="{html.escape(fingerprint, quote=True)}">boom</error>'
+            f'<error message="{html.escape(fingerprint, quote=True)}">'
+            f"{html.escape(fingerprint)}</error>"
             "</testcase>"
         )
         error_count += 1
@@ -105,6 +117,19 @@ MYPY_WITH_ERROR = (
     "src/openbiliclaw/foo.py:10:5: error: Incompatible types  [assignment]\n"
     "Found 1 error in 1 file (checked 227 source files)\n"
 )
+
+
+def _fingerprint_for(junit: Path, node: str) -> str:
+    """Derive the baseline fingerprint for ``node`` from a live JUnit file.
+
+    Re-parses the XML through the comparator's own parser so the test
+    records exactly what the comparator will compute at comparison time —
+    no duplicated normalization logic in the test.
+    """
+    failures, errors, _skips, _collection = parse_junit_failures_and_skips(junit)
+    combined = {**failures, **errors}
+    assert node in combined, f"{node} not present as failure/error in {junit}"
+    return combined[node]
 
 
 def test_missing_junit_xml_fails(tmp_path: Path) -> None:
@@ -291,12 +316,11 @@ def test_known_failure_with_matching_fingerprint_passes(tmp_path: Path) -> None:
     junit = _minimal_junit(tmp_path / "junit.xml", failures={node: fp})
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     # The fingerprint stored in the baseline must be the NORMALIZED form
-    # produced by the comparator (numbers stripped to <N>, then digested).
+    # produced by the comparator over the FULL outcome content (message
+    # attribute + element text), with numbers stripped to <N> and digested.
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[
-            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(fp)}
-        ],
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit, node)}],
     )
     rc = main(
         [
@@ -324,11 +348,12 @@ def test_known_failure_with_different_fingerprint_fails(tmp_path: Path) -> None:
         failures={node: "AssertionError: unrelated new bug"},
     )
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline_fp = _fingerprint_for(junit, node)
+    mutated_fp = baseline_fp[:-1] + ("0" if baseline_fp[-1] != "0" else "1")
+    assert mutated_fp != baseline_fp  # same grammar, different digest
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[
-            {"node_id": node, "fingerprint": "ModuleNotFoundError: No module named 'tomllib'"}
-        ],
+        known_failures=[{"node_id": node, "fingerprint": mutated_fp}],
     )
     rc = main(
         [
@@ -440,26 +465,79 @@ def test_parse_mypy_output_grammar_unit() -> None:
 
 
 def test_compare_pytest_fingerprint_mismatch_unit() -> None:
+    node = "tests/test_x.py::test_y"
+    fp_old = _checker._normalize_failure_fingerprint("AssertionError: old")
+    fp_new = _checker._normalize_failure_fingerprint("AssertionError: new")
     baseline = {
         "pytest": {
-            "known_failures": [
-                {"node_id": "tests/test_x.py::test_y", "fingerprint": "AssertionError: old"}
-            ],
+            "known_failures": [{"node_id": node, "fingerprint": fp_old}],
             "known_skips": [],
         }
     }
-    problems = compare_pytest(
-        baseline, {"tests/test_x.py::test_y": "AssertionError: new"}, {}, set(), []
-    )
+    problems = compare_pytest(baseline, {node: fp_new}, {}, set(), [])
     assert problems and "DIFFERENT failure fingerprint" in problems[0]
     # Matching fingerprint passes.
-    assert (
-        compare_pytest(baseline, {"tests/test_x.py::test_y": "AssertionError: old"}, {}, set(), [])
-        == []
-    )
-    # Legacy string-form entries still allow any fingerprint at that node.
-    legacy = {"pytest": {"known_failures": ["tests/test_x.py::test_y"], "known_skips": []}}
-    assert compare_pytest(legacy, {"tests/test_x.py::test_y": "anything"}, {}, set(), []) == []
+    assert compare_pytest(baseline, {node: fp_old}, {}, set(), []) == []
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff run 180 P2-1: corrupt known_failures baseline entries
+# fail closed instead of silently skipping fingerprint enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_validate_known_failures_unit() -> None:
+    """Unit-level schema validation: every entry must be an exact
+    {node_id, fingerprint} object with the comparator's own grammar."""
+    node = "tests/test_x.py::test_y"
+    good_fp = _checker._normalize_failure_fingerprint("AssertionError: boom")
+    assert _checker.validate_known_failures([]) == {}
+    assert _checker.validate_known_failures([{"node_id": node, "fingerprint": good_fp}]) == {
+        node: good_fp
+    }
+    # A preview longer than the bounded 120-char window is malformed.
+    with pytest.raises(BaselineSchemaError, match="malformed fingerprint"):
+        _checker.validate_known_failures(
+            [{"node_id": node, "fingerprint": "x" * 121 + " | sha256:" + "a" * 64}]
+        )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "tests/test_x.py::test_y",  # legacy plain-string form
+        {"node_id": "tests/test_x.py::test_y"},  # fingerprintless object
+        {"fingerprint": "x"},  # missing node_id
+        {"node_id": "", "fingerprint": "p | sha256:" + "a" * 64},  # empty node_id
+        {"node_id": "tests/test_x.py::test_y", "fingerprint": ""},  # empty fp
+        {"node_id": "tests/test_x.py::test_y", "fingerprint": "not-a-fp"},  # bad grammar
+        {"node_id": "tests/test_x.py::test_y", "fingerprint": 42},  # wrong fp type
+        {"node_id": 42, "fingerprint": "p | sha256:" + "a" * 64},  # wrong node type
+        {"node_id": "tests/test_x.py::test_y", "fingerprint": "p | sha256:" + "a" * 64, "extra": 1},
+        42,
+        ["tests/test_x.py::test_y"],
+    ],
+)
+def test_validate_known_failures_rejects_corrupt_entries_unit(entry: object) -> None:
+    with pytest.raises(BaselineSchemaError):
+        _checker.validate_known_failures([entry])
+
+
+def test_validate_known_failures_rejects_duplicates_unit() -> None:
+    node = "tests/test_x.py::test_y"
+    fp = _checker._normalize_failure_fingerprint("AssertionError: boom")
+    with pytest.raises(BaselineSchemaError, match="more than once"):
+        _checker.validate_known_failures(
+            [
+                {"node_id": node, "fingerprint": fp},
+                {"node_id": node, "fingerprint": fp},
+            ]
+        )
+
+
+def test_validate_known_failures_rejects_non_list_unit() -> None:
+    with pytest.raises(BaselineSchemaError, match="must be a list"):
+        _checker.validate_known_failures({"node_id": "x"})
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +554,7 @@ def test_pytest_exit0_with_failing_junit_fails_closed(tmp_path: Path) -> None:
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[{"node_id": node, "fingerprint": fp}],
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit, node)}],
     )
     rc = main(
         [
@@ -894,9 +972,7 @@ def test_fingerprint_captures_nested_cause_line(tmp_path: Path) -> None:
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[
-            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(original_fp)}
-        ],
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit_orig, node)}],
     )
 
     # The original failure matches the baseline fingerprint and passes.
@@ -1128,9 +1204,7 @@ def test_fingerprint_long_headline_preserves_nested_cause(tmp_path: Path) -> Non
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[
-            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(original_fp)}
-        ],
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit_orig, node)}],
     )
 
     # The original failure matches the baseline fingerprint and passes.
@@ -1254,7 +1328,7 @@ def test_error_outcome_never_allowlisted(tmp_path: Path) -> None:
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[{"node_id": node, "fingerprint": fp}],
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit, node)}],
     )
     rc = main(
         [
@@ -1276,9 +1350,10 @@ def test_error_outcome_never_allowlisted(tmp_path: Path) -> None:
 def test_compare_pytest_error_rejected_unit() -> None:
     """Direct unit test: <error> outcomes are rejected even when the node is
     in known_failures."""
+    fp = _checker._normalize_failure_fingerprint("message: anything\ntext: anything")
     baseline = {
         "pytest": {
-            "known_failures": [{"node_id": "tests/test_x.py::test_y", "fingerprint": "anything"}],
+            "known_failures": [{"node_id": "tests/test_x.py::test_y", "fingerprint": fp}],
             "known_skips": [],
         }
     }
@@ -1448,14 +1523,15 @@ def test_fingerprint_long_headline_and_long_nested_cause(tmp_path: Path) -> None
     )
     mutated_fp = original_fp.replace("ModuleNotFoundError", "SecurityError")
 
-    # The normalized fingerprints must differ even though the mutation sits
-    # beyond the human-readable preview window.
-    norm_orig = _checker._normalize_failure_fingerprint(original_fp)
-    norm_mut = _checker._normalize_failure_fingerprint(mutated_fp)
-    assert norm_orig != norm_mut
-
     junit_orig = _minimal_junit(tmp_path / "orig.xml", failures={node: original_fp})
     junit_mut = _minimal_junit(tmp_path / "mut.xml", failures={node: mutated_fp})
+
+    # The normalized fingerprints must differ even though the mutation sits
+    # beyond the human-readable preview window.
+    norm_orig = _fingerprint_for(junit_orig, node)
+    norm_mut = _fingerprint_for(junit_mut, node)
+    assert norm_orig != norm_mut
+
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     baseline = _baseline(
         tmp_path / "baseline.json",
@@ -1584,7 +1660,7 @@ def test_junit_testcase_with_failure_and_skipped_fails_closed(tmp_path: Path) ->
         "</testsuite></testsuites>",
     )
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
-    fp = _checker._normalize_failure_fingerprint("AssertionError: boom")
+    fp = _checker._normalize_failure_fingerprint("message: AssertionError: boom\ntext: boom")
     baseline = _baseline(
         tmp_path / "baseline.json",
         known_failures=[{"node_id": node, "fingerprint": fp}],
@@ -1641,3 +1717,172 @@ def test_parse_junit_failure_and_skipped_unit(tmp_path: Path) -> None:
     )
     with pytest.raises(JUnitStructureError, match="mutually exclusive"):
         parse_junit_failures_and_skips(junit)
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff run 180 (repair t_03b967d6): round-5 fail-closed
+# regressions — fingerprinted baseline schema + full failure-content hashing
+# ---------------------------------------------------------------------------
+
+_RUN180_NODE = "tests/test_x.py::test_y"
+
+
+def _run180_main(junit: Path, mypy: Path, baseline: Path) -> int:
+    return main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+
+
+def test_known_failures_plain_string_entry_fails_closed(tmp_path: Path) -> None:
+    """Run-180 P2-1 repro (exact probe): a legacy plain-string baseline entry
+    used to skip fingerprint enforcement entirely, so mutating the live
+    failure cause at that node printed OK / returned 0. The comparator must
+    now reject the corrupt baseline itself with a nonzero status."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={_RUN180_NODE: "SecurityError: replacement cause"},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[_RUN180_NODE],  # type: ignore[list-item]  # legacy form, intentionally invalid
+    )
+    rc = _run180_main(junit, mypy, baseline)
+    assert rc != 0
+
+
+def test_known_failures_fingerprintless_object_fails_closed(tmp_path: Path) -> None:
+    """Run-180 P2-1 repro (exact probe): a dict with node_id but no
+    fingerprint likewise used to allow ANY changed cause at that node.
+    Must now be rejected as a corrupt baseline."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={_RUN180_NODE: "SecurityError: replacement cause"},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": _RUN180_NODE}],
+    )
+    rc = _run180_main(junit, mypy, baseline)
+    assert rc != 0
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"node_id": _RUN180_NODE, "fingerprint": "not-a-valid-fingerprint"},
+        {"node_id": _RUN180_NODE, "fingerprint": "preview | sha256:tooshort"},
+        {"node_id": _RUN180_NODE, "fingerprint": "p | sha256:" + "g" * 64},  # non-hex
+        {"node_id": _RUN180_NODE, "fingerprint": "p | sha256:" + "a" * 64, "extra": 1},
+    ],
+    ids=["bad-grammar", "short-digest", "non-hex-digest", "unknown-key"],
+)
+def test_known_failures_malformed_entries_fail_closed_e2e(tmp_path: Path, entry: dict) -> None:
+    """Malformed fingerprint strings and unknown-shape entries are rejected
+    as a corrupt baseline (nonzero exit), never silently tolerated."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={_RUN180_NODE: "AssertionError: boom"},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json", known_failures=[entry])
+    rc = _run180_main(junit, mypy, baseline)
+    assert rc != 0
+
+
+def test_known_failures_duplicate_node_fails_closed_e2e(tmp_path: Path) -> None:
+    """Duplicate node IDs in known_failures are a corrupt baseline."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        failures={_RUN180_NODE: "AssertionError: boom"},
+    )
+    fp = _fingerprint_for(junit, _RUN180_NODE)
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[
+            {"node_id": _RUN180_NODE, "fingerprint": fp},
+            {"node_id": _RUN180_NODE, "fingerprint": fp},
+        ],
+    )
+    rc = _run180_main(junit, mypy, baseline)
+    assert rc != 0
+
+
+def test_fingerprint_body_mutation_with_absent_message_fails_closed(tmp_path: Path) -> None:
+    """Run-180 P2-2 repro (exact probe): baselining
+    ``<failure>ModuleNotFoundError: old</failure>`` and then mutating ONLY
+    the element text to ``SecurityError: replacement`` used to hash the
+    empty message attribute both times and pass. The fingerprint now covers
+    the full element text, so the mutation must be rejected."""
+    orig_xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites><testsuite name="pytest" tests="2" failures="1" errors="0" skipped="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        '<testcase classname="tests.test_x" name="test_y">'
+        "<failure>ModuleNotFoundError: old</failure>"
+        "</testcase>"
+        "</testsuite></testsuites>"
+    )
+    mut_xml = orig_xml.replace("ModuleNotFoundError: old", "SecurityError: replacement")
+    junit_orig = _write(tmp_path / "orig.xml", orig_xml)
+    junit_mut = _write(tmp_path / "mut.xml", mut_xml)
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+
+    # Sanity: the two outcomes must fingerprint differently even though the
+    # message attribute is absent on both.
+    assert _fingerprint_for(junit_orig, _RUN180_NODE) != _fingerprint_for(junit_mut, _RUN180_NODE)
+
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[
+            {"node_id": _RUN180_NODE, "fingerprint": _fingerprint_for(junit_orig, _RUN180_NODE)}
+        ],
+    )
+    # Original body matches the baseline fingerprint and passes.
+    assert _run180_main(junit_orig, mypy, baseline) == 0
+    # Mutated body must fail: the cause changed even though the (absent)
+    # message attribute did not.
+    assert _run180_main(junit_mut, mypy, baseline) == 1
+
+
+def test_fingerprint_body_mutation_with_generic_message_fails_closed(tmp_path: Path) -> None:
+    """Run-180 P2-2 follow-up: an unchanged generic message attribute must
+    NOT mask a mutated traceback body — hashing only the attribute would
+    be a blind channel. Same headline, different exception in the body."""
+    node = _RUN180_NODE
+    junit_orig = _minimal_junit(
+        tmp_path / "orig.xml",
+        failures={node: "test failed"},
+        failure_bodies={node: "ModuleNotFoundError: No module named 'tomllib'"},
+    )
+    junit_mut = _minimal_junit(
+        tmp_path / "mut.xml",
+        failures={node: "test failed"},
+        failure_bodies={node: "SecurityError: sandbox escape"},
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+
+    # Identical message attribute, different bodies -> different fingerprints.
+    assert _fingerprint_for(junit_orig, node) != _fingerprint_for(junit_mut, node)
+
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": node, "fingerprint": _fingerprint_for(junit_orig, node)}],
+    )
+    # Original outcome passes.
+    assert _run180_main(junit_orig, mypy, baseline) == 0
+    # Same headline, mutated body must fail.
+    assert _run180_main(junit_mut, mypy, baseline) == 1

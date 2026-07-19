@@ -7,8 +7,17 @@ and decides whether the run may pass.
 Rules (per docs/plans/2026-07-19-incremental-architecture-refactor-plan.md §7.2):
 
 - pytest failures/errors are keyed by node ID. Only failures whose node ID
-  appears in ``pytest.known_failures`` are tolerated. New failures, new
-  errors, collection errors, or a missing/unparseable JUnit XML fail closed.
+  appears in ``pytest.known_failures`` are tolerated, and every
+  ``known_failures`` entry MUST be a well-formed
+  ``{node_id, fingerprint}`` object whose fingerprint matches the exact
+  grammar ``<preview> | sha256:<64 hex>`` (digested over the normalized
+  ``message`` attribute PLUS the full element text, so a mutated
+  exception in the JUnit body cannot hide behind an unchanged/generic
+  headline). Legacy plain-string entries, fingerprintless objects,
+  malformed fingerprints, duplicates, or unknown shapes are rejected as a
+  corrupt baseline (exit 2) before any comparison. New failures, new
+  errors, collection errors, or a missing/unparseable JUnit XML fail
+  closed.
 - pytest skips are keyed by node ID. New skips must be explicitly added to
   ``pytest.known_skips``; existing skips disappearing is allowed.
 - mypy diagnostics are keyed by ``{path, error_code, normalized_message}``
@@ -243,26 +252,37 @@ def _parse_mypy_rows(text: str) -> tuple[set[tuple[str, str, str]], int]:
 
 
 def _normalize_failure_fingerprint(raw: str) -> str:
-    """Normalize a JUnit ``<failure message="...">`` attribute into a stable
+    """Normalize JUnit failure content into a stable fingerprint.
+
+    ``raw`` is the FULL semantic content of the ``<failure>``/``<error>``
+    outcome: the normalized ``message`` attribute plus the full element
+    text, joined with a channel separator (see
+    ``_failure_outcome_content``). The first line of pytest's failure
+    message carries the exception type and the headline message; the
+    second line is typically the traceback frame; the third line carries
+    the nested cause (e.g. ``ModuleNotFoundError: No module named
+    'tomllib'``), and for many pytest failures the element TEXT is where
+    the actual traceback and exception live while the attribute holds
+    only a generic headline. Because JUnit XML attributes flatten
+    newlines to spaces, we cannot rely on line structure at comparison
+    time, and ANY blind omission (head[:N] + tail[-M:], or hashing only
+    the attribute while ignoring the body) lets a semantic mutation hide
+    in the un-hashed region (review-t_e03bfeff round-4 P1: a 186-char
+    headline plus a 200-char nested-cause payload mutated
+    ``ModuleNotFoundError`` -> ``SecurityError`` in the omitted middle
+    and produced an identical fingerprint; run 180 P2: a baseline
+    ``<failure>ModuleNotFoundError: old</failure>`` mutated to
+    ``<failure>SecurityError: replacement</failure>`` hashed the empty
+    attribute both times and passed).
+
+    The fingerprint therefore digests the FULL normalized semantic text
+    (attribute AND element text) with SHA-256 and prepends a bounded
+    human-readable preview so baseline diffs stay reviewable:
+    ``<preview> | sha256:<hex>``. Whitespace is collapsed and numeric
+    literals / tmp paths are scrubbed for stability BEFORE the digest,
+    so two semantically identical outcomes hash identically while any
+    semantic change anywhere — attribute or body — changes the
     fingerprint.
-
-    The first line of pytest's failure message carries the exception type
-    and the headline message; the second line is typically the traceback
-    frame; the third line carries the nested cause (e.g.
-    ``ModuleNotFoundError: No module named 'tomllib'``). Because JUnit XML
-    attributes flatten newlines to spaces, we cannot rely on line structure
-    at comparison time, and ANY blind middle omission (head[:N] + tail[-M:])
-    lets a semantic mutation hide between the retained slices
-    (review-t_e03bfeff round-4 P1: a 186-char headline plus a 200-char
-    nested-cause payload mutated ``ModuleNotFoundError`` -> ``SecurityError``
-    in the omitted middle and produced an identical fingerprint).
-
-    The fingerprint therefore digests the FULL normalized semantic text with
-    SHA-256 and prepends a bounded human-readable preview so baseline diffs
-    stay reviewable: ``<preview> | sha256:<hex>``. Whitespace is collapsed
-    and numeric literals / tmp paths are scrubbed for stability BEFORE the
-    digest, so two semantically identical messages hash identically while
-    any semantic change anywhere in the message changes the fingerprint.
     """
     normalized = re.sub(r"\s+", " ", (raw or "")).strip()
     normalized = re.sub(r"/[^\s]*?(?:pytest-of-[^/]+|tmp[Tt][^/]*)/[^\s]*", "<TMP>", normalized)
@@ -270,6 +290,112 @@ def _normalize_failure_fingerprint(raw: str) -> str:
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     preview = normalized[:120]
     return f"{preview} | sha256:{digest}"
+
+
+def _failure_outcome_content(outcome_el: ET.Element) -> str:
+    """Return the full fingerprintable content of a ``<failure>``/``<error>``.
+
+    A standard JUnit ``<failure>`` may omit the optional ``message``
+    attribute or carry only a generic headline there while the actual
+    exception type, message, and traceback live in the element TEXT.
+    Hashing only the attribute is a blind channel: two failures with the
+    same (or no) attribute but different bodies — a different root cause
+    — must NOT produce the same fingerprint (review-t_e03bfeff run 180
+    P2). Both channels are therefore always included, normalized the
+    same way, and joined with a fixed separator so a semantic change in
+    either channel changes the digest. Nested child markup (rare in
+    practice) is serialized into the text channel as well so nothing
+    semantic is dropped.
+    """
+    message = re.sub(r"\s+", " ", (outcome_el.get("message") or "")).strip()
+    text_parts: list[str] = []
+    if outcome_el.text:
+        text_parts.append(outcome_el.text)
+    for child in outcome_el:
+        text_parts.append(ET.tostring(child, encoding="unicode"))
+        if child.tail:
+            text_parts.append(child.tail)
+    text = re.sub(r"\s+", " ", " ".join(part for part in text_parts if part)).strip()
+    return f"message: {message}\ntext: {text}"
+
+
+# Grammar of a well-formed known_failures fingerprint as emitted by
+# ``_normalize_failure_fingerprint``: ``<preview> | sha256:<64 hex>``.
+_FINGERPRINT_GRAMMAR_RE = re.compile(r"^.{0,120} \| sha256:[0-9a-f]{64}$", re.DOTALL)
+
+
+class BaselineSchemaError(ValueError):
+    """Raised when the checked-in baseline contains a malformed known_failures entry.
+
+    A stale, legacy, or hand-edited baseline entry that lacks an exact
+    fingerprint is a fail-open path: fingerprint enforcement is silently
+    skipped for that node and any new failure cause there passes
+    (review-t_e03bfeff run 180 P2-1). The comparator therefore validates
+    the schema strictly and refuses to run at all on a corrupt baseline.
+    """
+
+
+def validate_known_failures(known_failures_raw: Any) -> dict[str, str]:
+    """Validate ``pytest.known_failures`` and return ``{node_id: fingerprint}``.
+
+    Every entry MUST be a well-formed object with a non-empty string
+    ``node_id`` and a string ``fingerprint`` matching the exact grammar
+    ``<preview> | sha256:<64 hex>`` emitted by
+    ``_normalize_failure_fingerprint``. Plain node-ID strings (the legacy
+    form), fingerprintless objects, unknown shapes, wrong types, empty
+    values, malformed fingerprints, and duplicate node IDs are all
+    rejected as a corrupt baseline — fail closed, never skip
+    fingerprint enforcement (review-t_e03bfeff run 180 P2-1).
+    """
+    if not isinstance(known_failures_raw, list):
+        raise BaselineSchemaError(
+            "baseline pytest.known_failures must be a list of "
+            "{node_id, fingerprint} objects; refusing to run on a corrupt "
+            f"baseline (got {type(known_failures_raw).__name__})"
+        )
+    entries: dict[str, str] = {}
+    for index, entry in enumerate(known_failures_raw):
+        where = f"baseline pytest.known_failures[{index}]"
+        if not isinstance(entry, dict):
+            raise BaselineSchemaError(
+                f"{where} is not an object (got {type(entry).__name__}: {entry!r}); "
+                "the legacy plain-string form bypasses fingerprint enforcement "
+                "and is no longer accepted — regenerate the baseline with "
+                "scripts/generate_quality_baseline.py"
+            )
+        unknown_keys = sorted(set(entry) - {"node_id", "fingerprint"})
+        if unknown_keys:
+            raise BaselineSchemaError(
+                f"{where} has unknown keys {unknown_keys}; refusing to run on a corrupt baseline"
+            )
+        node = entry.get("node_id")
+        if not isinstance(node, str) or not node:
+            raise BaselineSchemaError(
+                f"{where} must have a non-empty string node_id; refusing to "
+                f"run on a corrupt baseline (got {node!r})"
+            )
+        fingerprint = entry.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise BaselineSchemaError(
+                f"{where} (node {node!r}) must have a non-empty string "
+                "fingerprint; an entry without a fingerprint silently "
+                "disables cause comparison for that node (fail closed)"
+            )
+        if not _FINGERPRINT_GRAMMAR_RE.match(fingerprint):
+            raise BaselineSchemaError(
+                f"{where} (node {node!r}) has a malformed fingerprint "
+                f"{fingerprint!r}; expected the exact grammar "
+                "'<preview> | sha256:<64 hex>' emitted by "
+                "scripts/generate_quality_baseline.py — a fingerprint the "
+                "comparator cannot verify fails closed"
+            )
+        if node in entries:
+            raise BaselineSchemaError(
+                f"baseline pytest.known_failures lists node {node!r} more "
+                "than once; refusing to run on a corrupt baseline"
+            )
+        entries[node] = fingerprint
+    return entries
 
 
 class JUnitStructureError(ValueError):
@@ -391,7 +517,7 @@ def parse_junit_failures_and_skips(
         outcome_el = outcome_children[0] if outcome_children else None
         has_skip = bool(skip_children)
         if outcome_el is not None:
-            fingerprint = _normalize_failure_fingerprint(outcome_el.get("message", ""))
+            fingerprint = _normalize_failure_fingerprint(_failure_outcome_content(outcome_el))
             if outcome_el.tag == "failure":
                 failures[nid] = fingerprint
                 parsed_failure_count += 1
@@ -479,23 +605,19 @@ def compare_pytest(
     problems: list[str] = []
     if collection_errors:
         problems.append(f"pytest collection errors (fail closed): {collection_errors}")
-    # known_failures entries may be plain node-ID strings (legacy form,
-    # fingerprint not enforced) or objects with ``node_id`` + ``fingerprint``
-    # (reviewer-required form: a new failure cause at the same node is
-    # rejected). Known skips stay plain node-ID strings. ``<error>``
-    # outcomes are NEVER allowlisted via known_failures — they must be
-    # rejected independently (review-t_e03bfeff P2-4).
+    # known_failures entries MUST be exact ``{node_id, fingerprint}``
+    # objects whose fingerprint matches the comparator's own grammar
+    # (``<preview> | sha256:<64 hex>``). The legacy plain-string form and
+    # fingerprintless objects silently disabled cause comparison for that
+    # node — a fail-open path that let a mutated failure cause pass when
+    # the checked-in baseline was stale/legacy/malformed (review-t_e03bfeff
+    # run 180 P2-1). The baseline is therefore schema-validated fail-closed
+    # BEFORE any comparison. Known skips stay plain node-ID strings.
+    # ``<error>`` outcomes are NEVER allowlisted via known_failures — they
+    # must be rejected independently (review-t_e03bfeff P2-4).
     known_failures_raw = baseline.get("pytest", {}).get("known_failures", [])
-    known_failure_nodes: set[str] = set()
-    known_failure_fingerprints: dict[str, str] = {}
-    for entry in known_failures_raw:
-        if isinstance(entry, str):
-            known_failure_nodes.add(entry)
-        elif isinstance(entry, dict) and "node_id" in entry:
-            node = str(entry["node_id"])
-            known_failure_nodes.add(node)
-            if "fingerprint" in entry:
-                known_failure_fingerprints[node] = str(entry["fingerprint"])
+    known_failure_fingerprints = validate_known_failures(known_failures_raw)
+    known_failure_nodes = set(known_failure_fingerprints)
     known_skips = set(baseline.get("pytest", {}).get("known_skips", []))
 
     new_failures = sorted(set(failures) - known_failure_nodes)
@@ -717,7 +839,11 @@ def main(argv: list[str] | None = None) -> int:
             "artifact (fail closed)"
         )
 
-    problems.extend(compare_pytest(baseline, failures, errors, skips, collection_errors))
+    try:
+        problems.extend(compare_pytest(baseline, failures, errors, skips, collection_errors))
+    except BaselineSchemaError as exc:
+        print(f"FAIL: corrupt baseline: {exc}", file=sys.stderr)
+        return 2
     problems.extend(compare_mypy(baseline, live_mypy))
 
     if args.coverage_xml is not None:
