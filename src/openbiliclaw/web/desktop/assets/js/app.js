@@ -5442,7 +5442,28 @@
       return { directory: normalized.slice(0, slashIndex) || "/", filename: normalized.slice(slashIndex + 1) || fallback.filename };
     }
 
+    // Explicit user-intent tracking for the logging path field. String
+    // equality against the redacted GET echo cannot distinguish "unchanged
+    // full-form save" from "intentional edit to the exact displayed
+    // basename", so the payload branch keys off an explicit dirty flag set
+    // by real user input events and reset whenever the backend config is
+    // (re)rendered into the form (initial load, hot reload, save success).
+    let logPathDirty = false;
+
+    function markLogPathDirty() {
+      logPathDirty = true;
+    }
+
+    function resetLogPathDirty() {
+      logPathDirty = false;
+    }
+
     function isLogPathUnmodified(currentLogging) {
+      // The dirty flag is the authoritative intent signal; the string
+      // comparison only guards the edge where the flag was never armed
+      // (e.g. listener not yet attached) — a pristine echo still counts as
+      // unmodified then.
+      if (logPathDirty) return false;
       return getInput("logPath") === resolveLogPath(currentLogging);
     }
 
@@ -5792,6 +5813,9 @@
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
       setInput("logPath", resolveLogPath(config.logging));
+      // Programmatic render of the wire echo means the field is pristine
+      // again — any prior edit intent has either been saved or discarded.
+      resetLogPathDirty();
       setInput("logMaxFileSize", config.logging?.max_file_size_mb);
       setInput("logBackupCount", config.logging?.backup_count);
       setInput("logAggregateBudget", config.logging?.aggregate_budget_mb);
@@ -7344,6 +7368,11 @@
         showToast("没有拿到占比建议");
       }
     });
+    // Any real user keystroke in the log path field marks intentional edit
+    // intent, even if the final value equals the redacted GET echo (the
+    // exact-basename revert case). Programmatic renders via setInput() do
+    // not fire "input" events, so this only arms on genuine user edits.
+    safeBind("#logPath", "input", () => markLogPathDirty());
     safeBind("#settingsForm", "submit", async (event) => {
       event.preventDefault();
       if (document.querySelector("[data-settings-tab].is-active")?.dataset.settingsTab === "models") {

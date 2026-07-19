@@ -1220,8 +1220,9 @@ def _is_absolute_or_unc_path(path: str) -> bool:
     """Return True if *path* is absolute on any common platform.
 
     ``PurePath.is_absolute()`` is host-native, so on POSIX it misses
-    Windows drive-absolute (``C:\\...``) and UNC (``\\\\server\\share``)
-    forms. This helper detects all three independent of the host OS.
+    Windows drive-absolute (``C:\\...``), UNC (``\\\\server\\share``), and
+    rooted-no-drive (``\\Users\\alice``) forms. This helper detects all of
+    them independent of the host OS.
     """
     if not path:
         return False
@@ -1231,8 +1232,12 @@ def _is_absolute_or_unc_path(path: str) -> bool:
     # Windows drive-absolute: C:\... or C:/...
     if len(path) >= 3 and path[1] == ":" and path[0].isalpha():
         return True
-    # Windows UNC: \\server\share or //server/share
-    return path.startswith("\\\\") or path.startswith("//")
+    # Windows UNC (``\\server\share`` or ``//server/share``) and Windows
+    # rooted-no-drive (``\Users\alice``): any leading backslash is a Windows
+    # root marker, and a doubled forward slash is already caught above.
+    if path.startswith("\\"):
+        return True
+    return path.startswith("//")
 
 
 def _safe_logging_directory_for_wire(directory: str) -> str:
@@ -1245,11 +1250,13 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
 
     Contract:
     - Relative directory (``"logs"``, ``"runtime-logs"``) → returned as-is.
-    - Absolute or ``~``-prefixed directory → reduced to its final path
-      component (basename). The basename is non-reversible: a client cannot
+    - Absolute, rooted-no-drive Windows (``\\Users\\alice``), UNC, or
+      ``~``-prefixed directory → reduced to its final path component
+      (basename). The basename is non-reversible: a client cannot
       reconstruct the parent directories from it.
-    - Root/volume-only paths (``/``, ``C:\\``, ``~``) → reduced to empty
-      string so ``file_path`` falls back to the filename only.
+    - Root/volume-only paths (``/``, ``C:\\``, ``~``) and bare ``~user``
+      forms (``~alice``) → reduced to empty string so ``file_path`` falls
+      back to the filename only.
 
     The on-disk logging path is unaffected — this redaction applies only to
     the API response.
@@ -1263,13 +1270,15 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
         if not parts:
             return ""
         candidate = parts[-1]
-        # Root/volume-only basenames are still host-revealing (``C:`` or
-        # ``~``) or empty. Redact them to empty so the wire form never
-        # contains an absolute host path component.
-        if candidate.endswith(":") or candidate == "~":
+        # Root/volume-only basenames are still host-revealing (``C:``,
+        # ``~``) or identify another user's home (``~alice``). Redact them
+        # to empty so the wire form never contains an absolute host path
+        # component.
+        if candidate.endswith(":") or candidate.startswith("~"):
             return ""
         return candidate
     return directory
+
 
 def _safe_logging_filename_for_wire(filename: str) -> str:
     """Redact a configured logging filename for ``GET /api/config``.
@@ -1290,6 +1299,7 @@ def _safe_logging_filename_for_wire(filename: str) -> str:
         return parts[-1] if parts else ""
     return filename
 
+
 def _logging_file_path_for_wire(directory: str, filename: str) -> str:
     """Build the redacted ``file_path`` wire form from redacted components.
 
@@ -1303,6 +1313,7 @@ def _logging_file_path_for_wire(directory: str, filename: str) -> str:
     name_part = _safe_logging_filename_for_wire(filename)
     return f"{dir_part}/{name_part}" if dir_part else name_part
 
+
 def _split_logging_file_path(file_path: str) -> tuple[str, str]:
     """Split a wire ``file_path`` into ``(directory, filename)`` components.
 
@@ -1314,9 +1325,6 @@ def _split_logging_file_path(file_path: str) -> tuple[str, str]:
     if slash_index == -1:
         return "", normalized
     return normalized[:slash_index], normalized[slash_index + 1 :]
-
-
-
 
 
 def create_app(
@@ -10440,9 +10448,7 @@ def create_app(
                 # path: relative directories pass through, absolute/``~``
                 # directories collapse to their basename first, and
                 # root/volume-only paths fall back to the filename only.
-                file_path=_logging_file_path_for_wire(
-                    cfg.logging.directory, cfg.logging.filename
-                ),
+                file_path=_logging_file_path_for_wire(cfg.logging.directory, cfg.logging.filename),
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
                 aggregate_budget_mb=cfg.logging.aggregate_budget_mb,
