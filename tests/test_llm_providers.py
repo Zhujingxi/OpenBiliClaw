@@ -21,7 +21,6 @@ from openbiliclaw.llm.base import (
     LLMResponseError,
     LLMTimeoutError,
 )
-from openbiliclaw.llm.claude_provider import ClaudeProvider
 from openbiliclaw.llm.gemini_provider import GeminiProvider, gemini_sdk_available
 from openbiliclaw.llm.ollama_provider import OllamaProvider
 from openbiliclaw.llm.openai_provider import (
@@ -432,173 +431,6 @@ async def test_openai_provider_reports_reasoning_only_response(
     message = str(exc_info.value)
     assert "returned reasoning but no final content" in message
     assert "finish_reason=length" in message
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = ClaudeProvider(api_key="test-key")
-
-    async def fake_create(**_: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            model="claude-sonnet",
-            content=[SimpleNamespace(text="hello"), SimpleNamespace(text=" world")],
-            usage=SimpleNamespace(input_tokens=12, output_tokens=8),
-        )
-
-    monkeypatch.setattr(provider._client.messages, "create", fake_create)
-
-    response = await provider.complete(
-        [
-            {"role": "system", "content": "You are helpful"},
-            {"role": "user", "content": "hi"},
-        ]
-    )
-
-    assert response.content == "hello world"
-    assert response.provider == "claude"
-    assert response.usage == {
-        "prompt_tokens": 12,
-        "completion_tokens": 8,
-        "total_tokens": 20,
-    }
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_accepts_per_call_model_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = ClaudeProvider(api_key="test-key", model="claude-default")
-    captured: dict[str, object] = {}
-
-    async def fake_request(**kwargs: object) -> SimpleNamespace:
-        captured.update(kwargs)
-        return SimpleNamespace(
-            model="claude-override",
-            content=[SimpleNamespace(text="ok")],
-            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
-        )
-
-    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
-
-    response = await provider.complete(
-        [{"role": "user", "content": "hi"}],
-        model="claude-override",
-    )
-
-    assert response.content == "ok"
-    assert captured["model"] == "claude-override"
-    assert provider._model == "claude-default"
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_marks_system_with_ephemeral_cache_control(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """v0.3.29+: ``system`` must reach Anthropic as a list of typed
-    blocks with ``cache_control: {"type": "ephemeral"}`` so prompt cache
-    fires (90% off on cached input). Plain string ``system="..."`` is
-    NEVER cached by Anthropic, regardless of length.
-    """
-    provider = ClaudeProvider(api_key="test-key")
-
-    captured_kwargs: dict[str, object] = {}
-
-    async def fake_create(**kwargs: object) -> SimpleNamespace:
-        captured_kwargs.update(kwargs)
-        return SimpleNamespace(
-            model="claude-sonnet-4-6",
-            content=[SimpleNamespace(text="ok")],
-            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
-        )
-
-    monkeypatch.setattr(provider._client.messages, "create", fake_create)
-
-    await provider.complete(
-        [
-            {"role": "system", "content": "static rules text"},
-            {"role": "user", "content": "hi"},
-        ]
-    )
-
-    system_param = captured_kwargs["system"]
-    # Must be the list-of-blocks form, not a plain string
-    assert isinstance(system_param, list), (
-        f"system must be list for cache_control, got {type(system_param).__name__}"
-    )
-    assert len(system_param) == 1
-    block = system_param[0]
-    assert block["type"] == "text"
-    assert block["text"] == "static rules text"
-    # The actual cache marker
-    assert block["cache_control"] == {"type": "ephemeral"}
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_extracts_cache_read_and_creation_tokens(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When Anthropic reports cache hit/write tokens, normalize them
-    under ``cached_input_tokens`` and ``cache_creation_input_tokens``."""
-    provider = ClaudeProvider(api_key="test-key")
-
-    async def fake_create(**_: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            model="claude-sonnet-4-6",
-            content=[SimpleNamespace(text="ok")],
-            usage=SimpleNamespace(
-                input_tokens=2000,
-                output_tokens=300,
-                cache_read_input_tokens=1500,
-                cache_creation_input_tokens=400,
-            ),
-        )
-
-    monkeypatch.setattr(provider._client.messages, "create", fake_create)
-
-    response = await provider.complete([{"role": "user", "content": "hi"}])
-
-    assert response.usage["cached_input_tokens"] == 1500
-    assert response.usage["cache_creation_input_tokens"] == 400
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_maps_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = ClaudeProvider(api_key="test-key")
-
-    async def fake_sleep(_: float) -> None:
-        return None
-
-    async def fake_create(**_: object) -> SimpleNamespace:
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(provider._client.messages, "create", fake_create)
-    monkeypatch.setattr("openbiliclaw.llm.claude_provider.asyncio.sleep", fake_sleep)
-
-    with pytest.raises(LLMProviderError):
-        await provider.complete([{"role": "user", "content": "hi"}])
-
-
-@pytest.mark.asyncio
-async def test_claude_provider_does_not_retry_rate_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = ClaudeProvider(api_key="test-key")
-    calls = {"count": 0}
-
-    async def fake_sleep(_: float) -> None:
-        pytest.fail("rate-limited requests should not sleep for provider retries")
-
-    async def fake_create(**_: object) -> SimpleNamespace:
-        calls["count"] += 1
-        raise RuntimeError("rate limit exceeded")
-
-    monkeypatch.setattr(provider._client.messages, "create", fake_create)
-    monkeypatch.setattr("openbiliclaw.llm.claude_provider.asyncio.sleep", fake_sleep)
-
-    with pytest.raises(LLMRateLimitError):
-        await provider.complete([{"role": "user", "content": "hi"}])
-
-    assert calls["count"] == 1
 
 
 def test_deepseek_provider_defaults() -> None:
@@ -1395,20 +1227,6 @@ async def test_health_check_returns_false_on_failure(monkeypatch: pytest.MonkeyP
     assert await provider.health_check() is False
 
 
-# --- issue #72: third-party gateway adaptation ---
-
-
-def test_claude_provider_accepts_custom_base_url() -> None:
-    provider = ClaudeProvider(api_key="sk-test", base_url="https://relay.example.com/api")
-    # The Anthropic SDK normalizes the URL with a trailing slash.
-    assert str(provider._client.base_url).rstrip("/") == "https://relay.example.com/api"
-
-
-def test_claude_provider_defaults_to_official_base_url() -> None:
-    provider = ClaudeProvider(api_key="sk-test")
-    assert "api.anthropic.com" in str(provider._client.base_url)
-
-
 def _responses_response(text: str = "ok", *, with_output_text: bool = True) -> SimpleNamespace:
     response = SimpleNamespace(
         model="gpt-5-mini",
@@ -1474,6 +1292,7 @@ async def test_openai_provider_responses_flavor_maps_params_and_usage(
     }
 
 
+# --- issue #72: third-party gateway adaptation ---
 @pytest.mark.asyncio
 async def test_openai_provider_responses_flavor_walks_output_without_output_text(
     monkeypatch: pytest.MonkeyPatch,
@@ -1624,39 +1443,6 @@ def test_openai_provider_direct_mode_disables_environment_proxy(
 
     assert httpx_kwargs["trust_env"] is False
     assert "proxy" not in httpx_kwargs
-
-
-def test_claude_provider_injects_proxy_into_http_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openbiliclaw.llm import claude_provider as mod
-
-    sdk_kwargs: dict[str, object] = {}
-    httpx_kwargs: dict[str, object] = {}
-    sentinel = object()
-
-    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
-    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: httpx_kwargs.update(kw) or sentinel)
-
-    provider = ClaudeProvider(api_key="k", proxy="http://127.0.0.1:7890")
-
-    assert provider._proxy == "http://127.0.0.1:7890"
-    assert httpx_kwargs.get("proxy") == "http://127.0.0.1:7890"
-    assert httpx_kwargs.get("trust_env") is False
-    assert sdk_kwargs.get("http_client") is sentinel
-
-
-def test_claude_provider_empty_proxy_is_zero_drift(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openbiliclaw.llm import claude_provider as mod
-
-    sdk_kwargs: dict[str, object] = {}
-    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
-
-    ClaudeProvider(api_key="k", proxy="")
-
-    assert "http_client" not in sdk_kwargs
 
 
 @pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai not installed")

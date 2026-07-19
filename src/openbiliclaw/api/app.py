@@ -1216,6 +1216,152 @@ def _is_masked_proxy_echo(value: str) -> bool:
     return "***" in value
 
 
+def _is_absolute_or_unc_path(path: str) -> bool:
+    """Return True if *path* is absolute on any common platform.
+
+    ``PurePath.is_absolute()`` is host-native, so on POSIX it misses
+    Windows drive-absolute (``C:\\...``), UNC (``\\\\server\\share``), and
+    rooted-no-drive (``\\Users\\alice``) forms. This helper detects all of
+    them independent of the host OS.
+    """
+    if not path:
+        return False
+    # POSIX absolute
+    if path.startswith("/"):
+        return True
+    # Windows drive-qualified: drive-absolute (``C:\...`` / ``C:/...``),
+    # drive-only (``C:``) and drive-relative (``C:foo``) forms. Drive-only
+    # and drive-relative paths are drive-qualified on Windows (they resolve
+    # against the drive's current directory), so the wire form must never
+    # emit a drive prefix either — the docs promise no ``C:`` disclosure.
+    if len(path) >= 2 and path[1] == ":" and path[0].isalpha():
+        return True
+    # Windows UNC (``\\server\share`` or ``//server/share``) and Windows
+    # rooted-no-drive (``\Users\alice``): any leading backslash is a Windows
+    # root marker, and a doubled forward slash is already caught above.
+    if path.startswith("\\"):
+        return True
+    return path.startswith("//")
+
+
+def _safe_logging_directory_for_wire(directory: str) -> str:
+    """Redact a configured logging directory for ``GET /api/config``.
+
+    ``LoggingConfig.directory`` accepts absolute paths (e.g.
+    ``/srv/private/openbiliclaw/logs``) and ``~``-prefixed home-relative
+    paths. Both reveal the host filesystem layout to any client that can
+    reach the API, so the wire form must not echo them verbatim.
+
+    Contract:
+    - Relative directory (``"logs"``, ``"runtime-logs"``) → returned as-is.
+    - Absolute, rooted-no-drive Windows (``\\Users\\alice``), UNC, or
+      ``~``-prefixed directory → reduced to its final path component
+      (basename). The basename is non-reversible: a client cannot
+      reconstruct the parent directories from it.
+    - Root/volume-only paths (``/``, ``C:\\``, ``~``) and bare ``~user``
+      forms (``~alice``) → reduced to empty string so ``file_path`` falls
+      back to the filename only.
+    - Drive-only (``C:``) and drive-relative (``C:foo``) forms: the drive
+      prefix is stripped first, then the remainder reduces by the same
+      rules — ``C:`` → empty, ``C:foo`` → ``foo``. The wire form never
+      emits a drive prefix.
+
+    The on-disk logging path is unaffected — this redaction applies only to
+    the API response.
+    """
+    if not directory:
+        return directory
+    if _is_absolute_or_unc_path(directory) or directory.startswith("~"):
+        # Strip any Windows drive prefix (``C:``, ``C:foo``) before
+        # splitting so drive-only and drive-relative forms never leak the
+        # drive letter into the wire form.
+        stripped = directory
+        if len(stripped) >= 2 and stripped[1] == ":" and stripped[0].isalpha():
+            stripped = stripped[2:]
+        # Use both separators so Windows-style absolutes serialised on a
+        # POSIX host (and vice versa) still reduce to their basename.
+        parts = [p for p in stripped.replace("\\", "/").split("/") if p]
+        if not parts:
+            return ""
+        candidate = parts[-1]
+        # Root/volume-only basenames are still host-revealing (``C:``,
+        # ``~``) or identify another user's home (``~alice``). Redact them
+        # to empty so the wire form never contains an absolute host path
+        # component.
+        if candidate.endswith(":") or candidate.startswith("~"):
+            return ""
+        return candidate
+    return directory
+
+
+def _safe_logging_filename_for_wire(filename: str) -> str:
+    """Redact a configured logging filename for ``GET /api/config``.
+
+    ``LoggingConfig.filename`` is documented as a plain basename, but the
+    config layer does not enforce that. A filename containing path separators
+    (absolute or relative) would leak the host filesystem layout when echoed
+    back or joined into ``file_path``. Drive-qualified forms without any
+    separator (``C:backend.log``, ``D:``) are equally host-revealing: on
+    Windows ``PureWindowsPath("logs") / "C:backend.log"`` collapses to the
+    drive-qualified ``C:backend.log``, silently dropping the configured
+    directory, so the wire form must never carry a drive prefix either.
+
+    Contract:
+    - Plain basename (``"backend.log"``) → returned as-is.
+    - Any filename containing ``/`` or ``\\`` → reduced to its basename.
+    - Drive-only (``C:`` / ``d:``) and drive-relative (``C:foo`` /
+      ``c:foo``) forms: the drive prefix is stripped first, then the
+      remainder reduces by the same rules — ``C:`` → empty (so
+      ``file_path`` falls back to the redacted directory only), ``C:foo``
+      → ``foo``. The wire form never emits a drive prefix, matching the
+      directory-side contract.
+    """
+    if not filename:
+        return filename
+    candidate = filename
+    # Strip any Windows drive prefix (``C:``, ``C:foo``) before separator
+    # handling so drive-only and drive-relative names never leak the drive
+    # letter into the wire form, independent of the host OS dialect. Keep the
+    # guard host-neutral (alpha + ``:``) rather than delegating to
+    # ``PureWindowsPath``, so POSIX-hosted daemons redact Windows dialects
+    # the same way a Windows-hosted daemon would.
+    if len(candidate) >= 2 and candidate[1] == ":" and candidate[0].isalpha():
+        candidate = candidate[2:]
+    if not candidate:
+        return ""
+    if "/" in candidate or "\\" in candidate:
+        parts = [p for p in candidate.replace("\\", "/").split("/") if p]
+        return parts[-1] if parts else ""
+    return candidate
+
+
+def _logging_file_path_for_wire(directory: str, filename: str) -> str:
+    """Build the redacted ``file_path`` wire form from redacted components.
+
+    ``file_path`` never contains an absolute host path: relative directories
+    pass through, absolute/``~``/UNC directories collapse to their basename
+    (or empty for root/volume-only paths), and filenames with separators
+    collapse to their basename. When the redacted directory is empty the
+    result is just the filename — no leading ``/`` is emitted.
+    """
+    dir_part = _safe_logging_directory_for_wire(directory)
+    name_part = _safe_logging_filename_for_wire(filename)
+    return f"{dir_part}/{name_part}" if dir_part else name_part
+
+
+def _split_logging_file_path(file_path: str) -> tuple[str, str]:
+    """Split a wire ``file_path`` into ``(directory, filename)`` components.
+
+    The inverse of :func:`_logging_file_path_for_wire`. Handles both
+    ``dir/name`` and bare ``name`` forms, normalising Windows separators.
+    """
+    normalized = file_path.replace("\\", "/").rstrip("/")
+    slash_index = normalized.rfind("/")
+    if slash_index == -1:
+        return "", normalized
+    return normalized[:slash_index], normalized[slash_index + 1 :]
+
+
 def create_app(
     *,
     memory_manager: Any | None = None,
@@ -10325,9 +10471,19 @@ def create_app(
             logging=LoggingConfigOut(
                 level=cfg.logging.level,
                 file_level=cfg.logging.file_level,
-                directory=cfg.logging.directory,
-                filename=cfg.logging.filename,
-                file_path=str(cfg.logging.file_path),
+                # Redact host-revealing directories: absolute paths and
+                # ``~``-prefixed home-relative paths leak the host filesystem
+                # layout when the API is bound beyond loopback. The wire form
+                # keeps relative directories as-is and reduces absolute or
+                # ``~``-prefixed directories to their basename (non-reversible).
+                directory=_safe_logging_directory_for_wire(cfg.logging.directory),
+                filename=_safe_logging_filename_for_wire(cfg.logging.filename),
+                # ``file_path`` is the wire-facing joined form of the redacted
+                # directory + filename. It never contains an absolute host
+                # path: relative directories pass through, absolute/``~``
+                # directories collapse to their basename first, and
+                # root/volume-only paths fall back to the filename only.
+                file_path=_logging_file_path_for_wire(cfg.logging.directory, cfg.logging.filename),
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
                 aggregate_budget_mb=cfg.logging.aggregate_budget_mb,
@@ -10973,7 +11129,29 @@ def create_app(
         # Apply logging updates
         if "logging" in update:
             ldata = update["logging"]
-            for key in ("level", "file_level", "directory", "filename"):
+            # Modern clients send ``file_path`` as the authoritative logging
+            # path field. When it exactly matches the current redacted wire
+            # form it is an unchanged GET echo and the canonical absolute
+            # paths are preserved. When it differs it is an intentional edit
+            # and is split back into directory/filename. Legacy clients that
+            # omit ``file_path`` apply directory/filename directly — the
+            # value-equality echo heuristic is intentionally dropped so an
+            # intentional edit to the exact displayed basename is honoured.
+            if "file_path" in ldata:
+                submitted_path = str(ldata["file_path"])
+                current_wire_path = _logging_file_path_for_wire(
+                    cfg.logging.directory, cfg.logging.filename
+                )
+                if submitted_path != current_wire_path:
+                    directory, filename = _split_logging_file_path(submitted_path)
+                    cfg.logging.directory = directory
+                    cfg.logging.filename = filename
+            else:
+                if "directory" in ldata:
+                    cfg.logging.directory = str(ldata["directory"])
+                if "filename" in ldata:
+                    cfg.logging.filename = str(ldata["filename"])
+            for key in ("level", "file_level"):
                 if key in ldata:
                     setattr(cfg.logging, key, str(ldata[key]))
             for key in (
