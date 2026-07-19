@@ -109,7 +109,7 @@ class UsageRecorder:
         # Normalized cache field — providers populate when their backend
         # served some input tokens from prompt cache. ``cached_input_tokens``
         # is always <= prompt_tokens. See provider docs in
-        # openai_provider.py / claude_provider.py / gemini_provider.py.
+        # openai_provider.py / anthropic_provider.py / gemini_provider.py.
         cached_tokens = int(usage.get("cached_input_tokens", 0) or 0)
 
         try:

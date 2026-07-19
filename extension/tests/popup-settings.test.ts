@@ -161,8 +161,47 @@ test("settings logging tab edits a single full log path", () => {
     popupJs,
     /const logPath = splitLogPath\(getVal\("cfgLogPath"\), state\.runtimeConfig\?\.logging\)/,
   );
-  assert.match(popupJs, /directory: logPath\.directory/);
-  assert.match(popupJs, /filename: logPath\.filename/);
+  assert.match(popupJs, /base\.directory = logPath\.directory/);
+  assert.match(popupJs, /base\.filename = logPath\.filename/);
+});
+
+test("settings logging path uses explicit dirty intent, not final-value equality", () => {
+  // Regression for the review finding that an intentional edit to the exact
+  // displayed basename (canonical absolute → relative "logs/backend.log")
+  // was indistinguishable from an unchanged redacted echo because the
+  // payload branch keyed off final string equality. The client must track
+  // user intent with an explicit dirty flag: armed by a real "input" event,
+  // reset on programmatic render (populateForm) and on save success.
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // 1. An explicit module-level dirty flag with mark/reset helpers exists.
+  assert.match(popupJs, /let logPathDirty = false;/);
+  assert.match(popupJs, /function markLogPathDirty\(\) \{\s*logPathDirty = true;\s*\}/);
+  assert.match(popupJs, /function resetLogPathDirty\(\) \{\s*logPathDirty = false;\s*\}/);
+
+  // 2. The intent classifier consults the dirty flag BEFORE any value
+  //    comparison, so edit-away-then-back still counts as an edit.
+  const classifier = popupJs.split("function isLogPathUnmodified", 2)[1] ?? "";
+  assert.match(classifier, /if \(logPathDirty\) return false;/);
+
+  // 3. The dirty flag is armed by a real user input event on the field,
+  //    not by programmatic setVal() renders.
+  assert.match(
+    popupJs,
+    /document\.getElementById\("cfgLogPath"\)[\s\S]{0,200}?addEventListener\("input", \(\) => markLogPathDirty\(\)\)/,
+  );
+
+  // 4. The flag is reset when the backend config is rendered into the form
+  //    (populateForm) and after a successful save.
+  const populateBlock = popupJs.split('setVal("cfgLogPath", resolveLogPathFromConfig(cfg.logging));', 2)[1] ?? "";
+  assert.match(populateBlock.slice(0, 300), /resetLogPathDirty\(\);/);
+  const saveSuccessBlock = popupJs.split("applyRuntimeConfig(result.config);", 2)[1] ?? "";
+  assert.match(saveSuccessBlock.slice(0, 400), /resetLogPathDirty\(\);/);
+
+  // 5. The payload branch still sends file_path only for pristine echoes
+  //    and directory/filename for intentional edits.
+  assert.match(popupJs, /if \(isLogPathUnmodified\(state\.runtimeConfig\?\.logging\)\) \{/);
+  assert.match(popupJs, /base\.file_path = getVal\("cfgLogPath"\);/);
 });
 
 test("settings page organizes backend config into tabs", () => {

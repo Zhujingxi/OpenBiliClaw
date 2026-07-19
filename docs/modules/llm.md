@@ -212,7 +212,7 @@ OpenAI、Gemini（文本与图像）和 DashScope 的 Embedding transport 每次
 - Gemini、Ollama 与 DashScope 保留各自原生协议 adapter。
 - adapter 的公开名称始终是稳定 connection ID；preset、额外 header、credential 与 endpoint 不进入 `repr`。
 
-`DeepSeekProvider`、`OpenRouterProvider` 与旧 vendor registry 已删除。新增协议行为应扩展 descriptor、connection factory 或统一 adapter options，不应重新引入厂商 bucket / subclass 构造。
+`DeepSeekProvider`、`OpenRouterProvider`、独立 `ClaudeProvider` 与旧 vendor registry 已删除；`openbiliclaw.llm.__all__` 不再导出 `ClaudeProvider`，Anthropic 官方与自定义 Messages 网关统一走 `AnthropicCompatibleProvider`。新增协议行为应扩展 descriptor、connection factory 或统一 adapter options，不应重新引入厂商 bucket / subclass 构造。
 ### Codex OAuth 凭据辅助
 
 ```python

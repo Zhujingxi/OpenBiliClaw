@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import textwrap
 import tomllib
@@ -185,6 +186,172 @@ def test_aggregate_release_helper_does_not_backfill_previous_channel_assets(
     assert f"release download extension-v{stale_version}" not in commands
     assert f"release download desktop-v{stale_version}" not in commands
     assert f"openbiliclaw-extension-v{stale_version}.zip" not in commands
+
+
+def test_aggregate_release_python_picker_discovers_future_versioned_binary(
+    tmp_path: Path,
+) -> None:
+    """``pick_python`` must accept any future ``python3.N`` interpreter.
+
+    Regression for the review finding that the picker hard-coded
+    ``python3.13 / 3.12 / 3.11`` and exited 1 on systems whose only suitable
+    interpreter was ``python3.14``. This test installs fake ``python3`` (old)
+    and fake ``python3.10`` (too old), ``python3.12`` (suitable),
+    ``python3.14`` (suitable, newest) and a stray ``python3.13-config``
+    (must never be picked) into an isolated PATH and verifies the script
+    selects ``python3.14`` deterministically — independent of directory
+    listing order. This is executable coverage, not a static string match.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    # Hermetic toolchain: the picker needs bash/awk/sort from PATH, but we
+    # must not leak host ``python3.N`` interpreters into the test. Symlink
+    # only the required tools into a dedicated directory and use that as the
+    # sole non-fake PATH entry.
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    for tool in ("bash", "awk", "sort"):
+        tool_path = shutil.which(tool)
+        assert tool_path is not None, f"{tool} not found on host PATH"
+        (toolchain / tool).symlink_to(tool_path)
+
+    # Old unversioned python3 (simulates macOS system python3 = 3.9).
+    fake_old_python3 = bin_dir / "python3"
+    fake_old_python3.write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    fake_old_python3.chmod(0o755)
+
+    # python3.10 — too old, must be skipped.
+    fake_310 = bin_dir / "python3.10"
+    fake_310.write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    fake_310.chmod(0o755)
+
+    # python3.12 — suitable but not the newest on PATH.
+    fake_312 = bin_dir / "python3.12"
+    fake_312.write_text(
+        "#!/usr/bin/env bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_312.chmod(0o755)
+
+    # python3.14 — suitable and the newest; must be picked.
+    fake_314 = bin_dir / "python3.14"
+    fake_314.write_text(
+        "#!/usr/bin/env bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_314.chmod(0o755)
+
+    # Stray non-interpreter sharing the python3.N prefix; must never be
+    # picked even though its version "passes" the check.
+    stray = bin_dir / "python3.13-config"
+    stray.write_text(
+        "#!/usr/bin/env bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    stray.chmod(0o755)
+
+    # Minimal gh stub — the script invokes `gh release ...` after picking
+    # Python; exiting 1 here stops the run right after pick_python emits.
+    fake_gh = bin_dir / "gh"
+    fake_gh.write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+
+    # Run only pick_python() in isolation, sourced from the real script, so
+    # we don't depend on gh / network / real pyproject.toml.
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            eval "$(awk '/^pick_python\\(\\) \\{/,/^}$/' \\
+                .github/scripts/sync-aggregate-release.sh)"
+            pick_python
+            """
+        ),
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{toolchain}"
+
+    result = subprocess.run(
+        ["bash", str(driver)],
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"picker exited {result.returncode}; stderr={result.stderr!r}"
+    # Deterministic: the highest suitable versioned binary wins regardless
+    # of PATH order or stray ``python3.*-config`` siblings.
+    assert result.stdout.strip() == "python3.14", f"expected python3.14, got {result.stdout!r}"
+
+    # Sanity: when the unversioned python3 is already 3.11+, it wins over
+    # any versioned binary — preserves the fast-path for modern systems.
+    bin2 = tmp_path / "bin2"
+    bin2.mkdir()
+    modern_python3 = bin2 / "python3"
+    modern_python3.write_text(
+        "#!/usr/bin/env bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    modern_python3.chmod(0o755)
+    env2 = os.environ.copy()
+    env2["PATH"] = f"{bin2}:{bin_dir}:{toolchain}"
+    result2 = subprocess.run(
+        ["bash", str(driver)],
+        cwd=PROJECT_ROOT,
+        env=env2,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result2.returncode == 0
+    assert result2.stdout.strip() == "python3"
+
+    # Negative path: with only an old python3 and no suitable versioned
+    # binary, the picker must exit 1 with the documented error message.
+    bin3 = tmp_path / "bin3"
+    bin3.mkdir()
+    (bin3 / "python3").write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    (bin3 / "python3").chmod(0o755)
+    (bin3 / "python3.10").write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    (bin3 / "python3.10").chmod(0o755)
+    env3 = os.environ.copy()
+    env3["PATH"] = f"{bin3}:{toolchain}"
+    result3 = subprocess.run(
+        ["bash", str(driver)],
+        cwd=PROJECT_ROOT,
+        env=env3,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result3.returncode == 1
+    assert "Python 3.11+ is required" in result3.stderr
 
 
 def test_release_channels_sync_assets_to_aggregate_release() -> None:
