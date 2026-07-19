@@ -60,9 +60,7 @@ def test_app_routes_match_contract(checked_in_contract: dict, live_manifest: dic
     )
 
 
-def test_openapi_operations_match_contract(
-    checked_in_contract: dict, live_manifest: dict
-) -> None:
+def test_openapi_operations_match_contract(checked_in_contract: dict, live_manifest: dict) -> None:
     """The OpenAPI HTTP surface (paths, methods, operationIds, response shapes) is unchanged."""
     expected = checked_in_contract["openapi_operations"]
     actual = live_manifest["openapi_operations"]
@@ -74,13 +72,30 @@ def test_openapi_operations_match_contract(
 
 
 def test_no_duplicate_route_registration(live_manifest: dict) -> None:
-    """New + legacy copies of the same (path, method) must never be live together."""
-    seen: set[tuple[str, str]] = set()
+    """New + legacy copies of the same (path, method) must never be live together.
+
+    HTTP duplicates are keyed by (path, method). WebSocket routes and Mount
+    entries carry no method list in the manifest, so they are keyed by
+    (path, kind) instead — a duplicate WS path or a duplicate Mount path is
+    just as much of a registration bug as a duplicate HTTP verb.
+    """
+    seen_http: set[tuple[str, str]] = set()
+    seen_ws: set[str] = set()
+    seen_mount: set[str] = set()
     for route in live_manifest["app_routes"]:
+        path = route["path"]
+        if route.get("is_websocket"):
+            assert path not in seen_ws, f"duplicate websocket registration: {path}"
+            seen_ws.add(path)
+            continue
+        if route.get("is_mount"):
+            assert path not in seen_mount, f"duplicate mount registration: {path}"
+            seen_mount.add(path)
+            continue
         methods = route.get("methods") or []
         for method in methods:
             if method in {"HEAD", "OPTIONS"}:
                 continue
-            key = (route["path"], method)
-            assert key not in seen, f"duplicate route registration: {key}"
-            seen.add(key)
+            key = (path, method)
+            assert key not in seen_http, f"duplicate route registration: {key}"
+            seen_http.add(key)

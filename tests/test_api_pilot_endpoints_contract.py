@@ -2,8 +2,9 @@
 
 The route contract manifest (``api-route-contract.json``) locks the
 *routing* surface. This file locks the *response body* shape: exact JSON
-payload and content-type. Together they prove the narrow router-factory
-extraction did not change externally visible behavior.
+payload, exact content-type header, and exact serialized bytes. Together
+they prove the narrow router-factory extraction did not change externally
+visible behavior.
 """
 
 from __future__ import annotations
@@ -17,18 +18,23 @@ from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
 
+_JSON_CONTENT_TYPE = "application/json"
+
 
 def test_ping_exact_response() -> None:
     """``GET /api/ping`` returns exactly ``{"status":"ok","service":"openbiliclaw-api"}``
-    with an application/json content-type."""
+    with an exact application/json content-type and exact serialized bytes."""
     app = create_app(memory_manager=object(), database=object(), soul_engine=object())
     client = TestClient(app)
 
     response = client.get("/api/ping")
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
     assert response.json() == {"status": "ok", "service": "openbiliclaw-api"}
+    # Lock the serialized body bytes so a serializer-level drift (key order,
+    # whitespace, unicode escaping) also trips the contract.
+    assert response.content == b'{"status":"ok","service":"openbiliclaw-api"}'
 
 
 def test_qr_info_exact_response_with_ip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,8 +48,9 @@ def test_qr_info_exact_response_with_ip(monkeypatch: pytest.MonkeyPatch) -> None
     response = client.get("/api/qr-info")
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
     assert response.json() == {"lan_ip": "192.168.1.7"}
+    assert response.content == b'{"lan_ip":"192.168.1.7"}'
 
 
 def test_qr_info_exact_response_without_ip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,5 +64,6 @@ def test_qr_info_exact_response_without_ip(monkeypatch: pytest.MonkeyPatch) -> N
     response = client.get("/api/qr-info")
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
     assert response.json() == {"lan_ip": None}
+    assert response.content == b'{"lan_ip":null}'

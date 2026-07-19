@@ -92,6 +92,48 @@ def _route_entry(index: int, route: Any) -> dict[str, Any]:
     return entry
 
 
+def _normalize_schema(schema: Any) -> Any:
+    """Normalize an OpenAPI schema fragment into a stable, comparable shape.
+
+    - ``$ref`` values are rewritten to just the referenced component name
+      (``#/components/schemas/HealthResponse`` -> ``HealthResponse``) so the
+      manifest is stable across Pydantic's internal ref formatting.
+    - ``anyOf``/``oneOf``/``allOf`` member lists are recursively normalized
+      and sorted by their serialized form (Pydantic emits union members in
+      a deterministic but implementation-detail order).
+    - Object keys are preserved verbatim (``properties`` order is semantic
+      in JSON Schema but Python dict order is already deterministic).
+    """
+    if isinstance(schema, dict):
+        out: dict[str, Any] = {}
+        for key, value in schema.items():
+            if key == "$ref" and isinstance(value, str):
+                out[key] = value.rsplit("/", 1)[-1]
+            elif key in {"anyOf", "oneOf", "allOf"} and isinstance(value, list):
+                members = [_normalize_schema(v) for v in value]
+                out[key] = sorted(members, key=lambda m: json.dumps(m, sort_keys=True))
+            elif key == "items" or isinstance(value, (dict, list)):
+                out[key] = _normalize_schema(value)
+            else:
+                out[key] = value
+        return out
+    if isinstance(schema, list):
+        return [_normalize_schema(v) for v in schema]
+    return schema
+
+
+def _content_schema(content: Any) -> dict[str, Any]:
+    """Extract ``{media_type: normalized_schema}`` from a content block."""
+    if not isinstance(content, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for media_type in sorted(content):
+        media = content[media_type] or {}
+        schema = media.get("schema")
+        out[media_type] = _normalize_schema(schema) if schema else None
+    return out
+
+
 def _openapi_operations(app: Any) -> list[dict[str, Any]]:
     """Extract the OpenAPI operation-level contract, normalized."""
     schema = app.openapi()
@@ -112,15 +154,34 @@ def _openapi_operations(app: Any) -> list[dict[str, Any]]:
                 "trace",
             }:
                 continue
-            responses = sorted((op.get("responses") or {}).keys())
             request_body = op.get("requestBody") or {}
             required = bool(request_body.get("required", False))
+            responses: dict[str, Any] = {}
+            for status in sorted((op.get("responses") or {}).keys()):
+                resp = (op.get("responses") or {})[status] or {}
+                responses[status] = {
+                    "description": (resp.get("description") or "").strip(),
+                    "content": _content_schema(resp.get("content")),
+                }
+            parameters = []
+            for param in op.get("parameters") or []:
+                parameters.append(
+                    {
+                        "name": param.get("name") or "",
+                        "in": param.get("in") or "",
+                        "required": bool(param.get("required", False)),
+                        "schema": _normalize_schema(param.get("schema") or {}),
+                    }
+                )
+            parameters.sort(key=lambda p: (p["in"], p["name"]))
             operations.append(
                 {
                     "path": path,
                     "method": method.upper(),
                     "operation_id": op.get("operationId") or "",
                     "request_body_required": required,
+                    "request_body_content": _content_schema(request_body.get("content")),
+                    "parameters": parameters,
                     "responses": responses,
                     "tags": sorted(op.get("tags") or []),
                 }

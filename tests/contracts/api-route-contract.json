@@ -1471,10 +1471,47 @@
       "method": "GET",
       "operation_id": "activity_feed_api_activity_feed_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "before",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "default": "",
+            "title": "Before"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "default": 10,
+            "title": "Limit"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ActivityFeedResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1482,9 +1519,16 @@
       "method": "POST",
       "operation_id": "auth_admin_api_auth_admin_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1492,9 +1536,16 @@
       "method": "POST",
       "operation_id": "exchange_extension_token_api_auth_extension_token_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1502,9 +1553,16 @@
       "method": "POST",
       "operation_id": "auth_login_api_auth_login_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1512,9 +1570,16 @@
       "method": "POST",
       "operation_id": "auth_logout_api_auth_logout_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1522,9 +1587,16 @@
       "method": "GET",
       "operation_id": "auth_status_api_auth_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1532,9 +1604,18 @@
       "method": "GET",
       "operation_id": "autostart_status_api_autostart_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "AutostartStatusOut"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1542,10 +1623,30 @@
       "method": "POST",
       "operation_id": "autostart_apply_api_autostart_apply_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "AutostartApplyIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "AutostartStatusOut"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1553,9 +1654,20 @@
       "method": "GET",
       "operation_id": "pending_avoidance_probes_api_avoidance_probes_pending_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Pending Avoidance Probes Api Avoidance Probes Pending Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1563,10 +1675,32 @@
       "method": "POST",
       "operation_id": "respond_to_avoidance_probe_api_avoidance_probes_respond_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Respond To Avoidance Probe Api Avoidance Probes Respond Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1574,9 +1708,20 @@
       "method": "POST",
       "operation_id": "trigger_avoidance_probe_api_avoidance_probes_trigger_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Trigger Avoidance Probe Api Avoidance Probes Trigger Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1584,10 +1729,30 @@
       "method": "POST",
       "operation_id": "sync_bilibili_cookie_api_bilibili_cookie_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "BilibiliCookieIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "BilibiliCookieResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1595,10 +1760,30 @@
       "method": "POST",
       "operation_id": "chat_api_chat_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ChatIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Chat Api Chat Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1606,10 +1791,59 @@
       "method": "GET",
       "operation_id": "list_chat_turns_api_chat_turns_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "maximum": 200,
+            "minimum": 1,
+            "default": 50,
+            "title": "Limit"
+          }
+        },
+        {
+          "name": "scope",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "default": "",
+            "title": "Scope"
+          }
+        },
+        {
+          "name": "session",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "default": "popup",
+            "title": "Session"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ChatTurnListResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1617,10 +1851,30 @@
       "method": "POST",
       "operation_id": "start_chat_turn_api_chat_turns_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ChatTurnIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ChatTurnOut"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1628,10 +1882,36 @@
       "method": "GET",
       "operation_id": "get_chat_turn_api_chat_turns__turn_id__get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "turn_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Turn Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ChatTurnOut"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1639,9 +1919,18 @@
       "method": "GET",
       "operation_id": "pending_cognition_update_api_cognition_updates_pending_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "PendingCognitionUpdateResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1649,10 +1938,30 @@
       "method": "POST",
       "operation_id": "cognition_update_seen_api_cognition_updates_seen_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "CognitionUpdateSeenIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "CognitionUpdateSeenResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1660,10 +1969,37 @@
       "method": "GET",
       "operation_id": "get_config_api_config_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "reveal_keys",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": false,
+            "title": "Reveal Keys"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ConfigResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1671,10 +2007,30 @@
       "method": "PUT",
       "operation_id": "update_config_api_config_put",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ConfigUpdateIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ConfigUpdateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1682,10 +2038,30 @@
       "method": "POST",
       "operation_id": "probe_config_service_api_config_probe_service_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ConfigServiceProbeIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ConfigServiceProbeResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1693,9 +2069,18 @@
       "method": "GET",
       "operation_id": "source_share_suggestion_api_config_source_share_suggestion_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SourceShareSuggestionResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1703,10 +2088,30 @@
       "method": "POST",
       "operation_id": "source_share_suggestion_for_form_api_config_source_share_suggestion_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "SourceShareSuggestionIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SourceShareSuggestionResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1714,9 +2119,18 @@
       "method": "GET",
       "operation_id": "pending_delight_api_delight_pending_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "PendingDelightResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1724,10 +2138,45 @@
       "method": "GET",
       "operation_id": "pending_delight_batch_api_delight_pending_batch_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "type": "object",
+              "additionalProperties": true,
+              "title": "Response Pending Delight Batch Api Delight Pending Batch Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1735,10 +2184,32 @@
       "method": "POST",
       "operation_id": "respond_to_delight_api_delight_respond_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Respond To Delight Api Delight Respond Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1746,10 +2217,30 @@
       "method": "POST",
       "operation_id": "mark_delight_sent_api_delight_sent_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "DelightAckIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "DelightAckResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1757,10 +2248,39 @@
       "method": "POST",
       "operation_id": "trigger_delight_api_delight_trigger_post",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Trigger Delight Api Delight Trigger Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1768,9 +2288,16 @@
       "method": "GET",
       "operation_id": "embedding_repair_status_api_embedding_repair_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1778,9 +2305,16 @@
       "method": "POST",
       "operation_id": "start_embedding_repair_api_embedding_repair_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1788,10 +2322,30 @@
       "method": "POST",
       "operation_id": "ingest_events_api_events_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "BehaviorEventBatchIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "EventIngestResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1799,10 +2353,32 @@
       "method": "POST",
       "operation_id": "extension_e2e_result_api_extension_e2e_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ExtensionE2EResultIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Extension E2E Result Api Extension E2E Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1810,10 +2386,30 @@
       "method": "POST",
       "operation_id": "extension_e2e_run_api_extension_e2e_run_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ExtensionE2ERunIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ExtensionE2ERunOut"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1821,9 +2417,20 @@
       "method": "POST",
       "operation_id": "extension_reload_api_extension_reload_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Extension Reload Api Extension Reload Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1831,10 +2438,50 @@
       "method": "GET",
       "operation_id": "favorite_list_api_favorites_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "maximum": 200,
+            "minimum": 1,
+            "default": 50,
+            "title": "Limit"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "title": "Offset"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "FavoriteListResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1842,10 +2489,30 @@
       "method": "POST",
       "operation_id": "favorite_add_api_favorites_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "FavoriteAddIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "FavoriteStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1853,10 +2520,36 @@
       "method": "DELETE",
       "operation_id": "favorite_remove_api_favorites__bvid__delete",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "bvid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Bvid"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "FavoriteStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1864,10 +2557,36 @@
       "method": "GET",
       "operation_id": "favorite_status_api_favorites__bvid__get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "bvid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Bvid"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "FavoriteStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1875,10 +2594,30 @@
       "method": "POST",
       "operation_id": "feedback_api_feedback_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "FeedbackIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "FeedbackResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1886,9 +2625,18 @@
       "method": "GET",
       "operation_id": "health_api_health_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "HealthResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1896,10 +2644,35 @@
       "method": "GET",
       "operation_id": "image_proxy_api_image_proxy_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "url",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "description": "URL-encoded image URL to proxy",
+            "title": "Url"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1907,9 +2680,16 @@
       "method": "POST",
       "operation_id": "start_guided_init_api_init_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1917,9 +2697,20 @@
       "method": "POST",
       "operation_id": "init_completed_api_init_completed_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Init Completed Api Init Completed Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1927,9 +2718,18 @@
       "method": "GET",
       "operation_id": "init_status_api_init_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "InitStatusOut"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1937,9 +2737,16 @@
       "method": "POST",
       "operation_id": "cancel_guided_init_api_init_cancel_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1947,10 +2754,30 @@
       "method": "POST",
       "operation_id": "insight_feedback_api_insights_feedback_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "InsightFeedbackIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "InsightFeedbackResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1958,9 +2785,20 @@
       "method": "GET",
       "operation_id": "pending_interest_probes_api_interest_probes_pending_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Pending Interest Probes Api Interest Probes Pending Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1968,10 +2806,32 @@
       "method": "POST",
       "operation_id": "respond_to_interest_probe_api_interest_probes_respond_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Respond To Interest Probe Api Interest Probes Respond Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1979,9 +2839,20 @@
       "method": "POST",
       "operation_id": "trigger_interest_probe_api_interest_probes_trigger_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Trigger Interest Probe Api Interest Probes Trigger Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1989,9 +2860,18 @@
       "method": "GET",
       "operation_id": "get_model_config_api_model_config_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ModelConfigSnapshotOut"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -1999,10 +2879,30 @@
       "method": "PUT",
       "operation_id": "put_model_config_api_model_config_put",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ModelConfigPutIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ModelConfigPutResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2010,10 +2910,30 @@
       "method": "POST",
       "operation_id": "probe_model_config_api_model_config_probe_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ModelConfigProbeIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ModelConfigProbeResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2021,10 +2941,47 @@
       "method": "GET",
       "operation_id": "get_model_connection_types_api_model_connection_types_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "capability",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "enum": [
+                  "chat",
+                  "embedding"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ConnectionTypesResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2032,9 +2989,18 @@
       "method": "GET",
       "operation_id": "pending_notification_api_notifications_pending_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "PendingNotificationResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2042,10 +3008,30 @@
       "method": "POST",
       "operation_id": "mark_notification_sent_api_notifications_sent_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "NotificationAckIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "NotificationAckResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2053,9 +3039,16 @@
       "method": "GET",
       "operation_id": "ping_api_ping_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2063,10 +3056,49 @@
       "method": "GET",
       "operation_id": "profile_summary_api_profile_summary_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "default": "",
+            "title": "Cursor"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "maximum": 20,
+            "minimum": 1,
+            "default": 3,
+            "title": "Limit"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ProfileSummaryResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2074,10 +3106,32 @@
       "method": "POST",
       "operation_id": "profile_edit_api_profile_edit_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ProfileEditIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Profile Edit Api Profile Edit Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2085,9 +3139,20 @@
       "method": "GET",
       "operation_id": "profile_edit_state_api_profile_edit_state_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Profile Edit State Api Profile Edit State Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2095,9 +3160,16 @@
       "method": "GET",
       "operation_id": "qr_info_api_qr_info_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2105,10 +3177,30 @@
       "method": "POST",
       "operation_id": "recommendation_click_api_recommendation_click_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "RecommendationClickIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RecommendationClickResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2116,9 +3208,18 @@
       "method": "GET",
       "operation_id": "recommendations_api_recommendations_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RecommendationListResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2126,10 +3227,30 @@
       "method": "POST",
       "operation_id": "append_recommendations_api_recommendations_append_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "RecommendationAppendIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RecommendationReshuffleResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2137,9 +3258,18 @@
       "method": "POST",
       "operation_id": "refresh_recommendations_api_recommendations_refresh_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RecommendationRefreshResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2147,10 +3277,38 @@
       "method": "POST",
       "operation_id": "reshuffle_recommendations_api_recommendations_reshuffle_post",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "anyOf": [
+            {
+              "$ref": "RecommendationReshuffleIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RecommendationReshuffleResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2158,9 +3316,18 @@
       "method": "GET",
       "operation_id": "runtime_status_api_runtime_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RuntimeStatusResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2168,10 +3335,37 @@
       "method": "GET",
       "operation_id": "saved_sync_task_api_saved_sync_tasks__task_id__get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Task Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedSyncBatchResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2179,10 +3373,63 @@
       "method": "GET",
       "operation_id": "saved_list_api_saved__list_kind__get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "list_kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "favorite",
+              "watch_later"
+            ],
+            "type": "string",
+            "title": "List Kind"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "maximum": 200,
+            "minimum": 1,
+            "default": 50,
+            "title": "Limit"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "title": "Offset"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedListResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2190,10 +3437,44 @@
       "method": "POST",
       "operation_id": "saved_add_api_saved__list_kind__post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {
+        "application/json": {
+          "$ref": "SavedItemIn"
+        }
+      },
+      "parameters": [
+        {
+          "name": "list_kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "favorite",
+              "watch_later"
+            ],
+            "type": "string",
+            "title": "List Kind"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedItemStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2201,10 +3482,44 @@
       "method": "POST",
       "operation_id": "saved_remove_api_saved__list_kind__remove_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {
+        "application/json": {
+          "$ref": "SavedItemKeyIn"
+        }
+      },
+      "parameters": [
+        {
+          "name": "list_kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "favorite",
+              "watch_later"
+            ],
+            "type": "string",
+            "title": "List Kind"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedItemStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2212,10 +3527,49 @@
       "method": "GET",
       "operation_id": "saved_status_api_saved__list_kind__status_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "list_kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "favorite",
+              "watch_later"
+            ],
+            "type": "string",
+            "title": "List Kind"
+          }
+        },
+        {
+          "name": "item_key",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Item Key"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedItemStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2223,10 +3577,44 @@
       "method": "POST",
       "operation_id": "saved_sync_api_saved__list_kind__sync_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {
+        "application/json": {
+          "$ref": "SavedSyncRequest"
+        }
+      },
+      "parameters": [
+        {
+          "name": "list_kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "favorite",
+              "watch_later"
+            ],
+            "type": "string",
+            "title": "List Kind"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SavedSyncBatchResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2234,9 +3622,20 @@
       "method": "GET",
       "operation_id": "list_sources_api_sources_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response List Sources Api Sources Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2244,10 +3643,34 @@
       "method": "POST",
       "operation_id": "create_source_api_sources_post",
       "request_body_required": true,
-      "responses": [
-        "201",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "201": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Create Source Api Sources Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2255,10 +3678,34 @@
       "method": "POST",
       "operation_id": "ext_debug_log_api_sources__debug_log_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Ext Debug Log Api Sources  Debug Log Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2266,9 +3713,20 @@
       "method": "POST",
       "operation_id": "bili_task_kick_api_sources_bili_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Bili Task Kick Api Sources Bili Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2276,10 +3734,35 @@
       "method": "GET",
       "operation_id": "bili_next_task_api_sources_bili_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Bili Next Task Api Sources Bili Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2287,10 +3770,34 @@
       "method": "POST",
       "operation_id": "bili_task_result_api_sources_bili_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Bili Task Result Api Sources Bili Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2298,10 +3805,37 @@
       "method": "GET",
       "operation_id": "sources_credentials_api_sources_credentials_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "reveal_keys",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": false,
+            "title": "Reveal Keys"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SourcesCredentialsResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2309,10 +3843,30 @@
       "method": "POST",
       "operation_id": "sync_douyin_cookie_api_sources_dy_cookie_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "DouyinCookieIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "DouyinCookieResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2320,9 +3874,20 @@
       "method": "POST",
       "operation_id": "dy_task_kick_api_sources_dy_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Dy Task Kick Api Sources Dy Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2330,10 +3895,35 @@
       "method": "GET",
       "operation_id": "dy_next_task_api_sources_dy_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Dy Next Task Api Sources Dy Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2341,10 +3931,34 @@
       "method": "POST",
       "operation_id": "dy_task_result_api_sources_dy_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Dy Task Result Api Sources Dy Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2352,10 +3966,30 @@
       "method": "POST",
       "operation_id": "sync_reddit_cookie_api_sources_reddit_cookie_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "RedditCookieIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "RedditCookieResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2363,9 +3997,20 @@
       "method": "POST",
       "operation_id": "reddit_task_kick_api_sources_reddit_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Reddit Task Kick Api Sources Reddit Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2373,10 +4018,35 @@
       "method": "GET",
       "operation_id": "reddit_next_task_api_sources_reddit_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Reddit Next Task Api Sources Reddit Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2384,10 +4054,34 @@
       "method": "POST",
       "operation_id": "reddit_task_result_api_sources_reddit_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Reddit Task Result Api Sources Reddit Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2395,9 +4089,18 @@
       "method": "GET",
       "operation_id": "sources_status_api_sources_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "SourcesStatusResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2405,10 +4108,30 @@
       "method": "POST",
       "operation_id": "sync_x_cookie_api_sources_x_cookie_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "XCookieIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "XCookieResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2416,9 +4139,20 @@
       "method": "GET",
       "operation_id": "x_list_creators_api_sources_x_creators_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response X List Creators Api Sources X Creators Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2426,10 +4160,34 @@
       "method": "POST",
       "operation_id": "x_add_creator_api_sources_x_creators_post",
       "request_body_required": true,
-      "responses": [
-        "201",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "201": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response X Add Creator Api Sources X Creators Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2437,10 +4195,38 @@
       "method": "DELETE",
       "operation_id": "x_delete_creator_api_sources_x_creators__sub_id__delete",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "sub_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "title": "Sub Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "type": "object",
+              "additionalProperties": true,
+              "title": "Response X Delete Creator Api Sources X Creators  Sub Id  Delete"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2448,9 +4234,20 @@
       "method": "POST",
       "operation_id": "x_task_kick_api_sources_x_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response X Task Kick Api Sources X Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2458,10 +4255,35 @@
       "method": "GET",
       "operation_id": "x_next_task_api_sources_x_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response X Next Task Api Sources X Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2469,9 +4291,18 @@
       "method": "GET",
       "operation_id": "x_source_status_api_sources_x_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "XStatusResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2479,10 +4310,34 @@
       "method": "POST",
       "operation_id": "x_task_result_api_sources_x_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response X Task Result Api Sources X Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2490,9 +4345,20 @@
       "method": "GET",
       "operation_id": "xhs_list_creators_api_sources_xhs_creators_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Xhs List Creators Api Sources Xhs Creators Get"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2500,10 +4366,34 @@
       "method": "POST",
       "operation_id": "xhs_add_creator_api_sources_xhs_creators_post",
       "request_body_required": true,
-      "responses": [
-        "201",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "201": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Xhs Add Creator Api Sources Xhs Creators Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2511,10 +4401,38 @@
       "method": "DELETE",
       "operation_id": "xhs_delete_creator_api_sources_xhs_creators__sub_id__delete",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "sub_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "title": "Sub Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "type": "object",
+              "additionalProperties": true,
+              "title": "Response Xhs Delete Creator Api Sources Xhs Creators  Sub Id  Delete"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2522,9 +4440,20 @@
       "method": "POST",
       "operation_id": "xhs_task_kick_api_sources_xhs_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Xhs Task Kick Api Sources Xhs Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2532,10 +4461,30 @@
       "method": "POST",
       "operation_id": "update_xhs_login_state_api_sources_xhs_login_state_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "XhsLoginStateIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "XhsLoginStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2543,10 +4492,35 @@
       "method": "GET",
       "operation_id": "xhs_next_task_api_sources_xhs_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Xhs Next Task Api Sources Xhs Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2554,10 +4528,34 @@
       "method": "POST",
       "operation_id": "ingest_xhs_observed_urls_api_sources_xhs_observed_urls_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Ingest Xhs Observed Urls Api Sources Xhs Observed Urls Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2565,10 +4563,34 @@
       "method": "POST",
       "operation_id": "xhs_task_result_api_sources_xhs_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Xhs Task Result Api Sources Xhs Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2576,10 +4598,34 @@
       "method": "POST",
       "operation_id": "ingest_xhs_tokens_api_sources_xhs_tokens_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Ingest Xhs Tokens Api Sources Xhs Tokens Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2587,9 +4633,20 @@
       "method": "POST",
       "operation_id": "yt_task_kick_api_sources_yt_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Yt Task Kick Api Sources Yt Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2597,10 +4654,35 @@
       "method": "GET",
       "operation_id": "yt_next_task_api_sources_yt_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Yt Next Task Api Sources Yt Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2608,10 +4690,34 @@
       "method": "POST",
       "operation_id": "yt_task_result_api_sources_yt_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Yt Task Result Api Sources Yt Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2619,9 +4725,20 @@
       "method": "POST",
       "operation_id": "zhihu_task_kick_api_sources_zhihu_kick_post",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Zhihu Task Kick Api Sources Zhihu Kick Post"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2629,10 +4746,30 @@
       "method": "POST",
       "operation_id": "update_zhihu_login_state_api_sources_zhihu_login_state_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "ZhihuLoginStateIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "ZhihuLoginStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2640,10 +4777,35 @@
       "method": "GET",
       "operation_id": "zhihu_next_task_api_sources_zhihu_next_task_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "response",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "title": "Response"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "title": "Response Zhihu Next Task Api Sources Zhihu Next Task Get"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2651,10 +4813,34 @@
       "method": "POST",
       "operation_id": "zhihu_task_result_api_sources_zhihu_task_result_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "additionalProperties": true,
+              "type": "object",
+              "title": "Response Zhihu Task Result Api Sources Zhihu Task Result Post"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2662,10 +4848,38 @@
       "method": "DELETE",
       "operation_id": "delete_source_api_sources__recipe_id__delete",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "recipe_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Recipe Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "type": "object",
+              "additionalProperties": true,
+              "title": "Response Delete Source Api Sources  Recipe Id  Delete"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2673,10 +4887,44 @@
       "method": "PUT",
       "operation_id": "update_source_api_sources__recipe_id__put",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {
+        "application/json": {
+          "type": "object",
+          "additionalProperties": true,
+          "title": "Payload"
+        }
+      },
+      "parameters": [
+        {
+          "name": "recipe_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Recipe Id"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "type": "object",
+              "additionalProperties": true,
+              "title": "Response Update Source Api Sources  Recipe Id  Put"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2684,9 +4932,18 @@
       "method": "GET",
       "operation_id": "update_status_api_update_status_get",
       "request_body_required": false,
-      "responses": [
-        "200"
-      ],
+      "request_body_content": {},
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "UpdateStatusResponse"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2694,10 +4951,28 @@
       "method": "POST",
       "operation_id": "update_apply_api_update_apply_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "UpdateApplyIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": null
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2705,10 +4980,38 @@
       "method": "POST",
       "operation_id": "update_check_api_update_check_post",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "anyOf": [
+            {
+              "$ref": "UpdateCheckIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": " Payload"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "UpdateStatusResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2716,10 +5019,50 @@
       "method": "GET",
       "operation_id": "watch_later_list_api_watch_later_get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "maximum": 200,
+            "minimum": 1,
+            "default": 50,
+            "title": "Limit"
+          }
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "title": "Offset"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "WatchLaterListResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2727,10 +5070,30 @@
       "method": "POST",
       "operation_id": "watch_later_add_api_watch_later_post",
       "request_body_required": true,
-      "responses": [
-        "200",
-        "422"
-      ],
+      "request_body_content": {
+        "application/json": {
+          "$ref": "WatchLaterAddIn"
+        }
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "WatchLaterStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2738,10 +5101,36 @@
       "method": "DELETE",
       "operation_id": "watch_later_remove_api_watch_later__bvid__delete",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "bvid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Bvid"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "WatchLaterStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     },
     {
@@ -2749,10 +5138,36 @@
       "method": "GET",
       "operation_id": "watch_later_status_api_watch_later__bvid__get",
       "request_body_required": false,
-      "responses": [
-        "200",
-        "422"
+      "request_body_content": {},
+      "parameters": [
+        {
+          "name": "bvid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "title": "Bvid"
+          }
+        }
       ],
+      "responses": {
+        "200": {
+          "description": "Successful Response",
+          "content": {
+            "application/json": {
+              "$ref": "WatchLaterStateResponse"
+            }
+          }
+        },
+        "422": {
+          "description": "Validation Error",
+          "content": {
+            "application/json": {
+              "$ref": "HTTPValidationError"
+            }
+          }
+        }
+      },
       "tags": []
     }
   ]
