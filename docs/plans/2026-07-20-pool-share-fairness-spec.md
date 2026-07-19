@@ -50,6 +50,10 @@ drain/admission 每 60s 一次(`refresh.py:1421` 附近 loop 注释),而 bangumi
 
 `refresh.py:2097` 起:池 ≥ 目标时 trending/explore/signal 计划照常生成,产出进 raw/evaluated 积压。这是刻意的新鲜度维护;修复后其危害被入池份额闸约束(积压不能再越份额占坑),故不改动。
 
+### D6. Producer 内部还有一道全局 pool_full 闸(confirmed by real E2E,Phase 1–3 解不开)
+
+真实 serve-api 日志:`bangumi producer skip: reason=pool_full`。tick 层 deficit 修复已生效(producer 被调度),但每个 producer 的 `produce_if_due` 内部还有一道**全局** pool 闸 `_candidate_pool_full()`(`bangumi_producer.py:94` 附近,调 `candidate_pipeline.pool_full()` = 全局可见池是否达标)。这形成鸡生蛋死结:bangumi 因全局池满不能生产 → 永远没有 bangumi 的 `evaluated` 供给 → Phase 3 rebalance 的触发条件「欠份额来源有 `evaluated` 供给等待」不满足 → 不退坑 → 池永远 300/300 → bangumi 永远 pool_full。波及 `bilibili/reddit/zhihu/youtube/bangumi/douyin` 六个 producer(其中 reddit 的旧闸引用了不存在的 `is_candidate_pool_full`,实际已是 no-op;`xhs`/`x` 为 fetch-only,自查确认无此内部闸)。
+
 ## Priority classification
 
 | Phase | Content | Tier | Why |
@@ -99,6 +103,12 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 2. rebalance 每次退坑打 INFO:来源、行数、腾给了谁。
 3. admission 第一轮跳过的超份额行数进 debug 日志。
 
+### Phase 5 — Producer 内部 pool_full 闸份额感知(E2E 发现,见 D6)
+
+`candidate_pipeline` 新增 `pool_full_for_source(source_family)`:注入份额策略且该源低于自身份额 → 返回 `False`(即使全局满,两轮 admission + rebalance 会腾坑);该源已达/超份额或未传 family → 沿用全局 `pool_full()`;未注入策略 → 完全等同 `pool_full()`(不变量 5)。六个 producer 的内部闸 `_candidate_pool_full()` 改经共享助手 `runtime/pool_gate.candidate_pool_full_for_source(pipeline, family, …)` 调用它,并传入各自的 `_pool_source_family` 口径 family(bilibili 族归并);pipeline 缺该方法时保守回退全局 `pool_full()`,再退 `False`。这打破 D6 死结:bangumi 欠份额时即使全局满也能生产,产出 `evaluated` 供给,rebalance 才有触发条件。
+
+测试:全局满 + 欠份额 → `pool_full_for_source` False、`produce_if_due` 不再 skip pool_full;全局满 + 已达份额 → True;未注入策略 → 等同 `pool_full()`;全局未满 → 恒 False。
+
 ## Expected impact
 
 | Lever | Measured effect |
@@ -107,6 +117,7 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 | Phase 2 | 坑位释放后欠份额行优先入池;超份额来源停止净增长 |
 | Phase 3 | 本机 reddit 169→25 的收敛从"数周自然消耗"变为 ≤3 行/分钟的可控速率(理论 <1 小时,实际受欠份额供给节奏限制) |
 | Phase 4 | 下次同类问题可从日志直接读出每源缺口,免于本次的三层静默排查 |
+| Phase 5 | 解除 producer 内部全局闸死结:欠份额来源即使全局满也能生产 `evaluated` 供给,Phase 3 rebalance 得以触发,`reason=pool_full` 不再冤枉欠份额来源 |
 
 ## Documentation obligations
 

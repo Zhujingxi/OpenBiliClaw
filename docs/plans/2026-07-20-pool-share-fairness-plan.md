@@ -100,6 +100,24 @@
 
 **Acceptance:** 文档描述与最终代码行为一致;pre-merge checklist 可勾选。
 
+### Task 6: Producer 内部 pool_full 闸份额感知(真实 E2E 发现,见 spec D6 / Phase 5)
+
+**Files:** add `src/openbiliclaw/runtime/pool_gate.py`(共享助手);modify `src/openbiliclaw/discovery/candidate_pipeline.py`(`pool_full_for_source`)、`src/openbiliclaw/runtime/{bilibili,douyin,youtube,zhihu,bangumi,reddit}_producer.py`(内部闸改调助手);add tests(`tests/test_candidate_pipeline_admission.py` 的 `pool_full_for_source` 用例 + `tests/test_bangumi_producer.py` 的欠份额 producer 用例)。
+
+**Interfaces:** Consumes: `_share_targets`、`_available_by_family`、`_pool_full`、`_source_family`。Produces: `pipeline.pool_full_for_source(family)`;共享 `candidate_pool_full_for_source(pipeline, family, *, logger, label)`(pipeline 缺方法 → 回退全局 `pool_full()` → `False`)。
+
+**Steps:**
+
+- [x] 先写失败测试:①全局满 + 欠份额 → `pool_full_for_source` False;②全局满 + 已达份额 → True;③未注入策略 → 等同 `pool_full()`;④全局未满 → 恒 False;⑤bangumi `produce_if_due` 在「全局满 + bangumi 欠份额」时不再 `reason=pool_full`。
+- [x] 确认 FAIL(4 个 pipeline 断言 + 1 个 producer 断言)。
+- [x] 实现:pipeline `pool_full_for_source`;`runtime/pool_gate.py` 共享助手;六个 producer 内部闸改调助手并传各自 family(bilibili 族归并;reddit 旧的 `is_candidate_pool_full` 死闸一并替换)。`xhs`/`x` 自查确认无内部闸,不改。
+- [x] 确认 PASS(pipeline 4 + 六个 producer 既有回归 + bangumi 新用例);ruff、mypy、全量 pytest。
+
+**Acceptance:**
+
+- Numeric gate:`pool_full_for_source("bangumi")` 在 300/300 + bangumi 0/50 → **False**;`("reddit")` 在 169/25 → **True**;未注入策略时 == `pool_full()`;全局未满恒 False。bangumi `produce_if_due` 在全局满 + 欠份额时 `reason != "pool_full"`。
+- 既有断言更新:无(六个 producer 的 `_Pipeline`/`_FakeCandidatePipeline` 桩只有 `pool_full()`/无任何池方法,经 getattr 回退逐字节保持旧行为;bangumi 桩新增可选 `pool_full_for_source` 仅供新用例,旧 `full=True` 用例仍 skip pool_full)。
+
 ## Verification after merge
 
 验收人(主会话)在隔离项目根执行真实 E2E:拷贝本机真实 DB(reddit 169 超份额饿死态)→ 启用 bangumi(真实 bgm.tv 匿名 API,走 custom 代理)+ 商汤 LLM → 起真实 serve-api → 观察 ≥3 个 drain tick:①`bangumi_discovery_runs` 出现新行;②池组成收敛(reddit 净减、bangumi 净增);③全局池恒 ≤300;④日志出现每源缺口摘要与退坑记录。回滚触发条件:全局池超发、退坑波及非超份额来源、或全量测试回归失败——revert 整个 feature 分支。
