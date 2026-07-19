@@ -333,6 +333,14 @@ autostart.unregister()
 
 `RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
 
+#### 小红书封面：扩展抓取时采集 URL 与字节（2026-07「没头图」修复）
+
+2026-07 用户实报「小红书内容都没头图」，日志复盘定位到两个叠加缺陷：**(1) 后台标签页懒加载图片永不升级**——搜索/创作者任务在后台标签页刮取，卡片 `<img>` 永远停在内联 `data:` 占位符上，DOM 提取拿不到真实封面 URL（受影响后端对 hdslb / douyinpic 抓取全部正常、却从未尝试过一次 xhscdn 抓取，即它手里从没有过可抓的 URL）；(2) 即使有 URL，服务端预取也是一场与轮换 token 过期、与本机到 CDN 出网状况的赛跑。
+
+修复（`extension/src/content/xhs/cover-harvest.ts`）：任务执行器先用 `backfillCoverUrlsFromState` 从 `__INITIAL_STATE__` 做**形状无关**的深扫（循环安全、深度/节点数有界，按 note_id 命中对象后取 cover 路径），把占位符/空 cover_url 回填成真实 CDN URL；DOM 提取（passive 与任务两路）一律拒收 `data:`/`blob:` 占位符。随后 `attachCoverData` 在页面上下文抓封面字节（此刻 token 最新鲜、走用户自己的浏览器会话），转 base64 挂 `cover_data`/`cover_content_type` 随既有 observed-urls / 任务结果通道上报；后端 `_cache_xhs_notes` 将非 http(s) 的 cover_url 归一为空，并经 `save_extension_cover`（白名单 / `image/*` / 1MB 上限 / base64 校验，坏封面绝不阻断笔记入库）把字节写入同一 `data/image-cache/`——缓存 key 本就剥离轮换 token，serve 零改动全走缓存命中。已知候选去重跳过的笔记也会先存封面，用户重新刷到旧笔记时可就地治愈无封面的存量行。服务端预取继续保留（对拿得到 URL、出网正常的环境仍是第二道保险）。
+
+同期补齐了封面链路的可观测性（此前 `image_cache` 模块零日志，这次定位只能靠「慢取日志里 xhscdn 完全缺席、其它 CN CDN 都在」反推）：`fetch_cover_bytes` 的上游非 2xx / 超时 / 网络错误按 host 限频打 WARNING（首次立即、之后每 host 每 10 分钟至多一条并携带抑制计数），错误 detail 携带真实上游状态码；`/api/image-proxy` 失败补 DEBUG 行关联具体请求；`_cache_xhs_notes` 每批打 INFO 汇报缓存的扩展采集封面数。
+
 ### AccountSyncService
 
 ```python

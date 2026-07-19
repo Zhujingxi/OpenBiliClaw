@@ -157,6 +157,7 @@ from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
     cleanup_image_cache,
     fetch_cover_bytes,
+    save_extension_cover,
     save_image_bytes,
 )
 from openbiliclaw.runtime.image_cache import (
@@ -3685,6 +3686,9 @@ def create_app(
             # failures (>=500) fall back to a cached copy when one appeared.
             if exc.status_code >= 500 and (cached := _image_cache_response(url)):
                 return cached
+            # fetch_cover_bytes already emits the per-host rate-limited WARNING;
+            # this line ties the failure to a concrete serve-time request.
+            logger.debug("image-proxy FAIL %d (%s) %s", exc.status_code, exc.detail, url[:100])
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
         save_image_bytes(url, data, content_type)
@@ -8418,6 +8422,7 @@ def create_app(
             self_info = _load_xhs_self_info()
         writes = []
         skipped_self = 0
+        covers_saved = 0
         for note in notes:
             if _is_self_authored_note(note, self_info):
                 skipped_self += 1
@@ -8439,6 +8444,32 @@ def create_app(
                 continue  # Skip notes with empty title — they produce blank recommendation cards
             author = str(note.get("author", "") or "").strip()
             cover_url = str(note.get("cover_url", "") or "").strip()
+            if cover_url.startswith("//"):
+                cover_url = f"https:{cover_url}"
+            if not cover_url.startswith(("http://", "https://")):
+                # Lazy-load data:/blob: placeholders from background-tab
+                # scrapes are not covers; storing them yields cards that can
+                # never render (the image proxy rejects non-http(s) URLs).
+                cover_url = ""
+            # Extension-harvested cover bytes: xhs card scrapes attach
+            # cover_data so the cover lands in the disk cache at ingest time
+            # (while the rotating xhscdn token is fresh) instead of depending
+            # on the backend's later fetch succeeding from this machine.
+            # Saved even when the note later dedupes as a known candidate —
+            # that heals stock rows whose cover was never cached.
+            # Best-effort: a bad cover never blocks the note.
+            cover_data = note.get("cover_data")
+            if (
+                cover_url
+                and isinstance(cover_data, str)
+                and cover_data
+                and save_extension_cover(
+                    cover_url,
+                    cover_data,
+                    str(note.get("cover_content_type", "") or ""),
+                )
+            ):
+                covers_saved += 1
             best_url = _pick_best_xhs_url(database, note_id, url)
             published = normalize_published_time(
                 note.get("published_at") or note.get("pubdate"),
@@ -8491,6 +8522,12 @@ def create_app(
             logger.info(
                 "xhs ingest filter: dropped %d self-authored note(s) (%s)",
                 skipped_self,
+                page_type,
+            )
+        if covers_saved > 0:
+            logger.info(
+                "xhs ingest: cached %d extension-harvested cover(s) (%s)",
+                covers_saved,
                 page_type,
             )
         if not writes:
