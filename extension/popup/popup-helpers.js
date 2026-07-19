@@ -1270,10 +1270,36 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
       const issueMessages = (Array.isArray(details.issues) ? details.issues : [])
         .map((issue) => normalizeText(issue?.message))
         .filter(Boolean);
+      const degradedMessage =
+        issueMessages.join("；") || "后端的 AI 服务配置有问题，修复并重启后恢复。";
+      // A degraded backend that was NEVER initialized should still land the
+      // user in the guided-init journey — its first step IS configuring the
+      // LLM provider, and the init checklist surfaces the degraded blocker
+      // from /api/init-status (allow-listed while degraded). Reserve the pure
+      // repair state for an initialized backend that degraded later.
+      // /api/runtime-status is also allow-listed, so the snapshot is available
+      // here; without it we cannot rule out an initialized backend and fall
+      // through to the repair state.
+      const degradedRuntime = runtimeStatus == null ? null : normalizeRuntimeStatus(runtimeStatus);
+      const neverInitialized =
+        degradedRuntime !== null &&
+        !degradedRuntime.initialized &&
+        degradedRuntime.recommendation_count === 0 &&
+        degradedRuntime.pool_available_count === 0 &&
+        degradedRuntime.pool_pending_count === 0 &&
+        degradedRuntime.last_replenished_count === 0 &&
+        degradedRuntime.last_discovered_count === 0;
+      if (neverInitialized) {
+        return {
+          kind: "uninitialized",
+          degraded: true,
+          message: degradedMessage,
+          items: [],
+        };
+      }
       return {
         kind: "degraded",
-        message: issueMessages.join("；")
-          || "后端的 AI 服务配置有问题，修复并重启后恢复。",
+        message: degradedMessage,
         items: [],
       };
     }

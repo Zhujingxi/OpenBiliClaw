@@ -6201,9 +6201,22 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
+      stateShape.degraded
+        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
-    setHint("先完成初始化，把画像和候选池攒起来。");
+    if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
+      // Keep the one-click config repair entry alongside the init journey —
+      // the checklist explains the blocker, this button opens the fix.
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint(
+      stateShape.degraded
+        ? "后端处于降级模式：修好 LLM 配置并重启后端后即可开始初始化。"
+        : "先完成初始化，把画像和候选池攒起来。",
+      stateShape.degraded ? "error" : "info",
+    );
     renderInitPanelIdle();
     // If a run is already live (started elsewhere / page reopened mid-init),
     // take over with the progress view + poll instead of a dead idle panel.

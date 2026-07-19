@@ -936,11 +936,40 @@ test("getPopupState surfaces a degraded backend as its own actionable state", ()
       ],
     },
   });
+  // No runtime snapshot → cannot rule out an initialized backend → repair state.
   assert.deepEqual(getPopupState({ online: true, items: [], error: degradedError }), {
     kind: "degraded",
     message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
     items: [],
   });
+
+  // Degraded but NEVER initialized → guided-init journey (its first step is
+  // configuring the LLM provider); the degraded blocker rides along.
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      degraded: true,
+      message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+      items: [],
+    },
+  );
+
+  // Initialized backend that degraded later → pure repair state.
+  assert.equal(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: true, recommendation_count: 12 },
+    }).kind,
+    "degraded",
+  );
 
   // Envelope without issue detail still classifies, with fallback copy.
   const bareDegraded = Object.assign(new Error("boom"), {
