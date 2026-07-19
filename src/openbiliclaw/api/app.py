@@ -3437,7 +3437,14 @@ def create_app(
             logger.warning("Embedding repair: pull %s failed: %s", model, error)
 
     async def _maybe_autostart_embedding_pull() -> bool:
-        """Best-effort auto-pull for a locally hosted missing/broken model."""
+        """Best-effort auto-pull for a locally hosted missing/broken model.
+
+        Also self-heals ``DIAG_NOT_RUNNING`` (managed Ollama simply not up yet)
+        by starting it first — reusing the same guards the manual repair
+        endpoint applies — then re-diagnosing so a genuinely missing/broken
+        model still gets auto-pulled. Any guard miss or start failure just
+        leaves the manual "修复向量模型" path to fix it (stays non-blocking).
+        """
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
         if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
             return False
@@ -3446,10 +3453,17 @@ def create_app(
             from openbiliclaw.llm.ollama_diagnostics import (
                 DIAG_MODEL_BROKEN,
                 DIAG_MODEL_MISSING,
+                DIAG_NOT_RUNNING,
                 diagnose_ollama_embedding,
                 ollama_embedding_disk_space_error,
             )
-            from openbiliclaw.runtime.ollama_supervisor import is_loopback
+            from openbiliclaw.runtime.ollama_supervisor import (
+                effective_ollama_endpoint,
+                ensure_managed_ollama,
+                is_loopback,
+                may_manage_ollama_endpoint,
+                ollama_required,
+            )
 
             if not is_loopback(base_url):
                 return False
@@ -3459,6 +3473,20 @@ def create_app(
                 ):
                     return True
                 code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_NOT_RUNNING:
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage or not ensure_managed_ollama(endpoint):
+                        return False
+                    # Re-diagnose now that the daemon is up: a missing/broken
+                    # model falls through to the auto-pull below.
+                    code, _detail = await diagnose_ollama_embedding(base_url, model)
                 if code not in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
                     return False
                 if ollama_embedding_disk_space_error(model):
