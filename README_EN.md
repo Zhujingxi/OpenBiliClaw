@@ -189,12 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.175 (2026-07-19)**
+📌 Latest: **v0.3.176 (2026-07-19)**
 
-- **Overseas sources now follow the system proxy by default** — Bangumi, YouTube and friends no longer time out on a direct connection out of the box, and the settings page spells out which sources need a proxy and which setting actually governs them.
-- **Xiaohongshu covers are back** — both the cover URL and the image bytes are now harvested while the extension scrapes the page, sidestepping the 403 that server-side fetches always hit.
-- **Bangumi cards credit their creators, and extension identity finally works** — director, original author or developer are parsed straight from the entry; until now "let the extension recognise your logged-in bgm.tv account" was unreachable from all three GUIs.
-- **A broken config no longer locks you out of settings** — when the LLM config fails or setup has not run, the home page routes you into the setup wizard instead of showing a raw 503 JSON body.
+- **A "credentials ready" badge now says what backs it** — each source states whether the verdict came from a live probe, a local file or a browser heartbeat, and all eight carry a "test connection" button that checks on the spot.
+- **Douyin no longer sits at "unverified" forever** — a valid cookie is recognised as such, and a successful check stays fresh for six hours instead of one minute.
+- **Bangumi joins the same contract** — anonymous access to public collections and a genuinely verified personal token are now two distinguishable states.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
