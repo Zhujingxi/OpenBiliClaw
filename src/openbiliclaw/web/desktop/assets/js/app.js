@@ -577,6 +577,10 @@
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
     let _cachedLanIp = "";
+    // 惊喜卡自动轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文
+    // 摘录读下来就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 /
+    // 下一条。与移动端 web/js/views/recommend.js 的同名常量保持一致。
+    const DELIGHT_AUTO_ADVANCE_MS = 60000;
     let _delightAutoTimer = null;
     let _delightSwipeStartX = 0;
     const _delightStatusCache = new Map();
@@ -6665,7 +6669,7 @@ ${cardFeedbackBarHtml()}`;
             if (delightUserEngaged()) return;
             const next = state.delightIndex + 1;
             setActiveDelight(next >= state.delights.length ? 0 : next);
-        }, 4000);
+        }, DELIGHT_AUTO_ADVANCE_MS);
     }
 
     function _stopDelightAutoAdvance() {
