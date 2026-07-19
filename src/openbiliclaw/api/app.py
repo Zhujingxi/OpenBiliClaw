@@ -1783,6 +1783,31 @@ def create_app(
             "issues": _degraded_issues_payload(),
         }
 
+    # Shared copy for the degraded-mode init rejection (POST /api/init) and the
+    # degraded-aware /api/init-status reason detail, so both surfaces explain
+    # the same actionable cause: the backend could not build its LLM registry,
+    # so init is impossible until the LLM config is repaired (mirrors the
+    # config-recovery message on PUT /api/config).
+    _degraded_init_detail = (
+        "后端处于降级模式：LLM 配置有误导致无法启动 AI 服务，暂时无法初始化。"
+        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
+        "然后 restart daemon 让新配置生效后再试。"
+    )
+
+    def _init_blocked_by_degraded() -> bool:
+        """True when the backend is degraded because the LLM registry never
+        built — the one degraded reason that makes guided init impossible.
+
+        Gated on the canonical ``llm_registry_unavailable`` reason (the only
+        value ``build_degraded_runtime_context`` ever emits) rather than the
+        bare ``degraded`` flag, so this stays a precise "LLM config is broken"
+        signal and does not swallow other, init-compatible degraded states.
+        """
+        return (
+            bool(getattr(ctx, "degraded", False))
+            and str(getattr(ctx, "degraded_reason", "")) == "llm_registry_unavailable"
+        )
+
     @app.middleware("http")
     async def _degraded_mode_guard(request: Request, call_next: Any) -> Any:
         if not bool(getattr(ctx, "degraded", False)):
@@ -2703,6 +2728,11 @@ def create_app(
 
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
+        elif _init_blocked_by_degraded():
+            # LLM registry never built → init is impossible until config is
+            # repaired. Surface the same actionable cause as POST /api/init so
+            # the checklist doesn't read as a generic "AI 服务不可用".
+            reason, detail = "degraded", _degraded_init_detail
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
@@ -2990,6 +3020,15 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
+        # Degraded mode reaches this handler (the guard allow-lists /api/init so
+        # the recovery UI stays live), but no LLM registry means init cannot run.
+        # Reject with an actionable cause instead of crashing on a missing
+        # coordinator or bubbling a bare error (project rule 7).
+        if _init_blocked_by_degraded():
+            return JSONResponse(
+                {"error": "degraded", "detail": _degraded_init_detail},
+                status_code=409,
+            )
         try:
             body = await request.json()
         except Exception:
