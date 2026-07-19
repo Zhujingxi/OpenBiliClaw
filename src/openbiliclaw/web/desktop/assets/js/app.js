@@ -7123,9 +7123,23 @@ ${cardFeedbackBarHtml()}`;
         scheduleAutoLoadCheck();
       }
 
-      function markDesktopRecommendationFailedAndRecover() {
+      function markDesktopRecommendationFailedAndRecover(error) {
         if (state.videos.length > 0) {
           clearDesktopRecommendationRecovery("ready");
+          return;
+        }
+        // A mid-session LLM-registry degrade blocks /api/recommendations with a
+        // 503 {status:"degraded", …} envelope, which requestJsonStrict rethrows
+        // as error.details (§4.8). Route that to the model-settings recovery
+        // instead of the generic retry UI — the pool cannot refill until the
+        // provider is fixed, so a retry loop here is a dead end.
+        const details = error && error.details;
+        if (details && details.status === "degraded") {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: details.reason || "",
+            issues: details.issues || [],
+          });
           return;
         }
         desktopRecommendationLoadState = "failed";
@@ -7280,7 +7294,7 @@ ${cardFeedbackBarHtml()}`;
 
       const recommendationApplicationPromise = recommendationsPromise.then(
         (items) => applyInitialRecommendations(items),
-        () => markDesktopRecommendationFailedAndRecover(),
+        (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
         (snapshot) => applyInitialRuntimeSnapshot(snapshot),
