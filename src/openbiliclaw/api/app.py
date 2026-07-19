@@ -2626,26 +2626,14 @@ def create_app(
         route = _embedding_route_config()
         return bool(route is not None and getattr(route, "enabled", False))
 
-    @app.get("/api/ping")
-    async def ping() -> JSONResponse:
-        """Pure liveness probe: no DB, no provider round-trips.
+    # Pilot extraction (Phase 1): /api/ping and /api/qr-info moved to
+    # api/routes/system.py. The router is included at exactly this point in
+    # create_app() so the route registration order (and therefore FastAPI's
+    # path-matching precedence) is identical to the legacy inline handlers.
+    from openbiliclaw.api.dependencies import SystemRouteDeps
+    from openbiliclaw.api.routes.system import build_system_router
 
-        ``/api/health`` is a READINESS endpoint — its embedding probe can
-        take seconds when the cache is cold (Ollama model reload), which
-        made the extension's connection badge sit on "未连接" after opening
-        the panel. UI liveness indicators should hit this instead and keep
-        ``/api/health`` for profile/embedding state.
-        """
-        return JSONResponse({"status": "ok", "service": "openbiliclaw-api"})
-
-    @app.get("/api/qr-info")
-    async def qr_info() -> JSONResponse:
-        """Lightweight endpoint for mobile QR code: LAN IP only.
-
-        Unlike ``/api/health``, this skips the embedding readiness probe
-        so the QR drawer never blocks on a cold Ollama model load.
-        """
-        return JSONResponse({"lan_ip": _health_lan_ip()})
+    app.include_router(build_system_router(SystemRouteDeps(get_lan_ip=_health_lan_ip)))
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:

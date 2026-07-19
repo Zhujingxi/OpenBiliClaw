@@ -14,6 +14,13 @@
 
 模型路由的 authority、revision、credential 与 circuit 不写入 SQLite：它们属于 `[models]`、`ModelConfigService` 和当前 `RuntimeModelBundle`。storage 只记录一次已完成调用实际命中的 connection identity 与 usage 元数据，因此原子 bundle swap 前后的在途调用可以各自按捕获到的稳定 ID 正确归因，不会把旧 route 的统计误记到新 revision。
 
+### 模块组成
+
+- `storage/database.py` — `Database` 兼容门面：schema 初始化、所有公开读写方法、带业务逻辑的迁移（如 `_ensure_content_identity_columns` 的 canonical key 回填）。
+- `storage/migrations.py` — Phase 2A 引入的数据驱动 `ensure_columns(conn, table, columns)` 工具，仅服务于**纯增量**列迁移（先 `PRAGMA table_info` 再 `ALTER TABLE ... ADD COLUMN`）。表名与列名对照静态白名单校验；不引入 schema 版本账，不改变惰性调用点，不接管事务边界。带数据回填、索引联动或合并逻辑的迁移方法仍由 `Database` 手写保留。
+- `storage/maintenance.py` — 备份 / 维护辅助（供未来 2B 原子迁移流程复用）。
+- `storage/x_health.py` — X 平台健康检查读写。
+
 ## 已实现功能
 
 | 功能 | 状态 | 说明 |
