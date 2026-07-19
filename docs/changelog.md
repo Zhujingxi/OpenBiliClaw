@@ -8,7 +8,7 @@
 
 - **P1 源头消除 10 个未基线化运行时跳过**：`tests/test_storage_schema_migrations.py` 的 `test_partial_db_repairs_each_non_content_table` 与 `test_ensure_columns_does_not_commit_or_rollback` 此前对完整 `_CONVERTED_METHODS`（含 5 个 content_cache 列组）参数化，再对每个 content_cache 行调用 `pytest.skip()`，共产生 5+5=10 个新跳过节点 ID，全部不在 checked-in `tests/contracts/quality-baseline.json`（45 条 known skips）中，导致本分支自身的 Check quality baseline 步骤 exit 1。content_cache 的对应形态本就有专属测试覆盖（`test_partial_db_repairs_each_content_cache_column_group` 与 `test_ensure_columns_does_not_commit_or_rollback_content_cache`），这些运行时跳过属于冗余收集。修复方式：新增 `_NON_CONTENT_CONVERTED_METHODS`（从 `_CONVERTED_METHODS` 静态过滤 `table != "content_cache"` 派生），两个仅覆盖非 content 表的测试改为对该集合参数化，并删除两处运行时 `pytest.skip()` 分支——收集期静态过滤产生零跳过记录，优于在 baseline 中 allowlist 十条永久跳过的冗余用例（后者会让比较器长期容忍死节点 ID）。
 - **回归**：`tests/test_quality_baseline_comparator.py` 新增 `test_checked_in_baseline_rejects_unbaselined_migration_skip`——以 checked-in baseline 运行比较器，注入一个未基线化的迁移测试参数化跳过节点，断言 exit 1（new skip 永不静默容忍），把「运行时 skip 重新进入套件」的漂移锁死在 CI 层。
-- **测试**：目标存储迁移测试 27 passed（0 skipped，此前 17 passed/10 skipped）、比较器测试 82 passed；ruff/mypy clean；完整套件 5768 passed/45 skipped（跳过数回到 baseline 恰好的 45 条），`scripts/check_quality_baseline.py` exit 0。
+- **测试**：目标存储迁移测试 42 passed（0 skipped，此前 32 passed/10 skipped）、比较器测试 82 passed；ruff/mypy clean；完整套件 5769 passed/45 skipped（跳过数回到 baseline 恰好的 45 条），`scripts/check_quality_baseline.py` exit 0。
 
 ---
 
