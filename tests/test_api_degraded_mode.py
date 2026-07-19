@@ -159,7 +159,7 @@ def test_degraded_mode_keeps_desktop_and_setup_recovery_shells_reachable(
     unrelated_prefix_response = client.get("/webhook")
 
     assert root_response.status_code == 302
-    assert root_response.headers["location"] == "/web"
+    assert root_response.headers["location"] == "/setup/"
     assert desktop_response.status_code == 200
     assert desktop_response.headers.get("content-type", "").startswith("text/html")
     assert desktop_asset_response.status_code == 200

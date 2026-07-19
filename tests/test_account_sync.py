@@ -417,6 +417,9 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
     assert "画像分析失败" in str(memory.state["last_sync_error"])
     assert "找不到所配置的模型" in str(memory.state["last_sync_error"])
     assert "ollama pull" in str(memory.state["last_sync_error"])
+    # The LLM-unavailability classification rides along so the status surface
+    # can render actionable copy instead of a false "稍后会自动重试" promise.
+    assert memory.state["last_sync_error_kind"] == "model_not_found"
     # Cursor / throttle are NOT advanced → next tick retries the same events.
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
@@ -425,6 +428,36 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
     # the failed analyze means _auto_bootstrap_soul_profile never runs.)
     assert soul.bootstrap_calls == []
     assert soul.ready_checks == 1
+
+
+@pytest.mark.asyncio
+async def test_account_sync_persists_no_provider_kind_on_profile_analysis() -> None:
+    """An empty LLM registry surfaces as no_provider, not a generic error."""
+    from openbiliclaw.llm.base import LLMFallbackError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _NoProviderSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise LLMFallbackError("No provider was available to process the request.")
+
+    memory = _FakeMemoryManager()
+    soul = _NoProviderSoul(ready=False)
+    client = _FakeClient(
+        history_items=[_history_item("BVNOLLM", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    with pytest.raises(LLMFallbackError):
+        await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == "no_provider"
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    status = service.get_runtime_status()
+    assert "设置" in str(status["last_account_sync_message"])
+    assert "稍后会自动重试" not in str(status["last_account_sync_message"])
 
 
 @pytest.mark.asyncio
@@ -1763,6 +1796,55 @@ def test_user_facing_sync_message_empty_when_healthy() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
     assert AccountSyncService._user_facing_sync_message("", "") == ""
+
+
+def test_user_facing_sync_message_actionable_for_llm_unavailability() -> None:
+    """no_provider / model_not_found never promise an automatic retry.
+
+    Nothing recovers until the user fixes the model configuration, so the copy
+    must point at settings instead of the generic "稍后会自动重试"."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    no_provider = AccountSyncService._user_facing_sync_message(
+        "no_provider", "画像分析失败：AI 服务未配置"
+    )
+    assert "设置" in no_provider
+    assert "稍后会自动重试" not in no_provider
+
+    model_missing = AccountSyncService._user_facing_sync_message(
+        "model_not_found", "画像分析失败：找不到所配置的模型"
+    )
+    assert "模型名" in model_missing
+    assert "稍后会自动重试" not in model_missing
+
+    # Rate limiting IS transient — the loop genuinely retries next cycle.
+    rate_limited = AccountSyncService._user_facing_sync_message(
+        "rate_limited", "画像分析失败：AI 服务限流"
+    )
+    assert "自动重试" in rate_limited
+
+
+def test_runtime_status_severity_for_llm_kinds() -> None:
+    """rate_limited reads as a warning (backoff), config faults as errors."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_BootstrapSoulEngine(ready=True),
+    )
+
+    for kind, expected in (
+        ("rate_limited", "warning"),
+        ("no_provider", "error"),
+        ("model_not_found", "error"),
+    ):
+        memory.state["last_sync_error"] = "画像分析失败：x"
+        memory.state["last_sync_error_kind"] = kind
+        status = service.get_runtime_status()
+        assert status["last_account_sync_severity"] == expected, kind
+        assert status["last_account_sync_message"]
 
 
 def test_exclusive_file_lock_is_non_blocking_for_second_holder(tmp_path: Path) -> None:

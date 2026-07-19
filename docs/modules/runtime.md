@@ -200,7 +200,7 @@ embedding_progress.reset()
 
 降级模式下可用接口：
 
-- `GET /`、`GET /web[/...]`、`GET /setup[/...]`、`GET /m[/...]` 与 `GET /favicon.ico`：静态恢复界面及其 CSS / JS / 图片继续可达；根路径仍 302 到桌面 Web。桌面端从配置响应或 runtime-stream 识别 `degraded` 后自动进入模型设置，展示 blocking issue，并提示补齐 Provider 配置、保存后重启。静态路径使用精确 segment 边界放行，不会把 `/webhook` 一类无关前缀误纳入白名单。
+- `GET /`、`GET /web[/...]`、`GET /setup[/...]`、`GET /m[/...]` 与 `GET /favicon.ico`：静态恢复界面及其 CSS / JS / 图片继续可达；根路径复刻 `packaging/entry.py` 的落点规则——降级模式或画像未初始化（`is_profile_ready()` 明确为 False）时 302 到 `/setup/`，就绪或探测结果未知时 302 到 `/web`（SPA 引导初始化卡片兜底），setup 静态目录缺失时始终回落 `/web`。桌面端从配置响应或 runtime-stream 识别 `degraded` 后自动进入模型设置，展示 blocking issue，并提示补齐 Provider 配置、保存后重启。静态路径使用精确 segment 边界放行，不会把 `/webhook` 一类无关前缀误纳入白名单。
 - `GET /api/ping`：继续作为不访问数据库和模型 Provider 的快速 liveness probe；正常模式仍只返回原有 `status` / `service`，降级模式额外返回 `degraded=true`、`degraded_reason` 和 issues。桌面端先请求它；一旦确认降级，只读取 `/api/config` 并停止推荐、画像、平台源等业务 hydration，避免预期中的 503 控制台噪声与推荐重试。
 - `GET /api/health`：返回 `status="degraded"`、`reason="llm_registry_unavailable"` 和 blocking issues；当 `SoulEngine` 可用时会额外返回可选字段 `profile_ready`，表示 soul 画像是否已生成。v0.3.95+ 额外返回 `embedding_ready`（bool）。v0.3.137+ 该同一 live probe 也被 `/api/init-status` 复用：若 `[llm.embedding].provider` 已配置，初始化前置清单会下发 `embedding_required=true`，`can_start` 与 `POST /api/init` 都必须等真实 probe 通过；provider 留空则可降级初始化。v0.3.97+ 这是一次**实时探活**而非「服务是否构建」：经 `EmbeddingService.probe()` 绕过缓存真打一次 provider，探测缓存保存 `ready / failed / timed_out` 原始三态而非调用方布尔值，并由 `_EMBEDDING_PROBE_TIMEOUT_SECONDS`（默认 15s）上限兜住。普通 `/api/health` 仅把 loopback Ollama 的 `timed_out` 解释为冷加载中的乐观可用，避免外部 Homebrew / 官方 Ollama 默认 5 分钟卸载后让插件横幅误报停服；远程 Ollama 或非 Ollama provider 超时仍为 `false`。成功沿用 `_EMBEDDING_READY_TTL_SECONDS`（默认 30s），明确失败与超时使用 8s 短 TTL 重探；single-flight 锁继续让并发 health/init 共享同一次真实 probe，但各入口独立解释结果。provider 现已 404/500（如 `bge-m3` 没拉、Ollama 停了、随包缺 `llama-server`）、返回空向量或抛出异常仍会如实报 `false`，修好后下次探活即翻 `true`；服务对象不存在仍 `false`，老/无 `probe()` 的服务回退「构建即就绪」。`false` 表示语义去重 / MMR 多样性降级（可能刷到换皮重复内容），插件 popup 据此显示「一键启用本地 Ollama」横幅。
 - `GET /api/config`：返回完整配置、`degraded=true` 和同一组 issues。
@@ -333,6 +333,14 @@ autostart.unregister()
 
 `RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
 
+#### 小红书封面：扩展抓取时采集 URL 与字节（2026-07「没头图」修复）
+
+2026-07 用户实报「小红书内容都没头图」，日志复盘定位到两个叠加缺陷：**(1) 后台标签页懒加载图片永不升级**——搜索/创作者任务在后台标签页刮取，卡片 `<img>` 永远停在内联 `data:` 占位符上，DOM 提取拿不到真实封面 URL（受影响后端对 hdslb / douyinpic 抓取全部正常、却从未尝试过一次 xhscdn 抓取，即它手里从没有过可抓的 URL）；(2) 即使有 URL，服务端预取也是一场与轮换 token 过期、与本机到 CDN 出网状况的赛跑。
+
+修复（`extension/src/content/xhs/cover-harvest.ts`）：任务执行器先用 `backfillCoverUrlsFromState` 从 `__INITIAL_STATE__` 做**形状无关**的深扫（循环安全、深度/节点数有界，按 note_id 命中对象后取 cover 路径），把占位符/空 cover_url 回填成真实 CDN URL；DOM 提取（passive 与任务两路）一律拒收 `data:`/`blob:` 占位符。随后 `attachCoverData` 在页面上下文抓封面字节（此刻 token 最新鲜、走用户自己的浏览器会话），转 base64 挂 `cover_data`/`cover_content_type` 随既有 observed-urls / 任务结果通道上报；后端 `_cache_xhs_notes` 将非 http(s) 的 cover_url 归一为空，并经 `save_extension_cover`（白名单 / `image/*` / 1MB 上限 / base64 校验，坏封面绝不阻断笔记入库）把字节写入同一 `data/image-cache/`——缓存 key 本就剥离轮换 token，serve 零改动全走缓存命中。已知候选去重跳过的笔记也会先存封面，用户重新刷到旧笔记时可就地治愈无封面的存量行。服务端预取继续保留（对拿得到 URL、出网正常的环境仍是第二道保险）。
+
+同期补齐了封面链路的可观测性（此前 `image_cache` 模块零日志，这次定位只能靠「慢取日志里 xhscdn 完全缺席、其它 CN CDN 都在」反推）：`fetch_cover_bytes` 的上游非 2xx / 超时 / 网络错误按 host 限频打 WARNING（首次立即、之后每 host 每 10 分钟至多一条并携带抑制计数），错误 detail 携带真实上游状态码；`/api/image-proxy` 失败补 DEBUG 行关联具体请求；`_cache_xhs_notes` 每批打 INFO 汇报缓存的扩展采集封面数。
+
 ### AccountSyncService
 
 ```python
@@ -366,7 +374,7 @@ result = await service.sync_now()
 | 画像未就绪 | 旧路径：`analyze_events` + `_auto_bootstrap_soul_profile` |
 | `is_profile_ready` 缺失 / 抛错 | 按未就绪保守处理 |
 
-**错误可见化**：每个拉取阶段的异常都会 `logger.warning` 并分类进状态字段 `last_sync_error_kind`（`auth_expired`——B 站 Cookie 已失效，优先级高于其他 / `error`——一般失败 / 空——干净同步时清除），经 `get_runtime_status()` 与 `/api/runtime-status` 的 `last_account_sync_error_kind` 下发，桌面 Web 在有错时渲染状态 chip（auth_expired 显示"重新登录"提示；新字段需重启后端生效）。
+**错误可见化**：每个拉取阶段的异常都会 `logger.warning` 并分类进状态字段 `last_sync_error_kind`（`auth_expired`——B 站 Cookie 已失效，优先级高于其他 / `error`——一般失败 / 空——干净同步时清除），经 `get_runtime_status()` 与 `/api/runtime-status` 的 `last_account_sync_error_kind` 下发，桌面 Web 在有错时渲染状态 chip（auth_expired 显示"重新登录"提示；新字段需重启后端生效）。画像分析阶段的 LLM 故障额外经 `classify_llm_unavailability` 分类为 `no_provider` / `model_not_found` / `rate_limited` 并随 `last_sync_error_kind` 持久化：前两类是配置故障，文案指向设置页（「修复后会自动恢复」）而非虚假的「稍后会自动重试」，severity 为 `error`；`rate_limited` 是真实的退避重试，文案保留自动重试承诺，severity 降为 `warning`。目前仅桌面 Web 渲染该横幅（扩展 popup / 移动 Web / CLI 不展示此状态）。
 
 **X 定时增量**：注入 `x_client`（两处装配点在 `sources.x_auth.resolve_x_cookie` 解析到 cookie 时构造 `XClient`）后，同一 6h 周期内在 B 站各阶段之后拉取 likes / bookmarks（各上限 200，`_X_FETCH_LIMIT`），分别映射为 `like` / `favorite` 事件（`source_platform="twitter"`）。去重用状态集合 `x_like_ids` / `x_bookmark_ids`（归一化 tweet ID，取 URL 的 `/status/<id>` 尾段，兼容 `x.com/i/status/<id>` 与 `x.com/<handle>/status/<id>` 两种形态，集合上限 2000 保最新）；集合为空的首轮从 events 表已持久化的 X 事件播种，init 之后、首轮之前新增的 like 仍会正常发事件。X 拉取失败只记入 errors + WARN，不影响 B 站同步，反之亦然。
 

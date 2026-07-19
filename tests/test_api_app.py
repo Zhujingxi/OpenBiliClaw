@@ -16271,3 +16271,35 @@ def test_apply_retraction_db_marks_skips_out_of_whitelist_action(
             ],
         )
     assert marked == 0
+
+
+class TestRootRedirectLanding:
+    """`GET /` mirrors packaging/entry.py's landing decision for browsers
+    that reach the port without the packaged launcher."""
+
+    def _client(self, soul_engine):
+        from fastapi.testclient import TestClient
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=soul_engine)
+        return TestClient(app)
+
+    def test_root_redirects_to_web_when_initialized(self) -> None:
+        client = self._client(SimpleNamespace(is_profile_ready=lambda: True))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web"
+
+    def test_root_redirects_to_setup_when_uninitialized(self) -> None:
+        client = self._client(SimpleNamespace(is_profile_ready=lambda: False))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/setup/"
+
+    def test_root_falls_back_to_web_when_readiness_unknown(self) -> None:
+        def _boom() -> bool:
+            raise RuntimeError("probe failed")
+
+        client = self._client(SimpleNamespace(is_profile_ready=_boom))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web"

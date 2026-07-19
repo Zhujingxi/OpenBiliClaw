@@ -11,6 +11,7 @@
  * it, but passive search/creator collection still only reads rendered cards.
  */
 
+import { attachCoverData, backfillCoverUrlsFromState } from "./cover-harvest.js";
 import {
   collectInViewportNoteUrls,
   extractNoteMetadataFromAnchor,
@@ -696,6 +697,14 @@ async function executeTaskInPage(
     const state = extractBootstrapStateFromDocument(doc);
     const selfInfo = state ? extractSelfInfoFromState(state) : null;
     const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
+
+    // Background tabs never upgrade lazy-loaded card images past their
+    // data: placeholder, so DOM extraction alone yields coverless notes on
+    // exactly the search/creator paths this executor serves. Backfill real
+    // CDN URLs from __INITIAL_STATE__, then harvest the bytes while the
+    // page (and the URL token) is fresh. Both steps are best-effort.
+    backfillCoverUrlsFromState(filteredNotes, state);
+    await attachCoverData(filteredNotes);
 
     const result: TaskResultPayload = {
       task_id: msg.task_id,
