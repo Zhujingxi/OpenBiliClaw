@@ -5442,6 +5442,10 @@
       return { directory: normalized.slice(0, slashIndex) || "/", filename: normalized.slice(slashIndex + 1) || fallback.filename };
     }
 
+    function isLogPathUnmodified(currentLogging) {
+      return getInput("logPath") === resolveLogPath(currentLogging);
+    }
+
     function setSelect(id, value) {
       const el = document.getElementById(id);
       if (el && value !== undefined && value !== null) el.value = String(value);
@@ -6756,18 +6760,30 @@
         saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
         storage: { db_path: getInput("storageDbPath") },
         network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") },
-        logging: {
-          level: getInput("logLevel") || "INFO",
-          file_level: getInput("logFileLevel") || "DEBUG",
-          directory: logPath.directory,
-          filename: logPath.filename,
-          file_path: getInput("logPath"),
-          max_file_size_mb: getIntInput("logMaxFileSize", 100),
-          backup_count: getIntInput("logBackupCount", 1),
-          aggregate_budget_mb: getIntInput("logAggregateBudget", 500),
-          unmanaged_truncate_mb: getIntInput("logUnmanagedTruncate", 200),
-          unmanaged_max_age_days: getIntInput("logUnmanagedMaxAge", 30)
-        }
+        logging: (() => {
+          const base = {
+            level: getInput("logLevel") || "INFO",
+            file_level: getInput("logFileLevel") || "DEBUG",
+            max_file_size_mb: getIntInput("logMaxFileSize", 100),
+            backup_count: getIntInput("logBackupCount", 1),
+            aggregate_budget_mb: getIntInput("logAggregateBudget", 500),
+            unmanaged_truncate_mb: getIntInput("logUnmanagedTruncate", 200),
+            unmanaged_max_age_days: getIntInput("logUnmanagedMaxAge", 30)
+          };
+          // Unmodified full-form save: send file_path so the backend can
+          // detect the redacted echo and preserve canonical absolute paths.
+          // Intentional edit (including to the exact displayed basename):
+          // send directory/filename only — the backend applies them directly.
+          if (isLogPathUnmodified(state.config?.logging)) {
+            base.file_path = getInput("logPath");
+            base.directory = logPath.directory;
+            base.filename = logPath.filename;
+          } else {
+            base.directory = logPath.directory;
+            base.filename = logPath.filename;
+          }
+          return base;
+        })()
       };
     }
 

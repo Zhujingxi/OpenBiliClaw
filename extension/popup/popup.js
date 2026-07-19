@@ -6719,6 +6719,10 @@ function bindSettings() {
     };
   }
 
+  function isLogPathUnmodified(currentLogging) {
+    return getVal("cfgLogPath") === resolveLogPathFromConfig(currentLogging);
+  }
+
   const getInt = (id, fallback) => {
     const raw = getVal(id);
     if (raw === "") return fallback;
@@ -7145,17 +7149,30 @@ function bindSettings() {
         mode: getVal("cfgNetworkProxyMode"),
         proxy: getVal("cfgNetworkProxy"),
       },
-      logging: {
-        level: getVal("cfgLogLevel"),
-        file_level: getVal("cfgLogFileLevel"),
-        directory: logPath.directory,
-        filename: logPath.filename,
-        max_file_size_mb: getInt("cfgLogMaxFileSize", 100),
-        backup_count: getInt("cfgLogBackupCount", 1),
-        aggregate_budget_mb: getInt("cfgLogAggregateBudget", 500),
-        unmanaged_truncate_mb: getInt("cfgLogUnmanagedTruncate", 200),
-        unmanaged_max_age_days: getInt("cfgLogUnmanagedMaxAge", 30),
-      },
+      logging: (() => {
+        const base = {
+          level: getVal("cfgLogLevel"),
+          file_level: getVal("cfgLogFileLevel"),
+          max_file_size_mb: getInt("cfgLogMaxFileSize", 100),
+          backup_count: getInt("cfgLogBackupCount", 1),
+          aggregate_budget_mb: getInt("cfgLogAggregateBudget", 500),
+          unmanaged_truncate_mb: getInt("cfgLogUnmanagedTruncate", 200),
+          unmanaged_max_age_days: getInt("cfgLogUnmanagedMaxAge", 30),
+        };
+        // Unmodified full-form save: send file_path so the backend can
+        // detect the redacted echo and preserve canonical absolute paths.
+        // Intentional edit (including to the exact displayed basename):
+        // send directory/filename only — the backend applies them directly.
+        if (isLogPathUnmodified(state.runtimeConfig?.logging)) {
+          base.file_path = getVal("cfgLogPath");
+          base.directory = logPath.directory;
+          base.filename = logPath.filename;
+        } else {
+          base.directory = logPath.directory;
+          base.filename = logPath.filename;
+        }
+        return base;
+      })(),
     };
   }
 

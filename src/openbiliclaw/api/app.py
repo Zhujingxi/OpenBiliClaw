@@ -1248,6 +1248,8 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
     - Absolute or ``~``-prefixed directory → reduced to its final path
       component (basename). The basename is non-reversible: a client cannot
       reconstruct the parent directories from it.
+    - Root/volume-only paths (``/``, ``C:\\``, ``~``) → reduced to empty
+      string so ``file_path`` falls back to the filename only.
 
     The on-disk logging path is unaffected — this redaction applies only to
     the API response.
@@ -1258,56 +1260,63 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
         # Use both separators so Windows-style absolutes serialised on a
         # POSIX host (and vice versa) still reduce to their basename.
         parts = [p for p in directory.replace("\\", "/").split("/") if p]
-        return parts[-1] if parts else ""
+        if not parts:
+            return ""
+        candidate = parts[-1]
+        # Root/volume-only basenames are still host-revealing (``C:`` or
+        # ``~``) or empty. Redact them to empty so the wire form never
+        # contains an absolute host path component.
+        if candidate.endswith(":") or candidate == "~":
+            return ""
+        return candidate
     return directory
-
 
 def _safe_logging_filename_for_wire(filename: str) -> str:
     """Redact a configured logging filename for ``GET /api/config``.
 
     ``LoggingConfig.filename`` is documented as a plain basename, but the
-    config layer does not enforce that. An absolute filename (e.g.
-    ``/srv/private/backend.log``) would leak the host filesystem layout
-    when echoed back or joined into ``file_path``.
+    config layer does not enforce that. A filename containing path separators
+    (absolute or relative) would leak the host filesystem layout when echoed
+    back or joined into ``file_path``.
 
     Contract:
     - Plain basename (``"backend.log"``) → returned as-is.
-    - Absolute or ``~``-prefixed filename → reduced to its basename.
+    - Any filename containing ``/`` or ``\\`` → reduced to its basename.
     """
     if not filename:
         return filename
-    if _is_absolute_or_unc_path(filename) or filename.startswith("~"):
+    if "/" in filename or "\\" in filename:
         parts = [p for p in filename.replace("\\", "/").split("/") if p]
         return parts[-1] if parts else ""
     return filename
 
+def _logging_file_path_for_wire(directory: str, filename: str) -> str:
+    """Build the redacted ``file_path`` wire form from redacted components.
 
-def _is_redacted_logging_echo(
-    canonical: str, submitted: str, wire_fn: Callable[[str], str]
-) -> bool:
-    """Return True when *submitted* is the harmless wire echo of *canonical*.
-
-    ``GET /api/config`` redacts absolute/``~``/UNC logging paths to their
-    basename.  When a client performs an unchanged round-trip (GET → modify
-    unrelated settings → PUT), the payload contains that basename instead of
-    the real path.  Treating it as a new value would silently rewrite the
-    canonical config.  This helper detects the echo so the PUT handler can
-    skip the field.
-
-    Rules:
-    - If *canonical* is not redacted (relative path), the wire form equals
-      the canonical form; any *submitted* value is therefore intentional.
-    - If *canonical* is redacted, the wire form is its basename.  A matching
-      *submitted* value is considered an unchanged echo and must be ignored.
-      A non-matching value is treated as an intentional edit.
+    ``file_path`` never contains an absolute host path: relative directories
+    pass through, absolute/``~``/UNC directories collapse to their basename
+    (or empty for root/volume-only paths), and filenames with separators
+    collapse to their basename. When the redacted directory is empty the
+    result is just the filename — no leading ``/`` is emitted.
     """
-    if not canonical:
-        return False
-    wire = str(wire_fn(canonical))
-    if wire == canonical:
-        # Not redacted → no echo possible.
-        return False
-    return bool(submitted == wire)
+    dir_part = _safe_logging_directory_for_wire(directory)
+    name_part = _safe_logging_filename_for_wire(filename)
+    return f"{dir_part}/{name_part}" if dir_part else name_part
+
+def _split_logging_file_path(file_path: str) -> tuple[str, str]:
+    """Split a wire ``file_path`` into ``(directory, filename)`` components.
+
+    The inverse of :func:`_logging_file_path_for_wire`. Handles both
+    ``dir/name`` and bare ``name`` forms, normalising Windows separators.
+    """
+    normalized = file_path.replace("\\", "/").rstrip("/")
+    slash_index = normalized.rfind("/")
+    if slash_index == -1:
+        return "", normalized
+    return normalized[:slash_index], normalized[slash_index + 1 :]
+
+
+
 
 
 def create_app(
@@ -10429,10 +10438,10 @@ def create_app(
                 # ``file_path`` is the wire-facing joined form of the redacted
                 # directory + filename. It never contains an absolute host
                 # path: relative directories pass through, absolute/``~``
-                # directories collapse to their basename first.
-                file_path=(
-                    f"{_safe_logging_directory_for_wire(cfg.logging.directory)}"
-                    f"/{_safe_logging_filename_for_wire(cfg.logging.filename)}"
+                # directories collapse to their basename first, and
+                # root/volume-only paths fall back to the filename only.
+                file_path=_logging_file_path_for_wire(
+                    cfg.logging.directory, cfg.logging.filename
                 ),
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
@@ -11079,21 +11088,28 @@ def create_app(
         # Apply logging updates
         if "logging" in update:
             ldata = update["logging"]
-            # directory/filename may arrive as the redacted wire echo from
-            # GET /api/config (absolute paths reduced to basename).  An
-            # unchanged round-trip must not overwrite the canonical path.
-            if "directory" in ldata:
-                submitted_dir = str(ldata["directory"])
-                if not _is_redacted_logging_echo(
-                    cfg.logging.directory, submitted_dir, _safe_logging_directory_for_wire
-                ):
-                    cfg.logging.directory = submitted_dir
-            if "filename" in ldata:
-                submitted_name = str(ldata["filename"])
-                if not _is_redacted_logging_echo(
-                    cfg.logging.filename, submitted_name, _safe_logging_filename_for_wire
-                ):
-                    cfg.logging.filename = submitted_name
+            # Modern clients send ``file_path`` as the authoritative logging
+            # path field. When it exactly matches the current redacted wire
+            # form it is an unchanged GET echo and the canonical absolute
+            # paths are preserved. When it differs it is an intentional edit
+            # and is split back into directory/filename. Legacy clients that
+            # omit ``file_path`` apply directory/filename directly — the
+            # value-equality echo heuristic is intentionally dropped so an
+            # intentional edit to the exact displayed basename is honoured.
+            if "file_path" in ldata:
+                submitted_path = str(ldata["file_path"])
+                current_wire_path = _logging_file_path_for_wire(
+                    cfg.logging.directory, cfg.logging.filename
+                )
+                if submitted_path != current_wire_path:
+                    directory, filename = _split_logging_file_path(submitted_path)
+                    cfg.logging.directory = directory
+                    cfg.logging.filename = filename
+            else:
+                if "directory" in ldata:
+                    cfg.logging.directory = str(ldata["directory"])
+                if "filename" in ldata:
+                    cfg.logging.filename = str(ldata["filename"])
             for key in ("level", "file_level"):
                 if key in ldata:
                     setattr(cfg.logging, key, str(ldata[key]))
