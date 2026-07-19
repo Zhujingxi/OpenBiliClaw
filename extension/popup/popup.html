@@ -4325,6 +4325,15 @@
       color: #b91c1c;
     }
 
+    /* Overseas-egress advisory (backend-authored, inserted by
+       applySourceNetworkHint). Amber so it reads as actionable rather than as
+       one more informational hint. */
+    .source-network-hint {
+      background: rgba(234, 179, 8, 0.14);
+      border: 1px solid rgba(234, 179, 8, 0.38);
+      color: var(--text-primary);
+    }
+
     .settings-status-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4392,6 +4401,32 @@
     .settings-probe-status[data-tone="error"] {
       color: #c0404e;
     }
+
+    /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
+       closed browser, a throttled platform, YouTube needing no login at all — is
+       not a failure, and painting it red sends users off to delete a cookie that
+       was working fine. Distinct from the muted "pending" grey too, so a final
+       verdict never reads as "still probing". */
+    .settings-probe-status[data-tone="neutral"] {
+      color: #2f6fb8;
+    }
+
+    .source-verify-row {
+      align-items: center;
+      margin: -4px 0 2px;
+    }
+
+    .source-verify-btn {
+      padding: 4px 10px;
+      font-size: 11.5px;
+    }
+
+    .source-verify-btn:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .source-verify-btn:disabled:hover { border-color: var(--line); }
 
     .settings-link {
       color: var(--brand-strong);
@@ -4841,6 +4876,7 @@
         <div id="emptyState" class="empty-state" hidden>
           <h3 id="emptyTitle">还没刷出新东西</h3>
           <p id="emptyText">稍等一下，新的推荐马上来。</p>
+          <button id="emptyAction" type="button" class="init-start-btn" hidden></button>
           <div id="initPanel" class="init-panel" hidden>
             <div id="initSources" class="init-sources" hidden></div>
             <ul id="initChecklist" class="init-checklist"></ul>
@@ -5404,6 +5440,10 @@
           <label for="cfgBilibiliEnabled">启用 Bilibili discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgBilibiliStatus" data-source-status="bilibili"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgBiliAuth">认证方式</label>
           <select id="cfgBiliAuth">
@@ -5433,6 +5473,10 @@
           <label for="cfgXhsEnabled">启用小红书 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgXhsStatus" data-source-status="xiaohongshu"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgXhsDailySearchBudget">小红书每日搜索任务</label>
           <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
@@ -5455,6 +5499,10 @@
           <label for="cfgDouyinEnabled">启用抖音 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgDouyinStatus" data-source-status="douyin"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgDouyinCookie">Cookie</label>
           <textarea id="cfgDouyinCookie" placeholder="从浏览器复制 Cookie 字符串（登录抖音后插件会自动同步）"></textarea>
@@ -5489,6 +5537,10 @@
           <label for="cfgYoutubeEnabled">启用 YouTube discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgYoutubeStatus" data-source-status="youtube"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgYoutubeDailySearchBudget">YouTube 搜索 query 预算</label>
           <input id="cfgYoutubeDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
@@ -5520,6 +5572,10 @@
           <label for="cfgTwitterEnabled">启用 X discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgTwitterStatus" data-source-status="twitter"><span class="src-dot">●</span> <span class="src-detail">X 来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgTwitterCookie">Cookie</label>
           <textarea id="cfgTwitterCookie" placeholder="从浏览器复制 Cookie 字符串（登录 x.com 后插件会自动同步，需含 auth_token 和 ct0）"></textarea>
@@ -5559,6 +5615,10 @@
           <label for="cfgZhihuEnabled">启用知乎 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgZhihuStatus" data-source-status="zhihu"><span class="src-dot">●</span> <span class="src-detail">知乎来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label>知乎 discovery 分支</label>
           <div class="settings-field-row">
@@ -5621,6 +5681,10 @@
           <label for="cfgRedditEnabled">启用 Reddit 来源</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgRedditStatus" data-source-status="reddit"><span class="src-dot">●</span> <span class="src-detail">Reddit 来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgRedditBackend">后端</label>
           <select id="cfgRedditBackend">
@@ -5711,7 +5775,7 @@
             <input id="cfgBangumiClearToken" type="checkbox">
             <label for="cfgBangumiClearToken">清除已保存的令牌（本次保存清空并降级为匿名公开发现）</label>
           </div>
-          <p class="settings-hint">个人令牌可自动识别当前登录账号（含私密收藏），比公开用户名更完整。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）。</p>
+          <p class="settings-hint">Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a>。</p>
         </div>
         <div class="settings-field">
           <label>内容发现分支</label>
@@ -5855,7 +5919,7 @@
           <label for="cfgNetworkProxyMode">海外网络模式</label>
           <select id="cfgNetworkProxyMode">
             <option value="direct">直连（忽略系统代理）</option>
-            <option value="system">跟随系统代理</option>
+            <option value="system" selected>跟随系统代理</option>
             <option value="custom">自定义代理</option>
           </select>
         </div>
@@ -5863,7 +5927,7 @@
           <label for="cfgNetworkProxy">自定义代理地址</label>
           <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
         </div>
-        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外服务（海外 AI 服务、需要海外出网的内容来源、更新检查）；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。哪些来源需要海外出网，见各来源卡片的接入状态。</p>
         <div class="settings-probe-row">
           <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
           <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
@@ -6105,6 +6169,11 @@
     </footer>
   </div>
 
+  <!-- Shared with the desktop page and the setup wizard; copied into the
+       package by scripts/build.mjs because MV3's CSP forbids loading it from
+       the backend. A classic script, so it runs before the deferred module
+       below and popup.js can read it as a global. -->
+  <script src="shared/source-status.js"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

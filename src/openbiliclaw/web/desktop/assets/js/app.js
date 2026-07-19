@@ -112,16 +112,27 @@
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" },
-      { key: "bangumi", label: "Bangumi" }
-    ];
+    //
+    // WHICH sources exist comes from the shared roster (/shared/source-status.js,
+    // loaded before this script), the same list the setup wizard and the side
+    // panel build their pickers from — a hardcoded copy here is what let the
+    // three surfaces drift. Labels come from the shared module too, with a local
+    // fallback map so an unrecognised key still renders. defaultChecked stays
+    // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
+    const INIT_SOURCE_LABEL_FALLBACK = {
+      bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+    };
+    const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+    const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+    const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+      ? [..._initSourceStatus.SOURCE_KEYS]
+      : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+    const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+      key,
+      label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+      ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
+    }));
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
@@ -132,7 +143,7 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
-      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
       invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
       bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
@@ -637,6 +648,10 @@
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
     let _cachedLanIp = "";
+    // 惊喜卡自动轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文
+    // 摘录读下来就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 /
+    // 下一条。与移动端 web/js/views/recommend.js 的同名常量保持一致。
+    const DELIGHT_AUTO_ADVANCE_MS = 60000;
     let _delightAutoTimer = null;
     let _delightSwipeStartX = 0;
     const _delightStatusCache = new Map();
@@ -1191,7 +1206,7 @@
         configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
       }
       $("#statusLabel").textContent = "模型配置待修复";
-      $("#runtimeSummary").textContent = "后端已安全降级；推荐功能暂停，模型设置仍可修改。";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
       if (degradedRecoveryPresented) return;
       degradedRecoveryPresented = true;
       openSettingsPage("models");
@@ -1446,11 +1461,30 @@
     // extension/popup/popup-init-control.js — the three GUI surfaces share no
     // module system, so keep the formulas in lock-step when editing either.
     const STAGE_FRACTION_CAP = 0.95;
-    const STAGE_FRACTION_FALLBACK = 0.5;
+    // A stage with no real done/total contributes NOTHING to the bar. It used
+    // to contribute a flat half-step (0.5), which implied a progress the stage
+    // had not made; such stages now render indeterminate instead.
+    const STAGE_FRACTION_UNKNOWN = 0;
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+    // Work-unit stall floor + adaptive slack. The heartbeat period says
+    // nothing about how long ONE unit of work legitimately takes: an analysis
+    // batch on a slow/remote chat model routinely runs minutes (field report
+    // 2026-07-20: 280s per batch — healthy, yet the shared 90s threshold cried
+    // "stalled" throughout). Floor generously, then adapt to this run's own
+    // cadence. Keep in lock-step with popup-init-control.js.
+    const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+    const PROGRESS_STALL_SLACK = 1.5;
+    function _progressStallThreshold(st, stage) {
+      const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+      const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+      const maxSeconds = Number(stage?.progress?.max_seconds || 0);
+      return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+    }
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+    // Said ONCE while the user waits, not repeated on every stage row.
+    const INIT_RUNNING_HINT = "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -1458,9 +1492,10 @@
       let st = _runViewState.get(runId);
       if (!st) {
         st = {
-          stageStartMs: new Map(), maxPct: 0,
+          maxPct: 0,
           lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
-          lastProgressMark: null, lastProgressChangeMs: 0
+          lastProgressMark: null, lastProgressChangeMs: 0,
+          slowestProgressIntervalSeconds: 0
         };
         _runViewState.set(runId, st);
         if (_runViewState.size > 8) {
@@ -1471,53 +1506,43 @@
       return st;
     }
 
-    function _runningStageFraction(stage, st, nowMs) {
-      const prog = stage?.progress;
-      if (prog?.mode === "indeterminate") {
-        const eta = Number(stage?.eta_seconds || 0);
-        if (eta > 0 && st) {
-          let startMs = st.stageStartMs.get(stage.n);
-          if (startMs === undefined) {
-            startMs = nowMs;
-            st.stageStartMs.set(stage.n, startMs);
-          }
-          return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta));
-        }
-        return STAGE_FRACTION_FALLBACK;
+    // Only REAL sub-progress moves the bar. The old elapsed/eta pseudo-progress
+    // (1 - e^-t/eta) is gone with the forecasts that fed it: faking a moving
+    // bar from a made-up duration is the same lie in another shape. A stage
+    // without done/total contributes nothing and renders indeterminate.
+    function _runningStageFraction(stage) {
+      const total = Number(stage?.progress?.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(stage?.progress?.done || 0), total));
+        return Math.min(STAGE_FRACTION_CAP, done / total);
       }
-      const progTotal = prog ? Number(prog.total || 0) : 0;
-      if (progTotal > 0) {
-        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-      }
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta > 0 && st) {
-        let startMs = st.stageStartMs.get(stage.n);
-        if (startMs === undefined) {
-          startMs = nowMs;
-          st.stageStartMs.set(stage.n, startMs);
-        }
-        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-      }
-      return STAGE_FRACTION_FALLBACK;
+      return STAGE_FRACTION_UNKNOWN;
     }
 
-    // Show the calibrated duration before it elapses; afterwards stop repeating
-    // an already-broken estimate and surface the real hard ceiling instead.
-    function stageEtaText(stage) {
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta <= 0) return "";
-      const elapsed = Number(stage?.progress?.elapsed_seconds || 0);
-      if (elapsed > eta) {
-        const maxSeconds = Number(stage?.progress?.max_seconds || 0);
-        if (maxSeconds > 0) {
-          return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-        }
-        return "已超常见用时；AI 或平台仍可能在处理";
+    // A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+    // duration we cannot honour is worse than none: every wrong estimate reads
+    // as "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and
+    // stage 4 announced 5, both legitimately ran far longer). So the running
+    // row reports only observed facts the backend already publishes: how long
+    // this stage has been running, and real sub-progress counts when they
+    // exist. No estimate, no ceiling, no extrapolation.
+    function formatElapsedText(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+    }
+
+    function stageDetailText(stage) {
+      const prog = stage?.progress;
+      if (!prog) return "";
+      const parts = [];
+      const elapsed = Number(prog.elapsed_seconds || 0);
+      if (elapsed > 0) parts.push(formatElapsedText(elapsed));
+      const total = Number(prog.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), total));
+        parts.push(`已完成 ${done}/${total}`);
       }
-      const halfMinutes = Math.ceil(eta / 30) / 2;
-      return `本阶段通常约 ${halfMinutes} 分钟`;
+      return parts.join(" · ");
     }
 
     // Split connection liveness from substantive work progress. A healthy 30s
@@ -1538,6 +1563,15 @@
       }
       const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
       if (st.lastProgressMark !== progressMark) {
+        // Learn this run's pace from every completed unit (skip the first
+        // mark, which measures "since we started watching").
+        if (st.lastProgressMark != null && st.lastProgressChangeMs) {
+          const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+          st.slowestProgressIntervalSeconds = Math.max(
+            st.slowestProgressIntervalSeconds || 0,
+            interval,
+          );
+        }
         st.lastProgressMark = progressMark;
         st.lastProgressChangeMs = nowMs;
       }
@@ -1551,12 +1585,15 @@
           text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`
         };
       }
-      if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+      const runningStage = Array.isArray(status.stages)
+        ? status.stages.find((stage) => stage?.status === "running")
+        : null;
+      if (progressStale > _progressStallThreshold(st, runningStage)) {
         const minutes = Math.max(1, Math.round(progressStale / 60));
         return {
           fresh: false,
           staleSeconds: progressStale,
-          text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`
+          text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`
         };
       }
       return { fresh: true, staleSeconds: progressStale, text: "● 后端在线 · 正在处理" };
@@ -1572,13 +1609,21 @@
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
-      const indeterminate = Boolean(running && currentStage?.progress?.mode === "indeterminate");
+      // Indeterminate covers both the backend's explicit flag and any
+      // running stage with no real done/total — with the eta gone there is
+      // nothing honest left to fill such a bar with.
+      const indeterminate = Boolean(
+        running &&
+          currentStage &&
+          (currentStage.progress?.mode === "indeterminate" ||
+            !(Number(currentStage.progress?.total || 0) > 0)),
+      );
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
       const note = currentStage?.progress?.note;
       if (stageLabel && note) stageLabel += ` · ${note}`;
       const runningStages = stages.filter((stage) => stage.status === "running");
       const inFlight = runningStages.length
-        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage, st, nowMs), 0) /
+        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage), 0) /
           runningStages.length
         : 0;
       const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
@@ -1594,7 +1639,7 @@
         indeterminate,
         pct,
         stageLabel,
-        etaText: running ? stageEtaText(currentStage) : "",
+        stageDetailText: running ? stageDetailText(currentStage) : "",
         failedReason: failedStage?.reason || ""
       };
     }
@@ -1688,7 +1733,7 @@
       // Optional personal access token: identifies the account via /v0/me and
       // reads private collections; when set, the username above is auto-resolved.
       const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
-      const bangumiTokenHint = `<p class="init-sources-hint"><a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）</p>`;
+      const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
       return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
@@ -1730,7 +1775,7 @@
         const staleness = stalenessView(status);
         const stallText = Boolean(status?.running)
           ? staleness.fresh
-            ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+            ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
             : staleness.text
           : "";
         stallHint.textContent = stallText;
@@ -1782,12 +1827,17 @@
       const staleness = stalenessView(status);
       const stallText = isRunning
         ? staleness.fresh
-          ? [staleness.text, displayProgress.etaText].filter(Boolean).join(" · ")
+          ? [staleness.text, displayProgress.stageDetailText].filter(Boolean).join(" · ")
           : staleness.text
         : "";
       // Expectation management near the start button while a run can begin.
-      const expectationText =
-        !isRunning && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
+      // Idle: orient the user about variability. Running: the one
+      // reassurance that is literally true after v0.3.180.
+      const expectationText = isRunning
+        ? INIT_RUNNING_HINT
+        : alreadyInitialized
+          ? ""
+          : INIT_EXPECTATION_HINT;
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);
@@ -1978,12 +2028,13 @@
       const bangumiToken = String(
         $("#initBangumiToken")?.value || state.initBangumiToken || ""
       ).trim();
-      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername && !bangumiToken) {
-        state.initReason = INIT_REASON_TEXT.no_profile_signal_sources;
-        state.initBusy = false;
-        renderAll();
-        return;
-      }
+      // No client-side Bangumi-only admission check here on purpose. The
+      // backend owns a THREE-tier account ladder (token → explicit username →
+      // browser-extension-reported identity); a local "username or token
+      // required" copy of it can't see the third tier and silently blocked
+      // zero-config extension users from ever reaching /api/init. The backend
+      // answers 409 no_profile_signal_sources when all three are genuinely
+      // missing, and the catch below renders it.
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         state.initReason = "还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。";
         state.initBusy = false;
@@ -6128,8 +6179,16 @@ ${cardFeedbackBarHtml()}`;
 
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+    //
+    // The state -> label/tone table, the verify tones and the credential-row
+    // shape all come from /shared/source-status.js, which the extension side
+    // panel and the setup wizard load too. Keeping a private copy here is what
+    // let the two surfaces drift into painting `no_auth` and `unverified` the
+    // same colour (spec D6). The roster it exports includes Bangumi, so this
+    // page keeps rendering that row even though the backend sends it no `auth`
+    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+    const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -6140,28 +6199,51 @@ ${cardFeedbackBarHtml()}`;
       reddit: "redditEnabled",
       bangumi: "bangumiEnabled"
     };
-    const SOURCE_ACCESS_STATE = {
-      ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "凭据已就绪" },
-      no_auth: { tone: "public", label: "无需登录" },
-      unverified: { tone: "pending", label: "状态待验证" },
-      missing: { tone: "warning", label: "需要登录" },
-      login_required: { tone: "warning", label: "需要登录" },
-      missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "pending", label: "频率受限" },
-      partial: { tone: "warning", label: "部分可用" },
-      stale: { tone: "warning", label: "需要刷新" },
-      error: { tone: "danger", label: "检查失败" },
-      expired: { tone: "danger", label: "凭据失效" },
-      expired_cookie: { tone: "danger", label: "Cookie 失效" },
-      blocked: { tone: "danger", label: "接入受阻" },
-      disabled: { tone: "muted", label: "来源未启用" }
-    };
 
     function setSourceBadge(badge, text, tone) {
       if (!badge) return;
       badge.textContent = text;
       badge.dataset.tone = tone;
+    }
+
+    // How strong the evidence behind the access verdict is, as its own badge
+    // beside it. Two sources can honestly both read 已验证 while one asked the
+    // platform and the other only found a file on disk; before this they were
+    // the same green pill, which is the misreading the contract exists to fix.
+    // Hidden rather than blanked when there is nothing to rate — a source that
+    // needs no credential has no evidence, and an empty pill reads as a bug.
+    function setSourceEvidence(badge, evidence) {
+      if (!badge) return;
+      const shown = Boolean(evidence && evidence.text);
+      badge.hidden = !shown;
+      badge.textContent = shown ? evidence.text : "";
+      badge.dataset.rank = shown ? evidence.rank : "none";
+      // The glyph and the method name already carry the distinction; the title
+      // spells it out for anyone who wants it, and comes from the shared module
+      // so it cannot drift from the glyph it explains.
+      if (shown && evidence.hint) badge.title = evidence.hint;
+      else badge.removeAttribute("title");
+    }
+
+    // The overseas-egress advisory is authored by the backend
+    // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+    // verbatim. This function must never learn a platform name nor read
+    // [network].mode: adding a platform must stay a one-line backend change.
+    // Only the `enabled` gate lives here, because "is this row live right now"
+    // is a UI fact the backend cannot see (the desktop select can be pending).
+    function applySourceNetworkHint(row, hint, enabled) {
+      const text = enabled ? String(hint || "") : "";
+      let node = row.querySelector(".source-network-hint");
+      if (!text) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.className = "source-network-hint";
+        row.appendChild(node);
+      }
+      node.textContent = text;
     }
 
     function getPendingSourceEnabled(key, item) {
@@ -6183,32 +6265,35 @@ ${cardFeedbackBarHtml()}`;
         if (!row) return;
         const sourceBadge = row.querySelector(".source-source-badge");
         const accessBadge = row.querySelector(".source-access-badge");
+        const evidenceBadge = row.querySelector(".source-evidence-badge");
         const detail = row.querySelector(".src-detail");
         const item = data?.[key];
-        if (!item) {
+        const access = SourceStatus.describeAccess(item);
+        setSourceEvidence(evidenceBadge, access.evidence);
+        if (!access.present) {
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
-          setSourceBadge(accessBadge, "接入：后端未连接", "muted");
-          if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
+          if (detail) detail.textContent = access.detail;
+          // No status means no basis for an egress advisory either; drop any
+          // hint left over from the last successful poll.
+          applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
-          row.dataset.accessTone = "muted";
+          row.dataset.accessTone = access.tone;
           return;
         }
         const enableState = getPendingSourceEnabled(key, item);
-        const tokenRejected = item.token_state === "rejected";
-        const accessState = tokenRejected
-          ? { tone: "danger", label: "令牌已失效" }
-          : (SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" });
         const sourceLabel = enableState.pending
           ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
           : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
         setSourceBadge(sourceBadge, sourceLabel, enableState.pending ? "pending" : enableState.savedEnabled ? "enabled" : "disabled");
-        setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
+        setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
-        if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        if (detail) detail.textContent = detailPrefix + (access.detail || "暂无更多状态细节。");
+        applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
-        row.dataset.accessTone = accessState.tone;
+        row.dataset.accessTone = access.tone;
       });
     }
 
@@ -6219,41 +6304,73 @@ ${cardFeedbackBarHtml()}`;
       renderSourcesStatusRows(data);
     }
 
+    function renderVerifyResult(statusEl, result) {
+      const view = SourceStatus.describeVerifyResult(result);
+      setProbeStatus(statusEl, view.tone, view.text);
+    }
+
+    const sourceVerifyInFlight = new Set();
+
+    async function runSourceVerify(row) {
+      const slug = row?.dataset?.sourceStatus || "";
+      if (!slug || sourceVerifyInFlight.has(slug)) return;
+      const button = row.querySelector(".source-verify-btn");
+      const statusEl = row.querySelector(".source-verify-status");
+      sourceVerifyInFlight.add(slug);
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "连接");
+      let cooldown = 0;
+      try {
+        const result = await requestJsonStrict(`/sources/${encodeURIComponent(slug)}/verify`, {
+          method: "POST",
+          timeoutMs: 30000
+        });
+        renderVerifyResult(statusEl, result);
+        cooldown = Number(result?.retry_after_seconds) || 0;
+        // Only a verification that actually moved the credential or the verdict
+        // makes the badge above it stale; a refreshed timestamp does not.
+        if (result?.changed) void renderSourcesStatus();
+      } catch (error) {
+        const view = SourceStatus.describeVerifyError(error);
+        setProbeStatus(statusEl, view.tone, view.text);
+      } finally {
+        sourceVerifyInFlight.delete(slug);
+        SourceStatus.startVerifyCooldown(button, cooldown);
+      }
+    }
+
+    $("#sourceStatusList")?.addEventListener("click", (event) => {
+      const button = event.target.closest(".source-verify-btn");
+      if (!button || button.disabled) return;
+      void runSourceVerify(button.closest(".source-status-row"));
+    });
+
     function renderSourceCredentialRows(data) {
       const list = $("#sourceCredentialList");
       if (!list) return;
-      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
+      SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
         const copyBtn = row.querySelector(".source-credential-copy");
-        const item = data?.[key];
-        if (!item) {
-          row.dataset.available = "false";
-          if (summary) summary.textContent = "状态暂不可用";
-          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
-          if (copyBtn) copyBtn.disabled = true;
-          return;
-        }
-        row.dataset.available = item.available ? "true" : "false";
-        if (summary) {
-          if (key === "xiaohongshu" && item.available) {
-            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
-          } else {
-            summary.textContent = item.available
-              ? `${item.label || "Cookie"} 已保存，展开查看`
-              : item.detail || "当前没有可展示 Cookie";
-          }
-        }
-        if (value) {
-          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
-        }
-        if (copyBtn) copyBtn.disabled = !item.available;
+        // Summary wording is the backend's, including 小红书's "a stored
+        // content token is not a login" caveat. That caveat used to be a
+        // per-platform branch right here, so only this page ever showed it —
+        // the side panel and the setup wizard silently disagreed.
+        const view = SourceStatus.describeCredential(data?.[key]);
+        row.dataset.available = view.available ? "true" : "false";
+        row.dataset.formKind = view.form.kind;
+        if (summary) summary.textContent = view.summary;
+        if (value) value.value = view.value;
+        if (copyBtn) copyBtn.disabled = !view.canCopy;
       });
-      // Reddit's paste box has no config-side cookie field (the value goes to
-      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
-      // by credential availability instead of the config snapshot.
+      // Not a display branch over the access enum: every other paste box gets
+      // its "已保存/未保存" placeholder from the config snapshot in
+      // populateForm(), but Reddit's credential goes to rdt-cli's own store, so
+      // config.toml has no field to read and the hint has to come from here.
+      // Generalising it would mean either a new contract field or moving three
+      // other platforms off the config snapshot — both beyond this change.
       setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
 
@@ -6484,7 +6601,9 @@ ${cardFeedbackBarHtml()}`;
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
-      setSelect("networkProxyMode", config.network?.mode || "direct");
+      // Mirrors the [network].mode backend default (system since v0.3.175);
+      // only reached if /api/config omits the field.
+      setSelect("networkProxyMode", config.network?.mode || "system");
       setInput("networkProxy", config.network?.proxy || "");
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
@@ -6814,7 +6933,7 @@ ${cardFeedbackBarHtml()}`;
             if (delightUserEngaged()) return;
             const next = state.delightIndex + 1;
             setActiveDelight(next >= state.delights.length ? 0 : next);
-        }, 4000);
+        }, DELIGHT_AUTO_ADVANCE_MS);
     }
 
     function _stopDelightAutoAdvance() {
@@ -7301,9 +7420,23 @@ ${cardFeedbackBarHtml()}`;
         scheduleAutoLoadCheck();
       }
 
-      function markDesktopRecommendationFailedAndRecover() {
+      function markDesktopRecommendationFailedAndRecover(error) {
         if (state.videos.length > 0) {
           clearDesktopRecommendationRecovery("ready");
+          return;
+        }
+        // A mid-session LLM-registry degrade blocks /api/recommendations with a
+        // 503 {status:"degraded", …} envelope, which requestJsonStrict rethrows
+        // as error.details (§4.8). Route that to the model-settings recovery
+        // instead of the generic retry UI — the pool cannot refill until the
+        // provider is fixed, so a retry loop here is a dead end.
+        const details = error && error.details;
+        if (details && details.status === "degraded") {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: details.reason || "",
+            issues: details.issues || [],
+          });
           return;
         }
         desktopRecommendationLoadState = "failed";
@@ -7458,7 +7591,7 @@ ${cardFeedbackBarHtml()}`;
 
       const recommendationApplicationPromise = recommendationsPromise.then(
         (items) => applyInitialRecommendations(items),
-        () => markDesktopRecommendationFailedAndRecover(),
+        (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
         (snapshot) => applyInitialRuntimeSnapshot(snapshot),
@@ -8019,18 +8152,26 @@ ${cardFeedbackBarHtml()}`;
       });
     }
 
+    // One DOM convention for every "click, wait, read a verdict" strip on this
+    // page: tone in the dataset, verdict in the text. The LLM/embedding probes
+    // and the per-source 测试连接 buttons share it instead of each keeping a
+    // private copy — two independent copies of one rendering rule is exactly
+    // the drift that left the codebase with two divergent source status maps.
+    function setProbeStatus(statusEl, tone, text) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = tone;
+      statusEl.textContent = text;
+    }
+
     function renderProbeResult(statusEl, result) {
       if (!statusEl) return;
-      statusEl.dataset.tone = result?.ok ? "success" : "error";
-      statusEl.textContent = formatProbeResult(result);
+      setProbeStatus(statusEl, result?.ok ? "success" : "error", formatProbeResult(result));
       const configStatus = $("#configStatus");
       if (configStatus) configStatus.value = formatProbeResult(result);
     }
 
     function renderProbePending(statusEl, label) {
-      if (!statusEl) return;
-      statusEl.dataset.tone = "pending";
-      statusEl.textContent = `${label} 探测中…`;
+      setProbeStatus(statusEl, "pending", `${label} 探测中…`);
     }
 
     async function runLlmConfigProbe() {

@@ -123,6 +123,8 @@ from openbiliclaw.api.models import (
     SavedSyncRequest,
     SchedulerConfigOut,
     SourceCredentialItem,
+    SourceCredentialWriteIn,
+    SourceCredentialWriteResponse,
     SourcesBrowserConfigOut,
     SourcesConfigOut,
     SourcesCredentialsResponse,
@@ -130,6 +132,7 @@ from openbiliclaw.api.models import (
     SourceShareSuggestionResponse,
     SourcesStatusResponse,
     SourceStatusItem,
+    SourceVerifyResponse,
     StorageConfigOut,
     TwitterSourceConfigOut,
     UpdateApplyIn,
@@ -158,6 +161,7 @@ from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
     cleanup_image_cache,
     fetch_cover_bytes,
+    save_extension_cover,
     save_image_bytes,
 )
 from openbiliclaw.runtime.image_cache import (
@@ -187,15 +191,21 @@ from openbiliclaw.soul.dislike_writeback import (
     topics_for_confirmed_avoidance,
 )
 from openbiliclaw.sources.platforms import (
-    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
+    CANONICAL_SOURCE_FAMILIES,
+    normalize_source_platform,
+    overseas_network_hint,
+    requires_overseas_network,
 )
 from openbiliclaw.sources.platforms import (
-    normalize_source_platform,
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from openbiliclaw.api.source_auth.contract import SourceAuthContract
+    from openbiliclaw.api.source_auth.write import CredentialWriteOutcome
 
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
@@ -260,9 +270,11 @@ _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
 
 # Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
 # re-exported here because callers historically imported from api.app.
-from openbiliclaw.sources.x_auth import (  # noqa: E402
-    X_REQUIRED_COOKIE_NAMES as _X_REQUIRED_COOKIE_NAMES,
-)
+#
+# ``X_REQUIRED_COOKIE_NAMES`` used to be re-exported here too. It no longer is:
+# which cookie names X requires is now stated once, in the write path's
+# ``CREDENTIAL_SPECS``, and a second copy in this file is exactly how a check
+# and its endpoint drift apart.
 from openbiliclaw.sources.x_auth import (  # noqa: E402, F401
     XCookieManager,
     resolve_x_cookie,
@@ -1313,12 +1325,25 @@ def create_app(
     # Mirror the overseas-outbound proxy into the process-level source of truth
     # before any LLM/updater client is built. CN-direct clients never read it.
     # getattr-guarded so a partial config object never hard-crashes app boot.
+    #
+    # The guard falls back to ``system``, not ``direct``. A config object missing
+    # ``network`` / ``mode`` is the in-memory analogue of an *absent* key, not of
+    # an invalid one: there is no user-written value here to disrespect, so it
+    # takes the same default an absent key takes in ``_build_network_config``.
+    # (``direct`` is reserved for present-but-broken values, where the user did
+    # write something and silently inheriting an env proxy would override it.)
+    # ``direct`` is also not the neutral choice — it actively sets
+    # ``trust_env=False`` and overrides the user's environment, whereas ``system``
+    # defers to it. When the config is too damaged to state a preference,
+    # deferring beats overriding, and matching the normal default keeps an
+    # already-degraded boot from growing a second, invisible failure mode
+    # (opaque overseas timeouts on a machine that has a working proxy).
     from openbiliclaw.network import set_outbound_proxy
 
     network_config = getattr(config, "network", None)
     set_outbound_proxy(
         getattr(network_config, "proxy", "") or "",
-        mode=getattr(network_config, "mode", "direct") or "direct",
+        mode=getattr(network_config, "mode", "system") or "system",
     )
 
     # Auto-generate the session signing secret on first enable so login state
@@ -1763,6 +1788,31 @@ def create_app(
             "issues": _degraded_issues_payload(),
         }
 
+    # Shared copy for the degraded-mode init rejection (POST /api/init) and the
+    # degraded-aware /api/init-status reason detail, so both surfaces explain
+    # the same actionable cause: the backend could not build its LLM registry,
+    # so init is impossible until the LLM config is repaired (mirrors the
+    # config-recovery message on PUT /api/config).
+    _degraded_init_detail = (
+        "LLM 配置有误，AI 服务无法启动，暂时无法初始化。"
+        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
+        "然后 restart daemon 让新配置生效后再试。"
+    )
+
+    def _init_blocked_by_degraded() -> bool:
+        """True when the backend is degraded because the LLM registry never
+        built — the one degraded reason that makes guided init impossible.
+
+        Gated on the canonical ``llm_registry_unavailable`` reason (the only
+        value ``build_degraded_runtime_context`` ever emits) rather than the
+        bare ``degraded`` flag, so this stays a precise "LLM config is broken"
+        signal and does not swallow other, init-compatible degraded states.
+        """
+        return (
+            bool(getattr(ctx, "degraded", False))
+            and str(getattr(ctx, "degraded_reason", "")) == "llm_registry_unavailable"
+        )
+
     @app.middleware("http")
     async def _degraded_mode_guard(request: Request, call_next: Any) -> Any:
         if not bool(getattr(ctx, "degraded", False)):
@@ -1772,7 +1822,10 @@ def create_app(
         static_recovery_surface = (
             path == "/"
             or path in {"/m", "/web", "/setup"}
-            or path.startswith(("/m/", "/web/", "/setup/"))
+            # /shared/ hosts modules the recovery shells load at parse time
+            # (e.g. source-status.js); blocking it kills the setup wizard's
+            # script and leaves the degraded config unrepairable.
+            or path.startswith(("/m/", "/web/", "/setup/", "/shared/"))
         )
         allowed = (
             method == "OPTIONS"
@@ -1789,6 +1842,15 @@ def create_app(
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            # LLM-independent repair/config surfaces (degraded ctx has config +
+            # database, which is all these handlers touch). Blocking them made
+            # the settings 平台源 tab and the embedding banner fail with
+            # misleading "backend unavailable" copy while degraded, even though
+            # fixing platform logins / pulling bge-m3 is exactly what a user
+            # can usefully do while repairing the LLM config.
+            or path == "/api/sources/status"
+            or (path.startswith("/api/sources/") and path.endswith("/verify"))
+            or path == "/api/embedding/repair"
             or path.startswith("/api/auth")
             # Keep every browser recovery shell loadable. Their static assets
             # do not depend on the LLM registry, and the desktop/setup forms
@@ -2680,6 +2742,11 @@ def create_app(
 
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
+        elif _init_blocked_by_degraded():
+            # LLM registry never built → init is impossible until config is
+            # repaired. Surface the same actionable cause as POST /api/init so
+            # the checklist doesn't read as a generic "AI 服务不可用".
+            reason, detail = "degraded", _degraded_init_detail
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
@@ -2712,7 +2779,12 @@ def create_app(
             detail = str(run.get("detail") or "")
         elif not chat:
             reason = "llm_not_ready"
-            detail = account_profile_error or "AI 服务还没配好或当前不可用"
+            # Prefer the classified probe cause (无效 API Key / 服务不可达 /
+            # 模型不存在) so the checklist explains WHY chat is down; a stored
+            # account-analysis failure still wins as the more specific history.
+            detail = (
+                account_profile_error or prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用"
+            )
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
@@ -2967,6 +3039,15 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
+        # Degraded mode reaches this handler (the guard allow-lists /api/init so
+        # the recovery UI stays live), but no LLM registry means init cannot run.
+        # Reject with an actionable cause instead of crashing on a missing
+        # coordinator or bubbling a bare error (project rule 7).
+        if _init_blocked_by_degraded():
+            return JSONResponse(
+                {"error": "degraded", "detail": _degraded_init_detail},
+                status_code=409,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -3156,12 +3237,24 @@ def create_app(
             and not effective_bangumi_username
             and not effective_bangumi_token
         ):
-            identity_loader = getattr(app.state, "load_bangumi_identity_username", None)
-            extension_bangumi_username = identity_loader() if callable(identity_loader) else ""
+            identity_loader = getattr(app.state, "load_bangumi_identity", None)
+            extension_bangumi_username, extension_identity_verified = (
+                identity_loader() if callable(identity_loader) else ("", False)
+            )
             if extension_bangumi_username:
                 effective_bangumi_username = extension_bangumi_username
+                # Say which one it is. An unverified identity is a best-effort
+                # DOM read that bgm.tv never confirmed, so the user has to be
+                # able to catch a wrong account instead of trusting the same
+                # confident sentence for both cases.
                 warnings.append(
                     f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}。"
+                    if extension_identity_verified
+                    else (
+                        f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}"
+                        "（未经 bgm.tv 校验，可能不准）。如果不是你本人，请填写公开用户名"
+                        "或个人令牌后重新初始化。"
+                    )
                 )
         if (
             effective_sources == {"bangumi"}
@@ -3219,7 +3312,11 @@ def create_app(
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
-            return JSONResponse({"error": "llm_not_ready"}, status_code=409)
+            # Propagate the classified cause the live probe just diagnosed
+            # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
+            # actionable rather than a generic "not ready" (project rule 7).
+            chat_detail = ctx.init_prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用。"
+            return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
@@ -3354,7 +3451,14 @@ def create_app(
             logger.warning("Embedding repair: pull %s failed: %s", model, error)
 
     async def _maybe_autostart_embedding_pull() -> bool:
-        """Best-effort auto-pull for a locally hosted missing/broken model."""
+        """Best-effort auto-pull for a locally hosted missing/broken model.
+
+        Also self-heals ``DIAG_NOT_RUNNING`` (managed Ollama simply not up yet)
+        by starting it first — reusing the same guards the manual repair
+        endpoint applies — then re-diagnosing so a genuinely missing/broken
+        model still gets auto-pulled. Any guard miss or start failure just
+        leaves the manual "修复向量模型" path to fix it (stays non-blocking).
+        """
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
         if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
             return False
@@ -3363,10 +3467,17 @@ def create_app(
             from openbiliclaw.llm.ollama_diagnostics import (
                 DIAG_MODEL_BROKEN,
                 DIAG_MODEL_MISSING,
+                DIAG_NOT_RUNNING,
                 diagnose_ollama_embedding,
                 ollama_embedding_disk_space_error,
             )
-            from openbiliclaw.runtime.ollama_supervisor import is_loopback
+            from openbiliclaw.runtime.ollama_supervisor import (
+                effective_ollama_endpoint,
+                ensure_managed_ollama,
+                is_loopback,
+                may_manage_ollama_endpoint,
+                ollama_required,
+            )
 
             if not is_loopback(base_url):
                 return False
@@ -3376,6 +3487,20 @@ def create_app(
                 ):
                     return True
                 code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_NOT_RUNNING:
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage or not ensure_managed_ollama(endpoint):
+                        return False
+                    # Re-diagnose now that the daemon is up: a missing/broken
+                    # model falls through to the auto-pull below.
+                    code, _detail = await diagnose_ollama_embedding(base_url, model)
                 if code not in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
                     return False
                 if ollama_embedding_disk_space_error(model):
@@ -3662,6 +3787,9 @@ def create_app(
             # failures (>=500) fall back to a cached copy when one appeared.
             if exc.status_code >= 500 and (cached := _image_cache_response(url)):
                 return cached
+            # fetch_cover_bytes already emits the per-host rate-limited WARNING;
+            # this line ties the failure to a concrete serve-time request.
+            logger.debug("image-proxy FAIL %d (%s) %s", exc.status_code, exc.detail, url[:100])
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
         save_image_bytes(url, data, content_type)
@@ -3678,12 +3806,21 @@ def create_app(
             },
         )
 
-    @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse)
+    @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse, deprecated=True)
     async def sync_bilibili_cookie(
         payload: BilibiliCookieIn,
     ) -> BilibiliCookieResponse | JSONResponse:
         """Receive a Bilibili cookie from the browser extension and persist
         it server-side so the backend can call B 站 API as the user.
+
+        **Deprecated** in favour of ``POST /api/sources/bilibili/credential``,
+        which speaks the one write shape every platform now shares. This route
+        stays, forwards into that same flow, and keeps its response byte-shape
+        exactly — installed extensions parse it, and breaking them would take a
+        user's login away with no visible cause. The deprecation marker is not
+        decorative: ``scripts/source_contract_metrics.py`` counts undeprecated
+        credential-write shapes, so leaving it off would keep the metric
+        reporting five ways to store a credential when there is now one.
 
         Replaces the manual "F12 → Network → copy cookie → paste into
         wizard" flow. The extension already runs on bilibili.com and has
@@ -3706,10 +3843,7 @@ def create_app(
         layer in front of the backend.
         """
         from openbiliclaw.bilibili.auth import AuthManager
-        from openbiliclaw.config import (
-            load_config_with_diagnostics,
-            save_config,
-        )
+        from openbiliclaw.config import load_config_with_diagnostics
 
         cookie_value = payload.cookie.strip()
         if not cookie_value:
@@ -3749,118 +3883,64 @@ def create_app(
                 status_code=409,
             )
 
-        config, diagnostics = load_config_with_diagnostics()
-        # 1) Validate the cookie if requested. We use the same auth
-        # manager the CLI's interactive wizard uses, for consistency.
-        auth_manager = AuthManager(data_dir=config.data_path, proxy=config.bilibili.proxy or None)
-        if payload.validate_with_bilibili:
-            status = await auth_manager.validate_cookie(cookie_value)
-            if not status.authenticated:
-                # Distinguish "network couldn't reach api.bilibili.com"
-                # (transient — extension should retry quickly) from
-                # "Bilibili rejected this cookie" (cookie expired —
-                # extension should back off until next login). The
-                # heuristic relies on AuthManager.validate_cookie's
-                # ``message`` field — connection / timeout / DNS errors
-                # surface as the underlying httpx exception text, while
-                # an actual logged-out cookie surfaces as the literal
-                # "当前 Cookie 未登录或已失效。" message we set in
-                # validate_cookie.
-                msg = (status.message or "").lower()
-                network_markers = (
-                    "timeout",
-                    "connect",
-                    "dns",
-                    "ssl",
-                    "proxy",
-                    "name or service",
-                    "connection",
-                    "网络",
-                    "代理",
-                )
-                is_network_error = any(m in msg for m in network_markers)
-                error_code = "validation_network" if is_network_error else "cookie_invalid"
-                return BilibiliCookieResponse(
-                    ok=False,
-                    authenticated=False,
-                    message=status.message or "Cookie validation failed; not saved.",
-                    error_code=error_code,
-                )
-            authenticated = True
-            username = status.username or ""
-            user_id = int(status.user_id or 0)
-        else:
-            authenticated = False
-            username = ""
-            user_id = 0
-
-        # 2) Persist to both stores, but keep repeated extension syncs
-        # idempotent. Chrome may POST the same Cookie several times around
-        # startup; rebuilding for an unchanged effective cookie cancels and
-        # restarts producer loops for no behavioral gain.
-        stored_cookie = ""
-        with suppress(Exception):
-            stored_cookie = auth_manager.load_cookie().strip()
-        configured_cookie = config.bilibili.cookie.strip()
-        effective_cookie_before = configured_cookie or stored_cookie
-        cookie_file_changed = stored_cookie != cookie_value
-        config_changed = configured_cookie != cookie_value
-        runtime_cookie_changed = effective_cookie_before != cookie_value
-
-        if cookie_file_changed:
-            auth_manager.set_cookie(cookie_value)  # → data/bilibili_cookie.json
-        if config_changed:
-            config.bilibili.cookie = cookie_value
-            save_config(config, diagnostics.config_path)
-
-        # 3) Reload runtime so existing in-flight components pick up
-        # the new client. ``rebuild_from_config`` is atomic — if it
-        # fails partway, the old runtime stays intact.
-        runtime_refreshed = False
-        if runtime_cookie_changed or config_changed:
-            with suppress(Exception):
-                await ctx.rebuild_from_config(config)
-                await ctx.restart_background_tasks(app)
-                runtime_refreshed = True
-
-        # 4) Tell the extension UI the cookie just got refreshed —
-        # this is how the popup knows it can stop nagging the user
-        # to log in.
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "bilibili_cookie_synced",
-                    "username": username,
-                    "user_id": user_id,
-                    "source": payload.source,
-                }
+        # ``payload.validate_with_bilibili`` is deliberately not consulted. It is
+        # still accepted on the wire (installed extensions send it), but a
+        # request cannot buy a weaker check: sending false used to persist a
+        # dead cookie with the probe never called, which is the exact hole that
+        # got ``validate_live`` deleted from the unified endpoint. Leaving the
+        # identical switch running on the deprecated route made that deletion
+        # cosmetic — "the extension always sends true" is a statement about the
+        # extension, not about who can reach this port.
+        result = await _write_source_credential(
+            "bilibili",
+            kind="cookie",
+            value=cookie_value,
+            source=payload.source,
+        )
+        if not result.accepted:
+            return BilibiliCookieResponse(
+                ok=False,
+                authenticated=False,
+                message=result.message or "Cookie validation failed; not saved.",
+                error_code=result.error_code,
             )
 
         return BilibiliCookieResponse(
             ok=True,
-            authenticated=authenticated,
-            username=username,
-            user_id=user_id,
+            authenticated=result.authenticated,
+            username=result.username,
+            user_id=result.user_id,
             message=(
                 "Cookie synced and runtime refreshed."
-                if runtime_refreshed
+                if result.runtime_refreshed
                 else "Cookie already synced; runtime unchanged."
             ),
         )
 
-    @app.post("/api/sources/dy/cookie", response_model=DouyinCookieResponse)
+    @app.post("/api/sources/dy/cookie", response_model=DouyinCookieResponse, deprecated=True)
     async def sync_douyin_cookie(payload: DouyinCookieIn) -> DouyinCookieResponse:
         """Receive a Douyin cookie from the browser extension.
 
-        Unlike Bilibili, Douyin direct-cookie discovery currently has no
-        stable nav endpoint that cleanly distinguishes "logged out" from
-        "soft anti-bot returned HTTP 200 with empty data". We therefore
-        persist the browser-provided Cookie header as-is and let discovery
-        smoke surface whether search / hot / feed calls return content.
-        """
-        from openbiliclaw.sources.douyin_auth import DouyinCookieManager
-        from openbiliclaw.sources.douyin_direct import parse_cookie_header
+        **Deprecated** in favour of ``POST /api/sources/douyin/credential``;
+        forwards into it and keeps this response shape for installed
+        extensions.
 
+        This endpoint used to persist whatever header arrived, without any
+        check, and the reason recorded here was that Douyin "has no stable nav
+        endpoint that cleanly distinguishes 'logged out' from 'soft anti-bot
+        returned HTTP 200 with empty data'".
+
+        **That claim was false** (spec D11), and it was the sole reason Douyin
+        reported "unverified" forever even with a perfectly valid cookie. A
+        strip-down control experiment — same signer, same UA, same minute, only
+        the 12 login cookies removed — showed
+        ``/aweme/v1/web/user/profile/self/`` answers ``status_code=0`` plus a
+        real ``user.uid`` when logged in and ``status_code=8`` / "用户未登录"
+        when not: an explicit error code, not the ambiguity the claim feared.
+        So a Douyin cookie is now probed *before* it lands, like B站's. The
+        probe lives in :mod:`openbiliclaw.sources.douyin_login_probe`; do not
+        reintroduce the old conclusion without repeating the experiment.
+        """
         cookie_value = payload.cookie.strip()
         if not cookie_value:
             return DouyinCookieResponse(
@@ -3870,39 +3950,32 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        runtime_config = getattr(ctx, "config", None) or config
-        manager = DouyinCookieManager(runtime_config.data_path)
-        manager.set_cookie(cookie_value, source=payload.source)
-        cookie_names = sorted(parse_cookie_header(cookie_value).keys())
-
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "douyin_cookie_synced",
-                    "source": payload.source,
-                    "cookie_names": cookie_names,
-                }
-            )
-
+        result = await _write_source_credential(
+            "douyin", kind="cookie", value=cookie_value, source=payload.source
+        )
         return DouyinCookieResponse(
-            ok=True,
-            has_cookie=True,
-            cookie_names=cookie_names,
-            message="Douyin Cookie synced.",
+            ok=result.accepted,
+            has_cookie=result.accepted,
+            cookie_names=list(result.cookie_names),
+            message=result.message if not result.accepted else "Douyin Cookie synced.",
+            error_code=result.error_code,
         )
 
-    @app.post("/api/sources/x/cookie", response_model=XCookieResponse)
+    @app.post("/api/sources/x/cookie", response_model=XCookieResponse, deprecated=True)
     async def sync_x_cookie(payload: XCookieIn) -> XCookieResponse:
         """Receive an X (Twitter) cookie from the browser extension.
 
-        The browser extension already gates on ``auth_token`` + ``ct0`` before
-        posting, but we persist whatever header arrives and recompute
-        ``has_cookie`` server-side so the env-override path and the file stay
-        consistent. ``has_cookie`` is true only when BOTH required cookies are
-        present — twitter-cli 401s without either.
-        """
-        from openbiliclaw.sources.douyin_direct import parse_cookie_header
+        **Deprecated** in favour of ``POST /api/sources/twitter/credential``;
+        forwards into it and keeps this response shape.
 
+        ``has_cookie`` is true only when BOTH ``auth_token`` and ``ct0`` are
+        present — twitter-cli 401s without either. A jar missing them used to
+        be stored anyway and reported as ``ok`` with ``has_cookie=false``; it is
+        now refused, because storing a credential that provably cannot
+        authenticate is the "silent write" spec D5 flagged. The browser
+        extension already gated on both names before posting and keys its
+        success branch off ``ok && has_cookie``, so it sees no change.
+        """
         cookie_value = payload.cookie.strip()
         if not cookie_value:
             return XCookieResponse(
@@ -3912,54 +3985,30 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        runtime_config = getattr(ctx, "config", None) or config
-        XCookieManager(runtime_config.data_path).set_cookie(cookie_value, source=payload.source)
-        cookie_pairs = parse_cookie_header(cookie_value)
-        cookie_names = sorted(cookie_pairs.keys())
-        has_cookie = all(name in cookie_pairs for name in _X_REQUIRED_COOKIE_NAMES)
-
-        # A freshly synced valid cookie is the external re-login signal that
-        # clears a missing_cookie / expired_cookie / blocked health block.
-        # Without this the producer's is_ready() gate stays False forever, so
-        # discovery never retries even though auth is now fixed (the cookie
-        # handler is the only place a re-login state can be lifted).
-        if has_cookie:
-            with suppress(Exception):
-                from openbiliclaw.storage.x_health import XSourceHealthStore
-
-                XSourceHealthStore(ctx.database).clear_relogin_block()
-
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "x_cookie_synced",
-                    "source": payload.source,
-                    "has_cookie": has_cookie,
-                    "cookie_names": cookie_names,
-                }
-            )
-
+        result = await _write_source_credential(
+            "twitter", kind="cookie", value=cookie_value, source=payload.source
+        )
         return XCookieResponse(
-            ok=True,
-            has_cookie=has_cookie,
-            cookie_names=cookie_names,
-            message=(
-                "X Cookie synced."
-                if has_cookie
-                else "X Cookie stored but missing auth_token / ct0."
-            ),
+            ok=result.accepted,
+            has_cookie=result.accepted,
+            cookie_names=list(result.cookie_names),
+            message=result.message if not result.accepted else "X Cookie synced.",
+            error_code=result.error_code,
         )
 
-    @app.post("/api/sources/reddit/cookie", response_model=RedditCookieResponse)
+    @app.post("/api/sources/reddit/cookie", response_model=RedditCookieResponse, deprecated=True)
     async def sync_reddit_cookie(payload: RedditCookieIn) -> RedditCookieResponse:
         """Receive a Reddit cookie from the browser extension.
+
+        **Deprecated** in favour of ``POST /api/sources/reddit/credential``;
+        forwards into it and keeps this response shape.
 
         Reddit steady-state discovery defaults to rdt-cli. Instead of forcing
         users to run ``rdt login`` manually, the connected extension can read
         reddit.com cookies with Chrome's ``cookies`` permission and persist them
         in rdt-cli's own credential format.
         """
-        from openbiliclaw.sources.reddit_tasks import sync_rdt_credential_from_cookie_header
+        from openbiliclaw.sources.reddit_tasks import _rdt_credential_file
 
         cookie_value = payload.cookie.strip()
         if not cookie_value:
@@ -3970,25 +4019,28 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        result = sync_rdt_credential_from_cookie_header(cookie_value, source=payload.source)
-
-        if result.has_cookie:
+        result = await _write_source_credential(
+            "reddit", kind="cookie", value=cookie_value, source=payload.source
+        )
+        credential_file = result.credential_file
+        if not credential_file:
+            # A refused cookie never reached the writer, so the path has to come
+            # from the store itself — the settings page shows it either way, and
+            # "where would this have been written" is the first thing a user
+            # asks when a paste is rejected.
             with suppress(Exception):
-                await ctx.event_hub.publish(
-                    {
-                        "type": "reddit_cookie_synced",
-                        "source": payload.source,
-                        "has_cookie": result.has_cookie,
-                        "cookie_names": list(result.cookie_names),
-                    }
-                )
+                credential_file = str(_rdt_credential_file())
 
         return RedditCookieResponse(
-            ok=result.ok,
-            has_cookie=result.has_cookie,
+            ok=result.accepted,
+            has_cookie=result.accepted,
             cookie_names=list(result.cookie_names),
-            credential_file=str(result.credential_file),
-            message=result.message,
+            credential_file=credential_file,
+            message=(
+                result.message
+                if not result.accepted
+                else "Reddit Cookie synced into rdt credential store."
+            ),
             error_code=result.error_code,
         )
 
@@ -8464,6 +8516,7 @@ def create_app(
             self_info = _load_xhs_self_info()
         writes = []
         skipped_self = 0
+        covers_saved = 0
         for note in notes:
             if _is_self_authored_note(note, self_info):
                 skipped_self += 1
@@ -8485,6 +8538,32 @@ def create_app(
                 continue  # Skip notes with empty title — they produce blank recommendation cards
             author = str(note.get("author", "") or "").strip()
             cover_url = str(note.get("cover_url", "") or "").strip()
+            if cover_url.startswith("//"):
+                cover_url = f"https:{cover_url}"
+            if not cover_url.startswith(("http://", "https://")):
+                # Lazy-load data:/blob: placeholders from background-tab
+                # scrapes are not covers; storing them yields cards that can
+                # never render (the image proxy rejects non-http(s) URLs).
+                cover_url = ""
+            # Extension-harvested cover bytes: xhs card scrapes attach
+            # cover_data so the cover lands in the disk cache at ingest time
+            # (while the rotating xhscdn token is fresh) instead of depending
+            # on the backend's later fetch succeeding from this machine.
+            # Saved even when the note later dedupes as a known candidate —
+            # that heals stock rows whose cover was never cached.
+            # Best-effort: a bad cover never blocks the note.
+            cover_data = note.get("cover_data")
+            if (
+                cover_url
+                and isinstance(cover_data, str)
+                and cover_data
+                and save_extension_cover(
+                    cover_url,
+                    cover_data,
+                    str(note.get("cover_content_type", "") or ""),
+                )
+            ):
+                covers_saved += 1
             best_url = _pick_best_xhs_url(database, note_id, url)
             published = normalize_published_time(
                 note.get("published_at") or note.get("pubdate"),
@@ -8537,6 +8616,12 @@ def create_app(
             logger.info(
                 "xhs ingest filter: dropped %d self-authored note(s) (%s)",
                 skipped_self,
+                page_type,
+            )
+        if covers_saved > 0:
+            logger.info(
+                "xhs ingest: cached %d extension-harvested cover(s) (%s)",
+                covers_saved,
                 page_type,
             )
         if not writes:
@@ -8616,8 +8701,8 @@ def create_app(
             "enqueued": enqueued,
         }
 
-    @app.post("/api/sources/xhs/tokens")
-    def ingest_xhs_tokens(payload: dict[str, Any]) -> dict[str, Any]:
+    @app.post("/api/sources/xhs/tokens", deprecated=True)
+    async def ingest_xhs_tokens(payload: dict[str, Any]) -> dict[str, Any]:
         """Ingest ``(note_id, xsec_token)`` pairs harvested by the MAIN-
         world fetch sniffer inside ``dist/main/xhs-token-sniffer.js``.
 
@@ -8626,50 +8711,65 @@ def create_app(
         (the typical search-page-sourced ones) get upgraded in place.
         Without this, clicking an xhs recommendation trips xhs's 300031
         access-denied gating because the stored URL lacks xsec_token.
+
+        **Deprecated** in favour of
+        ``POST /api/sources/xiaohongshu/credential`` with ``kind="token"``.
+        Note what that ``kind`` is for: an ``xsec_token`` is a *content access*
+        token for one note, not a login credential, and it says nothing about
+        whether anyone is logged in (spec D5). Keeping it a distinct kind is
+        what stops it from inheriting a login credential's promises.
         """
         raw = payload.get("pairs", [])
         if not isinstance(raw, list) or not raw:
             return {"ok": True, "upgraded": 0}
-        urls: list[str] = []
-        for pair in raw:
-            if not isinstance(pair, dict):
-                continue
-            note_id = str(pair.get("note_id", "") or "").strip()
-            token = str(pair.get("xsec_token", "") or "").strip()
-            # Guard against the noise the sniffer's deep-walk can surface
-            # — e.g. 24-hex ids that aren't notes. The backfill UPDATE is
-            # narrow (bvid match), so the worst case of a false id is a
-            # no-op, but the token must at least be non-empty.
-            if not note_id or not token:
-                continue
-            urls.append(f"{xhs_url_prefix}explore/{note_id}?xsec_token={token}")
-        upgraded = _backfill_xhs_tokens(ctx.database, urls)
-        return {"ok": True, "upgraded": upgraded}
+        result = await _write_source_credential(
+            "xiaohongshu", kind="token", value=raw, source="extension"
+        )
+        return {"ok": True, "upgraded": result.upgraded}
 
-    @app.post("/api/sources/xhs/login-state", response_model=XhsLoginStateResponse)
-    def update_xhs_login_state(payload: XhsLoginStateIn) -> XhsLoginStateResponse:
-        """Persist the extension-observed xhs login state without storing cookies."""
+    @app.post(
+        "/api/sources/xhs/login-state",
+        response_model=XhsLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_xhs_login_state(payload: XhsLoginStateIn) -> XhsLoginStateResponse:
+        """Persist the extension-observed xhs login state without storing cookies.
+
+        **Deprecated** in favour of
+        ``POST /api/sources/xiaohongshu/credential`` with
+        ``kind="login_state"``.
+        """
         if not hasattr(ctx.database, "set_xhs_login_state"):
             raise HTTPException(status_code=503, detail="database not configured")
-        ctx.database.set_xhs_login_state(payload.logged_in)
-        _stored_logged_in, updated_at = ctx.database.get_xhs_login_state()
+        result = await _write_source_credential(
+            "xiaohongshu", kind="login_state", value=payload.logged_in, source="extension"
+        )
         return XhsLoginStateResponse(
             ok=True,
             logged_in=payload.logged_in,
-            updated_at=updated_at,
+            updated_at=result.updated_at,
         )
 
-    @app.post("/api/sources/zhihu/login-state", response_model=ZhihuLoginStateResponse)
-    def update_zhihu_login_state(payload: ZhihuLoginStateIn) -> ZhihuLoginStateResponse:
-        """Persist the extension-observed Zhihu login state without storing cookies."""
+    @app.post(
+        "/api/sources/zhihu/login-state",
+        response_model=ZhihuLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_zhihu_login_state(payload: ZhihuLoginStateIn) -> ZhihuLoginStateResponse:
+        """Persist the extension-observed Zhihu login state without storing cookies.
+
+        **Deprecated** in favour of ``POST /api/sources/zhihu/credential`` with
+        ``kind="login_state"``.
+        """
         if not hasattr(ctx.database, "set_zhihu_login_state"):
             raise HTTPException(status_code=503, detail="database not configured")
-        ctx.database.set_zhihu_login_state(payload.logged_in)
-        _stored_logged_in, updated_at = ctx.database.get_zhihu_login_state()
+        result = await _write_source_credential(
+            "zhihu", kind="login_state", value=payload.logged_in, source="extension"
+        )
         return ZhihuLoginStateResponse(
             ok=True,
             logged_in=payload.logged_in,
-            updated_at=updated_at,
+            updated_at=result.updated_at,
         )
 
     # ── Bangumi extension identity channel ──────────────────────────
@@ -8704,55 +8804,151 @@ def create_app(
             username = ""
         return {"uid": str(uid), "username": username}
 
-    def _persist_bangumi_identity(identity: dict[str, str]) -> None:
-        """Save the extension-reported identity into discovery runtime state."""
+    def _persist_bangumi_identity(
+        identity: dict[str, str], *, verified: bool
+    ) -> dict[str, Any] | None:
+        """Save the extension-reported identity into discovery runtime state.
+
+        ``verified`` records whether bgm.tv positively confirmed the pair. It
+        is persisted alongside uid/username so every consumer can tell a
+        confirmed identity from a fail-open best-effort one instead of
+        treating both as equally true (project rule 7), and it is sticky-true
+        per identity so a later unreachable-bgm.tv report cannot erase a
+        confirmation we already hold (see ``_sticky_record``).
+
+        Returns the record as actually written, or ``None`` when it could not
+        be persisted at all. Callers MUST NOT report a state this did not
+        store — an unpersisted "verified" would be a claim the next read
+        contradicts.
+        """
         memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
         if memory_manager is None:
-            return
+            # No persistence backend: the report is dropped. Say so rather
+            # than echoing a flag nothing will read back (rule 7).
+            logger.warning(
+                "bangumi identity: no memory manager; cannot persist uid=%s",
+                identity.get("uid", ""),
+            )
+            return None
+
+        def _sticky_record(previous: object) -> dict[str, Any]:
+            """This round's record, upgraded to verified if ``previous`` proved it.
+
+            Evidence of a successful cross-check belongs to a specific
+            uid↔username pair and does not expire when bgm.tv is later
+            unreachable — downgrading it would erase proof we already hold and
+            make consumers call a genuinely checked identity "未经 bgm.tv 校验"
+            (flipping the flag, and rewriting the file, on every hiccup). So
+            the flag only ratchets up, and only for the SAME identity: a
+            changed uid or username is a different claim the old evidence says
+            nothing about, so it starts from this round's result.
+
+            Inheritance also requires the previous record to be one the current
+            rules could have produced, i.e. a non-empty username. Before the
+            flag meant "confirmed", the 404 path wrote
+            ``{"username": "", "verified": true}``; re-reporting that same 404
+            user matched on uid and on username (both ``""``) and inherited the
+            stale ``true``, pinning a record that contradicts the
+            verified-implies-a-username invariant. An illegal record is not
+            evidence, so it is not inherited.
+            """
+            sticky = bool(verified)
+            previous_username = previous.get("username") if isinstance(previous, dict) else None
+            if (
+                not sticky
+                and isinstance(previous, dict)
+                and previous.get("verified") is True
+                # A confirmed record always names someone; an empty username
+                # with verified=true can only come from the superseded rules.
+                and isinstance(previous_username, str)
+                and previous_username
+                and previous.get("uid") == identity["uid"]
+                and previous_username == identity["username"]
+            ):
+                sticky = True
+            return {**identity, "verified": sticky}
+
+        record: dict[str, Any] = {}
         try:
-            state = memory_manager.load_discovery_runtime_state()
-            existing = state.get("bangumi_self_info")
-            if isinstance(existing, dict) and existing == identity:
-                return
             update_state = getattr(memory_manager, "update_discovery_runtime_state", None)
             if callable(update_state):
-                update_state(
-                    lambda runtime_state: runtime_state.update({"bangumi_self_info": identity})
-                )
-            else:
-                state["bangumi_self_info"] = identity
-                memory_manager.save_discovery_runtime_state(state)
-            logger.info(
-                "bangumi identity persisted: uid=%s username=%r",
-                identity.get("uid", ""),
-                identity.get("username", ""),
-            )
-        except Exception:
-            logger.exception("Failed to persist bangumi identity")
 
-    def _load_bangumi_identity_username() -> str:
-        """Extension-reported Bangumi username from runtime state ('' on miss)."""
+                def _mutate(runtime_state: dict[str, Any]) -> None:
+                    # The merge runs ONLY here. update_json_state holds a
+                    # process + file lock and re-reads from disk before calling
+                    # us, so this sees the authoritative current value; a
+                    # pre-read outside the lock could be stale by now and was
+                    # how a concurrent confirmation used to get reported away.
+                    record.update(_sticky_record(runtime_state.get("bangumi_self_info")))
+                    runtime_state["bangumi_self_info"] = record
+
+                # Deliberately no lock-free write-avoidance fast path.
+                # update_json_state writes unconditionally, so re-reporting an
+                # unchanged identity costs one idempotent rewrite — accepted,
+                # because the only way to decide "unchanged" without the lock
+                # is a snapshot that a concurrent writer can already have
+                # invalidated, and answering from that snapshot contradicts
+                # what the next read returns.
+                update_state(_mutate)
+            else:
+                # Non-atomic fallback for runtimes without the atomic entry
+                # point (stubs). Same merge, weaker concurrency guarantee.
+                state = memory_manager.load_discovery_runtime_state()
+                record.update(_sticky_record(state.get("bangumi_self_info")))
+                state["bangumi_self_info"] = record
+                memory_manager.save_discovery_runtime_state(state)
+        except Exception:
+            logger.exception(
+                "Failed to persist bangumi identity (uid=%s); reporting it as not stored",
+                identity.get("uid", ""),
+            )
+            return None
+        logger.info(
+            "bangumi identity persisted: uid=%s username=%r verified=%s",
+            record.get("uid", ""),
+            record.get("username", ""),
+            record.get("verified"),
+        )
+        return record
+
+    def _load_bangumi_identity() -> tuple[str, bool]:
+        """Extension-reported Bangumi ``(username, verified)`` from runtime state.
+
+        Returns ``("", False)`` on any miss. Records written before the
+        ``verified`` flag existed have no way to prove they were cross-checked,
+        so they read back as UNVERIFIED rather than silently claiming a check
+        that may never have run — the next bgm.tv page view re-reports and
+        upgrades the record in place.
+
+        Records that cannot be legal under the current rules are normalised
+        here too: a ``verified`` record with no username (what the superseded
+        404 path used to write) reads back as unverified. Doing this on read as
+        well as on write means an installation that never revisits bgm.tv
+        still stops seeing the stale claim, instead of waiting for a report
+        that may never come.
+        """
         from openbiliclaw.sources.bangumi_client import validate_bangumi_username
 
         memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
         if memory_manager is None:
-            return ""
+            return "", False
         try:
             state = memory_manager.load_discovery_runtime_state()
             info = state.get("bangumi_self_info")
             if not isinstance(info, dict):
-                return ""
-            return validate_bangumi_username(info.get("username"))
+                return "", False
+            username = validate_bangumi_username(info.get("username"))
+            return username, bool(username) and info.get("verified") is True
         except Exception:
             logger.debug("bangumi identity: runtime state unavailable", exc_info=True)
-            return ""
+            return "", False
 
     # Publish for start_guided_init's username fallback ladder — that route is
     # defined earlier in this factory, so it reads the hook off app.state at
     # request time (by then create_app has finished wiring everything).
-    app.state.load_bangumi_identity_username = _load_bangumi_identity_username
+    app.state.load_bangumi_identity = _load_bangumi_identity
 
-    async def _verify_bangumi_identity(identity: dict[str, str]) -> dict[str, str]:
+    async def _verify_bangumi_identity(identity: dict[str, str]) -> tuple[dict[str, str], bool]:
         """Authoritatively cross-check an extension-reported identity.
 
         A real-page E2E (2026-07-18) showed a DOM-scraped username can be a
@@ -8761,12 +8957,32 @@ def create_app(
         account's ``id``; users without a custom slug keep ``str(uid)`` as
         their username, so a uid-only report also resolves for them.
 
+        Returns ``(identity, verified)``. ``verified`` is True only when bgm.tv
+        actually answered — the caller persists that flag so a fail-open value
+        is never mistaken for a checked one.
+
+        ``verified`` is True **only when bgm.tv positively confirmed this
+        uid↔username pair** — i.e. ``get_user`` returned and its ``id`` equals
+        the reported uid, yielding a non-empty username. Everything else is
+        False, including cases where bgm.tv answered clearly: a 404 *refutes*
+        the username, it does not confirm who the uid belongs to, and a
+        uid-only lookup that 404s never checked anything at all. Treating
+        "bgm.tv replied" as "identity confirmed" would let sticky-true pin an
+        account we never actually established as ``verified`` forever.
+
         Rules (never cache failures; ``trust_env=False`` via BangumiClient):
-        - API ``id`` matches the reported uid → persist the API's username.
+        - API ``id`` matches the reported uid → persist the API's username,
+          VERIFIED.
         - Username resolves to a DIFFERENT id, or does not exist → keep the
-          uid, DISCARD the username, log WARNING (plausible-but-wrong guard).
-        - Network / upstream failure → accept the DOM username best-effort
-          (debug log); the next page view re-reports and re-verifies.
+          uid, DISCARD the username, log WARNING (plausible-but-wrong guard);
+          NOT verified — a refutation is not a confirmation.
+        - Network / upstream failure → accept the DOM username best-effort but
+          mark it UNVERIFIED and log WARNING with the real cause. Staying
+          fail-open keeps zero-config users working when bgm.tv is unreachable
+          (bgm.tv sits behind overseas CF, and the default ``[network] mode =
+          system`` only reaches it when the machine already has a working
+          proxy), so the guard's honesty has to come from the flag + log rather
+          than from rejecting the report.
         """
         from openbiliclaw.sources.bangumi_client import (
             BangumiAPIError,
@@ -8785,24 +9001,35 @@ def create_app(
                 if reported_username:
                     logger.warning(
                         "bangumi identity: reported username %r does not exist; "
-                        "keeping uid=%s only",
+                        "keeping uid=%s only (NOT verified — a 404 refutes the "
+                        "username, it does not confirm the uid's owner)",
                         reported_username,
                         uid,
                     )
-                    return {"uid": uid, "username": ""}
-                # uid-only report from a custom-slug user: nothing to verify.
-                return identity
-            logger.debug(
-                "bangumi identity: verify unavailable (%s); accepting DOM report best-effort",
+                    return {"uid": uid, "username": ""}, False
+                # uid-only report from a custom-slug user: bgm.tv answered, but
+                # nothing about this uid's owner was established, so not verified.
+                return identity, False
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
                 exc.code,
+                exc,
             )
-            return identity
-        except Exception:
-            logger.debug(
-                "bangumi identity: verify failed; accepting DOM report best-effort",
+            return identity, False
+        except Exception as exc:
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                type(exc).__name__,
+                exc,
                 exc_info=True,
             )
-            return identity
+            return identity, False
         api_id = user.get("id")
         try:
             api_uid = str(int(str(api_id).strip()))
@@ -8811,17 +9038,21 @@ def create_app(
         if api_uid != uid:
             logger.warning(
                 "bangumi identity: reported username %r belongs to uid %s, not %s; "
-                "discarding username",
+                "discarding username (NOT verified)",
                 reported_username or lookup,
                 api_uid or "?",
                 uid,
             )
-            return {"uid": uid, "username": ""}
+            return {"uid": uid, "username": ""}, False
         try:
             api_username = validate_bangumi_username(user.get("username"))
         except ValueError:
             api_username = ""
-        return {"uid": uid, "username": api_username or reported_username}
+        confirmed_username = api_username or reported_username
+        # Only a non-empty username makes this a confirmed *pair*. bgm.tv
+        # returning an unusable username leaves nothing to have confirmed, so
+        # the flag stays False rather than claiming a pair that does not exist.
+        return {"uid": uid, "username": confirmed_username}, bool(confirmed_username)
 
     @app.post("/api/sources/bangumi/identity")
     async def ingest_bangumi_identity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8832,14 +9063,35 @@ def create_app(
         page can never overwrite a previously known identity. The username is
         cross-checked against ``GET /v0/users/{username}`` before persisting —
         a mismatching or unknown username is dropped (uid kept) so a DOM
-        drift can never store a stranger's identity.
+        drift can never store a stranger's identity. When bgm.tv is
+        unreachable the report is still stored (zero-config users must keep
+        working) but flagged ``verified: false``.
+
+        The whole body is read back off the record that was actually written,
+        so a 200 always describes what a subsequent read returns. If the
+        identity could not be persisted the request fails with 500 instead of
+        echoing a state nothing stored — the extension treats a failed report
+        as best-effort and re-reports on the next bgm.tv page view.
         """
         identity = _normalize_bangumi_identity(payload)
         if identity is None:
             raise HTTPException(status_code=422, detail="uid must be a positive integer")
-        identity = await _verify_bangumi_identity(identity)
-        _persist_bangumi_identity(identity)
-        return {"ok": True, "uid": identity["uid"], "username": identity["username"]}
+        identity, verified = await _verify_bangumi_identity(identity)
+        stored = _persist_bangumi_identity(identity, verified=verified)
+        if stored is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Bangumi identity could not be persisted; see server logs. "
+                    "The next bgm.tv page view will re-report it."
+                ),
+            )
+        return {
+            "ok": True,
+            "uid": stored["uid"],
+            "username": stored["username"],
+            "verified": stored["verified"],
+        }
 
     # ── Bilibili extension search fallback endpoints ────────────────
 
@@ -9293,477 +9545,432 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
-    # Window for trusting the extension's privacy-preserving xhs login-state
-    # heartbeat. A live browser pushes on startup, cookie changes, and the
-    # periodic cookie-sync alarm; stale rows fall back to missing.
-    _xhs_login_fresh_hours = 72
-    _zhihu_login_fresh_hours = 72
+    def _bangumi_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Bangumi's status item: the auth contract plus its two extra axes.
 
-    # Human-readable detail for each X (twitter) health state, reused by the
-    # unified /api/sources/status chip below.
-    _x_state_detail = {
-        "ok": "X 来源正常，cookie 有效。",
-        "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
-        "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": (
-            "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。"
-        ),
-        "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
-    }
+        Bangumi's *auth* verdict now comes from ``auth_bangumi`` like every other
+        source (``auth_required=False`` — anonymous-public — with an optional,
+        live-verifiable personal token). But it carries two dimensions the
+        uniform ``SourceStatusItem`` the loop builds cannot express, so it is
+        assembled here rather than inline in ``sources_status()``:
+
+        * a **discovery-health** ``detail`` (``尚未运行`` / 退避冷却 / run outcomes)
+          — the chip the settings page renders, distinct from the contract's own
+          auth-focused ``detail``. Keeping it means moving to the contract does
+          not silently drop the discovery status users already saw.
+        * the **``token_state``** axis (``ok`` / ``rejected`` / ``""``), which the
+          frontend overlays as 「令牌已失效」 when discovery rejected the token.
+
+        ``state`` / ``logged_in`` follow the contract (``no_auth`` / ``True``): the
+        discovery-health string lives in ``detail`` now, not in ``state``, so the
+        legacy field stops conflating scheduling and discovery with auth
+        readiness — the D1 conflation the contract exists to remove. The
+        ``enabled`` switch stays its own field, never folded back into ``state``.
+        """
+        from openbiliclaw.api.source_auth.providers import auth_bangumi
+        from openbiliclaw.runtime.bangumi_producer import (
+            bangumi_disabled_detail,
+            bangumi_source_status,
+        )
+
+        srcs = cfg.sources
+        bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
+        bgm_token_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
+        )
+        bgm_username_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "username", "") or "").strip()
+        )
+        bgm_status = (
+            bangumi_source_status(
+                ctx.database,
+                enabled=bgm_enabled,
+                token_configured=bgm_token_configured,
+                username_configured=bgm_username_configured,
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if bgm_enabled else "disabled",
+                # No ledger to read here, so a saved token can only be reported
+                # as "ok" — but the disabled wording still has to name it.
+                "detail": (
+                    "Bangumi 使用官方公开 API，尚未运行内容发现。"
+                    if bgm_enabled
+                    else bangumi_disabled_detail(
+                        token_state="ok" if bgm_token_configured else "",
+                        username_configured=bgm_username_configured,
+                    )
+                ),
+                **({"token_state": "ok"} if bgm_token_configured else {}),
+            }
+        )
+        # ``state`` / ``logged_in`` now come from the auth contract (always
+        # ``no_auth`` / ``True`` for an anonymous-public source); the
+        # discovery-health string moves to ``detail``, and ``token_state`` stays
+        # its own axis. The contract itself carries the optional-token verdict.
+        return SourceStatusItem(
+            enabled=bgm_enabled,
+            state="no_auth",
+            detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
+            logged_in=True,
+            token_state=str(bgm_status.get("token_state") or ""),
+            auth=auth_bangumi(auth_ctx),
+        )
+
+    def _attach_network_hints(statuses: SourcesStatusResponse, cfg: Any) -> None:
+        """Attach the overseas-egress advisory to every source in *statuses*.
+
+        A separate pass from assembling the auth status, and separate on
+        purpose: this one is uniform over all families and reads a table in
+        ``sources.platforms``, so it never grows a per-platform branch the way
+        the aggregator it sits next to once did. The platform list AND both
+        wordings live in that table; the settings surfaces render
+        ``network_hint`` verbatim and never learn a platform name
+        (``tests/test_source_network_hints.py`` pins that).
+        """
+        network_mode = str(getattr(getattr(cfg, "network", None), "mode", "") or "")
+        for family in CANONICAL_SOURCE_FAMILIES:
+            item = getattr(statuses, family, None)
+            if not isinstance(item, SourceStatusItem):
+                continue
+            item.requires_overseas_network = requires_overseas_network(family)
+            item.network_hint = overseas_network_hint(family, network_mode=network_mode)
 
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
 
-        Local-only: each source's state is derived from config cookie fields,
-        the Douyin cookie file/env, the count of token-bearing 小红书 cache
-        rows, and the X health store — no outbound platform requests. See
-        :class:`SourcesStatusResponse`. ``ready`` means a credential is present
-        and structurally valid (not live-validated); only X reports a真正
-        live-validated ``ok``.
+        Local-only: every verdict comes from config, local credential files,
+        the extension's login heartbeats, the X health store and cached probe
+        results — this handler makes **no outbound platform request**, which
+        matters because open settings pages poll it every ~30s.
+
+        Each platform's logic lives in one provider in
+        ``api/source_auth/providers.py``; this endpoint only walks the registry
+        and assembles the response. The legacy ``state`` / ``logged_in`` /
+        ``detail`` fields are carried verbatim from each provider (Wave A
+        promises byte-identical output), while the new ``auth`` sub-object
+        exposes the same knowledge as independent dimensions. See
+        :class:`SourceAuthContract` and ``source_auth/legacy.py``.
+
+        Bangumi is answered by ``auth_bangumi`` like the rest, but its item is
+        re-assembled by ``_bangumi_status_item`` to carry two axes the uniform
+        item cannot: a discovery-health ``detail`` and the ``token_state`` chip.
         """
+        from openbiliclaw.api.source_auth.providers import (
+            SOURCE_AUTH_PROVIDERS,
+            SourceAuthContext,
+            source_enabled,
+            source_feed_paused,
+        )
         from openbiliclaw.config import load_config
 
         cfg = load_config()
-        srcs = cfg.sources
+        auth_ctx = SourceAuthContext(cfg=cfg, database=ctx.database)
+        items: dict[str, SourceStatusItem] = {}
+        for slug, provider in SOURCE_AUTH_PROVIDERS.items():
+            contract = provider(auth_ctx)
+            items[slug] = SourceStatusItem(
+                enabled=source_enabled(auth_ctx, slug),
+                state=contract.legacy_state,
+                detail=contract.detail,
+                logged_in=contract.legacy_logged_in,
+                feed_paused=source_feed_paused(auth_ctx, slug),
+                auth=contract,
+            )
+        # Bangumi's uniform item (built above) is replaced: it carries a
+        # discovery-health detail and the token_state axis the loop cannot model.
+        # Do not delete this line thinking the loop covers it — it does not.
+        items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
+        statuses = SourcesStatusResponse(**items)
+        _attach_network_hints(statuses, cfg)
+        return statuses
 
-        # ── Bilibili: cookie present with the core login fields ──
-        # config.toml is the mirror, data/bilibili_cookie.json is the runtime
-        # store (CLI QR login writes only the file) — check both, like the
-        # douyin/x branches resolve env + file.
-        bili_cookie = str(getattr(cfg.bilibili, "cookie", "") or "")
-        if not bili_cookie.strip():
-            with suppress(Exception):
-                from openbiliclaw.bilibili.auth import AuthManager
+    @app.post("/api/sources/{slug}/verify", response_model=SourceVerifyResponse)
+    async def verify_source_credential(slug: str) -> SourceVerifyResponse:
+        """Verify one source's credential on demand and return its fresh contract.
 
-                bili_cookie = AuthManager(data_dir=cfg.data_path).load_cookie()
-        bili_enabled = bool(getattr(srcs.bilibili, "enabled", True))
-        has_fields = sum(
-            1 for f in ("SESSDATA", "bili_jct", "DedeUserID") if f"{f}=" in bili_cookie
-        )
-        if getattr(cfg.bilibili, "auth_method", "cookie") == "none":
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="no_auth",
-                detail="未启用 B 站登录（auth_method=none）。",
-                logged_in=True,
-            )
-        elif has_fields >= 3:
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="ready",
-                detail="Cookie 就绪（含 SESSDATA / bili_jct / DedeUserID）。",
-                logged_in=True,
-            )
-        elif bili_cookie.strip():
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="partial",
-                detail="Cookie 已配置，但缺少部分登录字段，可能未完整登录。",
-            )
-        else:
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="missing",
-                detail="未配置 Cookie —— 在浏览器登录 bilibili.com，插件会自动同步。",
-            )
+        The counterpart to ``GET /api/sources/status``: that route is polled and
+        therefore never goes out, while this one is an explicit user action and
+        is the only place a platform is probed. Which of the five verification
+        actions runs is a fixed per-platform property — see
+        ``source_auth/verify.py`` for why it is not keyed off the contract's
+        ``verify_method``.
 
-        # ── 小红书: browser login cookie presence, reported as a boolean ──
-        # XHS fetching is client-side, so the backend never stores/replays the
-        # raw ``web_session`` cookie. The extension reports only login state;
-        # xsec_token/content cache rows are secondary hints, never the login
-        # gate (a fresh account can be logged in with zero tokenized rows).
-        xhs_enabled = bool(getattr(srcs.xiaohongshu, "enabled", False))
-        xhs_tokens = 0
-        if hasattr(ctx.database, "conn"):
-            try:
-                row = ctx.database.conn.execute(
-                    "SELECT COUNT(*) FROM content_cache "
-                    "WHERE source_platform = 'xiaohongshu' "
-                    "AND content_url LIKE '%xsec_token=%'"
-                ).fetchone()
-                xhs_tokens = int(row[0]) if row else 0
-            except Exception:  # pragma: no cover - defensive
-                xhs_tokens = 0
-        xhs_stored_logged_in = False
-        xhs_login_at = ""
-        if hasattr(ctx.database, "get_xhs_login_state"):
-            try:
-                xhs_stored_logged_in, xhs_login_at = ctx.database.get_xhs_login_state()
-            except Exception:  # pragma: no cover - defensive
-                xhs_stored_logged_in, xhs_login_at = False, ""
-        xhs_login_fresh = False
-        if xhs_login_at:
-            try:
-                from datetime import UTC, datetime, timedelta
+        Always 200 for a known slug, including when the answer is "could not
+        tell": an unreachable proxy or a disconnected extension is not a client
+        error, and turning it into one would strip the frontends of the message
+        explaining what to do about it.
+        """
+        from openbiliclaw.api.source_auth.verify import verify_source
+        from openbiliclaw.config import load_config
 
-                parsed_login_at = datetime.fromisoformat(
-                    xhs_login_at.strip().replace("Z", "+00:00")
-                )
-                if parsed_login_at.tzinfo is None:
-                    parsed_login_at = parsed_login_at.replace(tzinfo=UTC)
-                xhs_login_fresh = datetime.now(UTC) - parsed_login_at.astimezone(UTC) <= timedelta(
-                    hours=_xhs_login_fresh_hours
-                )
-            except Exception:  # pragma: no cover - defensive
-                xhs_login_fresh = False
-        if not xhs_login_at:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="unverified",
-                detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
-            )
-        elif xhs_stored_logged_in and xhs_login_fresh:
-            token_hint = f"内容令牌 {xhs_tokens} 条。" if xhs_tokens else ""
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="ready",
-                detail=f"已登录小红书。{token_hint}",
-                logged_in=True,
-            )
-        elif xhs_stored_logged_in:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="stale",
-                detail="小红书登录态已过期，请连接插件刷新本地状态。",
-            )
-        else:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="missing",
-                detail="未检测到小红书登录 —— 在浏览器登录小红书后插件会自动同步。",
-            )
-
-        # ── 抖音: cookie resolvable from env / data/douyin_cookie.json ──
-        dy_enabled = bool(getattr(srcs.douyin, "enabled", False))
-        dy_cookie = ""
         try:
-            from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+            result = await verify_source(
+                slug,
+                cfg=load_config(),
+                database=ctx.database,
+                event_hub=getattr(ctx, "event_hub", None),
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown source: {slug}") from None
 
-            dy_cookie = resolve_douyin_cookie(
-                data_dir=cfg.data_path,
-                cookie_env=getattr(srcs.douyin, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"),
-            )
-        except Exception:  # pragma: no cover - defensive
-            dy_cookie = ""
-        if dy_cookie.strip():
-            douyin = SourceStatusItem(
-                enabled=dy_enabled,
-                state="unverified",
-                detail="Cookie 已同步，需在实际任务中验证。",
-                logged_in=False,
-            )
-        else:
-            douyin = SourceStatusItem(
-                enabled=dy_enabled,
-                state="missing",
-                detail="未配置 Cookie —— 设置环境变量，或登录抖音后由插件同步。",
-            )
-
-        # ── YouTube: public, no login required ──
-        youtube = SourceStatusItem(
-            enabled=bool(getattr(srcs.youtube, "enabled", False)),
-            state="no_auth",
-            detail="公开源 · 无需登录。",
-            logged_in=True,
+        return SourceVerifyResponse(
+            slug=result.slug,
+            outcome=result.outcome,
+            changed=result.changed,
+            message=result.message,
+            replayed=result.replayed,
+            retry_after_seconds=result.retry_after_seconds,
+            auth=result.contract,
         )
 
-        # ── X (Twitter): reuse the live health store ──
-        tw_enabled = bool(getattr(srcs.twitter, "enabled", False))
-        tw_state, tw_feed_paused = "missing_cookie", False
-        if hasattr(ctx.database, "conn"):
-            from openbiliclaw.storage.x_health import XSourceHealthStore
+    def _xhs_token_urls(pairs: Any) -> list[str]:
+        """Rebuild tokenised note URLs from ``(note_id, xsec_token)`` pairs."""
+        urls: list[str] = []
+        for pair in pairs if isinstance(pairs, list) else []:
+            if not isinstance(pair, dict):
+                continue
+            # Guard against the noise the sniffer's deep-walk can surface — e.g.
+            # 24-hex ids that aren't notes. The backfill UPDATE is narrow (bvid
+            # match), so a false id is a no-op, but the token must be non-empty.
+            note_id = str(pair.get("note_id", "") or "").strip()
+            token = str(pair.get("xsec_token", "") or "").strip()
+            if not note_id or not token:
+                continue
+            urls.append(f"{xhs_url_prefix}explore/{note_id}?xsec_token={token}")
+        return urls
 
-            h = XSourceHealthStore(ctx.database).get()
-            tw_state = str(h.get("state", "ok"))
-            tw_feed_paused = bool(h.get("feed_paused", False))
-        # The health row defaults to ``ok`` before any fetch has run, so an
-        # ``ok`` without an actual cookie would falsely report a logged-in
-        # source — gate it on the resolved credential, like the douyin branch.
-        if tw_state == "ok":
-            tw_cookie = ""
+    def _source_auth_contract(slug: str) -> SourceAuthContract:
+        """Freshly recomputed contract for *slug*, or an empty one if unknown."""
+        from openbiliclaw.api.source_auth.contract import SourceAuthContract
+        from openbiliclaw.api.source_auth.providers import (
+            SOURCE_AUTH_PROVIDERS,
+            SourceAuthContext,
+        )
+        from openbiliclaw.config import load_config
+
+        provider = SOURCE_AUTH_PROVIDERS.get(slug)
+        if provider is None:
+            return SourceAuthContract()
+        return provider(SourceAuthContext(cfg=load_config(), database=ctx.database))
+
+    def _credential_landed(slug: str, *, verdict: Any, value: str, changed: bool) -> None:
+        """Bookkeeping every credential write owes once the value is really stored.
+
+        Both write surfaces call this, and neither may skip it — the two steps
+        below used to be done by ``POST /api/sources/{slug}/credential`` alone,
+        so one cookie ended up in two different states depending on which page
+        the user had open (invariant I5, the outcome half rather than the
+        validation half):
+
+        1. **Record the verdict the gate already paid for.** ``PUT /api/config``
+           genuinely probed the platform and genuinely refused what failed, then
+           dropped the answer — leaving the status chip on ``unverified`` for a
+           credential the backend had just watched log in.
+        2. **Drop the platform's debounced verify result.** It describes the
+           credential that was there a moment ago; replaying it would tell a
+           user their fix had not taken.
+
+        A verdict served *from the cache* is not re-recorded: it would extend
+        its own freshness window on every extension re-post, so a credential
+        could stay "recently verified" indefinitely without anyone re-checking
+        it — the failure this whole path was tightened to prevent, arriving one
+        indirection later.
+        """
+        from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+        from openbiliclaw.api.source_auth.verify import note_credential_changed
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+        if verdict.checked == "live_probe" and not verdict.from_cache:
+            LIVE_PROBES.record(
+                slug,
+                authenticated=verdict.authenticated,
+                detail=verdict.message,
+                network_error=False,
+                fingerprint=credential_fingerprint(slug, value),
+                username=verdict.username,
+                user_id=verdict.user_id,
+            )
+        if changed:
+            note_credential_changed(slug)
+
+    async def _write_source_credential(
+        slug: str,
+        *,
+        kind: str = "cookie",
+        value: Any = "",
+        source: str = "settings",
+    ) -> CredentialWriteOutcome:
+        """Validate → persist → broadcast → re-read. The one credential write.
+
+        Every credential-bearing route funnels through here. Whether a route
+        writes a credential is decided by what it stores, never by what its path
+        spells (invariant I7) — reading the path is how ``PUT /api/config``, the
+        single largest credential writer in the codebase, went unnoticed long
+        enough to skip validation entirely (spec D4/D5). That route delegates to
+        the same :func:`validate_credential` gate; it keeps its own persistence
+        only because it is mid-transaction on ``config.toml`` and must not have
+        its pending edits flushed out from under it.
+
+        The returned ``auth`` is recomputed *after* the write, so the save and
+        the next status poll cannot disagree. For the live-probe platforms the
+        gate has already recorded a fresh verdict, so this costs no second round
+        trip — the receipt is free, which is why there is no longer any excuse
+        for the silent save that spec D7 complained about.
+        """
+        from openbiliclaw.api.source_auth.write import (
+            CredentialWriteOutcome,
+            cookie_names,
+            current_credential,
+            persist_credential,
+            validate_credential,
+        )
+        from openbiliclaw.config import load_config
+
+        cfg = load_config()
+        verdict = await validate_credential(slug, kind, value, cfg=cfg)
+        if not verdict.ok:
+            return CredentialWriteOutcome(
+                slug=slug,
+                accepted=False,
+                error_code=verdict.error_code,
+                message=verdict.message,
+                checked=verdict.checked,
+                unverified_reason=verdict.unverified_reason,
+                # Reported even on refusal: "which names did you actually see"
+                # is the first question a user asks when a paste is rejected,
+                # and it is derived from the payload, never from the store.
+                cookie_names=(cookie_names(str(value or "")) if kind == "cookie" and value else ()),
+                contract=_source_auth_contract(slug),
+            )
+
+        payload: Any = value
+        if kind == "token":
+            payload = _xhs_token_urls(value)
+
+        # An unchanged cookie is an accepted no-op: the extension re-posts the
+        # same jar around every startup, and rewriting the stores would restart
+        # producer loops for no behavioural gain.
+        text = str(value or "").strip() if kind == "cookie" else ""
+        unchanged = bool(text) and text == current_credential(slug, cfg=cfg)
+
+        written = persist_credential(
+            slug,
+            kind,
+            payload,
+            cfg=cfg,
+            database=ctx.database,
+            source=source,
+            token_sink=lambda urls: _backfill_xhs_tokens(ctx.database, urls),
+        )
+
+        # The candidate is now the stored credential, so its verdict finally
+        # describes something real and may be recorded (the gate deliberately
+        # withheld it while the value was only a candidate). A ``token`` write
+        # is excluded from the change signal: 小红书's ``xsec_token`` is per-note
+        # content access, not a login, so it cannot invalidate a login verdict.
+        if written.persisted:
+            _credential_landed(
+                slug,
+                verdict=verdict,
+                value=text,
+                changed=kind != "token" and not unchanged,
+            )
+
+        if slug == "twitter" and written.persisted:
+            # A freshly synced valid cookie is the external re-login signal that
+            # clears a missing/expired/blocked health block. Without it the
+            # producer's is_ready() gate stays False forever, so discovery never
+            # retries even though auth is now fixed.
             with suppress(Exception):
-                tw_cookie = resolve_x_cookie(
-                    data_dir=cfg.data_path,
-                    cookie_env=getattr(srcs.twitter, "cookie_env", "OPENBILICLAW_X_COOKIE"),
-                )
-            if not tw_cookie.strip():
-                tw_state = "missing_cookie"
-        tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
-        if tw_feed_paused:
-            tw_detail += " 其中 For-You 子流因连续失败已临时熔断，下次抓取成功会自动恢复。"
-        twitter = SourceStatusItem(
-            enabled=tw_enabled,
-            state=tw_state,
-            detail=tw_detail,
-            logged_in=tw_state == "ok",
-            feed_paused=tw_feed_paused,
-        )
+                from openbiliclaw.storage.x_health import XSourceHealthStore
 
-        zh_cfg = getattr(srcs, "zhihu", None)
-        zh_enabled = bool(getattr(zh_cfg, "enabled", False))
-        zhihu = SourceStatusItem(
-            enabled=zh_enabled,
-            state="unverified",
-            detail=(
-                "浏览器插件登录态源 · 尚未看到知乎任务结果，"
-                "保存后可运行 init 或 discover 验证登录态。"
-            ),
-            logged_in=False,
-        )
-        zhihu_stored_logged_in = False
-        zhihu_login_at = ""
-        if hasattr(ctx.database, "get_zhihu_login_state"):
-            try:
-                zhihu_stored_logged_in, zhihu_login_at = ctx.database.get_zhihu_login_state()
-            except Exception:  # pragma: no cover - defensive
-                zhihu_stored_logged_in, zhihu_login_at = False, ""
-        zhihu_login_fresh = False
-        if zhihu_login_at:
-            try:
-                from datetime import UTC, datetime, timedelta
+                XSourceHealthStore(ctx.database).clear_relogin_block()
 
-                parsed_login_at = datetime.fromisoformat(
-                    zhihu_login_at.strip().replace("Z", "+00:00")
-                )
-                if parsed_login_at.tzinfo is None:
-                    parsed_login_at = parsed_login_at.replace(tzinfo=UTC)
-                zhihu_login_fresh = datetime.now(UTC) - parsed_login_at.astimezone(
-                    UTC
-                ) <= timedelta(hours=_zhihu_login_fresh_hours)
-            except Exception:  # pragma: no cover - defensive
-                zhihu_login_fresh = False
-        if zhihu_login_at:
-            if zhihu_stored_logged_in and zhihu_login_fresh:
-                zhihu = SourceStatusItem(
-                    enabled=zh_enabled,
-                    state="ready",
-                    detail="已登录知乎。",
-                    logged_in=True,
-                )
-            elif zhihu_stored_logged_in:
-                zhihu = SourceStatusItem(
-                    enabled=zh_enabled,
-                    state="stale",
-                    detail="知乎登录态已过期，请连接插件刷新本地状态。",
-                    logged_in=False,
-                )
-            else:
-                zhihu = SourceStatusItem(
-                    enabled=zh_enabled,
-                    state="missing",
-                    detail="浏览器最近同步的状态为未登录知乎。",
-                    logged_in=False,
-                )
-        elif hasattr(ctx.database, "conn"):
-            try:
-                row = ctx.database.conn.execute(
-                    """
-                    SELECT type, status, result_json, created_at, completed_at
-                    FROM zhihu_tasks
-                    WHERE status IN ('pending', 'in_progress', 'completed', 'failed')
-                    ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-            except Exception:
-                row = None
-            if row is not None:
-                task_type = str(row["type"] if hasattr(row, "keys") else row[0])
-                status = str(row["status"] if hasattr(row, "keys") else row[1])
-                result_json = row["result_json"] if hasattr(row, "keys") else row[2]
-                payload: dict[str, Any] = {}
-                with suppress(Exception):
-                    parsed = json.loads(str(result_json or "{}"))
-                    if isinstance(parsed, dict):
-                        payload = parsed
-                items = payload.get("items")
-                item_count = len(items) if isinstance(items, list) else 0
-                error_code = str(payload.get("error", "") or "").strip()
-                debug = payload.get("debug")
-                login_required = error_code == "zhihu_login_required" or (
-                    isinstance(debug, dict) and bool(debug.get("login_required"))
-                )
-                if status == "completed":
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="ready",
-                        detail=f"最近任务完成（{task_type}，{item_count} 条）。",
-                        logged_in=True,
-                    )
-                elif login_required:
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="missing",
-                        detail="最近知乎任务提示需要登录知乎。请在当前浏览器登录知乎后重试。",
-                        logged_in=False,
-                    )
-                elif status == "failed":
-                    suffix = f"：{error_code}" if error_code else ""
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="partial",
-                        detail=f"最近知乎任务失败{suffix}。可在浏览器登录态正常后重试。",
-                        logged_in=False,
-                    )
-                elif status in {"pending", "in_progress"}:
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="unverified",
-                        detail=f"知乎任务正在等待插件执行（{task_type} / {status}）。",
-                        logged_in=False,
-                    )
-
-        rd_cfg = getattr(srcs, "reddit", None)
-        rd_enabled = bool(getattr(rd_cfg, "enabled", False))
-        rd_backend = str(getattr(rd_cfg, "backend", "rdt") or "rdt").strip().lower()
-        if rd_backend in {"extension", "openbiliclaw", "plugin"}:
-            reddit = SourceStatusItem(
-                enabled=rd_enabled,
-                state="unverified",
-                detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
-                logged_in=False,
-            )
-            reddit_cookie_names: tuple[str, ...] = ()
+        runtime_refreshed = False
+        if slug == "bilibili" and written.runtime_dirty:
+            # Atomic by contract: a partial ``rebuild_from_config`` leaves the
+            # old runtime intact, so a failure here costs a stale client, never
+            # a broken one.
             with suppress(Exception):
-                from openbiliclaw.sources.reddit_tasks import rdt_credential_cookie_names
+                await ctx.rebuild_from_config(load_config())
+                await ctx.restart_background_tasks(app)
+                runtime_refreshed = True
 
-                reddit_cookie_names = rdt_credential_cookie_names()
-            if "reddit_session" in reddit_cookie_names:
-                reddit = SourceStatusItem(
-                    enabled=rd_enabled,
-                    state="ready",
-                    detail="已登录 Reddit（reddit_session 已同步）。",
-                    logged_in=True,
-                )
+        event_type = {
+            "bilibili": "bilibili_cookie_synced",
+            "douyin": "douyin_cookie_synced",
+            "twitter": "x_cookie_synced",
+            "reddit": "reddit_cookie_synced",
+        }.get(slug, "")
+        if event_type and written.persisted:
+            event: dict[str, Any] = {"type": event_type, "source": source}
+            if slug == "bilibili":
+                event["username"] = verdict.username
+                event["user_id"] = verdict.user_id
             else:
-                db_conn = getattr(ctx.database, "conn", None)
-                if db_conn is not None and hasattr(db_conn, "execute"):
-                    with suppress(Exception):
-                        row = db_conn.execute(
-                            """
-                            SELECT type, status, result_json
-                            FROM reddit_tasks
-                            ORDER BY COALESCE(completed_at, claimed_at, created_at) DESC,
-                                     created_at DESC
-                            LIMIT 1
-                            """
-                        ).fetchone()
-                        if row is not None:
-                            task_type = str(row["type"] if hasattr(row, "keys") else row[0])
-                            status = str(row["status"] if hasattr(row, "keys") else row[1])
-                            result_json = row["result_json"] if hasattr(row, "keys") else row[2]
-                            error_code = ""
-                            reddit_debug: dict[str, Any] = {}
-                            with suppress(Exception):
-                                parsed = json.loads(str(result_json or "{}"))
-                                if isinstance(parsed, dict):
-                                    error_code = str(parsed.get("error", "") or "")
-                                    if isinstance(parsed.get("debug"), dict):
-                                        reddit_debug = parsed["debug"]
-                            login_required = error_code == "reddit_login_required" or bool(
-                                reddit_debug.get("login_required")
-                            )
-                            if status == "completed":
-                                reddit = SourceStatusItem(
-                                    enabled=rd_enabled,
-                                    state="ready",
-                                    detail=f"最近 Reddit 插件任务已完成（{task_type}）。",
-                                    logged_in=True,
-                                )
-                            elif login_required:
-                                reddit = SourceStatusItem(
-                                    enabled=rd_enabled,
-                                    state="missing",
-                                    detail=(
-                                        "最近 Reddit 任务提示需要登录 Reddit。"
-                                        "请在当前浏览器登录后重试。"
-                                    ),
-                                    logged_in=False,
-                                )
-                            elif status == "failed":
-                                suffix = f"：{error_code}" if error_code else ""
-                                reddit = SourceStatusItem(
-                                    enabled=rd_enabled,
-                                    state="partial",
-                                    detail=f"最近 Reddit 插件任务失败{suffix}。",
-                                    logged_in=False,
-                                )
-                            elif status in {"pending", "in_progress"}:
-                                reddit = SourceStatusItem(
-                                    enabled=rd_enabled,
-                                    state="unverified",
-                                    detail=(
-                                        f"Reddit 任务正在等待插件执行（{task_type} / {status}）。"
-                                    ),
-                                    logged_in=False,
-                                )
-        elif rd_backend == "rdt":
-            try:
-                from openbiliclaw.sources.reddit_tasks import local_reddit_credential_status
+                event["cookie_names"] = list(written.cookie_names)
+            if slug in {"twitter", "reddit"}:
+                event["has_cookie"] = True
+            with suppress(Exception):
+                await ctx.event_hub.publish(event)
 
-                rd_status = local_reddit_credential_status()
-                reddit = SourceStatusItem(
-                    enabled=rd_enabled,
-                    state=rd_status.state,
-                    detail=rd_status.message,
-                    logged_in=rd_status.state == "ready",
-                )
-            except Exception:
-                reddit = SourceStatusItem(
-                    enabled=rd_enabled,
-                    state="missing",
-                    detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
-                    logged_in=False,
-                )
-        else:
-            reddit = SourceStatusItem(
-                enabled=rd_enabled,
-                state="unverified",
-                detail=(
-                    f"Reddit {rd_backend} 后端已配置；状态页不执行命令探测，请通过显式任务验证。"
-                ),
-                logged_in=False,
-            )
-
-        from openbiliclaw.runtime.bangumi_producer import bangumi_source_status
-
-        bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
-        bgm_token_configured = bool(
-            str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
-        )
-        bgm_status = (
-            bangumi_source_status(
-                ctx.database, enabled=bgm_enabled, token_configured=bgm_token_configured
-            )
-            if hasattr(ctx.database, "conn")
-            else {
-                "state": "unverified" if bgm_enabled else "disabled",
-                "detail": "Bangumi 使用官方公开 API，尚未运行内容发现。",
-                **({"token_state": "ok"} if bgm_enabled and bgm_token_configured else {}),
-            }
-        )
-        bgm_state = str(bgm_status.get("state") or "unverified")
-        bangumi = SourceStatusItem(
-            enabled=bgm_enabled,
-            state=bgm_state,
-            detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
-            # Bangumi is anonymous and has no login session. This legacy field
-            # follows SourceStatusItem's readiness semantics instead of merely
-            # mirroring the config switch.
-            logged_in=bgm_state in {"ok", "ready", "no_auth"},
-            token_state=str(bgm_status.get("token_state") or ""),
+        return CredentialWriteOutcome(
+            slug=slug,
+            accepted=True,
+            message=verdict.message,
+            persisted=bool(written.persisted) and not unchanged,
+            checked=verdict.checked,
+            unverified_reason=verdict.unverified_reason,
+            cookie_names=written.cookie_names,
+            authenticated=verdict.authenticated,
+            username=verdict.username,
+            user_id=verdict.user_id,
+            credential_file=written.credential_file,
+            updated_at=written.updated_at,
+            upgraded=written.upgraded,
+            runtime_refreshed=runtime_refreshed,
+            contract=_source_auth_contract(slug),
         )
 
-        return SourcesStatusResponse(
-            bilibili=bilibili,
-            xiaohongshu=xiaohongshu,
-            douyin=douyin,
-            youtube=youtube,
-            twitter=twitter,
-            zhihu=zhihu,
-            reddit=reddit,
-            bangumi=bangumi,
+    @app.post("/api/sources/{slug}/credential", response_model=SourceCredentialWriteResponse)
+    async def write_source_credential(
+        slug: str, payload: SourceCredentialWriteIn
+    ) -> SourceCredentialWriteResponse:
+        """Store one source's credential, then report what that credential is worth.
+
+        The single write shape all six older endpoints now forward into. Always
+        200 for a known slug: a rejected credential is a normal outcome the UI
+        has to render, and turning it into a 4xx would leave the frontends
+        parsing error bodies to find the message explaining what to fix.
+        """
+        from openbiliclaw.api.source_auth.contract import SourceAuthContract
+        from openbiliclaw.api.source_auth.providers import SOURCE_AUTH_PROVIDERS
+
+        if slug not in SOURCE_AUTH_PROVIDERS:
+            raise HTTPException(status_code=404, detail=f"unknown source: {slug}")
+
+        value: Any = payload.pairs if payload.kind == "token" else payload.value
+        # No ``live=`` argument: this route always runs the strongest check the
+        # platform allows. See ``SourceCredentialWriteIn`` for why the request
+        # cannot ask for less.
+        result = await _write_source_credential(
+            slug,
+            kind=payload.kind,
+            value=value,
+            source=payload.source,
+        )
+        return SourceCredentialWriteResponse(
+            slug=result.slug,
+            accepted=result.accepted,
+            error_code=result.error_code,
+            message=result.message,
+            persisted=result.persisted,
+            checked=result.checked,
+            unverified_reason=result.unverified_reason,
+            cookie_names=list(result.cookie_names),
+            auth=result.contract or SourceAuthContract(),
         )
 
     def _mask_source_credential(value: str, *, reveal: bool) -> str:
@@ -9811,6 +10018,10 @@ def create_app(
     @app.get("/api/sources/credentials", response_model=SourcesCredentialsResponse)
     def sources_credentials(reveal_keys: bool = False) -> SourcesCredentialsResponse:
         """Return current local Cookie / token snapshots for source settings pages."""
+        from openbiliclaw.api.source_auth.forms import (
+            build_credential_form,
+            credential_summary,
+        )
         from openbiliclaw.bilibili.auth import resolve_runtime_cookie
         from openbiliclaw.config import load_config
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
@@ -9834,12 +10045,29 @@ def create_app(
         xhs_token = _latest_xhs_token()
         reddit_cookie_names = rdt_credential_cookie_names()
 
-        def item(label: str, value: str, detail: str) -> SourceCredentialItem:
+        def item(
+            slug: str, label: str, value: str, detail: str, *, secret: bool = True
+        ) -> SourceCredentialItem:
+            """One credential row, form descriptor included.
+
+            Every platform goes through here — including the three that store
+            nothing — so a source can never ship without a ``form``. That is
+            what lets the frontends drop their per-platform branches: an
+            absent descriptor would just move the special-casing back to them.
+
+            ``secret=False`` is for values that are not credentials: Reddit
+            shows the *names* of the cookies rdt-cli holds, and masking a list
+            of names would hide the only thing that row exists to tell you.
+            """
+            available = bool(value.strip())
+            form = build_credential_form(slug, cfg=cfg)
             return SourceCredentialItem(
                 label=label,
-                value=_mask_source_credential(value, reveal=reveal_keys),
-                available=bool(value.strip()),
+                value=_mask_source_credential(value, reveal=reveal_keys or not secret),
+                available=available,
                 detail=detail,
+                form=form,
+                summary=credential_summary(form, label=label, available=available, detail=detail),
             )
 
         def _bangumi_credential_detail(sources: Any) -> str:
@@ -9865,41 +10093,62 @@ def create_app(
                 )
             return base
 
+        def _bangumi_credential_item(sources: Any, config: Any) -> SourceCredentialItem:
+            """Bangumi's credential row: no pasteable value, but a real form.
+
+            The token is write-only through the config / init form, never shown
+            back (privacy: it reads private collections), so ``value`` stays empty
+            and ``available`` only reports whether one is configured. The form
+            descriptor (``form_kind='none'`` + verify / 去获取令牌 actions) is what
+            gives the settings page its 「测试连接」 button and login link without a
+            paste box that would write nowhere.
+            """
+            token_set = bool(
+                str(getattr(getattr(sources, "bangumi", None), "access_token", "") or "").strip()
+            )
+            detail = _bangumi_credential_detail(sources)
+            form = build_credential_form("bangumi", cfg=config)
+            return SourceCredentialItem(
+                label="可选个人令牌",
+                available=token_set,
+                detail=detail,
+                form=form,
+                summary=credential_summary(
+                    form, label="个人令牌", available=token_set, detail=detail
+                ),
+            )
+
         return SourcesCredentialsResponse(
-            bilibili=item("Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
+            bilibili=item("bilibili", "Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
             xiaohongshu=item(
+                "xiaohongshu",
                 "xsec_token",
                 xhs_token,
                 "小红书不保存整站 Cookie；xsec_token 只是内容访问令牌，不代表账号登录。",
             ),
-            douyin=item("Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
-            youtube=SourceCredentialItem(
-                label="Cookie",
-                available=False,
-                detail="YouTube 当前按公开源接入，后端不保存 Cookie。",
+            douyin=item("douyin", "Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
+            youtube=item(
+                "youtube",
+                "Cookie",
+                "",
+                "YouTube 当前按公开源接入，后端不保存 Cookie。",
             ),
-            twitter=item("Cookie", tw_cookie, "X 当前 resolved Cookie。"),
-            zhihu=SourceCredentialItem(
-                label="Cookie",
-                available=False,
-                detail="知乎登录态保存在浏览器站点 / 插件上下文中，后端不保存可展示 Cookie。",
+            twitter=item("twitter", "Cookie", tw_cookie, "X 当前 resolved Cookie。"),
+            zhihu=item(
+                "zhihu",
+                "Cookie",
+                "",
+                "知乎登录态保存在浏览器站点 / 插件上下文中，后端不保存可展示 Cookie。",
             ),
-            reddit=SourceCredentialItem(
-                label="rdt credential",
-                value=", ".join(reddit_cookie_names),
-                available=bool(reddit_cookie_names),
-                detail=(
-                    "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
-                    "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。"
-                ),
+            reddit=item(
+                "reddit",
+                "rdt credential",
+                ", ".join(reddit_cookie_names),
+                "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
+                "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。",
+                secret=False,
             ),
-            bangumi=SourceCredentialItem(
-                label="可选个人令牌",
-                available=bool(
-                    str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
-                ),
-                detail=_bangumi_credential_detail(srcs),
-            ),
+            bangumi=_bangumi_credential_item(srcs, cfg),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
@@ -11440,10 +11689,15 @@ def create_app(
                 mode_raw = str(network_data.get("mode", ""))
             try:
                 proxy = normalize_outbound_proxy(proxy_raw)
+                # A payload without ``mode`` is the "never configured" case, so it
+                # resolves the same way ``_build_network_config`` resolves an absent
+                # key: legacy proxy-only clients stay ``custom``, everything else
+                # takes the ``system`` default. Probing ``direct`` here would report
+                # on a policy the runtime would not actually use.
                 mode = (
                     normalize_outbound_proxy_mode(mode_raw)
                     if mode_raw.strip()
-                    else ("custom" if proxy else "direct")
+                    else ("custom" if proxy else "system")
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -11528,6 +11782,59 @@ def create_app(
         def _is_masked_echo(value: str) -> bool:
             return "****" in value
 
+        async def _gate_credential(slug: str, value: str) -> Any:
+            """Run the shared write-time gate, or 400 carrying its verdict.
+
+            This delegation *is* the fix for spec D4. This route writes four
+            platforms' credentials — more platforms than any other endpoint in
+            the codebase — yet validated none of them, while
+            ``POST /api/bilibili/cookie`` refused the very same dead cookie
+            after a live probe. Which page a user happened to paste into
+            decided whether their credential was checked. It no longer does:
+            both surfaces call :func:`validate_credential` with the same
+            arguments, so they cannot reach different conclusions.
+
+            Empty and masked-echo values never arrive here. Those are this
+            route's *partial-update* semantics — "this field was not edited" —
+            resolved by the callers before validation is reached, which is why
+            they are not a strength difference between the two paths.
+
+            Returns the verdict rather than discarding it. Equal validation
+            strength was only half of invariant I5; the probe this just paid
+            for is the same evidence the status endpoint and the verify button
+            read, and throwing it away here is why one cookie showed
+            ``verified`` when saved from the extension and ``unverified`` when
+            saved from the settings page.
+            """
+            from openbiliclaw.api.source_auth.write import validate_credential
+
+            verdict = await validate_credential(slug, "cookie", value, cfg=cfg)
+            if verdict.ok:
+                return verdict
+            raise HTTPException(
+                status_code=400,
+                detail={"error": verdict.error_code, "message": verdict.message},
+            )
+
+        # Credential writes, deferred to the save path.
+        #
+        # ``config.toml`` is written once, at the end, under a lock and behind a
+        # snapshot. The other three credential stores —
+        # ``data/douyin_cookie.json``, ``data/x_cookie.json`` and rdt-cli's own
+        # credential file — used to be written *where their fields are parsed*,
+        # hundreds of lines before validation finishes. A single PUT carrying a
+        # valid 抖音 cookie and an invalid ``[network]`` block therefore returned
+        # 400 "配置校验失败，未写入" having already overwritten the cookie, and
+        # those stores have neither snapshot nor rollback to undo it with.
+        #
+        # Deferring also puts them under ``_CONFIG_SAVE_LOCK``, so two
+        # concurrent PUTs can no longer interleave into a state where the config
+        # came from one request and the credentials from another. The
+        # persistence stays in this handler by design (spec: it is mid
+        # transaction on config.toml and must not have a shared writer flush its
+        # pending edits); what changes is *when* it runs, not where it lives.
+        pending_credential_writes: list[tuple[str, Callable[[], None]]] = []
+
         # Apply bilibili updates
         if "bilibili" in update:
             bdata = update["bilibili"]
@@ -11542,6 +11849,28 @@ def create_app(
                 if not _is_masked_echo(new_cookie) and (
                     new_cookie.strip() or not cfg.bilibili.cookie.strip()
                 ):
+                    if new_cookie.strip():
+                        from openbiliclaw.api.source_auth.write import current_credential
+
+                        bili_verdict = await _gate_credential("bilibili", new_cookie.strip())
+                        # Read before the assignment below, or "did this change"
+                        # compares the new value against itself.
+                        bili_changed = new_cookie.strip() != current_credential("bilibili", cfg=cfg)
+
+                        def _note_bilibili(
+                            cookie: str = new_cookie.strip(),
+                            verdict: Any = bili_verdict,
+                            changed: bool = bili_changed,
+                        ) -> None:
+                            # B站's store on this route *is* config.toml, so
+                            # ``save_config`` has already persisted it by the
+                            # time this runs; only the verdict and the debounce
+                            # are still outstanding.
+                            _credential_landed(
+                                "bilibili", verdict=verdict, value=cookie, changed=changed
+                            )
+
+                        pending_credential_writes.append(("bilibili", _note_bilibili))
                     cfg.bilibili.cookie = new_cookie
             if "browser_executable" in bdata:
                 cfg.bilibili.browser_executable = str(bdata["browser_executable"])
@@ -11605,11 +11934,23 @@ def create_app(
                                     cookie_env=cfg.sources.douyin.cookie_env,
                                 )
                             # Unchanged form echo → no write (env override
-                            # must not be copied into the file needlessly).
+                            # must not be copied into the file needlessly), and
+                            # no probe either: re-asking 抖音 about a cookie it
+                            # already answered for is free risk.
                             if new_cookie != current:
-                                DouyinCookieManager(cfg.data_path).set_cookie(
-                                    new_cookie, source="config-update"
-                                )
+                                dy_verdict = await _gate_credential("douyin", new_cookie)
+
+                                def _store_douyin(
+                                    cookie: str = new_cookie, verdict: Any = dy_verdict
+                                ) -> None:
+                                    DouyinCookieManager(cfg.data_path).set_cookie(
+                                        cookie, source="config-update"
+                                    )
+                                    _credential_landed(
+                                        "douyin", verdict=verdict, value=cookie, changed=True
+                                    )
+
+                                pending_credential_writes.append(("douyin", _store_douyin))
                     for key in (
                         "daily_search_budget",
                         "daily_hot_budget",
@@ -11655,27 +11996,33 @@ def create_app(
                                     cookie_env=cfg.sources.twitter.cookie_env,
                                 )
                             if new_cookie != current:
-                                XCookieManager(cfg.data_path).set_cookie(
-                                    new_cookie, source="config-update"
-                                )
-                                # A pasted valid cookie is a re-login signal,
-                                # same as the extension sync endpoint: lift any
-                                # missing/expired/blocked health block so
-                                # discovery retries instead of staying parked.
-                                from openbiliclaw.sources.douyin_direct import (
-                                    parse_cookie_header,
-                                )
+                                x_verdict = await _gate_credential("twitter", new_cookie)
 
-                                pairs = parse_cookie_header(new_cookie)
-                                if all(
-                                    name in pairs for name in _X_REQUIRED_COOKIE_NAMES
-                                ) and hasattr(ctx.database, "conn"):
-                                    with suppress(Exception):
-                                        from openbiliclaw.storage.x_health import (
-                                            XSourceHealthStore,
-                                        )
+                                def _store_twitter(
+                                    cookie: str = new_cookie, verdict: Any = x_verdict
+                                ) -> None:
+                                    XCookieManager(cfg.data_path).set_cookie(
+                                        cookie, source="config-update"
+                                    )
+                                    # A pasted valid cookie is a re-login signal,
+                                    # same as the extension sync endpoint: lift
+                                    # any missing/expired/blocked health block so
+                                    # discovery retries instead of staying parked.
+                                    # The gate above already established that
+                                    # both required names are present — a jar
+                                    # without them no longer reaches this point.
+                                    if hasattr(ctx.database, "conn"):
+                                        with suppress(Exception):
+                                            from openbiliclaw.storage.x_health import (
+                                                XSourceHealthStore,
+                                            )
 
-                                        XSourceHealthStore(ctx.database).clear_relogin_block()
+                                            XSourceHealthStore(ctx.database).clear_relogin_block()
+                                    _credential_landed(
+                                        "twitter", verdict=verdict, value=cookie, changed=True
+                                    )
+
+                                pending_credential_writes.append(("twitter", _store_twitter))
                     for key in (
                         "daily_search_budget",
                         "daily_feed_budget",
@@ -11739,25 +12086,37 @@ def create_app(
 
                         new_cookie = str(reddit_data["cookie"]).strip()
                         if new_cookie and not _is_masked_echo(new_cookie):
-                            sync_result = sync_rdt_credential_from_cookie_header(
-                                new_cookie, source="config-update"
-                            )
-                            if not sync_result.has_cookie:
-                                # Unlike douyin/x, rdt-cli has a hard cookie
-                                # requirement — reject visibly instead of
-                                # pretending the paste took effect.
-                                raise HTTPException(
-                                    status_code=400,
-                                    detail={
-                                        "error": sync_result.error_code or "reddit_cookie_invalid",
-                                        "message": (
-                                            "Reddit Cookie 未保存：缺少 reddit_session，"
-                                            "请从已登录 reddit.com 的浏览器复制完整 Cookie。"
-                                            if sync_result.error_code == "missing_reddit_session"
-                                            else sync_result.message
-                                        ),
-                                    },
+                            # Reddit was already the one platform here that
+                            # rejected visibly instead of pretending the paste
+                            # took effect. The gate now decides that for all
+                            # four, so the check happens *before* the write
+                            # rather than being inferred from its result.
+                            rd_verdict = await _gate_credential("reddit", new_cookie)
+
+                            def _store_reddit(
+                                cookie: str = new_cookie, verdict: Any = rd_verdict
+                            ) -> None:
+                                sync_result = sync_rdt_credential_from_cookie_header(
+                                    cookie, source="config-update"
                                 )
+                                if not sync_result.has_cookie:
+                                    # Unreachable through the gate, which has
+                                    # already established a non-empty
+                                    # ``reddit_session``. Kept because the two
+                                    # sides parse the Cookie header with
+                                    # different parsers: if they ever disagree,
+                                    # the write must fail loudly with the real
+                                    # reason rather than report a save that did
+                                    # not happen (pitfall #7).
+                                    raise RuntimeError(
+                                        sync_result.message
+                                        or "reddit credential store refused the cookie"
+                                    )
+                                _credential_landed(
+                                    "reddit", verdict=verdict, value=cookie, changed=True
+                                )
+
+                            pending_credential_writes.append(("reddit", _store_reddit))
                     if "source_modes" in reddit_data:
                         raw_modes = reddit_data["source_modes"]
                         if isinstance(raw_modes, str):
@@ -12133,7 +12492,10 @@ def create_app(
                     setattr(cfg.logging, key, int(ldata[key]))
 
         # Apply the overseas routing policy. Proxy-only payloads from older UI
-        # versions retain their historical meaning: non-empty = custom, empty = direct.
+        # versions carry no opinion about ``mode``, so they resolve exactly as an
+        # absent ``[network].mode`` key does in ``_build_network_config``: a
+        # non-empty proxy is still custom, and clearing the proxy falls back to
+        # the ``system`` default rather than pinning the user to direct.
         if "network" in update:
             ndata = update["network"]
             if isinstance(ndata, dict):
@@ -12152,7 +12514,7 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         if not mode_supplied:
-                            cfg.network.mode = "custom" if cfg.network.proxy else "direct"
+                            cfg.network.mode = "custom" if cfg.network.proxy else "system"
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
@@ -12209,6 +12571,34 @@ def create_app(
             saved_path = save_config(cfg)
             logger.info("Configuration saved to %s", saved_path)
 
+            # Only now do the external credential stores get touched. Every
+            # validation has passed, the 400 and 409 exits are behind us, and
+            # config.toml is committed — so "the response said saved" and "the
+            # credential is on disk" can no longer disagree. Ordered after
+            # ``save_config`` deliberately: a failure to write the config aborts
+            # before any credential moves, which is the direction that leaves
+            # the least behind.
+            #
+            # No transaction spans four independent stores, so an I/O failure
+            # part-way through genuinely leaves some applied. That cannot be
+            # prevented here; what it must not do is surface as an opaque 500.
+            # The raised error names the platform that failed and the ones that
+            # already landed, because "which of my credentials actually saved?"
+            # is the only question worth answering at that point (pitfall #7).
+            landed: list[str] = []
+            for slug, apply_credential in pending_credential_writes:
+                try:
+                    apply_credential()
+                except Exception as exc:
+                    logger.exception("credential write failed after config save: slug=%s", slug)
+                    already = ", ".join(landed) if landed else "none"
+                    raise RuntimeError(
+                        f"config.toml saved, but storing the {slug} credential failed: {exc}. "
+                        f"Credentials already written this request: {already}. "
+                        f"Re-save to retry; the write is idempotent."
+                    ) from exc
+                landed.append(slug)
+
             # Refresh the process-level outbound-proxy mirror BEFORE any runtime
             # rebuild so the rebuilt LLM registry constructs its clients with the
             # new proxy. CN-direct clients never read this value.
@@ -12227,8 +12617,8 @@ def create_app(
                         degraded_reason=str(getattr(ctx, "degraded_reason", "")),
                     ),
                     message=(
-                        f"配置已保存到 {saved_path}。当前后端处于降级模式，"
-                        "请 restart daemon 后让新配置生效。"
+                        f"配置已保存到 {saved_path}。AI 服务配置修复后，"
+                        "请重启后端（restart daemon）让新配置生效。"
                     ),
                     reloaded=False,
                     rollback_applied=False,
@@ -12387,6 +12777,7 @@ def create_app(
     from fastapi.staticfiles import StaticFiles as _StaticFiles
 
     _web_dir = _Path(__file__).resolve().parent.parent / "web"
+    _shared_web_dir = _web_dir / "shared"
     if _web_dir.is_dir():
         _favicon_path = _web_dir / "icon-192.png"
 
@@ -12398,6 +12789,14 @@ def create_app(
 
         app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
 
+    # ── Shared frontend modules ──────────────────────────────────
+    # Its own mount rather than a subdirectory of an existing one: `/web` is
+    # rooted at `web/desktop`, so a file in `web/shared/` is only reachable
+    # through the *mobile* mount (`/m/shared/…`). Serving cross-surface code
+    # from a surface-specific URL is how it ends up copied instead of shared.
+    if _shared_web_dir.is_dir():
+        app.mount("/shared", _StaticFiles(directory=_shared_web_dir), name="shared-web")
+
     # ── Desktop Web UI ───────────────────────────────────────────
     _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
     if _desktop_dir.is_dir():
@@ -12407,12 +12806,16 @@ def create_app(
             import hashlib
 
             digest = hashlib.sha256()
-            for relative in (
-                "assets/css/app.css",
-                "assets/css/classic.css",
-                "assets/js/app.js",
+            # Paths are relative to the desktop root except the shared modules,
+            # which live outside it — an upgrade that only changed
+            # source-status.js would otherwise be served from cache forever.
+            for relative, root in (
+                ("assets/css/app.css", _desktop_dir),
+                ("assets/css/classic.css", _desktop_dir),
+                ("assets/js/app.js", _desktop_dir),
+                ("source-status.js", _shared_web_dir),
             ):
-                path = _desktop_dir / relative
+                path = root / relative
                 if not path.is_file():
                     continue
                 stat = path.stat()
@@ -12438,6 +12841,10 @@ def create_app(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
             )
+            html = html.replace(
+                'src="/shared/source-status.js"',
+                f'src="/shared/source-status.js?v={version}"',
+            )
             return Response(
                 html,
                 media_type="text/html; charset=utf-8",
@@ -12456,6 +12863,15 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         def _root_redirect() -> RedirectResponse:
+            # Mirror packaging/entry.py's _decide_landing_path for browsers
+            # that reach the port without the packaged launcher (git/docker
+            # installs, manual visits): a degraded backend or one whose init
+            # never completed lands on the setup wizard, not the SPA. Unknown
+            # readiness keeps the /web fallback — the SPA's onboarding gate
+            # is the safety net, not a wall.
+            needs_setup = bool(getattr(ctx, "degraded", False)) or _health_profile_ready() is False
+            if needs_setup and (_web_dir / "setup").is_dir():
+                return RedirectResponse(url="/setup/", status_code=302)
             return RedirectResponse(url="/web", status_code=302)
 
     # ── First-run Setup Wizard ──────────────────────────────────

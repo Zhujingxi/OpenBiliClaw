@@ -56,7 +56,9 @@ def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:
     assert "海外" in html
     assert "国内请求始终直连" in html
 
-    assert 'setSelect("networkProxyMode", config.network?.mode || "direct")' in js
+    # The fallback literal must track the backend [network].mode default
+    # (system since v0.3.175), else an omitted field renders the wrong mode.
+    assert 'setSelect("networkProxyMode", config.network?.mode || "system")' in js
     assert 'setInput("networkProxy", config.network?.proxy || "")' in js
     assert 'network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") }' in js
     assert "function runNetworkProxyConfigProbe()" in js

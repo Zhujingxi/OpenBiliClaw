@@ -133,7 +133,6 @@
           <option value="gemini">Gemini（Google）</option>
           <option value="openrouter">OpenRouter</option>
           <option value="openai_compatible">OpenAI 兼容接口（自建 / 第三方）</option>
-          <option value="ollama">本地 Ollama（免 key，需自备聊天模型）</option>
         </select>
 
         <div id="keyWrap">
@@ -154,11 +153,6 @@
             <option value="">chat/completions（默认，绝大多数服务）</option>
             <option value="responses">responses（部分第三方网关的 GPT 模型只开放这个）</option>
           </select>
-        </div>
-
-        <div id="ollamaNote" class="hint" style="display:none; margin-top:14px">
-          本地 Ollama 已随安装包附带,无需填 key。聊天默认用 <code>qwen2.5</code> 等模型,
-          首次使用前请确保已 <code>ollama pull</code> 对应模型(embedding 的 bge-m3 已自动就绪)。
         </div>
 
         <label for="model">模型名</label>
@@ -231,6 +225,10 @@
     </div>
   </div>
 
+  <!-- Shared with the desktop page and the extension side panel; served from
+       its own /shared mount. A classic script, so the inline block below sees
+       it as a global without becoming a module. -->
+  <script src="/shared/source-status.js"></script>
   <script>
     const $ = (s) => document.querySelector(s);
     async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
@@ -252,7 +250,6 @@
       gemini: ["https://aistudio.google.com/app/apikey", "Google AI Studio"],
       openrouter: ["https://openrouter.ai/keys", "OpenRouter"],
       openai_compatible: ["", ""],
-      ollama: ["", ""],
     };
     const DEFAULT_MODELS = {
       deepseek: "deepseek-v4-flash",
@@ -261,31 +258,36 @@
       gemini: "gemini-2.5-flash",
       openrouter: "openai/gpt-5-nano",
       openai_compatible: "",
-      ollama: "qwen2.5:7b",
     };
+    // Platform roster and source-auth interpretation come from the module the
+    // desktop page and the extension side panel also load, so this wizard can
+    // never disagree with them about which sources exist or what counts as
+    // "connected" (spec I4/I6).
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
-    // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" },
-      { key: "bangumi", label: "Bangumi" },
-    ];
+    // stay checked to start. This is first-run *policy*, not a display rule,
+    // which is why it stays local instead of moving into the shared module;
+    // the backend keeps the same default in providers._ENABLED_BY_DEFAULT.
+    // Bangumi arrives through the shared roster like every other source, so it
+    // appears here without this wizard keeping a list of its own.
+    const INIT_DEFAULT_SOURCES = new Set(["bilibili"]);
+    const INIT_SOURCE_OPTIONS = SourceStatus.SOURCE_KEYS.map((key) => ({
+      key,
+      label: SourceStatus.sourceLabel(key),
+      ...(INIT_DEFAULT_SOURCES.has(key) ? { defaultChecked: true } : {}),
+    }));
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B站 登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
       embedding_not_ready: "向量模型还没就绪，请等待 bge-m3 下载完成或修复 Ollama 后重试。",
-      already_initialized: "已经初始化过了。",
+      already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
-      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
       invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
       bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
@@ -301,6 +303,7 @@
     const INIT_SOURCE_LOGIN_HINT =
       "勾选要纳入初始化的平台，勾选会同时开启该来源。Bangumi 使用公开 API，不需登录；其他平台请先在当前浏览器登录。";
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
+    const BILI_POLL_MS = Number(window.__OBC_TEST_BILI_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
@@ -327,6 +330,10 @@
         d.classList.toggle("active", i === n);
         d.classList.toggle("done", i < n);
       });
+      // Leaving step 1: stop the 3s B站 poll so it can't keep hitting the
+      // backend from a step the user has moved past. Null it so re-entering
+      // step 1 restarts a fresh poll (startBiliPoll early-returns while set).
+      if (n !== 1 && biliPoll) { clearInterval(biliPoll); biliPoll = null; }
       if (n === 1) startBiliPoll();
       if (n === 2) renderInitIdle();
     }
@@ -361,17 +368,14 @@
 
     function renderProvider() {
       const p = $("#provider").value;
-      const isOllama = p === "ollama";
       const isCompat = p === "openai_compatible";
       const isClaude = p === "claude";
       $("#apiKey").placeholder = savedKeyProviders.has(p) ? "已保存，留空则沿用当前 Key" : "粘贴你的 API Key";
-      $("#keyWrap").style.display = isOllama ? "none" : "block";
       // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
       $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
       $("#baseHint").style.display = isClaude ? "block" : "none";
       // openai_compatible 可切 /v1/responses 协议（issue #72）
       $("#flavorWrap").style.display = isCompat ? "block" : "none";
-      $("#ollamaNote").style.display = isOllama ? "block" : "none";
       const [url, name] = KEY_LINKS[p] || ["", ""];
       $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
       const modelInput = $("#model");
@@ -395,7 +399,7 @@
       const apiKey = $("#apiKey").value.trim();
       const baseUrl = $("#baseUrl").value.trim();
       const model = $("#model").value.trim();
-      if (provider !== "ollama" && !apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
+      if (!apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key。", "err"); return; }
       if (provider === "openai_compatible" && !baseUrl) { showMsg("#msg0", "OpenAI 兼容接口需要填 Base URL。", "err"); return; }
       if (!model) { showMsg("#msg0", "请填写模型名。", "err"); return; }
 
@@ -430,8 +434,7 @@
         providerDrafts.set(provider, savedFields);
         savedProviderConfigs.set(provider, savedFields);
         if (apiKey) savedKeyProviders.add(provider);
-        const label = provider === "ollama" ? "本地 Ollama" : provider;
-        $("#doneLlm").textContent = "已连接 · " + label;
+        $("#doneLlm").textContent = "已连接 · " + provider;
         setStep(1);
       } catch (e) {
         showMsg("#msg0", "保存失败：" + e.message, "err");
@@ -440,15 +443,26 @@
       }
     }
 
+    // Reads the same source-auth contract the settings pages render, through
+    // the same helper. The previous version string-tested config.bilibili.cookie
+    // directly, which is blind to the data file and the env var — a machine with
+    // a working cookie in data/bilibili_cookie.json was told it was not logged
+    // in, while the settings page two clicks away said "凭据已就绪" (spec D3).
+    // Returns the rendered access descriptor once a credential is stored, or
+    // null while there is none. The *gate* is still "is a credential stored" —
+    // an unverified cookie must keep letting the user past this step, exactly
+    // as before. What the contract adds is the strength line the caller prints
+    // beside it, so a user waved through on nothing more than three cookie
+    // field names can see that that is what happened.
     async function checkBili() {
       try {
-        const r = await fetch("/api/config");
-        if (!r.ok) return false;
+        const r = await fetch("/api/sources/status");
+        if (!r.ok) return null;
         const data = await r.json();
-        const cfg = data.config || data;
-        const cookie = cfg?.bilibili?.cookie || "";
-        return Boolean(cookie && String(cookie).trim());
-      } catch { return false; }
+        const item = data?.bilibili;
+        if (!SourceStatus.hasCredential(item)) return null;
+        return SourceStatus.describeAccess(item);
+      } catch { return null; }
     }
 
     function describeInitReason(reason) {
@@ -622,7 +636,7 @@
       root.append(bangumiTokenDetail);
       const bangumiTokenHint = document.createElement("p");
       bangumiTokenHint.className = "hint";
-      bangumiTokenHint.innerHTML = '<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）';
+      bangumiTokenHint.innerHTML = 'Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a>';
       root.append(bangumiTokenHint);
 
       root.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
@@ -754,11 +768,30 @@
     // three GUI surfaces share no module system, so keep the formulas in
     // lock-step when editing any copy.
     const STAGE_FRACTION_CAP = 0.95;
-    const STAGE_FRACTION_FALLBACK = 0.5;
+    // A stage with no real done/total contributes NOTHING to the bar. It used
+    // to contribute a flat half-step (0.5), which implied a progress the stage
+    // had not made; such stages now render indeterminate instead.
+    const STAGE_FRACTION_UNKNOWN = 0;
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+    // Work-unit stall floor + adaptive slack. A heartbeat period says nothing
+    // about how long ONE unit of work legitimately takes: an analysis batch on
+    // a slow/remote chat model routinely runs minutes (field report
+    // 2026-07-20: 280s per batch — healthy, yet the shared 90s threshold cried
+    // "stalled" the whole way). Floor generously, then adapt to the cadence
+    // THIS run demonstrates. Keep in lock-step with popup-init-control.js.
+    const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+    const PROGRESS_STALL_SLACK = 1.5;
+    function _progressStallThreshold(st, stage) {
+      const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+      const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+      const maxSeconds = Number(stage?.progress?.max_seconds || 0);
+      return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+    }
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+    // Said ONCE while the user waits, not repeated on every stage row.
+    const INIT_RUNNING_HINT = "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -766,9 +799,10 @@
       let st = _runViewState.get(runId);
       if (!st) {
         st = {
-          stageStartMs: new Map(), maxPct: 0,
+          maxPct: 0,
           lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
           lastProgressMark: null, lastProgressChangeMs: 0,
+          slowestProgressIntervalSeconds: 0,
         };
         _runViewState.set(runId, st);
         if (_runViewState.size > 8) {
@@ -779,53 +813,43 @@
       return st;
     }
 
-    function _runningStageFraction(stage, st, nowMs) {
-      const prog = stage?.progress;
-      if (prog?.mode === "indeterminate") {
-        const eta = Number(stage?.eta_seconds || 0);
-        if (eta > 0 && st) {
-          let startMs = st.stageStartMs.get(stage.n);
-          if (startMs === undefined) {
-            startMs = nowMs;
-            st.stageStartMs.set(stage.n, startMs);
-          }
-          return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta));
-        }
-        return STAGE_FRACTION_FALLBACK;
+    // Only REAL sub-progress moves the bar. The old elapsed/eta pseudo-progress
+    // (1 - e^-t/eta) is gone with the forecasts that fed it: faking a moving
+    // bar from a made-up duration is the same lie in another shape. A stage
+    // without done/total contributes nothing and renders indeterminate.
+    function _runningStageFraction(stage) {
+      const total = Number(stage?.progress?.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(stage?.progress?.done || 0), total));
+        return Math.min(STAGE_FRACTION_CAP, done / total);
       }
-      const progTotal = prog ? Number(prog.total || 0) : 0;
-      if (progTotal > 0) {
-        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-      }
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta > 0 && st) {
-        let startMs = st.stageStartMs.get(stage.n);
-        if (startMs === undefined) {
-          startMs = nowMs;
-          st.stageStartMs.set(stage.n, startMs);
-        }
-        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-      }
-      return STAGE_FRACTION_FALLBACK;
+      return STAGE_FRACTION_UNKNOWN;
     }
 
-    // Show the calibrated duration before it elapses; afterwards stop repeating
-    // an already-broken estimate and surface the real hard ceiling instead.
-    function stageEtaText(stage) {
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta <= 0) return "";
-      const elapsed = Number(stage?.progress?.elapsed_seconds || 0);
-      if (elapsed > eta) {
-        const maxSeconds = Number(stage?.progress?.max_seconds || 0);
-        if (maxSeconds > 0) {
-          return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-        }
-        return "已超常见用时；AI 或平台仍可能在处理";
+    // A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+    // duration we cannot honour is worse than none: every wrong estimate reads
+    // as "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and
+    // stage 4 announced 5, both legitimately ran far longer). So the running
+    // row reports only observed facts the backend already publishes: how long
+    // this stage has been running, and real sub-progress counts when they
+    // exist. No estimate, no ceiling, no extrapolation.
+    function formatElapsedText(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+    }
+
+    function stageDetailText(stage) {
+      const prog = stage?.progress;
+      if (!prog) return "";
+      const parts = [];
+      const elapsed = Number(prog.elapsed_seconds || 0);
+      if (elapsed > 0) parts.push(formatElapsedText(elapsed));
+      const total = Number(prog.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), total));
+        parts.push(`已完成 ${done}/${total}`);
       }
-      const halfMinutes = Math.ceil(eta / 30) / 2;
-      return `本阶段通常约 ${halfMinutes} 分钟`;
+      return parts.join(" · ");
     }
 
     // Heartbeat and substantive progress are separate. This prevents the 30s
@@ -847,6 +871,15 @@
       }
       const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
       if (st.lastProgressMark !== progressMark) {
+        // Learn this run's pace from every completed unit (skip the first
+        // mark, which measures "since we started watching").
+        if (st.lastProgressMark != null && st.lastProgressChangeMs) {
+          const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+          st.slowestProgressIntervalSeconds = Math.max(
+            st.slowestProgressIntervalSeconds || 0,
+            interval,
+          );
+        }
         st.lastProgressMark = progressMark;
         st.lastProgressChangeMs = nowMs;
       }
@@ -860,12 +893,15 @@
           text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`,
         };
       }
-      if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+      const runningStage = Array.isArray(status.stages)
+        ? status.stages.find((stage) => stage?.status === "running")
+        : null;
+      if (progressStale > _progressStallThreshold(st, runningStage)) {
         const minutes = Math.max(1, Math.round(progressStale / 60));
         return {
           fresh: false,
           staleSeconds: progressStale,
-          text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`,
+          text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`,
         };
       }
       return { fresh: true, staleSeconds: progressStale, text: "● 后端在线 · 正在处理" };
@@ -874,7 +910,7 @@
     function progressView(status, nowMs = Date.now()) {
       const pull = embeddingPullProgressView(status);
       if (pull.active && !status?.running) {
-        return { pct: pull.pct, failed: null, label: pull.label, etaText: "" };
+        return { pct: pull.pct, failed: null, label: pull.label, stageDetailText: "" };
       }
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
@@ -885,13 +921,21 @@
       const st = runId ? _viewState(runId) : null;
       const current = status?.current_stage || 0;
       const currentStage = stages.find((s) => s.n === current);
-      const indeterminate = Boolean(running && currentStage?.progress?.mode === "indeterminate");
+      // Indeterminate covers both the backend's explicit flag and any
+      // running stage with no real done/total — with the eta gone there is
+      // nothing honest left to fill such a bar with.
+      const indeterminate = Boolean(
+        running &&
+          currentStage &&
+          (currentStage.progress?.mode === "indeterminate" ||
+            !(Number(currentStage.progress?.total || 0) > 0)),
+      );
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
       const note = currentStage?.progress?.note;
       if (stageLabel && note) stageLabel += ` · ${note}`;
       const runningStages = stages.filter((s) => s.status === "running");
       const inFlight = runningStages.length
-        ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+        ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s), 0) /
           runningStages.length
         : 0;
       let pct = Math.max(0, Math.min(100, Math.round(((done + (running ? inFlight : 0)) / total) * 100)));
@@ -904,7 +948,7 @@
         pct,
         failed,
         indeterminate,
-        etaText: running ? stageEtaText(currentStage) : "",
+        stageDetailText: running ? stageDetailText(currentStage) : "",
         label: failed
           ? `初始化未完成：${initFailureText(status, failed)}`
           : running
@@ -925,7 +969,8 @@
       // failure banner).
       if ($("#initChecklist").querySelector(".init-checking")) {
         $("#initChecklist").innerHTML = status?.running
-          ? '<li class="init-hint-row">前置检查已通过，初始化进行中…</li>'
+          ? `<li class="init-hint-row">前置检查已通过，初始化进行中…</li>` +
+            `<li class="init-hint-row">${INIT_RUNNING_HINT}</li>`
           : '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>';
       }
       const view = progressView(status);
@@ -940,7 +985,7 @@
       const staleness = stalenessView(status);
       const stallText = status?.running
         ? staleness.fresh
-          ? [staleness.text, view.etaText].filter(Boolean).join(" · ")
+          ? [staleness.text, view.stageDetailText].filter(Boolean).join(" · ")
           : staleness.text
         : "";
       const stallHint = $("#initStallHint");
@@ -1114,13 +1159,13 @@
       const bangumiToken = String(
         bangumiTokenInput ? bangumiTokenInput.value : initBangumiToken
       ).trim();
-      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername && !bangumiToken) {
-        renderInitChecklist(status, selected);
-        $("#startInit").disabled = false;
-        $("#startInit").textContent = "开始初始化";
-        setInitReason(INIT_REASON_TEXT.no_profile_signal_sources);
-        return;
-      }
+      // No client-side Bangumi-only admission check here on purpose. The
+      // backend owns a THREE-tier account ladder (token → explicit username →
+      // browser-extension-reported identity); a local "username or token
+      // required" copy of it can't see the third tier and silently blocked
+      // zero-config extension users from ever reaching /api/init. The backend
+      // answers 409 no_profile_signal_sources when all three are genuinely
+      // missing, and the catch below renders it.
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
@@ -1194,20 +1239,38 @@
 
     function startBiliPoll() {
       if (biliPoll) return;
+      let missedTicks = 0;
       const tick = async () => {
-        if (await checkBili()) {
+        const access = await checkBili();
+        if (access) {
           biliConnected = true;
           clearInterval(biliPoll); biliPoll = null;
+          // Same verdict and same evidence wording as the settings page and the
+          // side panel, because it is the same module: this wizard used to say
+          // a flat「已检测到 B站 登录」whatever the evidence was.
+          const evidence = access.evidence.text ? `（${access.evidence.text}）` : "";
           $("#biliStatus").className = "msg show ok";
-          $("#biliStatus").innerHTML = "✓ 已检测到 B站 登录；其他平台会在初始化时按勾选项检查。";
+          $("#biliStatus").textContent = `✓ B站 ${access.label}${evidence}；其他平台会在初始化时按勾选项检查。`;
           $("#next1").textContent = "继续 →";
           const done = $("#biliDone"); done.classList.remove("pending");
           done.querySelector(".tick").textContent = "✓";
-          $("#doneBili").textContent = "B 站已连接；其他平台按初始化勾选项检查";
+          $("#doneBili").textContent = `B 站${access.label}；其他平台按初始化勾选项检查`;
+          return;
+        }
+        // Still not synced. After a few ticks, stop spinning forever and swap the
+        // spinner row for a neutral hint that reads as "fine either way": install
+        // the extension + log in for auto-detection, or skip and use other
+        // sources. Keep polling while ON step 1, so it flips green the moment the
+        // extension syncs a cookie. (setStep clears biliPoll when leaving step 1.)
+        missedTicks += 1;
+        if (missedTicks === 3) {
+          const box = $("#biliStatus");
+          box.className = "msg show";
+          box.textContent = "还没检测到 B站 登录同步。装好扩展并登录 bilibili.com 后这里会自动变绿；只用其他来源可以直接跳过。";
         }
       };
       tick();
-      biliPoll = setInterval(tick, 3000);
+      biliPoll = setInterval(tick, BILI_POLL_MS);
     }
 
     function finish() {
@@ -1219,6 +1282,7 @@
     // instead of silently landing on step 0, and an initialized backend goes
     // straight to done / first-pool waiting.
     (async function guard() {
+      let unlistedProvider = "";
       try {
         const r = await fetch("/api/config");
         if (r.ok) {
@@ -1246,10 +1310,24 @@
           const optionExists = Array.from($("#provider").options).some((option) => option.value === prov);
           if (prov && optionExists) {
             $("#provider").value = prov;
+          } else if (prov && !optionExists) {
+            // A saved default_provider that the wizard no longer offers (e.g.
+            // "ollama", which is embedding-only here). Don't silently drop it —
+            // remember it so we can flag it after switchProvider() (which
+            // clears #msg0) instead of losing the notice.
+            unlistedProvider = prov;
           }
         }
       } catch {}
       switchProvider();
+      if (unlistedProvider) {
+        showMsg(
+          "#msg0",
+          "检测到已配置的 provider「" + unlistedProvider + "」不在推荐列表中（本地 Ollama 仅用于向量检索）；" +
+            "如需继续使用请到设置页，或在这里重新选择一个聊天服务商。",
+          "info",
+        );
+      }
       try {
         const status = await fetchInitStatus();
         if (status.running) {

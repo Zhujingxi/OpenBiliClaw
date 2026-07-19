@@ -650,7 +650,9 @@ def test_collect_human_llm_openai_compat_numeric_preset_uses_vendor_defaults() -
 
 
 def test_collect_human_llm_ollama_needs_no_api_key() -> None:
-    plain_inputs = iter(["7", "qwen2.5:7b"])
+    # ollama is off the interactive menu but still accepted by name for
+    # backward-compat / non-interactive installs.
+    plain_inputs = iter(["ollama", "qwen2.5:7b"])
     secret_prompts: list[str] = []
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda _prompt: next(plain_inputs),
@@ -728,7 +730,7 @@ def test_collect_human_install_wizard_manual_cookie() -> None:
     prompts: list[tuple[str, str]] = []
     plain_inputs = iter(
         [
-            "7",
+            "ollama",
             "qwen2.5:7b",
             "3",
             "120",

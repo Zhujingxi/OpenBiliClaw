@@ -720,6 +720,54 @@ def test_source_status_reports_token_state(db: Database) -> None:
     assert "已被拒绝" in str(status["detail"])
 
 
+def test_disabled_source_status_names_the_saved_credential(db: Database) -> None:
+    """Saving a token and forgetting the switch must not read as "nothing here"."""
+
+    # No credential at all: the historical wording is what the user should see.
+    bare = bangumi_source_status(db, enabled=False)
+    assert bare["state"] == "disabled"
+    assert bare["detail"] == "Bangumi 来源未启用。"
+    assert "token_state" not in bare
+
+    # A saved token is called out, and the structured dimension is filled in so
+    # the front ends do not have to infer it from prose.
+    with_token = bangumi_source_status(db, enabled=False, token_configured=True)
+    assert with_token["state"] == "disabled"
+    assert with_token["token_state"] == "ok"
+    assert "已保存个人令牌" in str(with_token["detail"])
+    assert "「启用」" in str(with_token["detail"])
+    # Both renderers prefix the detail with their own "来源未启用" label (and the
+    # popup adds "(未启用)" as well), so the detail must not say it a third time.
+    assert "未启用" not in str(with_token["detail"])
+
+    # A public username alone is a credential too, but it is not a token.
+    with_username = bangumi_source_status(db, enabled=False, username_configured=True)
+    assert "已保存公开用户名" in str(with_username["detail"])
+    assert "未启用" not in str(with_username["detail"])
+    assert "token_state" not in with_username
+
+    # The token wins when both are set — the account comes from /v0/me.
+    both = bangumi_source_status(db, enabled=False, token_configured=True, username_configured=True)
+    assert "已保存个人令牌" in str(both["detail"])
+
+    # A dead token stays visible while disabled, and the wording must not claim
+    # that anonymous discovery is currently running (nothing runs while off).
+    BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=_Client(),
+        enabled=False,
+    )._ensure_tables()
+    bangumi_producer_module._persist_token_rejection(
+        db, bangumi_producer_module._token_fingerprint("tok")
+    )
+    rejected = bangumi_source_status(db, enabled=False, token_configured=True)
+    assert rejected["state"] == "disabled"
+    assert rejected["token_state"] == "rejected"
+    assert "拒绝" in str(rejected["detail"])
+    assert "已降级为匿名公开发现" not in str(rejected["detail"])
+
+
 def test_source_status_does_not_construct_a_producer(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:

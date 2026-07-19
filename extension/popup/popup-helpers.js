@@ -168,6 +168,27 @@ export function platformDisplayName(value) {
   return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
 }
 
+/**
+ * Build the author line shown on a recommendation card.
+ *
+ * "UP 主" is Bilibili-specific jargon, so the warm "这位 UP：" prefix only
+ * applies to Bilibili content. Every other source carries a creator whose
+ * role differs per platform (Bangumi ships directors / studios, Zhihu ships
+ * answer authors, YouTube ships channels), so prefixing them with "UP" is
+ * simply wrong. Those fall back to the bare name — which is what desktop web
+ * (`recommendationMetaHtml`) and mobile web (`views/recommend.js`) already
+ * render, so this keeps the three surfaces consistent.
+ *
+ * @param {{ up_name?: string, author_name?: string, source_platform?: string }} [item]
+ * @returns {string} display text, or "" when there is no creator to show
+ */
+export function formatRecommendationAuthorLine(item) {
+  const name = normalizeText(item?.up_name) || normalizeText(item?.author_name);
+  if (!name) return "";
+  const platform = normalizeSourcePlatform(item?.source_platform) || "bilibili";
+  return platform === "bilibili" ? `这位 UP：${name}` : name;
+}
+
 export function buildVideoUrl(bvid) {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
@@ -1239,6 +1260,49 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   }
 
   if (error) {
+    // A degraded backend answers every business route with a 503 envelope
+    // ({status:"degraded", issues:[...]}) that requestJson preserves on
+    // error.details. Lumping it into the generic error copy ("接口这会儿没回")
+    // hides the only actionable fact — the LLM config is broken and the
+    // settings panel can repair it — so surface it as its own state.
+    const details = typeof error === "object" && error !== null ? error.details : null;
+    if (details && typeof details === "object" && details.status === "degraded") {
+      const issueMessages = (Array.isArray(details.issues) ? details.issues : [])
+        .map((issue) => normalizeText(issue?.message))
+        .filter(Boolean);
+      const degradedMessage =
+        issueMessages.join("；") || "后端的 AI 服务配置有问题，修复并重启后恢复。";
+      // A degraded backend that was NEVER initialized should still land the
+      // user in the guided-init journey — its first step IS configuring the
+      // LLM provider, and the init checklist surfaces the degraded blocker
+      // from /api/init-status (allow-listed while degraded). Reserve the pure
+      // repair state for an initialized backend that degraded later.
+      // /api/runtime-status is also allow-listed, so the snapshot is available
+      // here; without it we cannot rule out an initialized backend and fall
+      // through to the repair state.
+      const degradedRuntime = runtimeStatus == null ? null : normalizeRuntimeStatus(runtimeStatus);
+      const neverInitialized =
+        degradedRuntime !== null &&
+        !degradedRuntime.initialized &&
+        degradedRuntime.recommendation_count === 0 &&
+        degradedRuntime.pool_available_count === 0 &&
+        degradedRuntime.pool_pending_count === 0 &&
+        degradedRuntime.last_replenished_count === 0 &&
+        degradedRuntime.last_discovered_count === 0;
+      if (neverInitialized) {
+        return {
+          kind: "uninitialized",
+          degraded: true,
+          message: degradedMessage,
+          items: [],
+        };
+      }
+      return {
+        kind: "degraded",
+        message: degradedMessage,
+        items: [],
+      };
+    }
     return {
       kind: "error",
       message: "推荐暂时没刷出来，稍后再试",
@@ -1285,7 +1349,9 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
     if (!runtime.initialized && !hasPostInitRuntimeSignals) {
       return {
         kind: "uninitialized",
-        message: "还没完成初始化，先运行 openbiliclaw init",
+        // Button-driven copy, consistent with the rendered card in popup.js:
+        // guided init runs from the「开始初始化」button, not a CLI command.
+        message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
         items: [],
       };
     }

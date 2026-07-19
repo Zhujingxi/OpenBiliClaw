@@ -525,7 +525,9 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 
 > Issue #113（v0.3.168+）：共享流水线仅在阶段 2 偏好分析和阶段 3 画像任务的 task-local scope 内绕过库存敏感的后台 admission，避免首次空库存与画像生成互相等待；阶段 4 只在完整画像落盘后开始且不继承 bypass，并同步完成发现、评估、推荐文案与 canonical 可用性校验。正向兴趣 / 避雷探针移到 init wrapper 恢复 runtime 后调度，普通后台任务、LLM 总并发 gate 及 Soul 公开 API 不变。
 
-> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批` 和实际 LLM 并发上限，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。默认墙钟预算按并发执行波次自适应：每波 300 秒，再固定预留 300 秒给一次 reasoning-only / 临时限流恢复；1100 条事件拆成 6 批时，并发 1 / 2 / 3 分别允许 2100 / 1200 / 900 秒，最小单波预算 600 秒。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时、限流重试和取消记录写入 `openbiliclaw.log`。
+> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批` 和实际 LLM 并发上限，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时、限流重试和取消记录写入 `openbiliclaw.log`。
+>
+> **进度感知期限（v0.3.179+）**：阶段 2 不再使用开跑前算死的固定墙钟——墙钟分不清“卡死”和“慢但在出结果”，健康但慢的服务商会在出结果的途中被杀。`_await_with_progress_deadline` 改为同时施加两个限制：**空闲期限**（`_INIT_PROGRESS_IDLE_SECONDS = 600s`，只有真实分片完成回调会刷新“上次进展”时间戳，心跳 tick 不算）与**绝对上限**（`_INIT_PROGRESS_ABSOLUTE_SECONDS = 2700s`，与按并发波次自适应算出的旧预算取较大值）。两种超时抛出可区分的 `_InitIdleTimeoutError` / `_InitAbsoluteTimeoutError`（均为 `TimeoutError` 子类），对应两条不同的可操作文案：空闲超时指向 Base URL / 模型名 / 代理排查，绝对超时提示换更快的模型并附上已完成批次。显式传入 `profile_analysis_timeout_seconds` 时仍是精确的纯墙钟（`<=0` 表示不限）。阶段 4 有真实进度信号，同样启用双限制（空闲 900s / 绝对 2700s）；阶段 3 是单次 LLM 调用、无分片进度可读，空闲判定天然失真，因此**只有绝对兜底**（1800s）。所有上限均为**卡死兜底、不是性能预期**；`CancelledError` 一律向上传播，被中断的初始化仍记为 `cancelled`。GUI 的 `stages[].progress.max_seconds` 发布的就是这个绝对上限。
 
 安装渠道里的首选路径是 `scripts/agent_bootstrap.py` 自动运行 init：Bash / PowerShell 人类一行安装会先在终端向导里按顺序确认 LLM、embedding、B 站 Cookie 和各来源 opt-in；Docker / AI agent / CI 非交互安装则通过显式 flags 和 `BOOTSTRAP_STATUS` 推进，不会阻塞读 stdin。bootstrap 随后会对默认 LLM provider 与 embedding 服务各做一次轻量真实调用；两者都可用才触发本命令。若 bootstrap 返回 `service_check_failed`，说明 `openbiliclaw init` 尚未运行，应先修 API key / base_url / model / Ollama，再重跑 bootstrap。直接执行 `openbiliclaw init` 仍保留为高级手动 fallback 和重复初始化入口。
 
@@ -616,16 +618,19 @@ OpenBiliClaw 需要一个语言模型来理解你的兴趣、写推荐文案。
  4   Gemini 官方                           默认 gemini-2.5-flash (稳定 / 便宜)。Google AI Studio 申请 Key,免费档每天 1500 次够用
  5   Claude 官方                           默认 claude-sonnet-4-6。Anthropic console,按 token 付费,质量高
  6   OpenRouter 聚合                       默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费
- 7   本地 Ollama（完全离线）                默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s
 
-Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。
+Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容)。本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;如需本地聊天模型请到设置页手动配置。
 
 请输入序号或名称（默认 1=DeepSeek） [1]:
 
 # (随后只问被选中那一项实际需要的字段——
 #  例如选 1/3/4/5/6: 只问 API Key + 模型名；
-#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名；
-#  选 7: 只问模型名，并自动安装 / 启动 Ollama)
+#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名)
+#
+# 注意（v0.3.176+）：本地 Ollama 已不再出现在聊天 provider 菜单里——随装的
+# Ollama 只带 embedding 模型（bge-m3），小体积本地聊天模型达不到内容管线质量线。
+# 后端注册表 / 桌面设置页仍支持 ollama 聊天；`ollama` 作为来自既有配置或
+# 显式 flag 的 default_provider 依然被接受，只是不再交互式「提供」它。
 
 Embedding(向量化)服务
 把视频标题/简介压成向量,跨视频做相似度对比 —— 决定"这条和你之前喜欢的那条是不是同一类"。和聊天 LLM 是分开的。
@@ -667,7 +672,9 @@ Cookie 只存在你本机 data/bilibili_cookie.json，不会上传任何地方�
 
 > **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义），按所选 preset 写入 `[llm.openai]` 段。两者底层走的是同一个 OpenAI 协议家族，但用户视角分得很清楚。
 >
-> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。Ollama 仍保留为完全离线选项，但需要本机算力，首次响应会慢。
+> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。
+>
+> **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 ollama 聊天，供进阶用户使用；来自既有 `config.toml` 或显式 flag 的 `default_provider = "ollama"` 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。
 
 首次 `init` 的 discover 阶段可能持续几分钟，因为它会真实访问 B 站接口并调用当前 provider 进行候选打分与表达生成。
 当前实现已经对首轮 discover 做了保守受控并发优化，但默认并发上限仍偏保守，优先减少 B 站和 LLM 限流风险。

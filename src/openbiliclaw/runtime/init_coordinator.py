@@ -37,16 +37,18 @@ _ACTIVE = ("starting", "running")
 _ORPHAN_HEARTBEAT_SECONDS = 120.0
 logger = logging.getLogger(__name__)
 
-# Typical per-stage duration surfaced to the GUI so the progress bar can render
-# an elapsed-based fraction inside a stage (instead of a static half-tick) and
-# show "本阶段通常约 X 分钟". Calibration provenance: stages 2/3 migrated from
-# the live CLI eta constants (``cli.py`` _run_with_progress calls: 180s analyze,
-# 70s profile); stages 1/4 are typical observed values for the fetch and
-# discovery + evaluation + expression-copy phases. These are display-only hints — reopen calibration
-# after any LLM provider / model swap (CLAUDE.md pitfall rule 3).
-_STAGE_ETAS = {1: 90, 2: 180, 3: 70, 4: 300}
 
-
+# No per-stage duration is published any more. A predicted duration we cannot
+# honour is worse than none: the real cost of a stage depends on the selected
+# platforms, the collected history AND the provider's latency, so every forecast
+# was wrong for someone and a healthy long run read as broken (field report
+# 2026-07-20 — the GUI announced "本阶段通常约 3 分钟" / "约 5 分钟" while the
+# run legitimately took 30-45+ minutes). The GUI now renders observed facts
+# only: elapsed time in the stage plus real ``progress`` counts, and an
+# indeterminate bar where no real count exists. Do NOT reintroduce an
+# ``eta_seconds`` field here — the CLI keeps its own console-only estimate in
+# ``cli._run_with_progress``, which is a separate surface that prints elapsed
+# alongside it and explicitly flips to "已超预估、仍在处理".
 def _initial_stages() -> list[dict[str, Any]]:
     return [
         {
@@ -54,7 +56,6 @@ def _initial_stages() -> list[dict[str, Any]]:
             "label": _STAGE_LABELS[n],
             "status": "pending",
             "reason": None,
-            "eta_seconds": _STAGE_ETAS[n],
         }
         for n in range(1, _TOTAL_STAGES + 1)
     ]

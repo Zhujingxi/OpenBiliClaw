@@ -11911,19 +11911,44 @@ class Database:
 
         No init task survives a process restart, so a persisted active status
         is necessarily stale. Returns the number of rows reconciled (spec §5a).
+
+        Mirrors ``InitCoordinator.reconcile_orphaned_run``: besides flipping the
+        row status, it downgrades any ``running``/``pending`` stage inside
+        ``stages_json`` to ``failed``/``interrupted`` and writes a user-facing
+        Chinese ``error_detail`` so ``GET /api/init-status`` no longer reports a
+        phantom "running" stage with an empty detail after a mid-init restart.
         """
-        cursor = self._execute_write(
-            """
-            UPDATE init_runs
-               SET status = 'failed', error_reason = 'interrupted',
-                   sequence = sequence + 1,
-                   progress_sequence = sequence + 1,
-                   progress_at = CURRENT_TIMESTAMP,
-                   finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-             WHERE status IN ('starting','running')
-            """
-        )
-        return cursor.rowcount
+        rows = self.conn.execute(
+            "SELECT run_id, stages_json FROM init_runs WHERE status IN ('starting','running')"
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            stages_raw = row["stages_json"]
+            stages = json.loads(stages_raw) if stages_raw else []
+            for stage in stages:
+                if stage.get("status") in ("running", "pending"):
+                    stage["status"] = "failed"
+                    stage["reason"] = "interrupted"
+                    stage.pop("progress", None)
+            self._execute_write(
+                """
+                UPDATE init_runs
+                   SET status = 'failed', error_reason = 'interrupted',
+                       error_detail = ?, stages_json = ?,
+                       sequence = sequence + 1,
+                       progress_sequence = sequence + 1,
+                       progress_at = CURRENT_TIMESTAMP,
+                       finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                 WHERE run_id = ?
+                """,
+                (
+                    "初始化后台任务已结束，但未能写入终态；已自动释放运行锁。",
+                    json.dumps(stages, ensure_ascii=False),
+                    row["run_id"],
+                ),
+            )
+        return len(rows)
 
     def get_auth_epoch(self) -> int:
         """Return the current revocation epoch. Reads fresh WAL state.

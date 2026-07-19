@@ -7,6 +7,7 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   buildVideoUrl,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   formatPublishedTime,
   getCommentSubmitUiState,
@@ -54,6 +55,7 @@ import {
   embeddingRepairStartAccepted,
   initProgressView,
   INIT_EXPECTATION_HINT,
+  INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
   shouldAttachRunningInitProgress,
@@ -141,6 +143,7 @@ import {
   savedItemStatus,
   sendBehaviorEvents,
   syncSavedItems,
+  verifySource,
 } from "./popup-api.js";
 
 const state = {
@@ -213,6 +216,7 @@ const elements = {
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
+  emptyAction: document.getElementById("emptyAction"),
   initPanel: document.getElementById("initPanel"),
   initSources: document.getElementById("initSources"),
   initChecklist: document.getElementById("initChecklist"),
@@ -1169,6 +1173,10 @@ function showRecommendationEmptyState(title, message) {
   elements.emptyState.hidden = false;
   elements.emptyTitle.textContent = title;
   elements.emptyText.textContent = message;
+  // Only the degraded branch re-shows the action button after this reset.
+  if (elements.emptyAction instanceof HTMLElement) {
+    elements.emptyAction.hidden = true;
+  }
   // The guided-init panel is only for the uninitialized state; the
   // uninitialized branch re-shows it via renderInitPanelIdle().
   if (elements.initPanel instanceof HTMLElement) {
@@ -1407,12 +1415,31 @@ function _renderInitSources() {
   elements.initSources.append(bangumiTokenRow);
   const bangumiTokenHint = document.createElement("p");
   bangumiTokenHint.className = "init-sources-hint";
+  // Spell out the three-way choice: the backend accepts a token, an explicit
+  // public username, OR the account the extension reads off a logged-in
+  // bgm.tv page. Leaving both fields empty is a valid path, and users who
+  // aren't told that assume Bangumi needs a token they haven't got.
   const bangumiTokenLink = document.createElement("a");
   bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
   bangumiTokenLink.target = "_blank";
   bangumiTokenLink.rel = "noopener noreferrer";
   bangumiTokenLink.textContent = "生成个人令牌";
-  bangumiTokenHint.append(bangumiTokenLink, document.createTextNode("（约 1 年有效，视同密码保管）"));
+  const bangumiTokenDocLink = document.createElement("a");
+  bangumiTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌";
+  bangumiTokenDocLink.target = "_blank";
+  bangumiTokenDocLink.rel = "noopener noreferrer";
+  bangumiTokenDocLink.textContent = "取令牌步骤";
+  bangumiTokenHint.append(
+    document.createTextNode(
+      "Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；" +
+        "公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，" +
+        "扩展会自动识别账号（只拿到账号名，可能未经校验）。",
+    ),
+    bangumiTokenLink,
+    document.createTextNode("（约 1 年有效，视同密码保管）·"),
+    bangumiTokenDocLink,
+  );
   elements.initSources.append(bangumiTokenHint);
 
   elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
@@ -1480,8 +1507,8 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
-    // Expectation management (init-progress Phase 2): tell the user upfront
-    // how long the whole run typically takes.
+    // Expectation management: total time is highly variable, so orient the
+    // user about that variability instead of quoting a duration.
     const expectation = document.createElement("li");
     expectation.className = "init-hint-row";
     expectation.textContent = INIT_EXPECTATION_HINT;
@@ -1512,6 +1539,14 @@ function renderInitProgress(status) {
     elements.initChecklist.replaceChildren();
   }
   const progress = initProgressView(status);
+  // The one reassurance a waiting user needs, said once: after v0.3.180 a run
+  // that keeps producing results is literally never interrupted.
+  if (elements.initChecklist instanceof HTMLElement && progress.active) {
+    const patience = document.createElement("li");
+    patience.className = "init-hint-row";
+    patience.textContent = INIT_RUNNING_HINT;
+    elements.initChecklist.append(patience);
+  }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
@@ -1535,13 +1570,13 @@ function renderInitProgress(status) {
       );
     }
   }
-  // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
+  // Liveness line under the bar: "● 进行中 (+ observed elapsed / counts)" while
   // the backend keeps writing; amber stall copy after >90s of silence.
   if (elements.initStallHint instanceof HTMLElement) {
     if (progress.active) {
       const staleness = stalenessView(status);
       const text = staleness.fresh
-        ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+        ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
         : staleness.text;
       elements.initStallHint.textContent = text;
       elements.initStallHint.classList.toggle("stale", !staleness.fresh);
@@ -1679,16 +1714,13 @@ async function handleStartInitClick() {
     _setInitReason("至少勾选一个数据来源。");
     return;
   }
-  if (
-    selectedSources.length === 1 &&
-    selectedSources[0] === "bangumi" &&
-    !bangumiUsername &&
-    !bangumiToken
-  ) {
-    _setInitStartButton("开始初始化", true);
-    _setInitReason("只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。");
-    return;
-  }
+  // No client-side Bangumi-only admission check here on purpose. The backend
+  // owns a THREE-tier account ladder (token → explicit username →
+  // browser-extension-reported identity); a local "username or token required"
+  // copy of it can't see the third tier and silently blocked zero-config
+  // extension users from ever reaching /api/init. The backend answers 409
+  // no_profile_signal_sources when all three are genuinely missing, and the
+  // startInit catch below renders it via describeInitStartError.
   _setInitStartButton("检查中…", false);
   _setInitReason("");
   if (elements.initChecklist instanceof HTMLElement) {
@@ -5917,7 +5949,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = item.up_name ? `这位 UP：${item.up_name}` : "";
+    metaLine.textContent = formatRecommendationAuthorLine(item);
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
@@ -6159,6 +6191,16 @@ function renderRecommendationState(stateShape) {
     return;
   }
 
+  if (stateShape.kind === "degraded") {
+    showRecommendationEmptyState("AI 服务配置需要修复", stateShape.message);
+    if (elements.emptyAction instanceof HTMLElement) {
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
+    return;
+  }
+
   if (stateShape.kind === "error") {
     showRecommendationEmptyState("推荐暂时没刷出来", stateShape.message);
     setHint("后端连上了，但推荐接口这会儿没回。", "error");
@@ -6168,9 +6210,22 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
+      stateShape.degraded
+        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
-    setHint("先完成初始化，把画像和候选池攒起来。");
+    if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
+      // Keep the one-click config repair entry alongside the init journey —
+      // the checklist explains the blocker, this button opens the fix.
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint(
+      stateShape.degraded
+        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
+        : "先完成初始化，把画像和候选池攒起来。",
+      stateShape.degraded ? "error" : "info",
+    );
     renderInitPanelIdle();
     // If a run is already live (started elsewhere / page reopened mid-init),
     // take over with the progress view + poll instead of a dead idle panel.
@@ -6399,6 +6454,10 @@ async function initializeRecommendations() {
     ]);
 
   state.runtimeStatus = runtimeResult.status === "fulfilled" ? runtimeResult.value : null;
+  // The banner is gated on the runtime snapshot (initialized + not degraded);
+  // the boot-time check usually races ahead of this fetch, so re-evaluate now
+  // that the snapshot is in.
+  void maybeShowEmbeddingBanner();
   if (configResult.status === "fulfilled") {
     applyRuntimeConfig(configResult.value);
   }
@@ -7053,7 +7112,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `后端处于降级模式，保存修复后需要 restart daemon。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");
@@ -7229,49 +7288,49 @@ function bindSettings() {
   }
 
   // Unified per-source login / cookie status from GET /api/sources/status,
-  // rendered as a uniform colored-dot line inside every source card. Only X is
-  // live-validated (state ok); the rest report local cookie/token readiness.
-  const SOURCE_STATUS_DOT = {
-    ok: "#2ecc71",
-    ready: "#2ecc71",
-    syncing: "#9aa0a6",
-    no_auth: "#9aa0a6",
-    unverified: "#9aa0a6",
-    missing: "#e0a800",
-    missing_cookie: "#e0a800",
-    login_required: "#e0a800",
-    rate_limited: "#9aa0a6",
-    partial: "#e0a800",
-    stale: "#e0a800",
-    error: "#e74c3c",
-    expired_cookie: "#e74c3c",
-    blocked: "#e74c3c",
-    disabled: "#9aa0a6",
-  };
-  const SOURCE_STATUS_LABEL = {
-    ok: "接入可用",
-    ready: "凭据已就绪",
-    syncing: "接入中",
-    no_auth: "无需登录",
-    unverified: "状态待验证",
-    missing: "需要登录",
-    missing_cookie: "缺少 Cookie",
-    login_required: "需要登录",
-    rate_limited: "频率受限",
-    partial: "部分可用",
-    stale: "需要刷新",
-    error: "检查失败",
-    expired: "凭据失效",
-    expired_cookie: "Cookie 失效",
-    blocked: "接入受阻",
-    disabled: "来源未启用",
-  };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+  // rendered as a uniform colored-dot line inside every source card.
+  //
+  // The verdict, its colour and the strength of the evidence behind it all come
+  // from shared/source-status.js, which the desktop page and the setup wizard
+  // load too. This panel used to keep its own pair of tables, and they had
+  // drifted: `no_auth` and `unverified` were the same grey here while the
+  // desktop page told them apart, and an unrecognised state rendered as an
+  // empty string instead of "状态未知" (spec D6). Having only one row per source
+  // to write into, this surface takes `access.line`, which folds the evidence
+  // in parenthetically — 「已验证（◆ 联网验证 · 3 分钟前）」 — where the desktop
+  // page gives it a badge of its own. Loaded as
+  // a classic script by popup.html, so it is a global rather than an import —
+  // MV3's CSP forbids pulling it from the backend over HTTP.
+  const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+  const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
   const BANGUMI_SAVE_ERROR_MESSAGES = {
     invalid_bangumi_access_token:
       "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
     bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   };
+
+  // The overseas-egress advisory is authored by the backend
+  // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+  // verbatim. This function must never learn a platform name nor read
+  // [network].mode: adding a platform must stay a one-line backend change.
+  // Only the `enabled` gate lives here — a disabled source makes no requests,
+  // so warning about its egress would be noise.
+  function applySourceNetworkHint(row, hint, enabled) {
+    const text = enabled ? String(hint || "") : "";
+    // The status row is a <p>; the hint is a sibling, never a nested <p>.
+    let node = row.nextElementSibling;
+    if (!node || !node.classList.contains("source-network-hint")) node = null;
+    if (!text) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("p");
+      node.className = "settings-hint source-network-hint";
+      row.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = text;
+  }
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -7287,22 +7346,16 @@ function bindSettings() {
       const dot = row.querySelector(".src-dot");
       const detail = row.querySelector(".src-detail");
       const item = data && data[key];
-      if (!item) {
-        if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
-        if (dot) dot.style.color = "#9aa0a6";
-        row.style.opacity = "1";
-        continue;
-      }
-      // A rejected personal token (Bangumi) overrides the run-derived state so
-      // the user sees an actionable warning + a red dot, not a green chip.
-      const tokenRejected = item.token_state === "rejected";
-      if (detail) {
-        const label = tokenRejected ? "令牌已失效" : (SOURCE_STATUS_LABEL[item.state] || "");
-        const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
-        detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
-      }
-      if (dot) dot.style.color = tokenRejected ? "#e74c3c" : (SOURCE_STATUS_DOT[item.state] || "#9aa0a6");
-      row.style.opacity = item.enabled ? "1" : "0.6";
+      const access = SourceStatus.describeAccess(item);
+      // Offline wording comes from the shared module too, so a backend the user
+      // cannot reach reads the same here as on the desktop page. The rejected-
+      // token override now lives in describeAccess() rather than being spelled
+      // out again here — this panel and the desktop page each having their own
+      // copy of that rule is how the two status tables drifted (spec D6).
+      if (detail) detail.textContent = access.present ? access.line : access.detail;
+      if (dot) dot.style.color = access.color;
+      applySourceNetworkHint(row, access.present ? item.network_hint : "", access.enabled);
+      row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
     }
   }
 
@@ -7473,7 +7526,9 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
-    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
+    // Mirrors the [network].mode backend default (system since v0.3.175);
+    // only reached if /api/config omits the field.
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "system");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
     const savedAutoSync = document.getElementById("cfgSavedAutoSync");
     if (savedAutoSync instanceof HTMLInputElement) {
@@ -7790,6 +7845,17 @@ function bindSettings() {
     };
   }
 
+  // One DOM convention for every "click, wait, read a verdict" strip in this
+  // panel: tone in the dataset, verdict in the text. The LLM/embedding probes
+  // and the per-source 测试连接 buttons share it instead of each keeping a
+  // private copy — two independent copies of one rendering rule is exactly the
+  // drift that left this codebase with two divergent source status maps.
+  function setProbeStatus(statusEl, tone, text) {
+    if (!statusEl) return;
+    statusEl.dataset.tone = tone;
+    statusEl.textContent = text;
+  }
+
   function renderProbeResult(statusEl, result) {
     if (!statusEl) return;
     const ok = Boolean(result?.ok);
@@ -7799,15 +7865,59 @@ function bindSettings() {
       ? ` (${Math.round(Number(result.latency_ms))}ms)`
       : "";
     const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-    statusEl.dataset.tone = ok ? "success" : "error";
-    statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+    setProbeStatus(
+      statusEl,
+      ok ? "success" : "error",
+      `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`,
+    );
   }
 
   function renderProbePending(statusEl, label) {
-    if (!statusEl) return;
-    statusEl.dataset.tone = "pending";
-    statusEl.textContent = `${label} 探测中...`;
+    setProbeStatus(statusEl, "pending", `${label} 探测中...`);
   }
+
+  // Three outcomes, three tones. The third one is the whole point: a dead proxy,
+  // a closed browser, a throttled platform or YouTube (which needs no login at
+  // all) all mean "could not tell", and showing that in red would send a user
+  // off to delete a credential that works. The backend picks the outcome — this
+  // map is a rendering detail, not a second opinion derived from
+  // `auth.verification` (invariant I4).
+  function renderVerifyResult(statusEl, result) {
+    const view = SourceStatus.describeVerifyResult(result);
+    setProbeStatus(statusEl, view.tone, view.text);
+  }
+
+  const sourceVerifyInFlight = new Set();
+
+  async function runSourceVerify(button) {
+    const slug = button?.closest("[data-source-card]")?.dataset?.sourceCard || "";
+    if (!slug || sourceVerifyInFlight.has(slug)) return;
+    const statusEl = button.parentElement?.querySelector(".source-verify-status");
+    sourceVerifyInFlight.add(slug);
+    button.disabled = true;
+    renderProbePending(statusEl, "连接");
+    let cooldown = 0;
+    try {
+      const result = await verifySource(slug);
+      renderVerifyResult(statusEl, result);
+      cooldown = Number(result?.retry_after_seconds) || 0;
+      // Only a verification that actually moved the credential or the verdict
+      // makes the status line above it stale; a refreshed timestamp does not.
+      if (result?.changed) void renderSourcesStatus();
+    } catch (err) {
+      const view = SourceStatus.describeVerifyError(err);
+      setProbeStatus(statusEl, view.tone, view.text);
+    } finally {
+      sourceVerifyInFlight.delete(slug);
+      SourceStatus.startVerifyCooldown(button, cooldown);
+    }
+  }
+
+  document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.(".source-verify-btn");
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+    void runSourceVerify(button);
+  });
 
   async function runLlmConfigProbe(button, statusEl) {
     if (!button) return;
@@ -7965,6 +8075,10 @@ function bindSettings() {
       if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
     });
   }
+
+  // The degraded empty state's "去设置修复" button routes through the gear so
+  // the overlay opens with the same banners / degraded save mode as always.
+  document.getElementById("emptyAction")?.addEventListener("click", () => gearBtn.click());
 
   gearBtn.addEventListener("click", async () => {
     overlay.hidden = false;
@@ -8289,7 +8403,7 @@ async function maybeShowEmbeddingBanner() {
   if (!banner) return;
   if (sessionStorage.getItem(EMBEDDING_BANNER_DISMISS_KEY) === "1") return;
   const health = await fetchHealth();
-  if (!shouldShowEmbeddingBanner(health)) {
+  if (!shouldShowEmbeddingBanner(health, state.runtimeStatus)) {
     banner.hidden = true;
     return;
   }

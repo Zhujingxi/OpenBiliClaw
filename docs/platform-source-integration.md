@@ -45,6 +45,148 @@
 
 如果平台依赖登录态，优先走浏览器插件任务链路。真实 E2E 要使用安装了插件且已有登录态的浏览器，不要用 MCP/CDP 临时浏览器代替，除非用户明确要求只做普通 UI 自动化。
 
+### 0.1 接入契约必填项（有强制点，不是建议）
+
+上面第 44 条讲了原则，但长期没有强制机制——七个平台各写各的，最后靠 `api/app.py` 里一个 400 多行的 if/elif 手工拍平，新平台全靠手抄上一个。所以新增平台时，下面这组字段**必须**在 `src/openbiliclaw/api/source_auth/providers.py` 里显式填写，否则过不了 `tests/test_source_auth_contract.py` 的参数化测试：
+
+| 字段 | 必须回答的问题 | 允许留白吗 |
+| --- | --- | --- |
+| `auth_required` | 这个源到底需不需要凭据 | 否 |
+| `credential` | 凭据在不在（`none` / `present` / `invalid`） | 否 |
+| `credential_origin` | 凭据存在哪（config / env / data_file / extension / external_cli） | 否 |
+| `verification` | 最近一次验证的结论 | 否 |
+| `verify_method` | **这个结论有多硬** | 否 |
+| `verify_ttl_seconds` | 结论多久过期，`None` = 不过期 | 可 `None`，但要有理由 |
+
+`verify_method` 是其中最关键的一个，取值即证据强度：`live_probe`（真出网）> `passive_health`（由真实流量的错误反推）> `browser_heartbeat`（插件报登录 cookie 存在）> `local_file`（只读本地文件）> `task_history`（由历史任务反推）> `none`（无验证能力或不需要）。
+
+**填 `none` 之前必须先做剥离对照实验**：实验组 = 完整凭据，对照组 = 剥掉登录 cookie 后的游客态，同一签名器 / UA / 时刻，唯一变量是登录 cookie。拿不出对照数据就不许在代码或 docstring 里声称"该平台无法验证"。
+
+这条规则是有代价换来的：抖音的 `api/app.py` docstring 曾断言它"没有稳定的 nav 端点能区分未登录和软风控"，于是整个平台的登录态显示误报了很久，而且这句话还成了后续所有人不去修的理由。2026-07-18 的对照实验只花了几分钟就推翻了它——`/aweme/v1/web/user/profile/self/` 已登录返回 `status_code=0` + 非空 uid，游客返回 `status_code=8` "用户未登录"，干净得很。
+
+对照实验本身也要防伪：同一次实验里 `/aweme/v1/web/query/user/` 在两组返回**完全相同**的 12 位 uid（那是设备级标识，由 `ttwid` / `odin_tt` 驱动）。只看"有没有返回 uid"会得出"可以验证"的错误结论。**判据必须是两组之间有差异，而不是单组看起来正常。**
+
+**第三种形态：匿名可用 + 可选可验证凭据（Bangumi）。** `auth_required` 是布尔，但有的源既不「必须登录」也不「无凭据可验」。Bangumi 公开收藏 / 排行匿名即可发现（`auth_required=false`），但配了个人令牌就能验证令牌——`GET /v0/me` 有效令牌返回账号、无效令牌返回 `unauthorized`（2026-07-19 对照：真令牌→`username='215952'`，伪造 / 无令牌→`unauthorized`，两组有差异，故 `live_probe` 名副其实）。接法：`auth_required` 恒 `false`（无令牌时即 YouTube 形状、零告警），配了令牌才 `credential=present` + `verify_method=live_probe`；`verify_method` 因此**随状态在 `none`/`live_probe` 间变**（像知乎在 `browser_heartbeat`/`task_history` 间变），而 `VERIFY_ACTIONS` 里的动作是固定的 `live_probe`。为此 `legacy.py` 的一致性检查放宽了一处：原「`auth_required=false` 不得带 live 方法」收紧成「**且 `credential='none'`** 才禁止」——有可选凭据时验证它是诚实，YouTube 那种无凭据的过度声称仍被拦。**已知缺口**：因 `auth_required=false`，前端渲染成「无需登录」并抑制证据徽章，令牌的 `verified`/`failed` 虽如实写进契约却不出常驻徽章（经「测试连接」消息与 `token_state` 暴露）；要做成常驻徽章需给契约加「可选凭据」档并改前端。详见 `docs/modules/source-auth.md`「Bangumi 的接入」。
+
+完整设计与诊断见 `docs/plans/2026-07-18-source-auth-contract-spec.md`。
+
+### 0.2 验证动作：`POST /api/sources/{slug}/verify`
+
+新平台除了在 `providers.py` 填契约字段，还必须在 `src/openbiliclaw/api/source_auth/verify.py` 的 `VERIFY_ACTIONS` 里登记一个动作，否则第一次点「测试连接」就是 KeyError。`tests/test_source_auth_contract.py::test_verify_action_table_covers_every_platform` 断言两张表键集合相等。
+
+| 动作 | 语义 | 当前平台 |
+| --- | --- | --- |
+| `live_probe` | 当场出网探测 | bilibili、douyin |
+| `passive_health` | 汇报真实流量已经得出的结论，不出网 | twitter |
+| `browser_heartbeat` | 经 WS 发 `*_login_state_sync_requested`，等插件回报（至多 5s） | xiaohongshu、zhihu |
+| `local_file` | 重读本地凭据文件，不跑子进程 | reddit |
+| `none` | 没有可验证的东西 | youtube |
+
+三个容易写错的地方：
+
+1. **动作是平台的固定属性，不等于契约里的 `verify_method`。** 后者描述「当前这个结论是怎么来的」，会随状态变化——知乎有插件心跳时是 `browser_heartbeat`，没有时回落 `task_history`。但点按钮要做的事永远是「请插件重新上报」。按 `verify_method` 分派会让知乎在最需要验证的时候反而没有可执行动作，还会凭空造出一个「重跑历史」这种不存在的操作。
+2. **响应里 `outcome` 和 `auth.verification` 回答的是两个问题。** 前者是「这次点击验证到了什么」，后者是「我们现在相信什么」。插件没连时，一小时前的心跳仍然让 `verification=verified`，但这次点击什么都没验证到，所以 `outcome=indeterminate`。把两者合并会渲染出绿色「已验证」配上「插件未连接」的文案。
+3. **三态，不是两态。** 探测超时、插件没回、平台限流、YouTube 无需登录——全部是 `indeterminate`，不是 `failed`。把「判定不了」显示成「凭据失效」，会让用户去删一份好好的 cookie。
+
+去抖：每平台 10 秒，窗口内重复调用重放上次结果且不产生任何出网请求；并发点击另有 in-flight 标记拦截。用户能按住的按钮如果不挡，就是自己给自己造风控。
+
+重放必须能被前端认出来，所以响应带两个字段：`replayed`（这次调用有没有真的干活）和 `retry_after_seconds`（还要等多久才会重新探测）。少了它们，一次被去抖的点击和一次真探测在响应里逐字节相同 —— 刚修好 Cookie 的用户再点一次，拿回缓存里的旧失败，会以为没修好。`retry_after_seconds` 由后端下发而不是前端各写一个 `10`，理由同 I4：两端各存一份常量，就是下一次漂移。
+
+### 0.3 三端「测试连接」按钮
+
+桌面 Web（`web/desktop/index.html` 的 `.source-status-row`）与插件 popup（`popup/popup.html` 的 `.settings-source-card`）每个平台各一个按钮，走同一套 DOM 约定：`renderProbePending()` → await → `renderVerifyResult()`，tone 写在 `dataset.tone`、文案写在 `textContent`，与「模型」tab 的 LLM 探测共用 `setProbeStatus()`。移动端见 Task 13。
+
+三条硬规矩：
+
+1. **tone 三态**：`verified` → `success`（绿）、`failed` → `error`（红）、`indeterminate` → `neutral`（蓝）。`neutral` 是本次新增的 CSS tone，**不能复用 `pending`** —— 那是「探测中」的灰，让终态和加载态长得一样。
+2. **文案 100% 来自后端 `message`**，前端不得出现平台专属字符串（I4，指标脚本第 2 项会抓）。前端唯一自造的文案是「连不上我们自己的后端」那一条，且同样按 `indeterminate` 渲染 —— 后端连不上不能说明平台凭据坏了。
+3. **状态标签与本次结论分开渲染**：`auth.verification` 驱动上方的「接入：…」badge，`outcome` 只驱动按钮旁那行字。小红书 / 知乎在插件没连时就是这个样子 —— badge 保持「状态待验证」，按钮旁是中性的「5 秒内没有收到回报」，绝不是绿色「已验证」配「插件未连接」。
+
+按钮点完进入可见倒计时（`测试连接（10s）`）并 disable，长度取自 `retry_after_seconds`；真落进去抖窗口的点击（另一端点的、或刷新页面后的）文案会追加「沿用刚才的结果，本次未重新探测」。
+
+### 0.4 凭据写入：`POST /api/sources/{slug}/credential`
+
+新平台**不要**再新开一条写入路由。统一入口一条：
+
+```
+POST /api/sources/{slug}/credential
+body  {kind: "cookie" | "token" | "login_state", value, source}
+→ 200 {accepted, error_code, message, persisted, checked, unverified_reason, cookie_names, auth}
+```
+
+流程固定为：**结构校验 → 活体校验（有能力的平台）→ 落盘 → 广播 → 重算契约一并返回**。最后一步就是「保存后零回执」的解法——`auth` 是写完之后重新算出来的契约，所以保存页和下一次状态轮询不可能给出两种说法。
+
+新平台要在 `src/openbiliclaw/api/source_auth/write.py` 的 `CREDENTIAL_SPECS` 里登记一条，字段含义：
+
+| 字段 | 回答什么 |
+| --- | --- |
+| `kinds` | 这个平台接受哪几种写入；空元组 = 不接受任何凭据（youtube） |
+| `required_keys` / `any_of_keys` | 结构校验用的 cookie 名，**必须与 `providers.py` 里数的那组一致** |
+| `invalid_error_code` | 结构不合格时的机器可读码 |
+| `live_gate` | 落盘前要不要真出网探一次 |
+| `unverified_reason` | `live_gate=False` 时**必填**：说明为什么这个平台的写入无法确认 |
+
+当前强度对照：
+
+| 平台 | kind | 结构校验 | 活体校验 | 落到哪 |
+| --- | --- | --- | --- | --- |
+| bilibili | cookie | SESSDATA + bili_jct + DedeUserID | nav 探针 | `data/bilibili_cookie.json` + config.toml 镜像 |
+| douyin | cookie | sessionid / sessionid_ss / sid_tt 至少一个 | profile/self 探针（D11） | `data/douyin_cookie.json` |
+| twitter | cookie | auth_token + ct0 | 无（只能被动反推） | `data/x_cookie.json` |
+| reddit | cookie | reddit_session | 无（只读本地文件） | rdt-cli 凭据库 |
+| xiaohongshu | login_state / token | 类型即全部 | **架构上不可能** | DB 布尔位 / 内容令牌 |
+| zhihu | login_state | 类型即全部 | **架构上不可能** | DB 布尔位 |
+| youtube | — | 不接受写入 | — | — |
+
+四条容易写错的地方：
+
+1. **拒绝必须有证据。** 结构不合格是证据，平台明说「未登录」是证据。传输失败**不是**关于凭据的证据——但在能验证的平台上它仍然拒绝落盘，返回 `validation_network`（插件本来就对这个码做退避重试）。一份我们没能验证的凭据静默落盘，正是这个模块要防的事。
+2. **`checked` 字段必须诚实。** `live_probe` / `structural` / `none` 三档，加上 `unverified_reason`。小红书和知乎后端只存一个布尔位，一个字节的 cookie 都没有，所以它们的写入永远是 `checked="none"` 并显式说明原因——不许因为「返回 200 好看」就假装校验过（I3/I5）。
+3. **`kind="token"` 不是凭据。** 小红书的 `xsec_token` 是单篇笔记的内容访问令牌，跟账号登没登录毫无关系（spec D5）。单独设一个 kind 就是为了不让它继承登录凭据的那套承诺。
+4. **`PUT /api/config` 也是凭据写入端点。** 它的路径叶子是 `config`，按词根扫描一个都看不见，但它一条路由写四个平台的凭据，而且设置页手工粘贴走的正是这条路。它现在委托同一个 `validate_credential()`，所以两条路径对同一份凭据给出相同的 `error_code`（`tests/test_source_auth_contract.py::test_write_paths_have_equal_validation` 锁死）。判断「这是不是凭据写入端点」的依据永远是**它会不会把用户凭据落盘**，不是路由名（I7）。
+
+`PUT /api/config` 保留自己的落盘代码，因为它正处在 config.toml 的事务中间，不能让共享写入器把它没保存完的编辑刷出去。它也保留「留空不清除」和「掩码回显拦截」——那是这条路由的**局部更新协议**（「这个字段没被编辑」），在校验之前就解决掉，所以不构成两条路径的强度差异。
+
+旧端点（`/api/bilibili/cookie`、`/api/sources/{dy,x,reddit}/cookie`、`/api/sources/xhs/tokens`、`/api/sources/{xhs,zhihu}/login-state`）全部保留为内部转发，响应逐字段不变（装着的插件在解析它们），并标 `deprecated=True`。这个标记不是文档修饰：`scripts/source_contract_metrics.py` 第 5 项只数**未标 deprecated** 的凭据写入形态，不标就永远显示「4 种命名」。
+
+### 0.5 表单描述符：`GET /api/sources/credentials` 的 `form`
+
+前端不该知道「小红书能不能粘贴 cookie」。新平台在 `CREDENTIAL_SPECS` 里补 `form_*` 字段，端点会把它投影成 `form` 描述符下发，三端照着渲染：
+
+| 字段 | 回答什么 |
+| --- | --- |
+| `kind` | `cookie_textarea` / `token_input` / `extension_only` / `none`。**这是能力声明，不是布局偏好** |
+| `label` / `placeholder` / `help_text` | 表单文案，全部来自后端 |
+| `env_var` | 这个平台认哪个环境变量；`null` = 不认（B 站今天就是 `null`） |
+| `required_keys` + `required_keys_mode` | 结构校验要哪些 cookie 名，`all` 还是 `any` |
+| `actions` | 这个平台**真正做得到**的按钮 |
+
+四条硬规矩：
+
+1. **描述符是派生的，不是另写一份。** `required_keys` 直接来自 `CREDENTIAL_SPECS` 的 `required_keys` / `any_of_keys`，`build_credential_form()` 只做投影。表单说要三个 cookie、校验器只要一个，就是 D6 的漂移换个楼层重演一遍。
+2. **`required_keys_mode` 不能省。** 抖音三个 session cookie 是**任选其一**，把它们平铺成 `required_keys` 会让 UI 声称校验器要求它其实不要的东西。spec 初稿的字段表里只有 `required_keys`，实现时发现表达不了，所以补了 mode——描述符宁可多一个字段，也不许说谎。
+3. **`extension_only` 是绑定的。** 后端一个字节的小红书 / 知乎 cookie 都不存，所以这两个平台**不许渲染出可粘贴的输入框**。给一个能填的框，是在骗用户往虚空里打字。它们仍然有 `verify` 和 `open_login_window` 两个动作——「去浏览器登录」才是这两个平台唯一有效的修法。
+4. **动作即能力，没有的不许挂。** 目前只有 `verify` / `copy` / `open_login_window` 三个，因为只有这三个背后有东西。spec 字段表里举例的 `clear` **故意没实现**：全 API 没有任何端点能抹掉已存的凭据（`PUT /api/config` 里空字段意为「本次没编辑」，恰恰相反），先挂按钮后补端点就是 UI 开始说谎的起点。
+
+`summary`（凭据行那句话）同样由后端下发。小红书那句「已保存，但不代表账号登录」以前是桌面页里的一个平台特判，于是只有桌面页说得出这句话，插件和引导页都不知道。
+
+### 0.6 三端共享渲染模块 `web/shared/source-status.js`
+
+状态 → 文案/色调的表**只有一份**，在 `src/openbiliclaw/web/shared/source-status.js`。三个前端都加载它：
+
+| 前端 | 加载方式 |
+| --- | --- |
+| 桌面 Web | `<script src="/shared/source-status.js" defer>`，在 `app.js` 之前 |
+| 插件 side panel | `<script src="shared/source-status.js">`（classic，在 `popup.js` 模块之前）；文件由 `extension/scripts/build.mjs` 在每次 build 时复制进包 |
+| setup 引导页 | `<script src="/shared/source-status.js">`，在内联脚本之前 |
+
+几个要点：
+
+- **`/shared` 是独立 mount。** `/web` 挂的是 `web/desktop/`，所以 `web/shared/` 下的文件从 `/web/shared/…` 取不到（只能从 `/m/shared/…`，那是移动端 mount）。跨端共享的资源不该走某一端专属的 URL。
+- **插件必须用复制，不能用 HTTP 拉。** MV3 默认 CSP `script-src 'self'` 禁止从后端加载脚本，所以同一个源文件有两条投递路径：HTTP（桌面 / 引导页）和 build 期复制（插件）。复制产物 `extension/popup/shared/` 已 gitignore——**不要提交它**，一提交它就变成第四份手抄副本。
+- **共享的是本枚举，不是所有相邻枚举。** 判据是「这张表的键是不是 `/api/sources/*` 发出来的字段值」。saved-sync 的任务状态表（`saved-sync-core.js` 等 6 处）跟本枚举共用 `login_required` / `rate_limited` 两个**拼写**，但回答的是「这一条收藏同步成功没有」，不是「这个源接不接得上」，所以不合并。引导页的 `INIT_REASON_TEXT` 同理（那是初始化前置条件枚举）。
+- **依赖是硬的。** 模块缺失会让整个页面挂掉（与既有的 `saved-sync-core.js` 一致）。所以任何自建 HTTP stub 的 E2E 测试都必须加 `/shared/` 路由，否则 404 会以「某个不相关的测试超时」的形式暴露出来——`tests/test_desktop_web_autoload_margin_e2e.py` 等三个 stub 已加。
+
 ## 1. 调研和架构选择
 
 1. 查是否有稳定官方 API 能拿到目标信号。需要联网时优先官方文档 / 一手资料。

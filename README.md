@@ -64,9 +64,9 @@
       <b>QQ 用户群</b>
     </td>
     <td align="center" width="50%">
-      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="微信用户群二维码" /><br/>
-      <b>微信用户群</b><br/>
-      <sub>二维码 7 天内有效，失效后会更新</sub>
+      <a href="https://discord.gg/PU6Xgch8yg"><img src="docs/images/discord-community-qrcode.jpg" width="200" alt="Discord 社区二维码" /></a><br/>
+      <b>Discord 社区</b><br/>
+      <sub>扫码或<a href="https://discord.gg/PU6Xgch8yg">点击加入</a>，链接长期有效</sub>
     </td>
   </tr>
 </table>
@@ -209,11 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.174（2026-07-18）**
+📌 最新版本：**v0.3.180（2026-07-20）**
 
-- **新增第八个内容来源 Bangumi 番组计划** —— 动画/书籍/游戏目录经官方 API 只读接入：搜索/排行/新作三种发现模式，公开收藏一键初始化画像，评分与排名直接进推荐卡。
-- **可选个人令牌，自动识别你是谁** —— 粘贴一个 Bangumi 个人令牌即可读取含私密条目的本人收藏；装了浏览器扩展则零配置自动识别当前登录账号。
-- **令牌过期不再静默失效** —— 状态页与设置页会明确提示"令牌已失效"并给出重新生成入口，保存坏令牌当场被拒绝。
+- **AI 服务慢不再导致初始化失败** —— 只要还在出结果就不打断（原本 15 分钟固定上限会把健康但慢的模型直接掐断），各阶段上限整体放宽。
+- **进度提示不再虚报「停滞」** —— 按本轮实际节奏判断，慢模型正常跑不会再弹告警。
+- **社区入口改为 Discord** —— 下掉已失效的微信群二维码。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -639,7 +639,7 @@ Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
-海外请求：设置页 `[network].mode` → 直连 / 系统代理 / 自定义代理 → LLM、YouTube、更新；国内平台保持独立直连
+海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、Bangumi、更新；国内平台保持独立直连
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。

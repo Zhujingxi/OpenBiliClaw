@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.174 (2026-07-18)**
+📌 Latest: **v0.3.180 (2026-07-20)**
 
-- **Bangumi joins as the eighth content source** — anime/book/game catalog via the official read-only API: search/ranked/latest discovery modes, one-step profile init from your public collection, with ratings and rank shown right on recommendation cards.
-- **Optional personal access token with auto-identity** — paste a Bangumi token to read your own collection including private entries; with the browser extension installed, your logged-in account is recognized with zero configuration.
-- **Token expiry is never silent anymore** — status and settings pages clearly flag a rejected token with a regeneration link, and saving a bad token is refused on the spot.
+- **A slow AI service no longer fails initialization** — a run that keeps producing results is never cut off (the old fixed 15-minute cap killed healthy-but-slow models), and every stage ceiling was relaxed.
+- **No more false "stalled" warnings** — progress is judged against the pace this run actually demonstrates.
+- **Community link is now Discord** — the expired WeChat QR code is gone.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -206,9 +206,9 @@ Full changelog: [docs/changelog.md](docs/changelog.md).
       <b>QQ Community</b>
     </td>
     <td align="center" width="50%">
-      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="WeChat user community QR code" /><br/>
-      <b>WeChat Community</b><br/>
-      <sub>The QR code is valid for 7 days and will be refreshed after it expires.</sub>
+      <a href="https://discord.gg/PU6Xgch8yg"><img src="docs/images/discord-community-qrcode.jpg" width="200" alt="Discord community QR code" /></a><br/>
+      <b>Discord Community</b><br/>
+      <sub>Scan or <a href="https://discord.gg/PU6Xgch8yg">click to join</a> — this invite does not expire.</sub>
     </td>
   </tr>
 </table>
@@ -636,7 +636,7 @@ Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → ba
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 
-Overseas traffic: `[network].mode` → direct / system proxy / custom proxy → LLM, YouTube, updater; CN clients remain isolated and direct
+Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, Bangumi, updater; CN clients remain isolated and direct
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.

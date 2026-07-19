@@ -281,14 +281,30 @@ def test_get_status_idle_when_empty(tmp_path: Path) -> None:
 # ── init-progress-visibility Phase 0: sub-progress / heartbeat / eta ─────────
 
 
-def test_initial_stages_carry_eta_seconds(tmp_path: Path) -> None:
-    from openbiliclaw.runtime.init_coordinator import _STAGE_ETAS
+def test_initial_stages_publish_no_duration_forecast(tmp_path: Path) -> None:
+    """Stages carry no ``eta_seconds``.
 
-    coord, db, _ = _coord(tmp_path)
+    A predicted duration we cannot honour is worse than none: the real cost
+    depends on the selected platforms, the collected history and the provider's
+    latency, so every forecast was wrong for someone and made a healthy long
+    run read as broken (field report 2026-07-20). The GUI renders observed
+    elapsed time + real progress counts instead.
+    """
+    coord, _, _ = _coord(tmp_path)
     coord.try_start("run-1")
     stages = coord.get_status()["stages"]
-    assert {s["n"]: s["eta_seconds"] for s in stages} == _STAGE_ETAS
-    assert _STAGE_ETAS == {1: 90, 2: 180, 3: 70, 4: 300}
+    assert [s["n"] for s in stages] == [1, 2, 3, 4]
+    assert all("eta_seconds" not in s for s in stages)
+    assert set(stages[0]) == {"n", "label", "status", "reason"}
+
+
+def test_coordinator_module_exposes_no_stage_duration_constants() -> None:
+    """Guard against reintroducing a forecast the GUI would render."""
+    from openbiliclaw.runtime import init_coordinator
+
+    assert not hasattr(init_coordinator, "_STAGE_ETAS")
+    assert not hasattr(init_coordinator, "derive_stage_etas")
+    assert not hasattr(InitCoordinator, "set_stage_eta")
 
 
 async def test_stage_progress_persists_and_emits(tmp_path: Path) -> None:

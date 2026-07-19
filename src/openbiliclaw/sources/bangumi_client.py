@@ -14,7 +14,12 @@ from urllib.parse import quote
 import httpx
 
 from openbiliclaw import __version__
-from openbiliclaw.network import outbound_httpx_kwargs
+from openbiliclaw.network import outbound_httpx_kwargs, outbound_proxy_mode
+from openbiliclaw.sources.platforms import (
+    OVERSEAS_DIRECT_MODE_ERROR_SUFFIX,
+    PLATFORM_BANGUMI,
+    requires_overseas_network,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -163,12 +168,31 @@ class BangumiClient:
             timeout=15.0,
             **outbound_httpx_kwargs(),
         )
+        # Captured next to outbound_httpx_kwargs() so a failure message can
+        # describe the transport that actually failed. Only meaningful for a
+        # client WE built from the outbound policy: an injected client is the
+        # caller's own transport, about which ``[network].mode`` says nothing.
+        self._outbound_mode = outbound_proxy_mode() if self._owns_http_client else ""
         # Structural validation only; keep the token in memory, never log it.
         self._access_token = validate_bangumi_access_token(access_token) or None
         self._request_interval_seconds = max(0.0, float(request_interval_seconds))
         self._transient_retry_delay_seconds = max(0.0, float(transient_retry_delay_seconds))
         self._request_lock = asyncio.Lock()
         self._last_request_started_at = 0.0
+
+    def _network_failure_message(self, message: str) -> str:
+        """Name the likely cause when ``direct`` mode is what broke the request.
+
+        bgm.tv is Cloudflare-fronted and resolves overseas, so a mainland-China
+        install running ``[network].mode = direct`` times out on every call.
+        Attaching the advice at the point of failure — rather than in each
+        caller — is what lets the CLI smokes, the API and discovery all explain
+        the timeout without re-implementing the check (rule 7: propagate the
+        real cause). The classification itself stays in ``sources.platforms``.
+        """
+        if self._outbound_mode != "direct" or not requires_overseas_network(PLATFORM_BANGUMI):
+            return message
+        return f"{message}{OVERSEAS_DIRECT_MODE_ERROR_SUFFIX}"
 
     async def __aenter__(self) -> BangumiClient:
         return self
@@ -345,10 +369,14 @@ class BangumiClient:
                     if attempt == 0:
                         response = None
                     else:
-                        raise BangumiAPIError("timeout", "Bangumi API request timed out") from exc
+                        raise BangumiAPIError(
+                            "timeout",
+                            self._network_failure_message("Bangumi API request timed out"),
+                        ) from exc
                 except httpx.HTTPError as exc:
                     raise BangumiAPIError(
-                        "network_error", "Bangumi API network request failed"
+                        "network_error",
+                        self._network_failure_message("Bangumi API network request failed"),
                     ) from exc
             if response is None or (response.status_code >= 500 and attempt == 0):
                 if self._transient_retry_delay_seconds:
@@ -356,7 +384,9 @@ class BangumiClient:
                 continue
             break
         if response is None:
-            raise BangumiAPIError("timeout", "Bangumi API request timed out")
+            raise BangumiAPIError(
+                "timeout", self._network_failure_message("Bangumi API request timed out")
+            )
         status = int(response.status_code)
         if status == 429:
             raise BangumiAPIError(

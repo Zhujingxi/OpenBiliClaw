@@ -13,6 +13,7 @@ import {
   buildNextCognitionHistoryState,
   buildVideoUrl,
   getDelightUiState,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
@@ -49,6 +50,44 @@ import {
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
+
+test("formatRecommendationAuthorLine keeps the UP prefix Bilibili-only", () => {
+  // "UP 主" is Bilibili jargon — it stays on Bilibili cards.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "机械工厂" }),
+    "这位 UP：机械工厂",
+  );
+  // Missing platform still means Bilibili (legacy payloads).
+  assert.equal(formatRecommendationAuthorLine({ up_name: "机械工厂" }), "这位 UP：机械工厂");
+
+  // Every other source shows the bare name — 押井守 directed Ghost in the
+  // Shell, he is not an UP 主. Matches desktop / mobile web rendering.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bgm", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "youtube", up_name: "Veritasium" }),
+    "Veritasium",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "zhihu", author_name: "张三" }),
+    "张三",
+  );
+});
+
+test("formatRecommendationAuthorLine returns empty text when no creator is known", () => {
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "" }), "");
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili" }), "");
+  assert.equal(formatRecommendationAuthorLine({}), "");
+  assert.equal(formatRecommendationAuthorLine(undefined), "");
+  // Whitespace-only names must not render a dangling prefix.
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "   " }), "");
+});
 
 test("platformDisplayName maps known platforms and passes through unknown", () => {
   assert.equal(platformDisplayName("bilibili"), "B 站");
@@ -833,7 +872,7 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
     }),
     {
       kind: "uninitialized",
-      message: "还没完成初始化，先运行 openbiliclaw init",
+      message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
       items: [],
     },
   );
@@ -883,6 +922,74 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
   assert.equal(ready.kind, "ready");
   assert.equal(ready.items.length, 1);
   assert.equal(ready.items[0]?.bvid, "BV1ready");
+});
+
+test("getPopupState surfaces a degraded backend as its own actionable state", () => {
+  const degradedError = Object.assign(new Error("/recommendations request failed: 503"), {
+    status: 503,
+    details: {
+      status: "degraded",
+      reason: "llm_registry_unavailable",
+      issues: [
+        { field: "llm", message: "默认 provider `deepseek` 缺少 `api_key`。", severity: "blocking" },
+        { field: "llm", message: "LLM registry unavailable.", severity: "blocking" },
+      ],
+    },
+  });
+  // No runtime snapshot → cannot rule out an initialized backend → repair state.
+  assert.deepEqual(getPopupState({ online: true, items: [], error: degradedError }), {
+    kind: "degraded",
+    message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+    items: [],
+  });
+
+  // Degraded but NEVER initialized → guided-init journey (its first step is
+  // configuring the LLM provider); the degraded blocker rides along.
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      degraded: true,
+      message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+      items: [],
+    },
+  );
+
+  // Initialized backend that degraded later → pure repair state.
+  assert.equal(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: true, recommendation_count: 12 },
+    }).kind,
+    "degraded",
+  );
+
+  // Envelope without issue detail still classifies, with fallback copy.
+  const bareDegraded = Object.assign(new Error("boom"), {
+    status: 503,
+    details: { status: "degraded" },
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: bareDegraded }).kind,
+    "degraded",
+  );
+
+  // Ordinary failures keep the generic error state.
+  const plainError = Object.assign(new Error("/recommendations request failed: 500"), {
+    status: 500,
+    details: null,
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: plainError }).kind,
+    "error",
+  );
 });
 
 test("getPopupState does not show init prompt while refresh or pool signals are active", () => {
@@ -940,7 +1047,7 @@ test("getPopupState shows the init CTA when uninitialized despite pending pre-in
     }),
     {
       kind: "uninitialized",
-      message: "还没完成初始化，先运行 openbiliclaw init",
+      message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
       items: [],
     },
   );

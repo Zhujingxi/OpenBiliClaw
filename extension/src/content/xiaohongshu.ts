@@ -29,6 +29,7 @@ import {
   extractBootstrapStateFromDocument,
   extractSelfInfoFromState,
 } from "./xhs/bootstrap.js";
+import { attachCoverData } from "./xhs/cover-harvest.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
 import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
@@ -228,7 +229,13 @@ function runPassiveCollection(): void {
     observed_at: Date.now(),
     ...(selfInfo ? { self_info: selfInfo } : {}),
   };
-  chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
+  // Harvest cover bytes before sending — xhscdn 403s every server-side
+  // fetch (TLS-fingerprint hotlink protection), so the page context is the
+  // only place covers can still be read. Fire-and-forget: attachCoverData
+  // never throws and a cover failure must not delay or drop the observation.
+  void attachCoverData(filteredNotes).finally(() => {
+    chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
+  });
 }
 
 let scrollTimer: number | null = null;

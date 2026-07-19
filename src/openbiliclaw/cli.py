@@ -36,12 +36,60 @@ from openbiliclaw.runtime.ollama_supervisor import (
 )
 from openbiliclaw.soul.preference_analyzer import DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE
 
+# ── Init stage ceilings ──────────────────────────────────────────────────
+#
+# Calibration provenance (2026-07-20, field report): a healthy SenseTime
+# ``deepseek-v4-flash`` gateway (``openai_compatible``) needs ~140s for one
+# 200-event preference chunk and up to ~300s for a worst-case chunk. The old
+# ceilings were sized as *performance expectations* for a fast provider, so a
+# slow-but-perfectly-healthy gateway was killed mid-run while the progress UI
+# still showed batches landing ("已处理 280s", 2/6 批).
+#
+# EVERY constant below is now a **wedged-run backstop, not a performance
+# expectation**: it exists only so a permanently stuck run eventually ends. An
+# init that legitimately takes 30-60 minutes on a slow gateway must survive.
+# Where a stage emits real per-unit progress we additionally guard it with an
+# idle limit (see ``_INIT_PROGRESS_IDLE_*``), which is what actually catches a
+# wedged run quickly; the absolute ceiling is then free to be generous.
 _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
-_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 360.0
-_INIT_DISCOVERY_TIMEOUT_SECONDS = 600.0
-_INIT_COLLECTION_TIMEOUT_SECONDS = 600.0
-_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 240.0
-_INIT_X_COLLECTION_TIMEOUT_SECONDS = 180.0
+# Stage 3 (``build_initial_profile``) is ONE long LLM call with no per-unit
+# progress signal, so an idle limit is meaningless there — a single slow call
+# is indistinguishable from a hung one. Absolute backstop only: 30 min is ~6x
+# the ~300s a slow gateway needs for this single synthesis call.
+_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 1800.0
+# Stage 4 (discovery + scoring + copy) emits coarse per-plan-stage progress,
+# so it gets the idle+absolute pair. 45 min absolute matches stage 2's ceiling:
+# both are LLM fan-outs over the same gateway.
+_INIT_DISCOVERY_TIMEOUT_SECONDS = 2700.0
+# Stage 1 global budget across ALL selected sources. Eight sources each waiting
+# up to 3-5 min for a browser extension to answer cannot fit in 10 min, so the
+# old value silently starved whichever sources ran last. 30 min lets a full
+# eight-source bootstrap finish while still bounding a wedged extension.
+_INIT_COLLECTION_TIMEOUT_SECONDS = 1800.0
+# Per-source waits. Bilibili history+favorites+following on a throttled account
+# routinely walks many paginated calls; X likes/bookmarks likewise. Doubled
+# from the fast-network calibration so slow/proxied networks are not clipped.
+_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 600.0
+_INIT_X_COLLECTION_TIMEOUT_SECONDS = 480.0
+
+# ── Progress-aware deadlines (idle + absolute) ───────────────────────────
+#
+# IDLE: max seconds with NO new progress signal. Derived from the same
+# slow-gateway figure as ``_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE`` — one
+# chunk on a slow real gateway ≈ 300s — doubled for slack, so a chunk that
+# takes twice the worst observed time still counts as alive. A genuinely
+# unreachable Base URL / wrong model name / dead proxy produces *zero* chunks
+# and therefore still fails fast (10 min), which is what users need diagnosed.
+_INIT_PROGRESS_IDLE_SECONDS = 600.0
+# Stage 4's progress reports are coarser (a handful per plan stage, each
+# covering a full discover+score+copy sweep), so it needs a wider idle window
+# than stage 2's per-chunk cadence.
+_INIT_DISCOVERY_PROGRESS_IDLE_SECONDS = 900.0
+# ABSOLUTE: hard stop for a run that keeps dribbling progress forever. The
+# reported case (6 chunks × ~140s, concurrency-throttled) lands in ~15 min;
+# 45 min leaves ~3x headroom for a larger bootstrap on the same slow gateway
+# while still bounding the lease. Wedged-run backstop, not an expectation.
+_INIT_PROGRESS_ABSOLUTE_SECONDS = 2700.0
 
 # Stage 2 fans bootstrap events into bounded LLM chunks. Real gateways can
 # legitimately need about three minutes for one 200-event chunk, and the
@@ -57,7 +105,8 @@ _INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE = 300.0
 _INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS = 300.0
 
 _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
-    "画像生成等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "画像生成等待 AI 服务超过 30 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "这一步是一次性的完整综合分析，没有分批进度可判断，因此只设了一个很宽松的兜底上限。"
     "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
     "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
 )
@@ -96,20 +145,142 @@ def _profile_analysis_timeout_seconds(
     )
 
 
-def _profile_analysis_timeout_message(seconds: float) -> str:
-    minutes = max(1, (max(1, int(seconds)) + 59) // 60)
+def _profile_analysis_deadlines(
+    *,
+    event_count: int,
+    requested: float | None,
+    concurrency: int = 1,
+) -> tuple[float | None, float | None]:
+    """Return stage 2's ``(idle_seconds, absolute_seconds)`` deadline pair.
+
+    An explicit caller override (API/test budget) stays an exact pure wall
+    clock — callers that ask for N seconds get N seconds, and ``<=0`` still
+    means "no limit". Only the default path becomes progress-aware.
+    """
+    if requested is not None:
+        return None, (requested if requested > 0 else None)
+    scaled = _profile_analysis_timeout_seconds(
+        event_count=event_count,
+        requested=None,
+        concurrency=concurrency,
+    )
+    absolute = max(_INIT_PROGRESS_ABSOLUTE_SECONDS, scaled or 0.0)
+    return _INIT_PROGRESS_IDLE_SECONDS, absolute
+
+
+def _timeout_minutes(seconds: float) -> int:
+    return max(1, (max(1, int(seconds)) + 59) // 60)
+
+
+def _profile_analysis_idle_timeout_message(seconds: float) -> str:
+    """Nothing came back at all — almost always a connectivity/config fault."""
     return (
-        f"偏好分析等待 AI 服务超过本轮 {minutes} 分钟上限仍未返回结果，"
+        f"AI 服务长时间没有返回任何新结果（约 {_timeout_minutes(seconds)} 分钟无进展），"
         "已自动停止，避免继续卡住。常见原因是 Base URL、模型名或代理配置错误，"
-        "网络无法访问模型服务，或模型服务响应过慢。请到模型设置测试 AI 服务，"
-        "修正后再重试初始化。"
+        "或网络无法访问模型服务。请到模型设置测试 AI 服务，修正后再重试初始化。"
     )
 
 
+def _profile_analysis_absolute_timeout_message(seconds: float, *, progress_note: str = "") -> str:
+    """Results kept coming, just too slowly for a bootstrap this size."""
+    progress_part = f"（{progress_note}）" if progress_note else ""
+    minutes = _timeout_minutes(seconds)
+    return (
+        f"偏好分析总时长超过上限（约 {minutes} 分钟），已自动停止{progress_part}。"
+        "AI 服务一直在返回结果，只是对这次初始化的数据量来说太慢了。"
+        "建议到模型设置换一个更快的模型，或稍后重试初始化。"
+    )
+
+
+class _InitIdleTimeoutError(TimeoutError):
+    """No progress signal within the idle limit."""
+
+
+class _InitAbsoluteTimeoutError(TimeoutError):
+    """Total runtime exceeded the absolute ceiling despite progress."""
+
+
+class _InitProgressMarker:
+    """Shared monotonic 'last progress' marker.
+
+    The work's own per-unit progress callbacks call :meth:`touch`; the
+    watchdog in :func:`_await_with_progress_deadline` reads :attr:`last`.
+    Heartbeat ticks deliberately do NOT touch it — a tick fires on a timer
+    regardless of whether the work advanced, so counting it as progress would
+    turn the idle limit into no limit at all.
+    """
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock: Callable[[], float] = clock or _loop_clock
+        self.started = self._clock()
+        self.last = self.started
+
+    def now(self) -> float:
+        return self._clock()
+
+    def touch(self) -> None:
+        self.last = self._clock()
+
+
+def _loop_clock() -> float:
+    return asyncio.get_running_loop().time()
+
+
+async def _await_with_progress_deadline(
+    awaitable: Awaitable[Any],
+    *,
+    marker: _InitProgressMarker,
+    idle_seconds: float | None,
+    absolute_seconds: float | None,
+    poll_seconds: float = 1.0,
+) -> Any:
+    """Await ``awaitable`` under an idle limit AND an absolute ceiling.
+
+    A fixed wall clock cannot tell "hung" from "slow but progressing", which
+    is exactly how a healthy-but-slow gateway got killed mid-bootstrap. This
+    replaces it with two limits: ``idle_seconds`` since the last progress
+    signal, and ``absolute_seconds`` overall. Either limit (and cancellation)
+    cancels the work task and awaits its cancellation so nothing leaks.
+    """
+    task: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
+    started = marker.now()
+    marker.touch()
+    try:
+        while True:
+            now = marker.now()
+            # Sleep only until the nearest limit so a tiny injected budget is
+            # honoured promptly instead of always costing a full poll interval.
+            wait_for = poll_seconds
+            if absolute_seconds is not None:
+                wait_for = min(wait_for, started + absolute_seconds - now)
+            if idle_seconds is not None:
+                wait_for = min(wait_for, marker.last + idle_seconds - now)
+            done_tasks, _ = await asyncio.wait({task}, timeout=max(0.0, wait_for))
+            if task in done_tasks:
+                return task.result()
+            now = marker.now()
+            if absolute_seconds is not None and now - started >= absolute_seconds:
+                raise _InitAbsoluteTimeoutError(absolute_seconds)
+            if idle_seconds is not None and now - marker.last >= idle_seconds:
+                raise _InitIdleTimeoutError(idle_seconds)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        raise
+
+
 _INIT_DISCOVERY_TIMEOUT_MESSAGE = (
-    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 10 分钟仍未完成，"
+    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 45 分钟仍未完成，"
     "本次初始化已按“部分完成”结束，避免继续卡住。"
     "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_IDLE_MESSAGE = (
+    "画像已生成，但首轮内容池已经约 15 分钟没有任何新进展，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 服务无法访问。"
     "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
 )
 _INIT_DISCOVERY_PARTIAL_MESSAGE = (
@@ -521,6 +692,55 @@ async def _run_with_progress(
     return result
 
 
+def _content_author_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) author row for one content-like object.
+
+    Two source-agnostic rules, shared with the three GUI surfaces:
+
+    * **Value** — ``author_name`` is the universal author field and
+      ``up_name`` is the Bilibili-only legacy one. ``DiscoveredContent``
+      back-fills ``author_name`` from ``up_name`` but never the reverse,
+      so non-Bilibili sources (Bangumi, Zhihu, YouTube, …) populate only
+      ``author_name`` and reading ``up_name`` alone rendered "（未知）"
+      for all of them. Prefer ``author_name``, keep ``up_name`` as the
+      fallback for legacy rows — same order as the backend's
+      ``content.author_name or content.up_name``.
+    * **Label** — mirrors ``formatRecommendationAuthorLine`` in
+      ``extension/popup/popup-helpers.js``: Bilibili keeps the native
+      "UP 主", every other platform gets the neutral "作者" (a Bangumi
+      director or a Zhihu answerer is not an UP). A missing / unknown
+      ``source_platform`` falls back to bilibili so legacy rows keep
+      their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    name = str(getattr(content, "author_name", "") or getattr(content, "up_name", "") or "").strip()
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "UP 主" if (platform or "bilibili") == "bilibili" else "作者"
+    return (label, name or "（未知）")
+
+
+def _content_id_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) identifier row for one content-like object.
+
+    ``bvid`` is the universal identifier column, not a Bilibili-only one:
+    every non-Bilibili mapper stores its own id there (``bangumi.py``'s
+    ``bangumi_subject_to_content`` sets ``bvid=content_id``, i.e. the bgm
+    subject id). Labelling it "BV号" unconditionally printed rows like
+    ``BV号  8`` for Bangumi — 8 is a subject id, not a BV number.
+
+    Same two rules as :func:`_content_author_row`: Bilibili keeps its native
+    term, every other platform gets a neutral "内容 ID", and a missing /
+    unknown ``source_platform`` falls back to bilibili so legacy rows keep
+    their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "BV号" if (platform or "bilibili") == "bilibili" else "内容 ID"
+    return (label, str(getattr(content, "bvid", "") or "") or "（暂无）")
+
+
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
     published = format_published_time(
@@ -529,7 +749,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     )
     rows = [
         ("标题", item.content.title or "（暂无）"),
-        ("UP 主", item.content.up_name or "（未知）"),
+        _content_author_row(item.content),
     ]
     if published:
         rows.append(("发布时间", published))
@@ -538,7 +758,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     rows.extend(
         [
             ("推荐理由", item.expression or "（暂无）"),
-            ("BV号", item.content.bvid or "（暂无）"),
+            _content_id_row(item.content),
         ]
     )
     _print_key_value_table(f"推荐 {index}", rows)
@@ -550,7 +770,7 @@ def _print_discovered_content_preview(item: Any, index: int) -> None:
         f"发现 {index}",
         [
             ("标题", item.title or "（暂无）"),
-            ("UP 主", item.up_name or "（未知）"),
+            _content_author_row(item),
             ("来源策略", item.source_strategy or "（未知）"),
             ("相关性分数", f"{float(item.relevance_score or 0.0):.2f}"),
         ],
@@ -769,7 +989,7 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             + "\n\nOpen the extension popup settings to fix the LLM credentials, "
             "then restart the daemon."
         )
-        _print_status_panel("warning", "降级模式 / Degraded mode", body)
+        _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
     uvicorn.run(api_app, host=host, port=port, log_level="info")
 
 
@@ -1680,10 +1900,17 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
 # Numbered menu shown in Phase 1. Order matters (v0.3.20+):
 # DeepSeek first as the default zero-friction recommendation
 # (¥0.001/千 token); OpenAI / Gemini / Claude / OpenRouter for users who
-# already have those keys; Ollama as the offline-only fallback (slow CPU
-# inference, real hardware floor); "OpenAI 协议兼容自建网关" demoted to
+# already have those keys; "OpenAI 协议兼容自建网关" demoted to
 # the final "(高级)" entry so 普通用户 don't pick it by mistake — most
 # people who think they want it actually want option 2 (OpenAI 官方).
+#
+# Local Ollama is intentionally NOT offered here as a chat provider
+# (v0.3.176+): the bundled Ollama is embedding-only (bge-m3), and small
+# local chat models don't meet the content-pipeline quality bar. Ollama
+# chat stays supported in the backend registry / desktop settings page
+# for advanced users, and ``ollama`` remains a valid ``default_provider``
+# when it arrives from an existing config or an explicit flag — we just
+# stop *offering* it in the interactive menu.
 _LLM_MENU: tuple[tuple[str, str, str], ...] = (
     (
         "deepseek",
@@ -1715,11 +1942,6 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
         "OpenRouter 聚合",
         "默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费",
     ),
-    (
-        "ollama",
-        "本地 Ollama（完全离线）",
-        "默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s",
-    ),
 )
 
 
@@ -1736,7 +1958,9 @@ def _print_provider_table() -> None:
     console.print(table)
     console.print(
         "[dim]Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。"
-        "已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。[/dim]"
+        "已经买了中转站 / OneAPI Key 选 2 (协议兼容)。"
+        "本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;"
+        "如需本地聊天模型请到设置页手动配置。[/dim]"
     )
 
 
@@ -2229,8 +2453,9 @@ def _interactive_runtime_config_setup() -> None:
     """Guide the user through missing LLM config before init.
 
     Four-phase flow:
-      1) Pick LLM service (Ollama-first menu; OpenAI-compat is its own entry,
-         not buried inside ``openai``).
+      1) Pick LLM service (DeepSeek-first menu; OpenAI-compat is its own entry,
+         not buried inside ``openai``). Local Ollama is not offered as a
+         chat provider — it's embedding-only here.
       2) Provide the fields that option actually needs.
       3) Choose how embeddings are served (separate question, not bundled).
       4) Optional per-module overrides (advanced, default skip).
@@ -2239,7 +2464,7 @@ def _interactive_runtime_config_setup() -> None:
     _print_provider_table()
 
     while True:
-        raw = typer.prompt("\n请输入序号或名称（默认 1=Ollama）", default="1")
+        raw = typer.prompt("\n请输入序号或名称（默认 1=DeepSeek）", default="1")
         choice = _resolve_menu_choice(raw)
         if choice is None:
             console.print("[bold red]看不懂这个输入，请重新输入序号或名称[/bold red]")
@@ -6005,14 +6230,21 @@ async def _fetch_x_init_data(
     return likes, bookmarks
 
 
-def _load_extension_bangumi_username() -> str:
-    """Read the extension-reported Bangumi username from runtime state.
+def _load_extension_bangumi_identity() -> tuple[str, bool]:
+    """Read the extension-reported Bangumi ``(username, verified)``.
 
     The Bangumi content script reports the logged-in account's public uid +
     username to ``POST /api/sources/bangumi/identity``, which persists
     ``bangumi_self_info`` into ``data/memory/discovery_runtime.json``. Returns
-    ``""`` on any miss or malformed value — the caller falls through to its
-    normal error path.
+    ``("", False)`` on any miss or malformed value — the caller falls through
+    to its normal error path.
+
+    ``verified`` mirrors the backend flag: True only when bgm.tv confirmed the
+    username belongs to the reported uid. Records written before the flag
+    existed read back as unverified (they cannot prove a check ever ran) and
+    self-heal on the next bgm.tv page view. A ``verified`` record with no
+    username is likewise read as unverified — the superseded 404 path wrote
+    those, and no current rule can produce one.
     """
     import json as _json
 
@@ -6022,15 +6254,16 @@ def _load_extension_bangumi_username() -> str:
     try:
         state_path = load_config().data_path / "memory" / "discovery_runtime.json"
         if not state_path.exists():
-            return ""
+            return "", False
         with open(state_path, encoding="utf-8") as file:
             state = _json.load(file)
         info = state.get("bangumi_self_info") if isinstance(state, dict) else None
         if not isinstance(info, dict):
-            return ""
-        return validate_bangumi_username(info.get("username"))
+            return "", False
+        username = validate_bangumi_username(info.get("username"))
+        return username, bool(username) and info.get("verified") is True
     except Exception:
-        return ""
+        return "", False
 
 
 async def _fetch_bangumi_init_data(
@@ -6878,11 +7111,17 @@ async def run_guided_init(
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
     profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
-    profile_analysis_budget = _profile_analysis_timeout_seconds(
+    # Progress-aware deadline: the idle limit is what actually catches a wedged
+    # gateway, so the absolute ceiling can stay generous for slow-but-healthy
+    # ones. ``profile_analysis_budget`` remains the number published to the GUI
+    # as ``progress.max_seconds`` — it is now the absolute ceiling, i.e. still
+    # the only limit that can end the stage on the clock.
+    profile_analysis_idle_budget, profile_analysis_budget = _profile_analysis_deadlines(
         event_count=len(events),
         requested=profile_analysis_timeout_seconds,
         concurrency=profile_analysis_concurrency,
     )
+    stage2_marker = _InitProgressMarker()
 
     # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
     # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
@@ -6906,6 +7145,8 @@ async def run_guided_init(
     async def _stage2_progress(done: int, total: int) -> None:
         _chunk_progress["done"] = done
         _chunk_progress["total"] = total
+        # Real per-chunk completion — the only thing that counts as progress.
+        stage2_marker.touch()
         console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
         await _report_stage_progress(
             2,
@@ -6948,7 +7189,7 @@ async def run_guided_init(
     )
     try:
         with _background_admission_bypass():
-            await asyncio.wait_for(
+            await _await_with_progress_deadline(
                 _run_with_progress(
                     soul_engine.analyze_events(
                         events,
@@ -6960,13 +7201,23 @@ async def run_guided_init(
                     status_provider=_chunk_status,
                     progress_callback=_stage2_tick,
                 ),
-                timeout=profile_analysis_budget,
+                marker=stage2_marker,
+                idle_seconds=profile_analysis_idle_budget,
+                absolute_seconds=profile_analysis_budget,
             )
+    except _InitIdleTimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _profile_analysis_idle_timeout_message(
+                profile_analysis_idle_budget or _INIT_PROGRESS_IDLE_SECONDS
+            ),
+        ) from exc
     except TimeoutError as exc:
         raise GuidedInitError(
             "analyze_failed",
-            _profile_analysis_timeout_message(
-                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
+            _profile_analysis_absolute_timeout_message(
+                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+                progress_note=_chunk_status(),
             ),
         ) from exc
     except Exception as exc:
@@ -7101,9 +7352,20 @@ async def run_guided_init(
     _stage4_live_done = 0
     _stage4_live_total = 4
     _stage4_live_note = "准备发现候选内容"
+    stage4_marker = _InitProgressMarker()
+    # Stage 4 reports real progress (per plan stage, from run_init_backfill), so
+    # it gets the idle+absolute pair too. Ticks are excluded for the same reason
+    # as stage 2: they fire on a timer, not on work.
+    stage4_idle_budget: float | None = (
+        _INIT_DISCOVERY_PROGRESS_IDLE_SECONDS
+        if discovery_timeout_seconds == _INIT_DISCOVERY_TIMEOUT_SECONDS
+        else None
+    )
+    stage4_absolute_budget = discovery_timeout_seconds if discovery_timeout_seconds > 0 else None
 
     async def _stage4_progress(done: int, total: int, note: str) -> None:
         nonlocal _stage4_live_done, _stage4_live_total, _stage4_live_note
+        stage4_marker.touch()
         _stage4_live_done = done
         _stage4_live_total = total
         _stage4_live_note = note
@@ -7145,14 +7407,16 @@ async def run_guided_init(
     # terminal *partial success*, and clients may enter the app while the
     # restarted runtime continues replenishment. Cancellation still propagates.
     try:
-        discovered_count = await asyncio.wait_for(
+        discovered_count = await _await_with_progress_deadline(
             _run_with_progress(
                 discover_backfill(profile_data, **backfill_kwargs),
                 label="基于完整画像生成首轮内容池",
                 eta_seconds=300,
                 progress_callback=_stage4_tick,
             ),
-            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
+            marker=stage4_marker,
+            idle_seconds=stage4_idle_budget,
+            absolute_seconds=stage4_absolute_budget,
         )
         await _stage4_progress(4, 4, "首轮内容已完成评分与推荐文案，可直接浏览")
     except Exception as exc:
@@ -7160,7 +7424,10 @@ async def run_guided_init(
 
         discovered_count = max(0, int(getattr(exc, "discovered_count", 0) or 0))
         discover_exc = exc
-        if isinstance(exc, TimeoutError):
+        if isinstance(exc, _InitIdleTimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_IDLE_MESSAGE
+        elif isinstance(exc, TimeoutError):
             discovery_reason = "discovery_timeout"
             discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
         elif isinstance(exc, InitialPoolUnavailableError):
@@ -7348,19 +7615,26 @@ def init(
 
     _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
-        "拉 B 站历史 / 收藏 / 关注（≈ 20–60s，看你的列表大小）"
+        "拉 B 站历史 / 收藏 / 关注（时长看你的列表大小）"
         if include_bili
         else "拉取所选平台数据（B 站已跳过）"
     )
+    # No total-duration forecast: it depends on the selected platforms, the
+    # collected history AND the provider's latency, so any number here would be
+    # wrong for someone and make a healthy long run read as broken (field
+    # report 2026-07-20). State the variability, then let the per-step heartbeat
+    # report elapsed time as evidence of progress.
     console.print(
-        "[bold yellow]⏱  这一步首次运行通常需要 4–20 分钟，"
-        "请保持网络畅通别中断。[/bold yellow]\n"
+        "[bold yellow]⏱  这一步首次运行耗时差别很大，取决于你勾了几个平台、"
+        "拉到多少历史，以及 AI 服务的快慢，请保持网络畅通别中断。[/bold yellow]\n"
+        "  只要还在出结果就不会被打断，慢一些是正常的。\n"
         "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
-        "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成并保存完整画像（LLM 调用，≈ 30–70s）\n"
-        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案，≈ 2–5 分钟）\n"
-        "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
+        "    2/4  分析偏好（LLM 调用，按事件量分片，每片单独计时）\n"
+        "    3/4  生成并保存完整画像（单次 LLM 调用）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案）\n"
+        "[dim]全程会打印已用时和已完成的量，不要以为卡住了——"
+        "远程 AI 服务单次响应就可能要几分钟。[/dim]\n"
     )
     if not include_bili:
         console.print(
@@ -7530,12 +7804,20 @@ def init(
                 # logged-in bgm.tv account's public username into runtime
                 # state. Priority: token /v0/me > explicit username >
                 # extension-reported username.
-                extension_username = _load_extension_bangumi_username()
+                extension_username, extension_verified = _load_extension_bangumi_identity()
                 if extension_username:
                     raw_username = extension_username
-                    console.print(
-                        f"[dim]  Bangumi 使用浏览器扩展识别到的账号 {extension_username}。[/dim]"
-                    )
+                    if extension_verified:
+                        console.print(
+                            f"[dim]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}。[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[yellow]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}（未经 bgm.tv 校验，可能不准）。"
+                            "如果不是你本人，请用 --bangumi-username 指定。[/yellow]"
+                        )
             try:
                 selected_bangumi_username = validate_bangumi_username(raw_username)
             except ValueError as exc:

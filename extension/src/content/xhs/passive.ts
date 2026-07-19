@@ -54,6 +54,14 @@ export interface XhsNoteMetadata {
   title: string;
   author: string;
   cover_url: string;
+  /**
+   * Cover bytes (base64) harvested in the page context by cover-harvest.ts —
+   * fetched at scrape time while the rotating xhscdn URL token is freshest,
+   * so caching no longer depends on the backend's own fetch succeeding.
+   * Absent when the fetch failed.
+   */
+  cover_data?: string;
+  cover_content_type?: string;
   view_count?: number;
   like_count?: number;
   collect_count?: number;
@@ -188,8 +196,17 @@ export function extractNoteMetadataFromAnchor(
   const author = authorEl?.textContent?.trim() || "";
 
   const coverImg = card.querySelector(NOTE_COVER_SELECTOR);
+  // Lazy-load placeholders (data:/blob: inline PNGs) are not covers — in
+  // background tabs they never upgrade, and storing them yields cards that
+  // can never render. Leave cover_url empty so state-based backfill
+  // (cover-harvest.ts) can supply the real CDN URL.
+  const rawCover = coverImg?.getAttribute("src") || coverImg?.getAttribute("data-src") || "";
+  const trimmedCover = rawCover.trim();
   const cover_url =
-    coverImg?.getAttribute("src") || coverImg?.getAttribute("data-src") || "";
+    trimmedCover.toLowerCase().startsWith("data:") ||
+    trimmedCover.toLowerCase().startsWith("blob:")
+      ? ""
+      : trimmedCover;
 
   const view_count = pickMetricCount(card, ["浏览", "观看", "view"]);
   const like_count = pickMetricCount(card, ["赞", "点赞", "喜欢", "like"]);

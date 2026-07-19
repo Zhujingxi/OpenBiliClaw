@@ -33,6 +33,65 @@ SUBJECT_TYPE_LABELS = {
     6: "三次元",
 }
 
+# Ordered ``infobox`` keys naming a subject's principal creator, per SubjectType.
+# Bangumi has no dedicated author field: the credit lives in the free-form
+# ``infobox`` array, whose key names differ per type (a book has 作者, an anime
+# has 导演, a game has 开发).
+#
+# Calibration provenance: a live survey of 250 rows (50 per subject type via
+# ``GET /v0/subjects``, 2026-07-18) found ``infobox`` present on 250/250 rows
+# and gave the per-type population rates below. Each ladder leads with the most
+# populated creator credit for that type and falls back to the next-best when a
+# row omits it (e.g. a manga credited only to 原作 + 作画, or an anime whose
+# credit sits on the production company instead of a named director).
+#   书籍   作者 44/50 · 原作 3/50 · 作画 3/50 · 出版社 47/50
+#   动画   导演 47/50 · 原作 45/50 · 动画制作 30/50 · 製作 43/50
+#   音乐   艺术家 41/50 · 作曲 43/50 · 厂牌 31/50
+#   游戏   开发 35/50 · 发行 33/50 · 游戏开发商 5/50
+#   三次元 导演 26/50 · 编剧 24/50 · 主演 29/50
+# Re-run the survey before trusting these keys after any Bangumi schema change.
+AUTHOR_INFOBOX_KEYS: dict[int, tuple[str, ...]] = {
+    1: ("作者", "原作", "作画", "出版社"),
+    2: ("导演", "原作", "动画制作", "製作"),
+    3: ("艺术家", "作曲", "厂牌"),
+    4: ("开发", "发行", "游戏开发商"),
+    6: ("导演", "编剧", "主演"),
+}
+# A creator credit is a display field on the recommendation card. Keep only the
+# leading names so a card reads "沖浦啓之、黄瀬和哉" instead of a 30-name roster,
+# and hard-cap the rendered length.
+MAX_AUTHOR_PARTS = 3
+MAX_AUTHOR_LENGTH = 80
+# Credits that are a stringified null rather than a name. Scope is exactly
+# "spellings THIS stack can emit": Python ``str(None)`` → "None", JSON/JS
+# ``null`` and ``undefined``, ``float('nan')`` → "NaN". That is the dirty-row
+# class ``COALESCE`` cannot repair once persisted, and the only class this
+# guard is for.
+#
+# DO NOT WIDEN THIS. Three attempts to be cleverer each destroyed real data,
+# and the misses they were chasing are merely cosmetic:
+#   1. an enumerated punctuation table missed U+2026 "…"
+#   2. adding "nil" to catch more nulls deleted the Japanese rock band nil —
+#      and no Python/JS/JSON path even emits that spelling (it is Ruby/Lisp)
+#   3. replacing the table with "a real name contains a letter or digit"
+#      deleted the idol group ・・・・・・・・・ (all U+30FB) and the band !!!
+#      (chk chk chk), both of which the crude table had preserved
+# The costs are not symmetric: a punctuation-only credit renders oddly on a
+# card, while a wrong filter silently erases a real artist. So punctuation and
+# symbol values are deliberately NOT filtered at all — if a card ever shows
+# "……", that is the accepted price.
+#
+# Also deliberately unfiltered, for the same "could be a real credit" reason:
+#   - "n/a" / "(none)" / "<none>" — editor prose, not something we emit; they
+#     belong to the same class as 无 / 未知 / 暂无 / 不明, which we already
+#     keep, so filtering them would be inconsistent as well as risky
+#   - bare "na" (romanised 나 / 娜 surname), single letters, digits
+#
+# "none"/"null"/"nan" keep a residual false-positive risk (a band could
+# stylise itself that way); accepted knowingly, because they are the literal
+# output of the stringification bug that put "None" in author_name before.
+_PLACEHOLDER_CREDITS = frozenset({"none", "null", "nan", "undefined"})
+
 
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
@@ -66,6 +125,170 @@ def _cover_url(subject: Mapping[str, Any]) -> str:
         if value:
             return value
     return ""
+
+
+def _infobox_value_text(value: object) -> str:
+    """Flatten one ``infobox`` entry's ``value`` into display text.
+
+    Bangumi ships three shapes for ``value`` (observed 4117 / 226 / 197 times
+    in the 250-row survey): a bare string (``"押井守"``), a list of ``{"v": …}``
+    entries (``别名``), and a list of ``{"k": …, "v": …}`` entries
+    (``版本:东立版``). Both list shapes are read through ``v``; ``k`` is a
+    sub-label, not a name.
+
+    Every other input — ``None``, a bool, a number, a dict, an empty list, a
+    drifted schema — yields ``""``. Returning the empty string rather than a
+    stringified value is what keeps literal ``"None"`` / ``"[]"`` out of
+    ``author_name``, the dirty-row class that ``COALESCE`` cannot repair.
+
+    That guarantee needs two things beyond shape checks, both learned the hard
+    way: ``v`` is only read when it is genuinely a ``str`` (``str()`` on a
+    drifted value manufactures ``"['押井守']"`` out of a nested list), and a
+    value that merely *spells* absence is normalised to ``""`` — a bare
+    ``"None"`` in the source data is just as unusable as one we produced
+    ourselves. See :data:`_PLACEHOLDER_CREDITS` for where that line is drawn.
+    """
+
+    if isinstance(value, str):
+        text = value.strip()
+        return "" if _is_placeholder_credit(text) else text
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for entry in value:
+        if not isinstance(entry, Mapping):
+            continue
+        raw = entry.get("v")
+        # Only real strings: no str() fallback, which would turn a drifted
+        # ``{"v": ["押井守"]}`` into the literal text "['押井守']".
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if _is_placeholder_credit(text) or text in parts:
+            continue
+        parts.append(text)
+        if len(parts) >= MAX_AUTHOR_PARTS:
+            break
+    return "、".join(parts)
+
+
+def _is_placeholder_credit(text: str) -> bool:
+    """True when ``text`` is an empty value or a stringified null.
+
+    One rule, by design: the empty string, or an exact match against
+    :data:`_PLACEHOLDER_CREDITS`. Everything else is treated as a real credit —
+    punctuation-only values included. See that constant for why the scope is
+    this small and why widening it has gone wrong every time.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return stripped.casefold() in _PLACEHOLDER_CREDITS
+
+
+def _author_name(subject: Mapping[str, Any], subject_type: int) -> str:
+    """Resolve a subject's creator credit from its ``infobox``.
+
+    Walks :data:`AUTHOR_INFOBOX_KEYS` for ``subject_type`` in priority order and
+    returns the first credit that flattens to non-empty text. A subject whose
+    ``infobox`` is missing, is not a list, or carries no ladder key resolves to
+    ``""`` — an absent credit is an empty string, never a placeholder.
+    """
+
+    ladder = AUTHOR_INFOBOX_KEYS.get(subject_type, ())
+    if not ladder:
+        return ""
+    raw_infobox = subject.get("infobox")
+    if not isinstance(raw_infobox, list):
+        return ""
+    wanted = set(ladder)
+    credits: dict[str, str] = {}
+    for entry in raw_infobox:
+        if not isinstance(entry, Mapping):
+            continue
+        key = str(entry.get("key") or "").strip()
+        # First *non-empty* occurrence wins: a key whose value flattens to ""
+        # stays unrecorded so a later duplicate can still supply the credit.
+        if key not in wanted or key in credits:
+            continue
+        text = _infobox_value_text(entry.get("value"))
+        if text:
+            credits[key] = text
+    for key in ladder:
+        credit = credits.get(key, "")
+        if credit:
+            return _truncate_credit(credit)
+    return ""
+
+
+def _truncate_credit(credit: str) -> str:
+    """Bound a credit's rendered length, cutting on a name separator.
+
+    Some credits are a single string holding a whole roster (a 猫和老鼠 entry
+    runs past 200 characters). A blind slice can end mid-name or inside an
+    unclosed bracket, so prefer the last separator that still keeps at least
+    half the budget and fall back to a hard cut only when there is none — then
+    drop any bracket the cut left open.
+    """
+
+    if len(credit) <= MAX_AUTHOR_LENGTH:
+        return credit
+    head = credit[:MAX_AUTHOR_LENGTH]
+    cut = max(head.rfind(separator) for separator in ("、", "，", ",", "/"))
+    if cut >= MAX_AUTHOR_LENGTH // 2:
+        head = head[:cut]
+    return _drop_unclosed_bracket(head).rstrip(" 、,，/|·")
+
+
+# Bracket pairs seen in real credits: 押井守（総監督）, [監修], 《攻殻機動隊》.
+_CREDIT_BRACKETS = {
+    "（": "）",
+    "(": ")",
+    "【": "】",
+    "[": "]",
+    "《": "》",
+    "〈": "〉",
+    "「": "」",
+    "『": "』",
+    "〔": "〕",
+    "｢": "｣",
+}
+_CREDIT_BRACKET_CLOSERS = {closer: opener for opener, closer in _CREDIT_BRACKETS.items()}
+
+
+def _drop_unclosed_bracket(head: str) -> str:
+    """Cut ``head`` back to before the first bracket the truncation left open.
+
+    ``押井守、神山健治（総監督`` reads as if the credit were mangled, so trim to
+    ``押井守、神山健治``.
+
+    A closer only settles an opener of the SAME family: in ``(credit]`` the
+    ``]`` does not close the ``(``, so the ``(`` is still open and the cut
+    happens before it. Popping on any closer would have declared that balanced.
+
+    Known limitation: when the unmatched opener sits at index 0 the whole
+    credit is one long parenthetical, and trimming would erase it entirely.
+    Losing a real credit is worse than an unbalanced tail, so the hard cut is
+    kept there — deliberate, and covered by a test so the choice stays visible.
+    """
+
+    unclosed: list[int] = []
+    for index, char in enumerate(head):
+        if char in _CREDIT_BRACKETS:
+            unclosed.append(index)
+        # A closer only settles an opener of its own family. One that matches
+        # nothing is stray punctuation inside the credit and leaves the stack
+        # untouched, so ``(credit]`` still counts the ``(`` as open.
+        elif (
+            char in _CREDIT_BRACKET_CLOSERS
+            and unclosed
+            and head[unclosed[-1]] == _CREDIT_BRACKET_CLOSERS[char]
+        ):
+            unclosed.pop()
+    if not unclosed:
+        return head
+    return head[: unclosed[0]].rstrip() or head
 
 
 def _meta_tags(subject: Mapping[str, Any]) -> list[str]:
@@ -139,7 +362,14 @@ def bangumi_subject_to_content(
     strategy: str,
     source_keyword_id: int | None = None,
 ) -> DiscoveredContent | None:
-    """Normalize one official Subject/SlimSubject into discovery content."""
+    """Normalize one official Subject/SlimSubject into discovery content.
+
+    ``author_name`` is resolved from the row's own ``infobox`` (see
+    :func:`_author_name`), which both discovery endpoints — ``POST
+    /v0/search/subjects`` and ``GET /v0/subjects`` — return inline, so no extra
+    per-subject request is needed. SlimSubject rows (embedded in user
+    collections) carry no ``infobox`` and resolve to an empty credit.
+    """
 
     if row.get("nsfw") is True:
         return None
@@ -163,6 +393,7 @@ def bangumi_subject_to_content(
         source_strategy=strategy,
         content_type="subject",
         title=title,
+        author_name=_author_name(row, subject_type),
         body_text=str(row.get("summary") or row.get("short_summary") or "").strip(),
         description="",
         cover_url=_cover_url(row),

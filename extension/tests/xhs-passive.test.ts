@@ -333,3 +333,29 @@ test("filterSelfAuthoredNotes is a no-op when self.nickname is empty", () => {
   const self: XhsSelfInfo = { user_id: "uid", nickname: "" };
   assert.equal(filterSelfAuthoredNotes(notes, self).length, 1);
 });
+
+test("extractNoteMetadataFromAnchor rejects data: lazy-load placeholder covers", () => {
+  // Background tabs never upgrade lazy images past the inline data: PNG —
+  // storing the placeholder as cover_url yields cards that can never render.
+  const titleEl = new FakeDomElement({ textContent: "占位符测试" });
+  const cover = new FakeDomElement({
+    attrs: { src: "data:image/png;base64,iVBORw0KGgo" },
+  });
+  const card = new FakeDomElement({
+    selectorMap: {
+      ".title, .note-title, [class*='title'] span, [class*='title']": [titleEl],
+      "img.cover, .cover img, img[src*='xhscdn'], img[src*='sns-img'], img": [cover],
+    },
+  });
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-ph?xsec_token=tok",
+    closestElement: card,
+  });
+
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+
+  assert.equal(meta?.cover_url, "");
+});

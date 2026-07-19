@@ -360,7 +360,10 @@ class AccountSyncService:
                 logger.warning(
                     "Profile analysis failed during account sync: %s", exc, exc_info=True
                 )
-                self._persist_profile_analysis_error(safe_llm_failure_message(exc))
+                self._persist_profile_analysis_error(
+                    safe_llm_failure_message(exc),
+                    kind=classify_llm_unavailability(exc) or "",
+                )
                 raise
 
         state["last_account_sync_at"] = self._now().isoformat()
@@ -678,7 +681,7 @@ class AccountSyncService:
             return []
         return [item for raw in value if (item := str(raw).strip())]
 
-    def _persist_profile_analysis_error(self, message: str) -> None:
+    def _persist_profile_analysis_error(self, message: str, *, kind: str = "") -> None:
         """Record a profile-analysis failure without advancing any sync cursor.
 
         Loads a FRESH state so the failing tick's in-flight cursor bumps
@@ -687,10 +690,18 @@ class AccountSyncService:
         user-visible reason to ``/api/init-status`` and the account-sync status
         surface. ``last_account_sync_at`` is deliberately left untouched so the
         throttle does not lock the retry out for ``sync_interval_hours``.
+
+        ``kind`` carries the :func:`classify_llm_unavailability` verdict
+        (``no_provider`` / ``model_not_found`` / ``rate_limited``) so the
+        status surface can show an actionable sentence instead of the generic
+        "稍后会自动重试" — which is a false promise when the real fix is a
+        config change. Always written (even empty) so a stale kind from a
+        previous failure never mislabels this one.
         """
         try:
             state = self.memory_manager.load_account_sync_state()
             state["last_sync_error"] = f"画像分析失败：{message}"
+            state["last_sync_error_kind"] = kind
             self.memory_manager.save_account_sync_state(state)
         except Exception:
             logger.debug("Failed to persist profile-analysis error", exc_info=True)
@@ -709,7 +720,7 @@ class AccountSyncService:
             # sentence instead of each formatting the raw error themselves.
             "last_account_sync_message": self._user_facing_sync_message(kind, detail),
             "last_account_sync_severity": "warning"
-            if kind == "auth_expired"
+            if kind in ("auth_expired", "rate_limited")
             else ("error" if detail else ""),
         }
 
@@ -719,12 +730,27 @@ class AccountSyncService:
 
         An expired cookie is a normal lifecycle event, not a fault, so it gets
         an actionable instruction rather than the provider's English error.
+        LLM-unavailability kinds likewise get actionable copy: "稍后会自动重试"
+        would be a false promise for ``no_provider`` / ``model_not_found`` —
+        nothing recovers until the user fixes the model configuration.
         """
         if kind == "auth_expired":
             return (
                 "B 站登录已失效，账号同步已停止。"
                 "请在浏览器重新登录 B 站，或保持扩展在线以同步新的 Cookie。"
             )
+        if kind == "no_provider":
+            return (
+                "AI 模型未配置或不可用，画像同步已暂停 — "
+                "请在设置中检查模型配置（API Key 与服务地址），修复后会自动恢复。"
+            )
+        if kind == "model_not_found":
+            return (
+                "配置的 AI 模型不存在 — "
+                "请在设置中修正模型名（本地模型需先拉取），修复后会自动恢复。"
+            )
+        if kind == "rate_limited":
+            return "AI 服务限流中，账号同步稍后会自动重试。"
         if detail:
             return "账号同步出错，稍后会自动重试。"
         return ""

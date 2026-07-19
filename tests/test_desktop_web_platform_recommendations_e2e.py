@@ -119,6 +119,11 @@ def platform_server() -> Iterator[tuple[str, PlatformStub]]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path == "/shared/source-status.js":
+                return self._serve_file(
+                    ROOT / "src/openbiliclaw/web/shared/source-status.js",
+                    "application/javascript",
+                )
             if path == "/api/ping":
                 return _json_response(self, {"ok": True})
             if path == "/api/health":

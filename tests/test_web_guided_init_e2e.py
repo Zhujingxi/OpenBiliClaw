@@ -77,6 +77,9 @@ class GuidedInitStub:
         self.current_status = _status()
         self.post_init_error: tuple[int, dict[str, Any]] | None = None
         self.fail_next_status = False
+        # When set, replaces the default /api/config body. Used to simulate a
+        # saved default_provider the wizard no longer offers (e.g. "ollama").
+        self.config_override: dict[str, Any] | None = None
         self.runtime_status = {
             "initialized": False,
             "pool_available_count": 0,
@@ -235,6 +238,13 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
 
         def do_GET(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path.startswith("/shared/"):
+                # The desktop page and the setup wizard both load the shared
+                # source-status module from the backend's /shared mount. Without
+                # this route it 404s, app.js dies on the missing global, and the
+                # failure surfaces as an unrelated test timing out.
+                rel = path.removeprefix("/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / rel)
             if path in {"/setup/", "/setup/index.html"}:
                 return self._serve_file(ROOT / "src/openbiliclaw/web/setup/index.html", "text/html")
             if path in {"/web", "/web/"}:
@@ -246,16 +256,14 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
             if path == "/api/config":
+                if state.config_override is not None:
+                    return _json_response(self, state.config_override)
                 return _json_response(
                     self,
                     {
                         "config": {
                             "llm": {
-                                "default_provider": "ollama",
-                                "ollama": {
-                                    "model": "qwen2.5:7b",
-                                    "base_url": "http://localhost:11434/v1",
-                                },
+                                "default_provider": "openai_compatible",
                                 "openai_compatible": {
                                     "api_key": "sk-t************alue",
                                     "model": "compat-model",
@@ -462,21 +470,54 @@ def test_setup_wizard_e2e_restores_fields_per_provider(
     """Provider switches must not leak another provider's model or endpoint."""
     base_url, _ = guided_init_server
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.wait_for_function("document.querySelector('#model').value === 'qwen2.5:7b'")
+    chromium_page.wait_for_function("document.querySelector('#model').value === 'compat-model'")
 
-    chromium_page.locator("#provider").select_option("openai_compatible")
-    assert chromium_page.locator("#model").input_value() == "compat-model"
     assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
     assert chromium_page.locator("#apiFlavor").input_value() == "responses"
 
     chromium_page.locator("#model").fill("compat-draft")
-    chromium_page.locator("#provider").select_option("ollama")
-    assert chromium_page.locator("#model").input_value() == "qwen2.5:7b"
-    assert chromium_page.locator("#baseUrl").input_value() == "http://localhost:11434/v1"
+    chromium_page.locator("#provider").select_option("deepseek")
+    assert chromium_page.locator("#model").input_value() == "deepseek-v4-flash"
+    assert chromium_page.locator("#baseUrl").input_value() == ""
 
     chromium_page.locator("#provider").select_option("openai_compatible")
     assert chromium_page.locator("#model").input_value() == "compat-draft"
     assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
+
+    # Local Ollama is embedding-only; the wizard must not offer it for chat.
+    provider_values = chromium_page.evaluate(
+        "() => Array.from(document.querySelectorAll('#provider option')).map((o) => o.value)"
+    )
+    assert "ollama" not in provider_values
+
+
+def test_setup_wizard_e2e_notifies_when_saved_provider_is_unlisted(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A saved default_provider the wizard no longer offers (e.g. "ollama",
+    which is embedding-only here) must not be silently dropped — the wizard
+    surfaces an info notice telling the user to re-pick a chat provider."""
+    base_url, stub = guided_init_server
+    stub.config_override = {
+        "config": {
+            "llm": {
+                "default_provider": "ollama",
+                "ollama": {"model": "qwen2.5:7b", "base_url": "http://127.0.0.1:11434/v1"},
+            },
+            "bilibili": {"cookie": "SESSDATA=test"},
+            "sources": {"bilibili": {"enabled": True}},
+        }
+    }
+    chromium_page.goto(f"{base_url}/setup/")
+
+    notice = chromium_page.locator("#msg0")
+    notice.wait_for(state="visible")
+    text = notice.inner_text()
+    assert "ollama" in text
+    assert "向量检索" in text
+    # The unlisted provider must not have been forced into the select.
+    assert chromium_page.locator("#provider").input_value() != "ollama"
 
 
 def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
@@ -487,7 +528,8 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -522,7 +564,8 @@ def test_setup_wizard_e2e_partial_success_finishes_without_second_pool_wait(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -548,7 +591,8 @@ def test_setup_wizard_e2e_save_llm_does_not_start_guided_init(
     base_url, stub = guided_init_server
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
 
@@ -566,7 +610,8 @@ def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -641,7 +686,8 @@ def test_web_e2e_surfaces_timeout_cause_and_recovery_actions(
 
     if surface == "setup":
         chromium_page.goto(f"{base_url}/setup/")
-        chromium_page.locator("#provider").select_option("ollama")
+        chromium_page.locator("#provider").select_option("deepseek")
+        chromium_page.locator("#apiKey").fill("sk-e2e-test")
         chromium_page.locator("#saveLlm").click()
         chromium_page.wait_for_selector('[data-panel="1"].active')
         chromium_page.locator("#next1").click()
@@ -707,7 +753,8 @@ def test_setup_wizard_e2e_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -729,7 +776,8 @@ def test_setup_wizard_e2e_default_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -752,7 +800,8 @@ def test_setup_wizard_e2e_blocks_missing_bilibili_without_post(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -763,6 +812,36 @@ def test_setup_wizard_e2e_blocks_missing_bilibili_without_post(
     assert stub.init_posts == []
     assert "还没检测到 B站 登录" in chromium_page.locator("#initReason").inner_text()
     assert "✗" in chromium_page.locator("#initChecklist").inner_text()
+
+
+def test_setup_wizard_e2e_shows_neutral_hint_when_bilibili_never_syncs(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A never-synced B站 login must stop the spinner and show a neutral,
+    skippable hint — while the poll keeps running so it can still flip green."""
+    base_url, _ = guided_init_server
+    # /api/sources/status 404s in the stub, so checkBili always returns null.
+    # Speed the 3s poll up so the negative state lands within the test budget.
+    chromium_page.add_init_script("window.__OBC_TEST_BILI_POLL_MS = 30;")
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+
+    # After a few ticks the spinner row becomes the neutral hint.
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#biliStatus')"
+        "?.textContent.includes('还没检测到 B站 登录同步')"
+    )
+    box = chromium_page.locator("#biliStatus")
+    # Not painted as success, and the spinner element is gone.
+    assert "ok" not in (box.get_attribute("class") or "")
+    assert chromium_page.locator("#biliStatus .spin").count() == 0
+    # Still on step 1 (the poll keeps running; it did not crash or advance).
+    assert chromium_page.locator('[data-panel="1"].active').count() == 1
 
 
 def test_desktop_web_e2e_surfaces_init_start_conflict(
@@ -970,3 +1049,93 @@ def test_setup_wizard_e2e_partial_success_enters_completion_screen(
     )
     assert "后台继续补池" in chromium_page.locator("#doneInit").inner_text()
     assert chromium_page.locator("#finish").is_enabled()
+
+
+def _open_init_sources(page: Any, base_url: str, surface: str) -> tuple[Any, Any]:
+    """Land on the source picker of either surface; return (start, reason)."""
+    if surface == "setup":
+        page.goto(f"{base_url}/setup/")
+        page.locator("#provider").select_option("deepseek")
+        page.locator("#apiKey").fill("sk-e2e-test")
+        page.locator("#saveLlm").click()
+        page.wait_for_selector('[data-panel="1"].active')
+        page.locator("#next1").click()
+        page.wait_for_selector('[data-panel="2"].active')
+        return page.locator("#startInit"), page.locator("#initReason")
+    page.goto(f"{base_url}/web/")
+    page.wait_for_selector(".init-onboarding", state="attached")
+    return page.locator('[data-init-action="start"]'), page.locator(".init-reason")
+
+
+def _select_bangumi_only(page: Any) -> None:
+    page.locator('input[data-init-source="bilibili"]').uncheck()
+    page.locator('input[data-init-source="bangumi"]').check()
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_bangumi_only_without_username_still_reaches_backend(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    """Regression: a client-side Bangumi-only guard blocked /api/init entirely.
+
+    Every GUI surface used to refuse to POST when Bangumi was the only source
+    and neither a username nor a token was typed — the two covered here plus
+    the extension popup, which carried the same block under a different
+    variable name (``selectedSources``), so a narrow grep made it look like an
+    unaffected control. That copy of the backend's admission rule predated the
+    third tier of the account ladder — the identity the browser extension
+    reports from a logged-in bgm.tv page — so zero-config users (the
+    recommended path) could not start an init from any GUI at all. The
+    frontend must hand the decision to the backend.
+    """
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+
+    start, _ = _open_init_sources(chromium_page, base_url, surface)
+    _select_bangumi_only(chromium_page)
+    start.click()
+
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+    assert stub.init_posts == [{"sources": ["bangumi"]}]
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_bangumi_only_renders_backend_rejection_naming_the_extension(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    """With all three tiers genuinely empty, the backend 409 is what shows.
+
+    The rejection copy must name the extension tier too, otherwise deleting
+    the frontend guard just moves the same misleading "填令牌或用户名" text onto a
+    different code path.
+    """
+    base_url, stub = guided_init_server
+    stub.post_init_error = (
+        409,
+        {
+            "error": "no_profile_signal_sources",
+            "detail": (
+                "只选择 Bangumi 初始化时，需提供个人令牌（推荐，自动识别当前用户）、"
+                "公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别。"
+            ),
+        },
+    )
+    _install_fake_runtime_stream(chromium_page)
+
+    start, reason = _open_init_sources(chromium_page, base_url, surface)
+    _select_bangumi_only(chromium_page)
+    start.click()
+
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+    assert stub.init_posts == [{"sources": ["bangumi"]}]
+    chromium_page.wait_for_function("() => document.body.innerText.includes('bgm.tv')")
+    text = reason.inner_text()
+    assert "Bangumi" in text
+    assert "个人令牌" in text
+    # The extension tier is named, not just token / username.
+    assert "bgm.tv" in text
+    assert start.is_enabled()

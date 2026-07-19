@@ -89,7 +89,6 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | v0.3.144 推荐理由双 worker + 默认 30 | ✅ | `_drain_expression_copy()` 不再对所有待生成 batch 一次性 `gather`，而是默认 batch_size=30、用 2 个 worker 顺序领取 batch；真实 provider 并发测试显示 45 条推荐文案偶发 JSON 解析失败，因此推荐理由保持保守批量；批量解析失败会在当前 worker 内先拆半重试，半批仍失败才退到单条兜底；`_expression_lock` 仍串行化多入口，热重载 / shutdown 的 `CancelledError` 不会被当作普通 batch 失败吞掉 |
 | v0.3.x XHS 自发布内容过滤 | ✅ | `get_pool_candidates` / `count_pool_candidates` / `count_pool_readiness` 及后台整理查询（evaluation / copy / delight）在 SQL 层排除已知的自发布小红书行；`_purge_self_authored_pool_items` 同时匹配 `up_name` 和 `author_name`；self_info 首次到达或变更时立即 purge 已入池内容。`RecommendationEngine` 通过 `xhs_self_info_provider` 回调从 runtime state 获取 nickname，`Database` 保持纯存储层不直接读 runtime state |
 | v0.3.x serve 平台保底 | ✅ | `serve()` 装载 top-40 relevance 窗口后、排除过滤前调用 `_apply_platform_floor()`：按 `list_servable_pool_platforms()` 找出窗口内缺席但仍可服务的平台，对每个用 `get_pool_candidates_for_platform(platform, limit=5)` 补拉并按 bvid 去重扩窗（补货时记一行 INFO），避免会话早期 top-40 全是 B站 而知乎 / 小红书 / 抖音标签页长时间空置；下游 MMR / 多样化不变。单平台池（纯 B站 安装）直接跳过，行为零变化 |
-
 ## 公开 API
 
 ### RecommendationEngine
@@ -267,6 +266,9 @@ count = await engine.precompute_delight_scores(
 - 对已经高分但缺 `delight_reason / delight_hook` 的 backlog 候选按同一 Evo 映射补齐文案，而不是永远卡在“只有分数没有解释”
 - 候选出池阈值与运行时 `pending delight` 查询共用同一套口径：先取 profile 默认底线（默认 `0.75`，探索开放度较低时 `0.80`），正式候选池已打 `delight_score` 样本不少于 150 条且总体标准差不低于 `0.08` 时，再用 `max(profile floor, delight_score Top 10% boundary)` 抬高门槛；样本不足、分布过于同质或初始化阶段回退 profile 默认底线
 - `get_pending_delight()` 只会暴露文案已就绪的候选，避免前端收到空 `reason/hook`
+- **与 `DelightScorer` 的关系（读代码前先看这条）**：`recommendation/delight.py` 里的 `DelightScorer`（embedding 多信号打分器）**当前不在生产链路上**——`src/` 内没有任何实例化点，生产代码只从该模块引用 `effective_delight_threshold` / `DEFAULT_DELIGHT_THRESHOLD` 两个阈值工具。线上 `delight_score` 完全由本函数复用 Evo 的 `relevance_score` 产出（为省一次 LLM 调用的有意决策，见函数 docstring）。因此改动 `DelightScorer` 内部信号（quality / novelty / exploration 等）**不会改变任何当前推荐输出**，只有把 scorer 重新接回线上时才会生效；`DelightScorer` 的单测覆盖也只保证该类自身行为，不构成对线上排序的验证。目录评分（`rating_score` / `rating_count` / `source_rank`）实际是经 `discovery/engine.py` 的 `_prompt_visible_content_fields` 在非零时进入 evaluator prompt，由 LLM 在语境中权衡后体现在 `relevance_score` 上——而不是靠打分公式里的常量
+
+> **delight 分的唯一产出路径（v0.3.174+）**：线上 `delight_score` 只由 `precompute_delight_scores()` 复用 Evo 写入的 `relevance_score` 产出——这是为省掉每条候选一次 LLM 调用的有意决策。目录评分类信号（`rating_score` / `rating_count` / `source_rank`）通过 `discovery.engine._prompt_visible_content_fields` 在非零时进入共享 evaluator prompt，由 LLM 在语境中权衡，**而不是**在推荐层再算一遍加权公式。`recommendation/delight.py` 因此只保留阈值口径（`DEFAULT_DELIGHT_THRESHOLD` / `CONSERVATIVE_DELIGHT_THRESHOLD` / `effective_delight_threshold()`）。该模块历史上还有一个 embedding 多信号打分器 `DelightScorer`（deep_need / insight / likes / novelty / quality / exploration 加权），它从未接进上述链路、生产零调用点，已随本版删除；若将来 delight 真需要独立打分，应接进 `precompute_delight_scores()`，不要再起一条平行打分路径。
 
 ### Recommendation
 

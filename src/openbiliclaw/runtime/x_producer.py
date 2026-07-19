@@ -363,6 +363,7 @@ def build_x_discovery_producer(
         return None
 
     # Lazy imports — only reached on the enabled path.
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
     from openbiliclaw.discovery.strategies.x import (
         XCreatorStrategy,
         XForYouStrategy,
@@ -379,6 +380,15 @@ def build_x_discovery_producer(
         cookie_env=str(getattr(x_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
     )
     x_client = XClient(cookie=cookie)
+    # Bind the health store to the credential this producer actually replays,
+    # resolved here once and handed to the same ``XClient``. A success recorded
+    # later is then provably about *this* cookie, so a cookie swapped in
+    # afterwards cannot inherit it. Binding at build time is also the safe
+    # direction: if the stored cookie changes without the producer being
+    # rebuilt, the fingerprint stays with the credential still making the
+    # requests, and the status endpoint reports the newer one as unverified
+    # rather than crediting it with someone else's success.
+    x_credential = credential_fingerprint("twitter", cookie)
     adapter = XAdapter(
         client=x_client,
         search=XSearchStrategy(client=x_client, llm_service=llm_service),
@@ -390,7 +400,7 @@ def build_x_discovery_producer(
         soul_engine=soul_engine,
         adapter=adapter,
         creator_store=XCreatorStore(database),
-        health_store=XSourceHealthStore(database),
+        health_store=XSourceHealthStore(database, credential_fingerprint=x_credential),
         enabled=True,
         min_interval_minutes=int(getattr(x_cfg, "min_interval_minutes", 60)),
         daily_search_budget=int(getattr(x_cfg, "daily_search_budget", 0)),
