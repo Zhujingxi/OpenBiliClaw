@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.174 (2026-07-18)**
+📌 Latest: **v0.3.175 (2026-07-19)**
 
-- **Bangumi joins as the eighth content source** — anime/book/game catalog via the official read-only API: search/ranked/latest discovery modes, one-step profile init from your public collection, with ratings and rank shown right on recommendation cards.
-- **Optional personal access token with auto-identity** — paste a Bangumi token to read your own collection including private entries; with the browser extension installed, your logged-in account is recognized with zero configuration.
-- **Token expiry is never silent anymore** — status and settings pages clearly flag a rejected token with a regeneration link, and saving a bad token is refused on the spot.
+- **Overseas sources now follow the system proxy by default** — Bangumi, YouTube and friends no longer time out on a direct connection out of the box, and the settings page spells out which sources need a proxy and which setting actually governs them.
+- **Xiaohongshu covers are back** — both the cover URL and the image bytes are now harvested while the extension scrapes the page, sidestepping the 403 that server-side fetches always hit.
+- **Bangumi cards credit their creators, and extension identity finally works** — director, original author or developer are parsed straight from the entry; until now "let the extension recognise your logged-in bgm.tv account" was unreachable from all three GUIs.
+- **A broken config no longer locks you out of settings** — when the LLM config fails or setup has not run, the home page routes you into the setup wizard instead of showing a raw 503 JSON body.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

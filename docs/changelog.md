@@ -4,7 +4,7 @@
 
 ---
 
-## 未发布
+## v0.3.175：海外出网默认跟随系统代理、Bangumi 身份诚实化与小红书封面修复（2026-07-19）
 
 - **修复「小红书内容都没头图」：封面 URL 与字节都在扩展抓取时采集**：用户日志复盘定位到两个叠加缺陷。(1) **后台标签页懒加载图片永不升级**——搜索/创作者任务在后台标签页刮取，卡片 `<img>` 永远停在内联 `data:` 占位符，DOM 提取拿不到真实封面 URL（铁证：受影响后端 7-12~16 对 hdslb / ytimg / douyinpic 抓取全部正常，却从未尝试过一次 xhscdn 抓取——它手里从没有过可抓的 URL）；(2) 即使有 URL，服务端预取也是与轮换 token 过期、与本机 CDN 出网的赛跑。修复三件套：扩展 `cover-harvest.ts` 从 `__INITIAL_STATE__` 形状无关深扫按 note_id 回填真实封面 URL（循环安全、深度/节点有界；DOM 两路提取一律拒收 `data:`/`blob:` 占位符）；随后在页面上下文抓封面字节（token 最新鲜、走用户浏览器会话），转 base64 挂 `cover_data`/`cover_content_type` 随既有通道上报（每批 ≤12 张、单张 ≤1MB、4s 超时、best-effort）；后端把非 http(s) 的 cover_url 归一为空，`save_extension_cover` 校验（白名单 / `image/*` / 大小 / base64）后写入既有 `data/image-cache/`——缓存 key 本就剥离轮换 token，serve 零改动全走缓存命中，已知候选去重的笔记也先存封面以就地治愈存量。已在隔离 serve-api 用真实小红书页面采集的真封面端到端验证（入库→落盘→原 URL 与换 token URL 均缓存命中 200）。同期补齐链路可观测性（`image_cache` 模块此前零日志，本次定位只能靠「慢取日志里 xhscdn 完全缺席、其它 CN CDN 都在」反推）：`fetch_cover_bytes` 失败按 host 限频 WARNING 且 detail 携带真实上游状态码，image-proxy 失败补 DEBUG 关联行，xhs ingest 每批 INFO 汇报缓存封面数。
 - **账号同步的 LLM 故障不再谎称「稍后会自动重试」**：画像分析因 LLM 不可用失败时，`last_sync_error_kind` 此前不写入，桌面 Web 只能落到通用文案「账号同步出错，稍后会自动重试」——但当真实原因是模型未配置（API Key/Base URL 被清空）或模型名不存在时，重试永远不会成功，用户被误导干等（真实用户日志复盘：provider 配置被手改清空 → 后端 degraded → 横幅仍承诺自动重试）。现在 `_persist_profile_analysis_error` 把 `classify_llm_unavailability` 的分类（`no_provider` / `model_not_found` / `rate_limited`）随错误一起持久化，`_user_facing_sync_message` 为前两类渲染指向设置页的可操作文案（「修复后会自动恢复」），`rate_limited` 如实保留自动重试承诺且 severity 降为 warning。文案仍由后端统一计算；**本次仅桌面 Web 消费该横幅**，扩展 popup / 移动 Web / CLI 不展示此状态。
