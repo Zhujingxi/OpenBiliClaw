@@ -55,9 +55,11 @@ jobs:
       - name: Run pytest (single run, emits JUnit XML + coverage)
         # Single-run collection per the refactor plan: JUnit XML and coverage
         # are emitted in the same pass that produces pass/fail, so the
-        # baseline comparator never re-runs the suite. The known release-
-        # workflow failure is expected to fail here; the comparator below
-        # recognizes it via tests/contracts/quality-baseline.json.
+        # baseline comparator never re-runs the suite. Any failure that
+        # appears here must be explained by tests/contracts/quality-baseline.json
+        # or the comparator fails the next step (fail-closed). The aggregate-
+        # release Python-picker failure previously allowlisted here was fixed
+        # in f6123bcc and removed from the baseline; recurrence now fails CI.
         # Same errexit guard as the mypy step: `set +e` around the expected-
         # to-fail invocation, capture `$?` immediately, then re-enable `-e`
         # before writing build/pytest.status.

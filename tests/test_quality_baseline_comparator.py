@@ -423,9 +423,9 @@ def test_parse_mypy_output_grammar_unit() -> None:
         parse_mypy_output("src/a.py:1:1: error: x  [assignment]\n")
     with pytest.raises(MypyOutputError, match="unparseable"):
         parse_mypy_output("garbage\n" + MYPY_CLEAN)
-    # Crash-only noise must be rejected: the noise regex matches the crash
-    # line but the missing summary still fails closed.
-    with pytest.raises(MypyOutputError, match="summary"):
+    # Crash-only noise must be rejected: INTERNAL ERROR is not benign noise
+    # and fails closed as an unparseable line (review-t_e03bfeff P2).
+    with pytest.raises(MypyOutputError, match="unparseable"):
         parse_mypy_output("mypy: INTERNAL ERROR: boom\n")
     assert parse_mypy_output(MYPY_CLEAN) == []
     diags = parse_mypy_output(MYPY_WITH_ERROR)
@@ -999,6 +999,175 @@ def test_parse_mypy_summary_unit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# review-t_e03bfeff (repair t_c4bd6233): round-3 fail-closed regressions
+# ---------------------------------------------------------------------------
+
+
+def test_mypy_found_zero_errors_with_exit1_fails_closed(tmp_path: Path) -> None:
+    """P1-3 repro: 'Found 0 errors in 0 files (checked 227 source files)' +
+    mypy exit 1 must fail closed. Exit 1 means diagnostics were found; a
+    zero-error summary is contradictory."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Found 0 errors in 0 files (checked 227 source files)\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+def test_mypy_success_summary_with_trailer_fails_closed(tmp_path: Path) -> None:
+    """P2-5 repro: 'Success: no issues found in 227 source files UNTRUSTED
+    TRAILER' must be rejected as unparseable, not accepted as a success
+    summary."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Success: no issues found in 227 source files UNTRUSTED TRAILER\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_mypy_found_errors_with_trailer_fails_closed(tmp_path: Path) -> None:
+    """P2-5 repro: a 'Found N errors' line with an untrusted trailer is
+    rejected as unparseable."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Found 1 error in 1 file (checked 227 source files) EXTRA\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_mypy_internal_error_line_fails_closed(tmp_path: Path) -> None:
+    """P2-5 repro: 'mypy: INTERNAL ERROR' is not benign noise and must fail
+    closed as an unparseable line."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "mypy: INTERNAL ERROR: boom\nSuccess: no issues found in 227 source files\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_fingerprint_long_headline_preserves_nested_cause(tmp_path: Path) -> None:
+    """P1-4 repro: a 186-char headline must not crowd the nested cause out
+    of the fingerprint. Mutating only the nested cause must still change
+    the fingerprint and fail comparison."""
+    node = "tests/test_x.py::test_y"
+    long_headline = "AssertionError: " + "x" * 170
+    original_fp = (
+        long_headline + "\n"
+        '  File "<stdin>", line 1, in <module>\n'
+        "ModuleNotFoundError: No module named 'tomllib'"
+    )
+    mutated_fp = original_fp.replace("ModuleNotFoundError", "SecurityError")
+
+    junit_orig = _minimal_junit(tmp_path / "orig.xml", failures={node: original_fp})
+    junit_mut = _minimal_junit(tmp_path / "mut.xml", failures={node: mutated_fp})
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[
+            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(original_fp)}
+        ],
+    )
+
+    # The original failure matches the baseline fingerprint and passes.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_orig),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 0
+
+    # The mutated nested cause produces a different fingerprint and fails.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_mut),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
 # review-t_e03bfeff P2-3: testsuite@skipped must match parsed <skipped>
 # ---------------------------------------------------------------------------
 
@@ -1136,11 +1305,10 @@ AGGREGATE_RELEASE_MESSAGE = (
 )
 
 
-def test_checked_in_baseline_tolerates_unchanged_nested_cause(tmp_path: Path) -> None:
-    """End-to-end regression against the CHECKED-IN baseline (not one
-    synthesized from the current normalizer): the unchanged real nested
-    cause must be tolerated. Guards the baseline fingerprint and the
-    normalizer grammar from drifting apart again."""
+def test_checked_in_baseline_rejects_obsolete_aggregate_release_failure(tmp_path: Path) -> None:
+    """The aggregate-release ModuleNotFoundError was fixed in f6123bcc and
+    removed from the checked-in baseline. Recurrence must now be rejected
+    as a new failure, not tolerated (repair t_c4bd6233)."""
     junit = _minimal_junit(
         tmp_path / "junit.xml",
         failures={AGGREGATE_RELEASE_NODE: AGGREGATE_RELEASE_MESSAGE},
@@ -1160,12 +1328,12 @@ def test_checked_in_baseline_tolerates_unchanged_nested_cause(tmp_path: Path) ->
             "1",
         ]
     )
-    assert rc == 0
+    assert rc == 1
 
 
 def test_checked_in_baseline_rejects_mutated_nested_cause(tmp_path: Path) -> None:
-    """ModuleNotFoundError -> SecurityError at the same allowlisted node must
-    be rejected by the checked-in baseline fingerprint."""
+    """ModuleNotFoundError -> SecurityError at the same (now removed) node
+    must also be rejected by the checked-in baseline."""
     mutated = AGGREGATE_RELEASE_MESSAGE.replace("ModuleNotFoundError", "SecurityError")
     junit = _minimal_junit(
         tmp_path / "junit.xml",

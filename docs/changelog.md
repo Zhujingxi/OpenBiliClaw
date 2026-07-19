@@ -10,6 +10,17 @@
 
 ---
 
+## 质量基线比较器复审修复（评审 t_e03bfeff 第三轮 P1×3 + P2）
+
+- **集成分支到 `origin/main @ f6123bcc`（P1）**：合并 PR #13 合入点，`git merge-base --is-ancestor origin/main HEAD` 通过；`src/openbiliclaw/api/app.py` 与 `docs/changelog.md` 的 PR #13 变更完整保留，无无关回归工件。
+- **移除过期聚合发布 known-failure（P1）**：f6123bcc 修复了 `sync-aggregate-release.sh` 的 Python 选择器根因，`test_aggregate_release_helper_does_not_backfill_previous_channel_assets` 已 hermetic；从 `tests/contracts/quality-baseline.json` 删除该条 ModuleNotFoundError 指纹，同步更新 `.github/workflows/ci.yml` 注释——复发现在会被比较器拒绝而非容忍。新增端到端回归证明 checked-in baseline 对该旧失败返回 exit 1。
+- **`Found 0 errors` + exit 1 fail-closed（P1）**：`scripts/check_quality_baseline.py` 在 occurrence 对账之后新增显式矛盾检测——mypy exit 1（发现诊断）与 `Found 0 errors` 摘要矛盾，直接判 fail。新增回归用例覆盖该精确场景。
+- **长 headline 指纹保留 nested cause（P1）**：`_normalize_failure_fingerprint()` 从「合并三行后整体截断 200 字符」改为「headline 前 120 字符 + tail 后 80 字符」，JUnit XML 属性将换行折叠为空格后仍能保证 nested cause 不被长 headline 挤出指纹。新增 186 字符 headline 变异回归。
+- **mypy 摘要语法 fullmatch 锚定（P2）**：`MYPY_SUCCESS_RE` / `MYPY_FOUND_ERRORS_RE` 改为 `$` 结尾锚定，`Success: no issues found in 227 source files UNTRUSTED TRAILER` 等畸形摘要被识别为 unparseable 并以 exit 2 关闭；`mypy: INTERNAL ERROR` 从 `MYPY_NOISE_RE` 移除， crash 输出不再被当作良性噪音。新增 3 个回归用例（success trailer、found-errors trailer、INTERNAL ERROR）。
+- **测试**：`tests/test_quality_baseline_comparator.py` 新增 6 个回归用例，总计 51 passed；`tests/test_aggregate_release_workflow.py` 7 passed 确认聚合发布修复稳定。
+
+---
+
 ## 质量基线比较器复审修复（评审 t_e03bfeff 第二轮 P1×3）
 
 - **基线指纹同步新语法（P1）**：`tests/contracts/quality-baseline.json` 的聚合发布 known-failure 指纹从旧两行语法（含字面 `\n`）重生成到现行三行语法（headline + traceback frame + nested cause，whitespace 折叠后单行存储）；新增端到端回归直接以 checked-in baseline 运行比较器——真实 nested message 原样通过（exit 0），`ModuleNotFoundError → SecurityError` 变异被拒（exit 1），防止 baseline 与 normalizer 再次漂移。baseline description 与 `scripts/generate_quality_baseline.py` 发射文案同步更新为准确描述指纹语法。

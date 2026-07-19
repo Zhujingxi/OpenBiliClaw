@@ -55,17 +55,21 @@ MYPY_LINE_RE = re.compile(
 
 # Mypy summary grammar. We require at least one of these forms at the end
 # of a non-empty stream; anything else is treated as unparseable/crash
-# output and fails closed.
-MYPY_SUCCESS_RE = re.compile(r"^Success: no issues found in \d+ source files?\b")
-MYPY_FOUND_ERRORS_RE = re.compile(r"^Found (?P<count>\d+) errors? in \d+ files?\b")
+# output and fails closed. The grammar is fullmatch-anchored so a trailer
+# after the supported sentence is rejected (review-t_e03bfeff P2).
+MYPY_SUCCESS_RE = re.compile(r"^Success: no issues found in \d+ source files?$")
+MYPY_FOUND_ERRORS_RE = re.compile(
+    r"^Found (?P<count>\d+) errors? in \d+ files?(?: \(checked \d+ source files?\))?$"
+)
 
 # Recognizable non-diagnostic lines mypy may emit alongside the summary
 # (config notes, unused-section notes, etc.). Anything else that is not a
 # diagnostic line and not one of these makes the stream unparseable.
+# NOTE: ``mypy: INTERNAL ERROR`` is NOT benign noise — it indicates a crash
+# and must fail closed via the unparseable-line path (review-t_e03bfeff P2).
 MYPY_NOISE_RE = re.compile(
     r"^(?:pyproject\.toml|mypy\.ini|setup\.cfg|tox\.ini): note: |"
-    r"^note: |"
-    r"^mypy: (?:INTERNAL ERROR|error: |warning: )"
+    r"^note: "
 )
 
 
@@ -215,21 +219,20 @@ def _normalize_failure_fingerprint(raw: str) -> str:
     The first line of pytest's failure message carries the exception type
     and the headline message; the second line is typically the traceback
     frame; the third line carries the nested cause (e.g.
-    ``ModuleNotFoundError: No module named 'tomllib'``). We keep all three
-    lines, collapse whitespace, strip numeric literals and tmp paths so the
-    fingerprint is stable across runs and machines, then truncate to keep
-    the baseline JSON readable. Keeping the nested-cause line prevents a
-    real failure cause mutation from being masked by an allowlist entry
-    (review-t_e03bfeff P1-1).
+    ``ModuleNotFoundError: No module named 'tomllib'``). Because JUnit XML
+    attributes flatten newlines to spaces, we cannot rely on line structure
+    at comparison time. Instead we extract a bounded headline component
+    (first 120 chars) and a bounded tail component (last 80 chars) so the
+    nested cause at the end is always captured regardless of headline length
+    (review-t_e03bfeff P1-1 and follow-up). Whitespace is collapsed and
+    numeric literals / tmp paths are scrubbed for stability.
     """
-    # Keep the first three lines: exception headline + traceback frame +
-    # nested cause.
-    head = "\n".join((raw or "").splitlines()[:3])
-    head = re.sub(r"\s+", " ", head).strip()
-    # Strip machine-specific tmp paths and numeric literals.
+    head = re.sub(r"\s+", " ", (raw or "")).strip()
     head = re.sub(r"/[^\s]*?(?:pytest-of-[^/]+|tmp[Tt][^/]*)/[^\s]*", "<TMP>", head)
     head = re.sub(r"\b\d+\b", "<N>", head)
-    return head[:200]
+    if len(head) <= 200:
+        return head
+    return head[:120] + " ... " + head[-80:]
 
 
 class JUnitStructureError(ValueError):
@@ -632,12 +635,25 @@ def main(argv: list[str] | None = None) -> int:
     # same-message diagnostics at different lines are one identity for
     # baseline comparison but two occurrences for summary reconciliation.
     # A summary claiming N errors with zero parsed rows remains a
-    # contradiction (truncation) and fails closed.
+    # contradiction (truncation) and fails closed. A ``Found 0 errors``
+    # summary with exit code 1 is likewise contradictory: exit 1 means
+    # diagnostics were found, so declaring zero errors while exiting 1 is
+    # a fail-open path that must be rejected (review-t_e03bfeff P1-3).
     if mypy_summary_error_count is not None and mypy_summary_error_count != mypy_error_occurrences:
         problems.append(
             f"mypy summary declares {mypy_summary_error_count} error(s) "
             f"but {mypy_error_occurrences} diagnostic occurrence(s) were parsed; "
             "refusing to accept a contradictory artifact (fail closed)"
+        )
+    if (
+        args.mypy_exit_code == 1
+        and mypy_summary_error_count is not None
+        and mypy_summary_error_count == 0
+    ):
+        problems.append(
+            "mypy exit code 1 (diagnostics found) contradicts mypy output "
+            "summary 'Found 0 errors'; refusing to accept a contradictory "
+            "artifact (fail closed)"
         )
 
     problems.extend(compare_pytest(baseline, failures, errors, skips, collection_errors))
