@@ -10096,6 +10096,62 @@ class TestConfigApiE2E:
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
 
+    def test_get_config_redacts_absolute_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Absolute ``logging.directory`` must not leak through /api/config.
+
+        Regression for the review finding that ``directory="/srv/private/..."``
+        previously produced an absolute ``file_path`` verbatim, leaking the
+        host filesystem layout. The wire form must reduce absolute (and
+        ``~``-prefixed) directories to their basename; relative directories
+        still pass through unchanged.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        # directory is reduced to its basename — the full host path is gone.
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["filename"] == "backend.log"
+        # file_path joins the redacted directory and filename; it must not
+        # expose any absolute host path component.
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "/srv" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+        assert "openbiliclaw/logs" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_tilde_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """``~``-prefixed logging.directory also leaks the home layout and is
+        reduced to its basename on the wire."""
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~/private-logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "private-logs"
+        assert data["logging"]["file_path"] == "private-logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "~" not in data["logging"]["file_path"]
+
     def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
         self, monkeypatch, tmp_path
     ) -> None:

@@ -17,6 +17,7 @@ import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import parse_qsl, quote, urlparse
 from uuid import UUID
@@ -1214,6 +1215,36 @@ def _mode_to_flags(mode: str) -> tuple[bool, bool]:
 def _is_masked_proxy_echo(value: str) -> bool:
     """Whether a submitted proxy value is a masked GET echo (contains ``***``)."""
     return "***" in value
+
+
+def _safe_logging_directory_for_wire(directory: str) -> str:
+    """Redact a configured logging directory for ``GET /api/config``.
+
+    ``LoggingConfig.directory`` accepts absolute paths (e.g.
+    ``/srv/private/openbiliclaw/logs``) and ``~``-prefixed home-relative
+    paths. Both reveal the host filesystem layout to any client that can
+    reach the API, so the wire form must not echo them verbatim.
+
+    Contract:
+    - Relative directory (``"logs"``, ``"runtime-logs"``) → returned as-is.
+    - Absolute or ``~``-prefixed directory → reduced to its final path
+      component (basename). The basename is non-reversible: a client cannot
+      reconstruct the parent directories from it.
+
+    The on-disk logging path is unaffected — this redaction applies only to
+    the API response.
+    """
+    if not directory:
+        return directory
+    # ``PurePath(directory).is_absolute()`` is platform-correct for the host
+    # the backend runs on; ``~`` is treated separately because ``Path`` does
+    # not expand it and it still leaks the home-directory layout.
+    if PurePath(directory).is_absolute() or directory.startswith("~"):
+        # Use both separators so Windows-style absolutes serialised on a
+        # POSIX host (and vice versa) still reduce to their basename.
+        parts = [p for p in directory.replace("\\", "/").split("/") if p]
+        return parts[-1] if parts else ""
+    return directory
 
 
 def create_app(
@@ -10325,12 +10356,21 @@ def create_app(
             logging=LoggingConfigOut(
                 level=cfg.logging.level,
                 file_level=cfg.logging.file_level,
-                directory=cfg.logging.directory,
+                # Redact host-revealing directories: absolute paths and
+                # ``~``-prefixed home-relative paths leak the host filesystem
+                # layout when the API is bound beyond loopback. The wire form
+                # keeps relative directories as-is and reduces absolute or
+                # ``~``-prefixed directories to their basename (non-reversible).
+                directory=_safe_logging_directory_for_wire(cfg.logging.directory),
                 filename=cfg.logging.filename,
-                # Redact resolved absolute path: expose only the configured
-                # relative form (directory/filename). Absolute paths leak host
-                # filesystem layout when the API is bound beyond loopback.
-                file_path=f"{cfg.logging.directory}/{cfg.logging.filename}",
+                # ``file_path`` is the wire-facing joined form of the redacted
+                # directory + filename. It never contains an absolute host
+                # path: relative directories pass through, absolute/``~``
+                # directories collapse to their basename first.
+                file_path=(
+                    f"{_safe_logging_directory_for_wire(cfg.logging.directory)}"
+                    f"/{cfg.logging.filename}"
+                ),
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
                 aggregate_budget_mb=cfg.logging.aggregate_budget_mb,
