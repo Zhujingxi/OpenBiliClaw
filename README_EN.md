@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.176 (2026-07-19)**
+📌 Latest: **v0.3.177 (2026-07-19)**
 
-- **A "credentials ready" badge now says what backs it** — each source states whether the verdict came from a live probe, a local file or a browser heartbeat, and all eight carry a "test connection" button that checks on the spot.
-- **Douyin no longer sits at "unverified" forever** — a valid cookie is recognised as such, and a successful check stays fresh for six hours instead of one minute.
-- **Bangumi joins the same contract** — anonymous access to public collections and a genuinely verified personal token are now two distinguishable states.
+- **Fixed the first-run setup wizard freezing when the LLM config is broken** — degraded mode no longer blocks the wizard's shared script, so Base URL can be filled and the config repaired instead of dead-ending.
+- **The extension now points to the fix when the backend is degraded** — the recommend tab shows the actual config error plus a "repair in settings" button instead of a generic "API not responding".
+- **Init failures always state their cause** — invalid API key / unreachable service / missing model are distinguished, and a restart-interrupted init is labelled honestly instead of leaving phantom progress.
+- **Local Ollama is now embedding-only across onboarding** — the wizard, CLI and install script no longer offer it as a chat provider; advanced users can still enable it in settings.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
