@@ -258,11 +258,7 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                     {
                         "config": {
                             "llm": {
-                                "default_provider": "ollama",
-                                "ollama": {
-                                    "model": "qwen2.5:7b",
-                                    "base_url": "http://localhost:11434/v1",
-                                },
+                                "default_provider": "openai_compatible",
                                 "openai_compatible": {
                                     "api_key": "sk-t************alue",
                                     "model": "compat-model",
@@ -469,21 +465,25 @@ def test_setup_wizard_e2e_restores_fields_per_provider(
     """Provider switches must not leak another provider's model or endpoint."""
     base_url, _ = guided_init_server
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.wait_for_function("document.querySelector('#model').value === 'qwen2.5:7b'")
+    chromium_page.wait_for_function("document.querySelector('#model').value === 'compat-model'")
 
-    chromium_page.locator("#provider").select_option("openai_compatible")
-    assert chromium_page.locator("#model").input_value() == "compat-model"
     assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
     assert chromium_page.locator("#apiFlavor").input_value() == "responses"
 
     chromium_page.locator("#model").fill("compat-draft")
-    chromium_page.locator("#provider").select_option("ollama")
-    assert chromium_page.locator("#model").input_value() == "qwen2.5:7b"
-    assert chromium_page.locator("#baseUrl").input_value() == "http://localhost:11434/v1"
+    chromium_page.locator("#provider").select_option("deepseek")
+    assert chromium_page.locator("#model").input_value() == "deepseek-v4-flash"
+    assert chromium_page.locator("#baseUrl").input_value() == ""
 
     chromium_page.locator("#provider").select_option("openai_compatible")
     assert chromium_page.locator("#model").input_value() == "compat-draft"
     assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
+
+    # Local Ollama is embedding-only; the wizard must not offer it for chat.
+    provider_values = chromium_page.evaluate(
+        "() => Array.from(document.querySelectorAll('#provider option')).map((o) => o.value)"
+    )
+    assert "ollama" not in provider_values
 
 
 def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
@@ -494,7 +494,8 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -529,7 +530,8 @@ def test_setup_wizard_e2e_partial_success_finishes_without_second_pool_wait(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -555,7 +557,8 @@ def test_setup_wizard_e2e_save_llm_does_not_start_guided_init(
     base_url, stub = guided_init_server
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
 
@@ -573,7 +576,8 @@ def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -648,7 +652,8 @@ def test_web_e2e_surfaces_timeout_cause_and_recovery_actions(
 
     if surface == "setup":
         chromium_page.goto(f"{base_url}/setup/")
-        chromium_page.locator("#provider").select_option("ollama")
+        chromium_page.locator("#provider").select_option("deepseek")
+        chromium_page.locator("#apiKey").fill("sk-e2e-test")
         chromium_page.locator("#saveLlm").click()
         chromium_page.wait_for_selector('[data-panel="1"].active')
         chromium_page.locator("#next1").click()
@@ -714,7 +719,8 @@ def test_setup_wizard_e2e_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -736,7 +742,8 @@ def test_setup_wizard_e2e_default_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -759,7 +766,8 @@ def test_setup_wizard_e2e_blocks_missing_bilibili_without_post(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
     chromium_page.locator("#saveLlm").click()
     chromium_page.wait_for_selector('[data-panel="1"].active')
     chromium_page.locator("#next1").click()
@@ -983,7 +991,8 @@ def _open_init_sources(page: Any, base_url: str, surface: str) -> tuple[Any, Any
     """Land on the source picker of either surface; return (start, reason)."""
     if surface == "setup":
         page.goto(f"{base_url}/setup/")
-        page.locator("#provider").select_option("ollama")
+        page.locator("#provider").select_option("deepseek")
+        page.locator("#apiKey").fill("sk-e2e-test")
         page.locator("#saveLlm").click()
         page.wait_for_selector('[data-panel="1"].active')
         page.locator("#next1").click()

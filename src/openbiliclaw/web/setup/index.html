@@ -133,7 +133,6 @@
           <option value="gemini">Gemini（Google）</option>
           <option value="openrouter">OpenRouter</option>
           <option value="openai_compatible">OpenAI 兼容接口（自建 / 第三方）</option>
-          <option value="ollama">本地 Ollama（免 key，需自备聊天模型）</option>
         </select>
 
         <div id="keyWrap">
@@ -154,11 +153,6 @@
             <option value="">chat/completions（默认，绝大多数服务）</option>
             <option value="responses">responses（部分第三方网关的 GPT 模型只开放这个）</option>
           </select>
-        </div>
-
-        <div id="ollamaNote" class="hint" style="display:none; margin-top:14px">
-          本地 Ollama 已随安装包附带,无需填 key。聊天默认用 <code>qwen2.5</code> 等模型,
-          首次使用前请确保已 <code>ollama pull</code> 对应模型(embedding 的 bge-m3 已自动就绪)。
         </div>
 
         <label for="model">模型名</label>
@@ -256,7 +250,6 @@
       gemini: ["https://aistudio.google.com/app/apikey", "Google AI Studio"],
       openrouter: ["https://openrouter.ai/keys", "OpenRouter"],
       openai_compatible: ["", ""],
-      ollama: ["", ""],
     };
     const DEFAULT_MODELS = {
       deepseek: "deepseek-v4-flash",
@@ -265,7 +258,6 @@
       gemini: "gemini-2.5-flash",
       openrouter: "openai/gpt-5-nano",
       openai_compatible: "",
-      ollama: "qwen2.5:7b",
     };
     // Platform roster and source-auth interpretation come from the module the
     // desktop page and the extension side panel also load, so this wizard can
@@ -371,17 +363,14 @@
 
     function renderProvider() {
       const p = $("#provider").value;
-      const isOllama = p === "ollama";
       const isCompat = p === "openai_compatible";
       const isClaude = p === "claude";
       $("#apiKey").placeholder = savedKeyProviders.has(p) ? "已保存，留空则沿用当前 Key" : "粘贴你的 API Key";
-      $("#keyWrap").style.display = isOllama ? "none" : "block";
       // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
       $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
       $("#baseHint").style.display = isClaude ? "block" : "none";
       // openai_compatible 可切 /v1/responses 协议（issue #72）
       $("#flavorWrap").style.display = isCompat ? "block" : "none";
-      $("#ollamaNote").style.display = isOllama ? "block" : "none";
       const [url, name] = KEY_LINKS[p] || ["", ""];
       $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
       const modelInput = $("#model");
@@ -405,7 +394,7 @@
       const apiKey = $("#apiKey").value.trim();
       const baseUrl = $("#baseUrl").value.trim();
       const model = $("#model").value.trim();
-      if (provider !== "ollama" && !apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
+      if (!apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key。", "err"); return; }
       if (provider === "openai_compatible" && !baseUrl) { showMsg("#msg0", "OpenAI 兼容接口需要填 Base URL。", "err"); return; }
       if (!model) { showMsg("#msg0", "请填写模型名。", "err"); return; }
 
@@ -440,8 +429,7 @@
         providerDrafts.set(provider, savedFields);
         savedProviderConfigs.set(provider, savedFields);
         if (apiKey) savedKeyProviders.add(provider);
-        const label = provider === "ollama" ? "本地 Ollama" : provider;
-        $("#doneLlm").textContent = "已连接 · " + label;
+        $("#doneLlm").textContent = "已连接 · " + provider;
         setStep(1);
       } catch (e) {
         showMsg("#msg0", "保存失败：" + e.message, "err");
