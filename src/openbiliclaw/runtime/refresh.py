@@ -98,6 +98,11 @@ _PLATFORM_SOURCE_ORDER = (
     "reddit",
 )
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
+# Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
+# per drain tick. Deliberately small so pool composition converges toward the
+# configured shares gently (≤3 rows/minute) instead of a disruptive bulk purge;
+# admission fills the freed slots with under-share supply the same tick.
+_POOL_REBALANCE_MAX_PER_TICK = 3
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
 
@@ -2243,6 +2248,12 @@ class ContinuousRefreshController:
             logger.debug("candidate eval drain skipped: reason=locked caller=%s", reason)
             return {"evaluated": 0, "cached": 0, "rejected": 0}
         async with self._discovery_drain_lock:
+            # Pool-share fairness (spec 2026-07-20, Phase 3): before measuring
+            # the pool, gently evict a few over-share rows if an under-share
+            # source has supply waiting. This frees slots the same tick so the
+            # admission below (and the pool_at_cap gate) reflect the freed room.
+            with suppress(Exception):
+                self._rebalance_pool_shares()
             try:
                 pool_available = self.database.count_pool_candidates(
                     xhs_self_nickname=self._xhs_self_nickname()
@@ -3061,6 +3072,88 @@ class ContinuousRefreshController:
 
     def _source_deficit(self, source_family: str) -> int:
         return self._source_requested_count(source_family)
+
+    def _evaluated_waiting_by_family(self) -> dict[str, int]:
+        """Return admission-waiting ``evaluated`` candidate counts per family."""
+        count_fn = getattr(self.database, "count_evaluated_discovery_candidates_by_source", None)
+        if not callable(count_fn):
+            return {}
+        try:
+            counts = count_fn()
+        except Exception:
+            logger.debug("evaluated-waiting-by-source snapshot failed", exc_info=True)
+            return {}
+        return {str(family): int(count) for family, count in dict(counts).items()}
+
+    def _rebalance_pool_shares(self) -> int:
+        """Gently free over-share slots for under-share sources with supply waiting.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3). Runs inside the drain
+        tick before admission. Only acts when the visible pool is at/over
+        target AND some under-share source has ``evaluated`` supply waiting to
+        take a freed slot. Evicts at most ``_POOL_REBALANCE_MAX_PER_TICK`` (3)
+        rows from the single most over-share source — the lowest-scored oldest
+        rows — so the pool converges toward the configured shares at a calm,
+        quality-preserving rate. Never touches under-share or at-share sources.
+        """
+        demote_fn = getattr(self.database, "demote_lowest_ranked_pool_rows", None)
+        if not callable(demote_fn):
+            return 0
+        try:
+            available_total = self.database.count_pool_candidates(
+                xhs_self_nickname=self._xhs_self_nickname()
+            )
+        except TypeError:
+            available_total = self.database.count_pool_candidates()
+        except Exception:
+            logger.debug("pool rebalance pool-count read failed", exc_info=True)
+            return 0
+        if int(available_total) < self.pool_target_count:
+            return 0
+
+        target_counts = self._source_target_counts()
+        available_by_source = self._count_pool_available_candidates_by_source()
+        waiting_by_source = self._evaluated_waiting_by_family()
+
+        # Budget = how many freed slots an under-share source could actually
+        # fill right now (deficit clamped by its evaluated waiting supply).
+        fillable = 0
+        for family, target in target_counts.items():
+            deficit = int(target) - self._platform_source_count(available_by_source, family)
+            if deficit > 0:
+                fillable += min(deficit, int(waiting_by_source.get(family, 0)))
+        if fillable <= 0:
+            return 0
+
+        # Pick the single most over-share source.
+        over_share: list[tuple[int, str]] = []
+        for family, target in target_counts.items():
+            overage = self._platform_source_count(available_by_source, family) - int(target)
+            if overage > 0:
+                over_share.append((overage, family))
+        if not over_share:
+            return 0
+        over_share.sort(reverse=True)
+        overage, family = over_share[0]
+
+        demote_count = min(_POOL_REBALANCE_MAX_PER_TICK, overage, fillable)
+        if demote_count <= 0:
+            return 0
+        try:
+            demoted = int(demote_fn(source_family=family, limit=demote_count) or 0)
+        except Exception:
+            logger.debug("pool rebalance demotion failed", exc_info=True)
+            return 0
+        if demoted:
+            logger.info(
+                "pool rebalance: demoted %d over-share '%s' row(s) (overage=%d) to free "
+                "slots for %d under-share row(s) waiting admission",
+                demoted,
+                family,
+                overage,
+                fillable,
+            )
+        return demoted
 
     # ── keyword planner deficit / catalyst口径 (P1.6) ─────────────────────
     # The unified keyword planner reuses these so its "real deficit" shares the

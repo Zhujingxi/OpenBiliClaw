@@ -4110,6 +4110,85 @@ class Database:
             counts[source_family] += int(row["count"])
         return dict(counts)
 
+    def count_evaluated_discovery_candidates_by_source(self) -> dict[str, int]:
+        """Return ``evaluated`` (admission-waiting) candidates grouped by family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): the rebalancer only
+        evicts over-share rows when an under-share source actually has supply
+        sitting in ``evaluated`` ready to take the freed slot.
+        """
+        self._ensure_fresh_read()
+        counts: dict[str, int] = defaultdict(int)
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status = 'evaluated'
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
+        return dict(counts)
+
+    def demote_lowest_ranked_pool_rows(self, *, source_family: str, limit: int) -> int:
+        """Mark the *limit* lowest-ranked fresh visible rows of one family stale.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): a gentle, per-tick
+        rebalance frees a few slots held by an over-supplied source so an
+        under-share source can be seated. Selection is the lowest
+        ``relevance_score`` then oldest ``last_scored_at`` (quality never
+        regresses — the best rows stay). Only ``fresh``, non-disliked,
+        not-yet-recommended rows are touched, and they are set to the existing
+        ``'stale'`` status (no new enum). Returns the number of rows demoted.
+        """
+        demote_limit = max(0, int(limit))
+        family = str(source_family or "").strip()
+        if demote_limit <= 0 or not family:
+            return 0
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT bvid, source, source_platform, relevance_score, last_scored_at
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND NOT EXISTS (
+                SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+              )
+            """
+        )
+        candidates: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            bvid = str(row_dict.get("bvid", "")).strip()
+            if not bvid:
+                continue
+            if _pool_source_family(row_dict["source"], row_dict["source_platform"]) != family:
+                continue
+            candidates.append(row_dict)
+        candidates.sort(
+            key=lambda r: (
+                float(r.get("relevance_score") or 0.0),
+                str(r.get("last_scored_at") or ""),
+            )
+        )
+        victims = [str(r["bvid"]) for r in candidates[:demote_limit]]
+        if not victims:
+            return 0
+        placeholders = ", ".join("?" for _ in victims)
+        result = self._execute_write(
+            f"""
+            UPDATE content_cache
+            SET pool_status = 'stale'
+            WHERE bvid IN ({placeholders})
+              AND COALESCE(pool_status, 'fresh') = 'fresh'
+            """,
+            victims,
+        )
+        return result.rowcount
+
     def count_pool_readiness(
         self,
         *,
