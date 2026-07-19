@@ -24,6 +24,7 @@ from openbiliclaw.discovery.candidate_pool import (
     row_to_discovered_content,
 )
 from openbiliclaw.llm.base import classify_llm_unavailability
+from openbiliclaw.sources.platforms import source_family as _source_family
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -147,6 +148,12 @@ class DiscoveryCandidatePipeline:
     # inline.  The API runtime leaves this unset because its coordinator owns
     # that stage after claim completion.
     on_candidates_admitted: Callable[[Any, int], Any] | None = None
+    # Pool-share fairness (spec 2026-07-20, Phase 2): optional provider of the
+    # per-family visible-pool targets ``{source_family: target}``. When set,
+    # ``_admit_until_full`` becomes share-aware (under-share rows admitted
+    # first, over-share rows only as an availability fallback). ``None`` keeps
+    # the legacy global-cap-only FIFO admission byte-for-byte (invariant 5).
+    source_share_targets: Callable[[], dict[str, int]] | None = None
     time_fn: Callable[[], float] = field(default=time.monotonic, repr=False)
     _drain_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -740,8 +747,12 @@ class DiscoveryCandidatePipeline:
         get_rows = getattr(self.database, "get_evaluated_discovery_candidates_for_admission", None)
         if not callable(get_rows):
             return 0, 0
+        preferred = self._under_share_platforms()
         try:
-            rows = list(get_rows(limit=limit))
+            try:
+                rows = list(get_rows(limit=limit, preferred_source_platforms=preferred))
+            except TypeError:
+                rows = list(get_rows(limit=limit))
         except Exception:
             logger.debug("evaluated discovery candidates unavailable", exc_info=True)
             return 0, 0
@@ -871,47 +882,204 @@ class DiscoveryCandidatePipeline:
         admitted_items: list[DiscoveredContent],
         limit: int | None = None,
     ) -> tuple[int, int]:
+        cache_limit = None if limit is None else max(0, int(limit))
+        targets = self._share_targets()
+        if targets is None:
+            # Legacy path (invariant 5): global-cap-only FIFO admission.
+            return self._admit_rows(
+                accepted,
+                recently_viewed=recently_viewed,
+                admitted_items=admitted_items,
+                cache_limit=cache_limit,
+            )
+        return self._admit_share_aware(
+            accepted,
+            targets=targets,
+            recently_viewed=recently_viewed,
+            admitted_items=admitted_items,
+            cache_limit=cache_limit,
+        )
+
+    def _admit_rows(
+        self,
+        accepted: list[tuple[dict[str, Any], DiscoveredContent]],
+        *,
+        recently_viewed: set[str],
+        admitted_items: list[DiscoveredContent],
+        cache_limit: int | None,
+    ) -> tuple[int, int]:
         cached = 0
         rejected = 0
-        cache_limit = None if limit is None else max(0, int(limit))
         for row, item in accepted:
             if (cache_limit is not None and cached >= cache_limit) or self._pool_full():
                 break
-            if self._is_recently_viewed(item, recently_viewed):
-                self.database.reject_discovery_candidate(
-                    int(row["id"]),
-                    status=REJECTED_RECENTLY_VIEWED,
-                    reason="recently viewed",
-                )
-                rejected += 1
-                continue
-            block_status, block_reason = self._cache_admission_block(row, item)
-            if block_status:
-                self.database.reject_discovery_candidate(
-                    int(row["id"]),
-                    status=block_status,
-                    reason=block_reason,
-                )
-                rejected += 1
-                continue
-            cache_fn = getattr(self.discovery_engine, "cache_evaluated_results", None)
-            if callable(cache_fn):
-                persisted = int(cache_fn([item]))
-            else:
-                self.discovery_engine._cache_results([item])  # noqa: SLF001
-                persisted = 1
-            if persisted > 0:
-                self.database.mark_discovery_candidate_cached(int(row["id"]))
-                admitted_items.append(item)
+            outcome = self._admit_one(
+                row, item, recently_viewed=recently_viewed, admitted_items=admitted_items
+            )
+            if outcome == "cached":
                 cached += 1
             else:
-                self.database.reject_discovery_candidate(
-                    int(row["id"]),
-                    status=REJECTED_CACHE_ADMISSION,
-                    reason="cache admission skipped",
-                )
                 rejected += 1
         return cached, rejected
+
+    def _admit_share_aware(
+        self,
+        accepted: list[tuple[dict[str, Any], DiscoveredContent]],
+        *,
+        targets: dict[str, int],
+        recently_viewed: set[str],
+        admitted_items: list[DiscoveredContent],
+        cache_limit: int | None,
+    ) -> tuple[int, int]:
+        """Two-round admission honoring per-family share targets.
+
+        Round 1 admits only under-share rows (family available < target),
+        incrementing the local family count as it goes. Round 2 fills any
+        remaining global slots with the deferred over-share rows — availability
+        beats purity (spec invariant 3). Over-share rows are *deferred*, never
+        rejected, so they stay ``evaluated`` and can win a slot on a later tick
+        once share-aware rebalancing (Phase 3) frees one.
+        """
+
+        available = self._available_by_family()
+        cached = 0
+        rejected = 0
+        skipped_over_share = 0
+        deferred: list[tuple[dict[str, Any], DiscoveredContent]] = []
+        for row, item in accepted:
+            if (cache_limit is not None and cached >= cache_limit) or self._pool_full():
+                deferred.append((row, item))
+                continue
+            family = self._row_source_family(row, item)
+            if int(available.get(family, 0)) >= int(targets.get(family, 0)):
+                deferred.append((row, item))
+                skipped_over_share += 1
+                continue
+            outcome = self._admit_one(
+                row, item, recently_viewed=recently_viewed, admitted_items=admitted_items
+            )
+            if outcome == "cached":
+                cached += 1
+                available[family] = int(available.get(family, 0)) + 1
+            else:
+                rejected += 1
+        for row, item in deferred:
+            if (cache_limit is not None and cached >= cache_limit) or self._pool_full():
+                break
+            outcome = self._admit_one(
+                row, item, recently_viewed=recently_viewed, admitted_items=admitted_items
+            )
+            if outcome == "cached":
+                cached += 1
+            else:
+                rejected += 1
+        if skipped_over_share:
+            logger.debug(
+                "admission round-1 deferred %d over-share row(s) (share-aware fairness)",
+                skipped_over_share,
+            )
+        return cached, rejected
+
+    def _admit_one(
+        self,
+        row: dict[str, Any],
+        item: DiscoveredContent,
+        *,
+        recently_viewed: set[str],
+        admitted_items: list[DiscoveredContent],
+    ) -> str:
+        """Attempt one row's content-cache admission.
+
+        Returns ``"cached"`` on success or ``"rejected"`` when the row is
+        recently viewed, blocked by a cache-admission guard, or the engine
+        declined to persist it. Callers gate the global/limit caps first.
+        """
+
+        if self._is_recently_viewed(item, recently_viewed):
+            self.database.reject_discovery_candidate(
+                int(row["id"]),
+                status=REJECTED_RECENTLY_VIEWED,
+                reason="recently viewed",
+            )
+            return "rejected"
+        block_status, block_reason = self._cache_admission_block(row, item)
+        if block_status:
+            self.database.reject_discovery_candidate(
+                int(row["id"]),
+                status=block_status,
+                reason=block_reason,
+            )
+            return "rejected"
+        cache_fn = getattr(self.discovery_engine, "cache_evaluated_results", None)
+        if callable(cache_fn):
+            persisted = int(cache_fn([item]))
+        else:
+            self.discovery_engine._cache_results([item])  # noqa: SLF001
+            persisted = 1
+        if persisted > 0:
+            self.database.mark_discovery_candidate_cached(int(row["id"]))
+            admitted_items.append(item)
+            return "cached"
+        self.database.reject_discovery_candidate(
+            int(row["id"]),
+            status=REJECTED_CACHE_ADMISSION,
+            reason="cache admission skipped",
+        )
+        return "rejected"
+
+    def _share_targets(self) -> dict[str, int] | None:
+        """Return per-family visible-pool targets, or ``None`` for legacy mode."""
+
+        provider = self.source_share_targets
+        if provider is None:
+            return None
+        try:
+            raw = provider()
+        except Exception:
+            logger.debug("source share targets provider failed", exc_info=True)
+            return None
+        if not raw:
+            return None
+        return {str(family): int(target) for family, target in dict(raw).items()}
+
+    def _available_by_family(self) -> dict[str, int]:
+        """Snapshot the current frontend-visible pool availability by family."""
+
+        count_fn = getattr(self.database, "count_pool_available_candidates_by_source", None)
+        if not callable(count_fn):
+            return {}
+        try:
+            try:
+                counts = count_fn(xhs_self_nickname=self._current_xhs_self_nickname())
+            except TypeError:
+                counts = count_fn()
+        except Exception:
+            logger.debug("available-by-source snapshot failed", exc_info=True)
+            return {}
+        return {str(family): int(count) for family, count in dict(counts).items()}
+
+    def _under_share_platforms(self) -> list[str]:
+        """Family keys currently below their share target (empty in legacy mode)."""
+
+        targets = self._share_targets()
+        if not targets:
+            return []
+        available = self._available_by_family()
+        return [
+            family
+            for family, target in targets.items()
+            if int(available.get(family, 0)) < int(target)
+        ]
+
+    @staticmethod
+    def _row_source_family(row: dict[str, Any], item: DiscoveredContent) -> str:
+        """Resolve an admission row's pool source family (invariant: use _source_family)."""
+
+        platform = row.get("source_platform") or getattr(item, "source_platform", "")
+        strategy = (
+            row.get("source_strategy") or row.get("source") or getattr(item, "source_strategy", "")
+        )
+        return _source_family(strategy, platform)
 
     def _cache_admission_block(
         self,

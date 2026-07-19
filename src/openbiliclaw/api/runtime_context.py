@@ -1162,6 +1162,14 @@ class RuntimeContext:
         new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
             new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
         )
+        # Pool-share fairness (spec 2026-07-20, Phase 2): let admission see the
+        # per-family visible-pool targets so under-share sources win freed slots
+        # ahead of an over-supplied source's backlog. Bound after controller
+        # construction so the pipeline reuses the controller's canonical
+        # ``_source_target_counts`` (family-keyed) share口径.
+        new_candidate_pipeline.source_share_targets = (
+            new_runtime_controller._source_target_counts  # noqa: SLF001
+        )
         for producer in (
             new_douyin_producer,
             new_youtube_producer,

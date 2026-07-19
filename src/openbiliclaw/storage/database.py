@@ -2980,22 +2980,42 @@ class Database:
         self,
         *,
         limit: int,
+        preferred_source_platforms: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return evaluated candidates still waiting for content-cache admission."""
+        """Return evaluated candidates still waiting for content-cache admission.
+
+        Pool-share fairness (spec 2026-07-20, Phase 2): when
+        ``preferred_source_platforms`` is given, under-share sources sort ahead
+        of the FIFO order so a fixed admission window is not monopolized by an
+        over-supplied source's backlog. Omitting it keeps the legacy
+        ``evaluated_at ASC`` ordering byte-for-byte (invariant 5).
+        """
 
         admission_limit = max(0, int(limit))
         if admission_limit <= 0:
             return []
         self._ensure_fresh_read()
+        platforms = [
+            str(platform).strip()
+            for platform in (preferred_source_platforms or [])
+            if str(platform).strip()
+        ]
+        if platforms:
+            placeholders = ", ".join("?" for _ in platforms)
+            order_prefix = f"CASE WHEN source_platform IN ({placeholders}) THEN 0 ELSE 1 END, "
+            params: tuple[Any, ...] = (*platforms, admission_limit)
+        else:
+            order_prefix = ""
+            params = (admission_limit,)
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT *
             FROM discovery_candidates
             WHERE status = 'evaluated'
-            ORDER BY evaluated_at ASC, last_seen_at ASC, id ASC
+            ORDER BY {order_prefix}evaluated_at ASC, last_seen_at ASC, id ASC
             LIMIT ?
             """,
-            (admission_limit,),
+            params,
         )
         return [dict(row) for row in cursor.fetchall()]
 
