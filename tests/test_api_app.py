@@ -12494,9 +12494,17 @@ def test_cap_keeping_user_added_keeps_manual_entries_past_limit() -> None:
 class _FakeInitPrereqs:
     """Controllable stand-in for InitPrereqs (E2 endpoint tests)."""
 
-    def __init__(self, *, bili: str = "ok", chat: bool = True, platforms=None) -> None:
+    def __init__(
+        self,
+        *,
+        bili: str = "ok",
+        chat: bool = True,
+        platforms=None,
+        chat_detail: str = "",
+    ) -> None:
         self._bili = bili
         self._chat = chat
+        self._chat_detail = chat_detail
         self._platforms = list(platforms or [])
         self.bilibili_check_calls = 0
         self.chat_ready_calls = 0
@@ -12517,6 +12525,9 @@ class _FakeInitPrereqs:
 
     def peek_chat(self) -> bool:
         return self._chat
+
+    def peek_chat_detail(self) -> str:
+        return self._chat_detail
 
     def has_cached_readiness(self) -> bool:
         return True
@@ -12699,6 +12710,35 @@ class TestGuidedInitEndpoints:
         assert resp.json()["error"] == "llm_not_ready"
         assert db.get_latest_init_run()["status"] == "idle"
         assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_init_llm_not_ready_propagates_classified_detail(self, tmp_path: Path) -> None:
+        """The 409 must carry the probe's classified cause (defect 3) so the
+        user can tell an invalid API key from an unreachable service."""
+        from fastapi.testclient import TestClient
+
+        detail = "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "llm_not_ready"
+        assert resp.json()["detail"] == detail
+
+    def test_init_status_llm_not_ready_surfaces_classified_detail(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        detail = "无法连接到 AI 服务（网络连接失败）。请检查网络与代理设置后重试。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        assert body["reason"] == "llm_not_ready"
+        assert body["detail"] == detail
 
     def test_init_missing_configured_embedding_resets_to_idle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

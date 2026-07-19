@@ -2765,7 +2765,12 @@ def create_app(
             detail = str(run.get("detail") or "")
         elif not chat:
             reason = "llm_not_ready"
-            detail = account_profile_error or "AI 服务还没配好或当前不可用"
+            # Prefer the classified probe cause (无效 API Key / 服务不可达 /
+            # 模型不存在) so the checklist explains WHY chat is down; a stored
+            # account-analysis failure still wins as the more specific history.
+            detail = (
+                account_profile_error or prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用"
+            )
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
@@ -3293,7 +3298,11 @@ def create_app(
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
-            return JSONResponse({"error": "llm_not_ready"}, status_code=409)
+            # Propagate the classified cause the live probe just diagnosed
+            # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
+            # actionable rather than a generic "not ready" (project rule 7).
+            chat_detail = ctx.init_prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用。"
+            return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")

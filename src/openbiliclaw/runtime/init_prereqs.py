@@ -74,6 +74,10 @@ class InitPrereqs:
         self._ctx = ctx
         self._chat_value = False
         self._chat_at = float("-inf")
+        # Classified, user-facing reason the last chat probe failed ("" when
+        # ready). Lets POST /api/init and /api/init-status distinguish 无效
+        # API Key / 服务不可达 / 模型不存在 instead of one generic line.
+        self._chat_detail = ""
         self._chat_lock = asyncio.Lock()
         # Fallback verdict, used only when the shared probe store holds nothing
         # for B站: before the first probe ("checking"), or when there is no
@@ -121,6 +125,17 @@ class InitPrereqs:
         informational only — a live (billable) probe is not justified.
         """
         return self._chat_value
+
+    def peek_chat_detail(self) -> str:
+        """Classified reason the last chat probe failed ("" when ready).
+
+        Populated by :meth:`chat_ready` from the probe's own exception via
+        ``describe_llm_failure``, so callers (POST /api/init 409 detail,
+        /api/init-status ``llm_not_ready`` detail) can tell an invalid API key
+        from an unreachable service from a missing model instead of surfacing
+        one generic "not ready" banner (project rule 7: propagate the cause).
+        """
+        return self._chat_detail
 
     def peek_bilibili(self) -> str:
         """Last known Bilibili probe result, without firing a new probe.
@@ -183,9 +198,10 @@ class InitPrereqs:
             if callable(is_chat_capable) and default_name:
                 default_is_chat_capable = bool(is_chat_capable(default_name))
 
+            failure: BaseException | None = None
             if default_is_chat_capable:
                 default_provider = registry.get(default_name) if default_name else registry.get()
-                ready = await self._probe_chat_provider(default_provider)
+                ready, failure = await self._probe_chat_provider(default_provider)
             else:
                 # Defensive backstop for registries built by older code or
                 # injected by tests/extensions. A readiness probe is a real
@@ -203,7 +219,9 @@ class InitPrereqs:
                     and callable(is_chat_capable)
                     and is_chat_capable(fallback_name)
                 ):
-                    ready = await self._probe_chat_provider(registry.get(fallback_name))
+                    ready, fallback_failure = await self._probe_chat_provider(
+                        registry.get(fallback_name)
+                    )
                     if ready:
                         logger.info(
                             "Chat readiness: default provider %s failed the probe but "
@@ -211,26 +229,51 @@ class InitPrereqs:
                             default_name,
                             fallback_name,
                         )
+                    elif failure is None:
+                        # Keep the primary's cause when present; only fall back to
+                        # the fallback provider's exception if the default failed
+                        # without one (non-chat default / bare False health_check).
+                        failure = fallback_failure
             self._chat_value = ready
             self._chat_at = time.monotonic()
+            self._chat_detail = "" if ready else self._describe_chat_failure(failure)
             return ready
 
-    async def _probe_chat_provider(self, provider: Any) -> bool:
-        """One strict, bounded health_check; False on timeout or any error."""
+    @staticmethod
+    def _describe_chat_failure(exc: BaseException | None) -> str:
+        """Classified Chinese copy for a failed chat probe ("" when unknown)."""
+        if exc is None:
+            return ""
+        # describe_llm_failure is the user-facing sibling of
+        # classify_llm_unavailability: it emits ready-made distinguishing copy
+        # for auth (无效 API Key) / connection (服务不可达) / model_not_found
+        # (模型不存在), which classify_llm_unavailability (machine kind, no auth
+        # bucket) cannot. Imported lazily — see _bili_probes() for the reason.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        return describe_llm_failure(exc) or ""
+
+    async def _probe_chat_provider(self, provider: Any) -> tuple[bool, BaseException | None]:
+        """One strict, bounded health_check.
+
+        Returns ``(ok, failure)`` where ``failure`` is the exception that
+        explains a False result (``None`` when ok, or when the provider merely
+        returned a falsy health_check without raising) so callers can classify
+        the cause instead of only knowing that chat is not ready.
+        """
         try:
-            return bool(
-                await asyncio.wait_for(provider.health_check(), timeout=_CHAT_PROBE_TIMEOUT)
-            )
-        except TimeoutError:
+            ok = bool(await asyncio.wait_for(provider.health_check(), timeout=_CHAT_PROBE_TIMEOUT))
+            return ok, None
+        except TimeoutError as exc:
             # Strict: the prereq must confirm a REAL request succeeded. A
             # timeout means we could NOT confirm the provider answers within
             # a (generous, cold-load-tolerant) window → report not-ready so
             # the checklist never greenlights an unverified chat service.
             logger.debug("Chat readiness probe timed out; reporting not ready")
-            return False
-        except Exception:
+            return False, exc
+        except Exception as exc:
             logger.debug("Chat readiness probe errored", exc_info=True)
-            return False
+            return False, exc
 
     async def bilibili_check(self) -> str:
         """``ok`` / ``failed`` / ``checking`` for the configured B站 cookie.
