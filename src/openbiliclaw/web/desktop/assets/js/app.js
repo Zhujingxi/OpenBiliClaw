@@ -1131,7 +1131,7 @@
         configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
       }
       $("#statusLabel").textContent = "模型配置待修复";
-      $("#runtimeSummary").textContent = "后端已安全降级；推荐功能暂停，模型设置仍可修改。";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
       if (degradedRecoveryPresented) return;
       degradedRecoveryPresented = true;
       openSettingsPage("models");

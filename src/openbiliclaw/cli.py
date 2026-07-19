@@ -818,7 +818,7 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             + "\n\nOpen the extension popup settings to fix the LLM credentials, "
             "then restart the daemon."
         )
-        _print_status_panel("warning", "降级模式 / Degraded mode", body)
+        _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
     uvicorn.run(api_app, host=host, port=port, log_level="info")
 
 

@@ -1789,7 +1789,7 @@ def create_app(
     # so init is impossible until the LLM config is repaired (mirrors the
     # config-recovery message on PUT /api/config).
     _degraded_init_detail = (
-        "后端处于降级模式：LLM 配置有误导致无法启动 AI 服务，暂时无法初始化。"
+        "LLM 配置有误，AI 服务无法启动，暂时无法初始化。"
         "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
         "然后 restart daemon 让新配置生效后再试。"
     )
@@ -12543,8 +12543,8 @@ def create_app(
                         degraded_reason=str(getattr(ctx, "degraded_reason", "")),
                     ),
                     message=(
-                        f"配置已保存到 {saved_path}。当前后端处于降级模式，"
-                        "请 restart daemon 后让新配置生效。"
+                        f"配置已保存到 {saved_path}。AI 服务配置修复后，"
+                        "请重启后端（restart daemon）让新配置生效。"
                     ),
                     reloaded=False,
                     rollback_applied=False,

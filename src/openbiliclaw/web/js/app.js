@@ -47,7 +47,7 @@ function renderStatusBar() {
   const statusText = document.createElement("span");
   statusText.style.cssText = "font-size:11px;color:var(--text-muted);margin-right:4px";
   if (state.degraded) {
-    statusText.textContent = "降级模式";
+    statusText.textContent = "AI 服务待修复";
     statusText.style.color = "var(--danger)";
   } else {
     statusText.textContent = state.online ? "在线" : "离线";
@@ -91,7 +91,7 @@ function renderStatusBar() {
         "background:var(--warning-soft);color:#d97706;font-size:12px;padding:6px 16px;text-align:center";
       $statusBar.after(existing);
     }
-    existing.textContent = state.degradedReason || "后端处于降级模式，部分功能不可用";
+    existing.textContent = state.degradedReason || "AI 服务配置有误，修复并重启后端前大部分功能不可用";
   } else if (existing) {
     existing.remove();
   }

@@ -287,8 +287,8 @@ def test_degraded_init_post_rejects_with_actionable_detail(
     assert response.status_code == 409
     body = response.json()
     assert body["error"] == "degraded"
-    assert "降级" in body["detail"]
-    assert "LLM" in body["detail"]
+    assert "LLM 配置有误" in body["detail"]
+    assert "设置页" in body["detail"]
 
 
 def test_degraded_init_status_reports_degraded_reason(
@@ -306,8 +306,8 @@ def test_degraded_init_status_reports_degraded_reason(
     assert response.status_code == 200
     body = response.json()
     assert body["reason"] == "degraded"
-    assert "降级" in body["detail"]
-    assert "LLM" in body["detail"]
+    assert "LLM 配置有误" in body["detail"]
+    assert "设置页" in body["detail"]
     assert body["can_start"] is False
 
 

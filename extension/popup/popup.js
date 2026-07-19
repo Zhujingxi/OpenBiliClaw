@@ -6188,7 +6188,7 @@ function renderRecommendationState(stateShape) {
       elements.emptyAction.textContent = "去设置修复 →";
       elements.emptyAction.hidden = false;
     }
-    setHint("后端处于降级模式：修好 LLM 配置并重启后端即可恢复。", "error");
+    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
     return;
   }
 
@@ -6213,7 +6213,7 @@ function renderRecommendationState(stateShape) {
     }
     setHint(
       stateShape.degraded
-        ? "后端处于降级模式：修好 LLM 配置并重启后端后即可开始初始化。"
+        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
         : "先完成初始化，把画像和候选池攒起来。",
       stateShape.degraded ? "error" : "info",
     );
@@ -7103,7 +7103,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `后端处于降级模式，保存修复后需要 restart daemon。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");
