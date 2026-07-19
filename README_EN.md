@@ -206,9 +206,9 @@ Full changelog: [docs/changelog.md](docs/changelog.md).
       <b>QQ Community</b>
     </td>
     <td align="center" width="50%">
-      <a href="https://discord.gg/PU6Xgch8yg"><img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the Discord server" /></a><br/>
+      <a href="https://discord.gg/PU6Xgch8yg"><img src="docs/images/discord-community-qrcode.jpg" width="200" alt="Discord community QR code" /></a><br/>
       <b>Discord Community</b><br/>
-      <sub>Click to join — this invite does not expire.</sub>
+      <sub>Scan or <a href="https://discord.gg/PU6Xgch8yg">click to join</a> — this invite does not expire.</sub>
     </td>
   </tr>
 </table>
