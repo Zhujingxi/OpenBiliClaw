@@ -238,16 +238,33 @@ export function getEnabledPlatforms(status) {
 // Platform sources the user can include in a guided-init run. Bilibili is
 // selectable like every other source (v0.3.118+): default checked
 // (recommended) but no longer forced — at least one source must stay checked.
-export const INIT_SOURCE_OPTIONS = [
-  { key: "bilibili", label: "B 站", defaultChecked: true },
-  { key: "xiaohongshu", label: "小红书" },
-  { key: "douyin", label: "抖音" },
-  { key: "youtube", label: "YouTube" },
-  { key: "twitter", label: "X" },
-  { key: "zhihu", label: "知乎" },
-  { key: "reddit", label: "Reddit" },
-  { key: "bangumi", label: "Bangumi" },
-];
+//
+// WHICH sources exist comes from the shared roster (shared/source-status.js,
+// published on globalThis before this module evaluates in the side panel), the
+// same list the desktop page and the setup wizard build their pickers from —
+// a hardcoded copy here is what let the three surfaces drift. Labels come from
+// the shared module too, with a local fallback map so an unrecognised key still
+// renders; defaultChecked stays local first-run policy.
+const INIT_SOURCE_LABEL_FALLBACK = {
+  bilibili: "B 站",
+  xiaohongshu: "小红书",
+  douyin: "抖音",
+  youtube: "YouTube",
+  twitter: "X",
+  zhihu: "知乎",
+  reddit: "Reddit",
+  bangumi: "Bangumi",
+};
+const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+  ? [..._initSourceStatus.SOURCE_KEYS]
+  : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+export const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+  key,
+  label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+  ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {}),
+}));
 
 // Reminder under the source checkboxes: each selected platform is pulled THROUGH
 // this browser, so the user must be logged into it here.

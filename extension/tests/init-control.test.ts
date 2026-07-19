@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// Publish the shared roster on globalThis BEFORE popup-init-control evaluates,
+// so INIT_SOURCE_OPTIONS derives from SourceStatus.SOURCE_KEYS exactly as it
+// does in the side panel (this import must stay first — ESM evaluates imports
+// in source order). Without it the module falls back to its local key list.
+import "../../src/openbiliclaw/web/shared/source-status.js";
+
 import {
   buildInitChecklist,
   describeInitFailure,
@@ -385,6 +391,21 @@ test("init source options: bilibili is default-checked but deselectable, others 
   ]);
   // The login reminder copy mentions logging in on this browser.
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
+});
+
+test("init source roster derives from the shared SourceStatus.SOURCE_KEYS (drift lock)", () => {
+  const shared = (globalThis as Record<string, any>).OpenBiliClawSourceStatus;
+  assert.ok(shared, "shared source-status module must be loaded for this test");
+  // Same keys, same order — the picker is a projection of the shared roster,
+  // not a parallel hardcoded list that can drift when a platform is added.
+  assert.deepEqual(
+    INIT_SOURCE_OPTIONS.map((o) => o.key),
+    [...shared.SOURCE_KEYS],
+  );
+  // Labels come from the shared module too.
+  for (const opt of INIT_SOURCE_OPTIONS) {
+    assert.equal(opt.label, shared.sourceLabel(opt.key));
+  }
 });
 
 test("init source options: X (twitter) is present, opt-in, labelled X", () => {
