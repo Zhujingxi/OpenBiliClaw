@@ -12600,6 +12600,15 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         def _root_redirect() -> RedirectResponse:
+            # Mirror packaging/entry.py's _decide_landing_path for browsers
+            # that reach the port without the packaged launcher (git/docker
+            # installs, manual visits): a degraded backend or one whose init
+            # never completed lands on the setup wizard, not the SPA. Unknown
+            # readiness keeps the /web fallback — the SPA's onboarding gate
+            # is the safety net, not a wall.
+            needs_setup = bool(getattr(ctx, "degraded", False)) or _health_profile_ready() is False
+            if needs_setup and (_web_dir / "setup").is_dir():
+                return RedirectResponse(url="/setup/", status_code=302)
             return RedirectResponse(url="/web", status_code=302)
 
     # ── First-run Setup Wizard ──────────────────────────────────
