@@ -179,9 +179,7 @@ def test_both_frontends_actually_render_the_backend_field() -> None:
         # backend field reaching the call, not one particular argument shape —
         # pinning the shape makes any refinement of the gate look like a
         # regression.
-        assert re.search(
-            r"applySourceNetworkHint\(\s*row,[^)]*item\.network_hint", source
-        ), name
+        assert re.search(r"applySourceNetworkHint\(\s*row,[^)]*item\.network_hint", source), name
         # Rendered as text, never as HTML — the copy reaches the DOM verbatim.
         assert "node.textContent = text;" in source, name
         assert "node.innerHTML" not in source, name
