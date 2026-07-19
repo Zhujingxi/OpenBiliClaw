@@ -438,6 +438,14 @@ class ContinuousRefreshController:
     _last_empty_plan_diag_at: datetime | None = field(default=None, init=False)
     _last_empty_plan_fingerprint: tuple[int] | None = field(default=None, init=False)
     _suppressed_empty_plan_count: int = field(default=0, init=False)
+    # Pool-share fairness (spec 2026-07-20, Phase 4): last per-family
+    # (available, target, deficit) snapshot. The per-source deficit summary is
+    # only logged when this changes, so a steady state stays quiet but any
+    # shift (e.g. an under-share source recovering) is visible in one line.
+    _last_source_deficit_snapshot: dict[str, tuple[int, int, int]] = field(
+        default_factory=dict,
+        init=False,
+    )
     _warned_pool_count_fallbacks: set[str] = field(default_factory=set, init=False)
     # Last pool_available count emitted via the runtime event stream so
     # popup-side ``mergeRuntimeStatusEvent`` only re-renders when the
@@ -2254,6 +2262,8 @@ class ContinuousRefreshController:
             # admission below (and the pool_at_cap gate) reflect the freed room.
             with suppress(Exception):
                 self._rebalance_pool_shares()
+            with suppress(Exception):
+                self._log_source_deficit_summary()
             try:
                 pool_available = self.database.count_pool_candidates(
                     xhs_self_nickname=self._xhs_self_nickname()
@@ -3154,6 +3164,31 @@ class ContinuousRefreshController:
                 fillable,
             )
         return demoted
+
+    def _log_source_deficit_summary(self) -> None:
+        """Log a one-line per-source available/target/deficit summary on change.
+
+        Pool-share fairness (spec 2026-07-20, Phase 4). This排查 cost us three
+        layers of silent skips; a change-throttled INFO line makes the share
+        picture legible without spamming the log every steady tick.
+        """
+        target_counts = self._source_target_counts()
+        if not target_counts:
+            return
+        available_by_source = self._count_pool_available_candidates_by_source()
+        snapshot: dict[str, tuple[int, int, int]] = {}
+        for family, target in target_counts.items():
+            available = self._platform_source_count(available_by_source, family)
+            deficit = self._source_deficit(family)
+            snapshot[family] = (available, int(target), int(deficit))
+        if snapshot == self._last_source_deficit_snapshot:
+            return
+        self._last_source_deficit_snapshot = snapshot
+        summary = " | ".join(
+            f"{family} {available}/{target} (deficit {deficit})"
+            for family, (available, target, deficit) in sorted(snapshot.items())
+        )
+        logger.info("pool source shares: %s", summary)
 
     # ── keyword planner deficit / catalyst口径 (P1.6) ─────────────────────
     # The unified keyword planner reuses these so its "real deficit" shares the

@@ -276,3 +276,37 @@ def test_demote_lowest_ranked_pool_rows_evicts_lowest_score_first(tmp_path: Path
     assert statuses["BVmid"] == "stale"
     assert statuses["BVhi"] == "fresh"
     assert statuses["BVbili"] == "fresh"
+
+
+# ── Phase 4: change-throttled per-source deficit summary logging ──
+
+
+def test_source_deficit_summary_logs_once_per_change(caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    db = _FakeDatabase(
+        [],
+        pool_count=250,
+        source_available_counts={"bilibili": 200, "bangumi": 50},
+        source_raw_counts={"bilibili": 200, "bangumi": 50},
+    )
+    controller = _controller(
+        database=db,
+        pool_target_count=300,
+        pool_source_shares={"bilibili": 5, "bangumi": 1},
+    )
+
+    with caplog.at_level(logging.INFO, logger="openbiliclaw.runtime.refresh"):
+        controller._log_source_deficit_summary()
+        controller._log_source_deficit_summary()  # unchanged → no second line
+
+    summary_lines = [r for r in caplog.records if r.message.startswith("pool source shares:")]
+    assert len(summary_lines) == 1
+
+    # A change in the availability picture emits exactly one more line.
+    db.source_available_counts = {"bilibili": 200, "bangumi": 40}
+    with caplog.at_level(logging.INFO, logger="openbiliclaw.runtime.refresh"):
+        controller._log_source_deficit_summary()
+
+    summary_lines = [r for r in caplog.records if r.message.startswith("pool source shares:")]
+    assert len(summary_lines) == 2
