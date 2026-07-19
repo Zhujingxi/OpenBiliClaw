@@ -1886,3 +1886,45 @@ def test_fingerprint_body_mutation_with_generic_message_fails_closed(tmp_path: P
     assert _run180_main(junit_orig, mypy, baseline) == 0
     # Same headline, mutated body must fail.
     assert _run180_main(junit_mut, mypy, baseline) == 1
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff run 192 P1: an unbaselined parametrized skip in the
+# storage-schema migration tests must fail the checked-in baseline
+# comparator — the drift is never silently tolerated again (repair
+# t_e237f9cb removed the ten runtime skips at the source).
+# ---------------------------------------------------------------------------
+
+_RUN192_NODE = (
+    "tests/test_storage_schema_migrations.py"
+    "::test_partial_db_repairs_each_non_content_table"
+    "[_ensure_content_cache_runtime_columns-content_cache-expected_columns2]"
+)
+
+
+def test_checked_in_baseline_rejects_unbaselined_migration_skip(tmp_path: Path) -> None:
+    """Run-192 P1 regression: a new parametrized skip at a migration-test
+    node that is absent from the checked-in baseline's known_skips must make
+    the comparator exit 1 (new skip), even with zero failures and a clean
+    mypy stream. This locks the invariant that runtime pytest.skip() rows
+    can never re-enter the suite without a deliberate baseline update."""
+    junit = _minimal_junit(
+        tmp_path / "junit.xml",
+        skips=[_RUN192_NODE],
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(_CHECKED_IN_BASELINE),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1

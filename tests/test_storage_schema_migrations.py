@@ -363,6 +363,20 @@ _CONVERTED_METHODS: list[tuple[str, str, set[str]]] = [
     ),
 ]
 
+# Non-content_cache converted methods only. The five content_cache column
+# groups are exercised by dedicated tests below
+# (test_partial_db_repairs_each_content_cache_column_group,
+# test_ensure_columns_does_not_commit_or_rollback_content_cache), so tests
+# scoped to the non-content tables parametrize over THIS set instead of
+# collecting content_cache rows only to pytest.skip() them at runtime.
+# Runtime skips mint new skip node IDs that the quality-baseline comparator
+# (scripts/check_quality_baseline.py) must tolerate; static filtering at
+# collection time produces zero skip records for redundant coverage
+# (review-t_e03bfeff run 192 P1).
+_NON_CONTENT_CONVERTED_METHODS: list[tuple[str, str, set[str]]] = [
+    method for method in _CONVERTED_METHODS if method[1] != "content_cache"
+]
+
 
 def _pragma_rows(conn: sqlite3.Connection, table: str) -> dict[str, tuple]:
     """Full PRAGMA table_info rows keyed by column name (cid, name, type,
@@ -485,7 +499,7 @@ def test_partial_db_repairs_each_content_cache_column_group(tmp_path: Path) -> N
         assert _column_names(conn, "content_cache") == after_first
 
 
-@pytest.mark.parametrize("method_name,table,expected_columns", _CONVERTED_METHODS)
+@pytest.mark.parametrize("method_name,table,expected_columns", _NON_CONTENT_CONVERTED_METHODS)
 def test_partial_db_repairs_each_non_content_table(
     tmp_path: Path, method_name: str, table: str, expected_columns: set[str]
 ) -> None:
@@ -494,8 +508,6 @@ def test_partial_db_repairs_each_non_content_table(
     must repair its own missing columns from a partial fixture, and the
     second invocation must be a no-op (review-t_cce76b68 F6).
     """
-    if table == "content_cache":
-        pytest.skip("content_cache partial states covered by group test above")
     conn = make_partial_db(tmp_path / table, table, missing_columns=expected_columns)
     before = _column_names(conn, table)
     assert not (expected_columns & before), (
@@ -513,7 +525,7 @@ def test_partial_db_repairs_each_non_content_table(
     assert _column_names(conn, table) == after_first
 
 
-@pytest.mark.parametrize("method_name,table,expected_columns", _CONVERTED_METHODS)
+@pytest.mark.parametrize("method_name,table,expected_columns", _NON_CONTENT_CONVERTED_METHODS)
 def test_ensure_columns_does_not_commit_or_rollback(
     tmp_path: Path, method_name: str, table: str, expected_columns: set[str]
 ) -> None:
@@ -525,9 +537,6 @@ def test_ensure_columns_does_not_commit_or_rollback(
     durable), then rolling back and confirming BOTH the sentinel and the
     added columns are gone (review-t_cce76b68 F6).
     """
-    if table == "content_cache":
-        # content_cache uses a non-integer primary key; handle separately below.
-        pytest.skip("content_cache transaction boundary covered by dedicated test")
     conn = make_legacy_conn(tables=[table])
     # Plant a sentinel row in an UNCOMMITTED transaction.
     pk_col = "id" if table != "content_cache" else "bvid"
