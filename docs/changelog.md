@@ -21,6 +21,15 @@
 
 ---
 
+## 共享 E2E 认证 Fixture
+
+- **新增 `tests/e2e_auth_fixtures.py`**：为需要真实 FastAPI app + 数据库的 E2E 测试提供统一的认证绕过方案，避免每个测试文件重复实现 app 构建逻辑。默认使用 loopback 绕过（`trust_loopback=True`），同时提供 opt-in 的 extension-token 交换路径供后续容器内浏览器测试使用。
+- **新增 `tests/test_e2e_auth_fixtures.py`**：fixture 自身的单元测试，验证 loopback 无 token 通过、跨源请求 401、extension-token 交换与 Bearer 认证。
+- **迁移 `tests/test_xhs_e2e_smoke.py`**：作为首个使用共享 fixture 的隔离 E2E 测试，保持 `XHS_E2E_SMOKE=1` 环境门控不变。其中 `test_task_queue_round_trip` 按当前服务端契约（`POST /api/sources/xhs/task-result` 对未知 task 返回 409）改为真实往返：经 `XhsTaskQueue.enqueue_with_id` 在同一 DB 上入队 → `next-task` 认领 → 对已存在任务提交结果返回 200。
+- **新增 `docs/testing/e2e-guide.md`**：完整说明两种认证策略、使用方式和已迁移测试列表。
+
+---
+
 ## 前端契约对齐与轻结构收口
 
 - **四端配置读取全部脱敏，凭据输入改为只写占位**：桌面 Web、移动 Web 与插件 popup 都只读 masked `GET /api/config`，任何前端不再请求 `reveal_keys=true`，也不再消费 `GET /api/sources/credentials`（该路由保留在服务端）；`/setup/` 向导不调用 `/api/config`，其模型与前置检查改走 `/api/model-config`、`/api/model-config/probe` 与 `/api/init-status`。B 站 / 抖音 / X / Reddit Cookie 等凭据输入框渲染为空，仅用 placeholder 显示「已保存 Cookie（留空保持不变，粘贴新值覆盖）/ 未保存」状态；空输入在 `PUT /api/config` 里整键省略，保存永不覆盖已存 secret。桌面设置页只读「当前 Cookie / 登录凭据」折叠列表（details + 只读 textarea + 复制按钮）的 markup、JS 与 CSS 一并删除，各源只保留写-only 覆盖输入框。
