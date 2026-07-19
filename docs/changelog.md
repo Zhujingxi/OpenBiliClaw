@@ -12,6 +12,7 @@
 - **setup 向导不再提供「本地 Ollama」当聊天 provider**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需要用户自行 `ollama pull` 且小模型跑内容管线质量不达标，首次配置把它摆在选项里等于引导新用户走进坏体验。向导下拉移除该项（API Key 相应变为全 provider 必填）；桌面设置页、config.toml、后端 provider 注册表不受影响，进阶用户仍可在设置页选 ollama。E2E 与向导测试同步迁移到 deepseek + 显式填 key 的路径，并断言下拉中不再出现 ollama。
 - **修复降级模式下 setup 向导整页瘫痪（Base URL 填不了、配置修不了）**：来源登录态契约把平台源清单抽进 `/shared/source-status.js` 供 setup / 桌面 Web / 插件三端共用，但 degraded-mode guard 的静态恢复面白名单没跟上——降级时该脚本被 503 拦截，向导顶层 `SourceStatus.SOURCE_KEYS` 直接抛 TypeError，整页事件全灭：切换服务商无反应、OpenAI 兼容接口的 Base URL 字段永不出现，用户被锁死在无法修复配置的死循环里（真实 Windows 用户复现：deepseek 缺 api_key → 后端降级 → 向导瘫痪 → 无法改配其他 provider）。现将 `/shared/` 加入恢复面放行，并在降级测试中锁住该脚本必须可加载。
 - **移动端有意排除，并写进规格**：手机是躺着刷推荐的场景，填 cookie、点测试连接属于持有登录态浏览器会话的桌面与插件。移动端仍经 saved-sync 透出各平台的登录需求，不会对「这个来源需要登录」失明。按 CLAUDE.md 铁律 5 的四端契约要求，该排除在指标脚本注释与 spec 里显式声明，而不是默默少做一端。
+- **初始化界面四项一致性修复**：(1) 初始化来源清单收口——桌面 Web 与插件侧栏此前各自硬编码一份平台列表，现统一从 `/shared/source-status.js` 的 `SOURCE_KEYS` 派生（标签优先取共享模块、本地映射兜底），并加漂移锁测试锁住三端与共享清单一致；(2) setup 向导 B 站轮询生命周期修复——离开步骤 1 时清掉 3 秒轮询并置空以便重进重启，且连续几次未检测到登录后把转圈行替换为中性可跳过提示（仍在步骤 1 继续轮询）；(3) 桌面 Web 在推荐失败点识别降级 503 信封（`details.status==="degraded"`）→ 走既有模型设置恢复流程而非通用重试 UI；(4) 跨端初始化文案对齐——向导「已初始化」采用桌面口径带设置页指引，插件未初始化提示改为按钮驱动文案。移动端按四端契约有意排除。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
 ---
 
