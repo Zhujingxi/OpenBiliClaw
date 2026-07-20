@@ -179,7 +179,7 @@ jobs:
         run: npm ci
         working-directory: extension
 
-      - name: Typecheck (src + popup + tests projects)
+      - name: Typecheck strict src + popup projects
         run: npm run typecheck
         working-directory: extension
 

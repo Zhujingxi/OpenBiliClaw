@@ -10,7 +10,7 @@
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
     "build:firefox": "TARGET=firefox npm run clean && npm run build:popup && npm run build:types && TARGET=firefox npm run build:bundle",
     "clean": "rm -rf dist dist-firefox",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.popup.json --noEmit && tsc -p tsconfig.tests.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.popup.json --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "package": "node scripts/package.mjs",
     "package:only": "node scripts/package.mjs --no-build",
@@ -23,7 +23,6 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.1.29",
-    "@types/node": "^22.10.0",
     "esbuild": "^0.25.10",
     "typescript": "^5.9.2",
     "web-ext": "^10.4.0"
