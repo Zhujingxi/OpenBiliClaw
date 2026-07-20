@@ -54,6 +54,10 @@ drain/admission 每 60s 一次(`refresh.py:1421` 附近 loop 注释),而 bangumi
 
 真实 serve-api 日志:`bangumi producer skip: reason=pool_full`。tick 层 deficit 修复已生效(producer 被调度),但每个 producer 的 `produce_if_due` 内部还有一道**全局** pool 闸 `_candidate_pool_full()`(`bangumi_producer.py:94` 附近,调 `candidate_pipeline.pool_full()` = 全局可见池是否达标)。这形成鸡生蛋死结:bangumi 因全局池满不能生产 → 永远没有 bangumi 的 `evaluated` 供给 → Phase 3 rebalance 的触发条件「欠份额来源有 `evaluated` 供给等待」不满足 → 不退坑 → 池永远 300/300 → bangumi 永远 pool_full。波及 `bilibili/reddit/zhihu/youtube/bangumi/douyin` 六个 producer(其中 reddit 的旧闸引用了不存在的 `is_candidate_pool_full`,实际已是 no-op;`xhs`/`x` 为 fetch-only,自查确认无此内部闸)。
 
+### D7. Phase 3/4 挂载点在生产装配下是死代码(confirmed by real E2E)
+
+`_rebalance_pool_shares()` 与 `_log_source_deficit_summary()` 挂在 `_drain_discovery_candidates_and_precompute`(经 `_loop_candidate_eval` 驱动)。但生产 serve-api 装配(`api/runtime_context.py:1144` 起)注入 `CandidateEvalCoordinator`,`refresh.py:1455-1459` 用 `coordinator.run_forever()` **替换** `_loop_candidate_eval()`,于是那个方法永远不被调用——Phase 3/4 在生产装配下是死代码。E2E 实机佐证:bangumi 已真实拉取 29 条入原料池(Task 1/6 生效)、xiaohongshu 有 4 条 evaluated 等待且欠份额(7/25)、池 300/300 顶满——完全满足退坑条件,却零退坑、零份额摘要日志。修复须把再平衡与摘要移到**两种装配都必经的收敛点**;两装配互斥(`coordinator.run_forever()` XOR `_loop_candidate_eval()`,且 `drain_discovery_candidates_once` 与 refresh 内联 drain 在 coordinator 存在时都提前 notify 返回),故单轮至多一次再平衡。
+
 ## Priority classification
 
 | Phase | Content | Tier | Why |
@@ -109,6 +113,12 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 
 测试:全局满 + 欠份额 → `pool_full_for_source` False、`produce_if_due` 不再 skip pool_full;全局满 + 已达份额 → True;未注入策略 → 等同 `pool_full()`;全局未满 → 恒 False。
 
+### Phase 6 — 再平衡/摘要挂到两装配共同的收敛点(修 D7)
+
+新增 controller 入口 `run_pool_share_maintenance()`(顺序调 `_rebalance_pool_shares()` + `_log_source_deficit_summary()`,吞异常不打断 eval loop)。legacy drain 的两处 `with suppress` 合并为调它一次;`CandidateEvalCoordinator` 新增 `pre_admit_hook` 参数,`run_forever` 每 tick 在 `_admit_evaluated` 之前调一次;`runtime_context` 以 `getattr` 守卫把 `controller.run_pool_share_maintenance` 注入 hook(测试替身缺该方法时不注入)。两装配互斥 → 单轮至多一次再平衡;hook 在 admission 前跑 → 退坑腾的坑同 tick 被欠份额供给填上。语义(触发条件、每 tick ≤3、只动最超份额来源最低分最老行、INFO 日志)与 Phase 3/4 完全一致。
+
+测试:coordinator 每 tick 在 admission 前调 hook(顺序断言);`run_pool_share_maintenance` 顺序调 rebalance→summary;legacy(无 coordinator)路径回归不变。
+
 ## Expected impact
 
 | Lever | Measured effect |
@@ -118,6 +128,7 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 | Phase 3 | 本机 reddit 169→25 的收敛从"数周自然消耗"变为 ≤3 行/分钟的可控速率(理论 <1 小时,实际受欠份额供给节奏限制) |
 | Phase 4 | 下次同类问题可从日志直接读出每源缺口,免于本次的三层静默排查 |
 | Phase 5 | 解除 producer 内部全局闸死结:欠份额来源即使全局满也能生产 `evaluated` 供给,Phase 3 rebalance 得以触发,`reason=pool_full` 不再冤枉欠份额来源 |
+| Phase 6 | Phase 3/4 不再是生产装配下的死代码:coordinator 每 tick 触发退坑与份额摘要,E2E 中 300/300 顶满 + xhs 7/25 欠份额 + evaluated 等待的场景真正退坑 |
 
 ## Documentation obligations
 

@@ -118,6 +118,26 @@
 - Numeric gate:`pool_full_for_source("bangumi")` 在 300/300 + bangumi 0/50 → **False**;`("reddit")` 在 169/25 → **True**;未注入策略时 == `pool_full()`;全局未满恒 False。bangumi `produce_if_due` 在全局满 + 欠份额时 `reason != "pool_full"`。
 - 既有断言更新:无(六个 producer 的 `_Pipeline`/`_FakeCandidatePipeline` 桩只有 `pool_full()`/无任何池方法,经 getattr 回退逐字节保持旧行为;bangumi 桩新增可选 `pool_full_for_source` 仅供新用例,旧 `full=True` 用例仍 skip pool_full)。
 
+### Task 7: 再平衡/摘要挂到两装配共同的收敛点(真实 E2E 发现,见 spec D7 / Phase 6）
+
+**Files:** modify `src/openbiliclaw/runtime/refresh.py`(新增 `run_pool_share_maintenance()`,legacy drain 改调它)、`src/openbiliclaw/runtime/candidate_eval.py`(新增 `pre_admit_hook` 参数 + `_run_pre_admit_hook`,`run_forever` 每 tick admission 前调用）、`src/openbiliclaw/api/runtime_context.py`（`getattr` 守卫注入 hook）；add tests（`tests/test_candidate_eval_coordinator.py` 的 hook 顺序用例 + `tests/test_refresh_source_deficit.py` 的 `run_pool_share_maintenance` 用例）。
+
+**Interfaces:** Consumes: `controller._rebalance_pool_shares`/`_log_source_deficit_summary`（已在 Task 3/4 落地）。Produces: `controller.run_pool_share_maintenance()`（两装配唯一入口）;`CandidateEvalCoordinator(pre_admit_hook=…)`。
+
+**Steps:**
+
+- [x] 先写失败测试:①coordinator 每 tick 在 `_admit_evaluated` 之前调 `pre_admit_hook`（顺序断言 `["hook","admit"]`）；②`run_pool_share_maintenance()` 顺序调 rebalance→summary。
+- [x] 确认 FAIL（`pre_admit_hook` 非法参数 + `run_pool_share_maintenance` 不存在）。
+- [x] 实现:controller `run_pool_share_maintenance()`（吞异常）；legacy drain 两处 `with suppress` 合并为调它一次；coordinator `pre_admit_hook` 参数 + `_run_pre_admit_hook`（admission 前、吞异常）；runtime_context 以 `getattr` 守卫注入 `controller.run_pool_share_maintenance`。
+- [x] 确认 PASS;全量 pytest + ruff + mypy。
+
+**防重复执行依据:** 三个 `_drain_discovery_candidates_and_precompute` 调用点在 coordinator 存在时都不生效——`_loop_candidate_eval`（唯一周期驱动）仅在 `candidate_eval_coordinator is None` 时被 `run_forever` 调度（`refresh.py:1455-1459` XOR）；`drain_discovery_candidates_once` 与 refresh 内联 drain 在 `coordinator.notify` 可调用时都提前 return。故 coordinator 装配下退坑只经 hook，legacy 装配下只经 drain,单轮至多一次。
+
+**Acceptance:**
+
+- Numeric gate:coordinator 一轮的事件序列首二项 == `["hook","admit"]`;`run_pool_share_maintenance` 调用序列 == `["rebalance","summary"]`；六个 producer 与既有 coordinator 回归全绿。
+- 既有断言更新:无（新增参数带默认值 `None`,既有 coordinator 构造/用例不受影响；bootstrap 装配测试的 `FakeRuntimeController` 缺 `run_pool_share_maintenance`,经 `getattr` 守卫回退为不注入 hook）。
+
 ## Verification after merge
 
 验收人(主会话)在隔离项目根执行真实 E2E:拷贝本机真实 DB(reddit 169 超份额饿死态)→ 启用 bangumi(真实 bgm.tv 匿名 API,走 custom 代理)+ 商汤 LLM → 起真实 serve-api → 观察 ≥3 个 drain tick:①`bangumi_discovery_runs` 出现新行;②池组成收敛(reddit 净减、bangumi 净增);③全局池恒 ≤300;④日志出现每源缺口摘要与退坑记录。回滚触发条件:全局池超发、退坑波及非超份额来源、或全量测试回归失败——revert 整个 feature 分支。
