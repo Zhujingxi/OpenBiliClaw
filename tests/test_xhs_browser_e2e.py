@@ -196,7 +196,9 @@ class TestBackendApi:
         assert resp.json()["ok"] is True
         print(f"✓ Observed URLs accepted: {resp.json()['accepted']}")
 
-    def test_task_result(self, backend: httpx.Client) -> None:
+    def test_task_result_rejects_unknown(self, backend: httpx.Client) -> None:
+        # Browser E2E has no direct DB access to enqueue/lease a real task,
+        # so this verifies the rejection contract: unknown task ids get 409.
         resp = backend.post(
             "/api/sources/xhs/task-result",
             json={
@@ -205,8 +207,9 @@ class TestBackendApi:
                 "urls": ["https://www.xiaohongshu.com/explore/e2e_result"],
             },
         )
-        assert resp.status_code == 200
-        print("✓ Task result accepted")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "task_result_conflict"
+        print("✓ Unknown task result rejected (409)")
 
     def test_creator_crud(self, backend: httpx.Client) -> None:
         # Add
@@ -379,7 +382,8 @@ class TestFullPipeline:
                 assert resp.status_code == 200
                 print(f"  Step 2: Backend accepted {resp.json()['accepted']} observed URLs")
 
-        # 3. Simulate task result (like dispatcher would report)
+        # 3. Task-result rejection contract: no real task was leased, so the
+        # backend must reject the hardcoded id with 409 task_result_conflict.
         resp = backend.post(
             "/api/sources/xhs/task-result",
             json={
@@ -388,8 +392,9 @@ class TestFullPipeline:
                 "urls": urls[:5] if urls else [],
             },
         )
-        assert resp.status_code == 200
-        print("  Step 3: Task result posted OK")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "task_result_conflict"
+        print("  Step 3: Unleased task result rejected (409) as expected")
 
         # 4. Creator subscription round-trip
         resp = backend.post(
