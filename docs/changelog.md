@@ -4,6 +4,12 @@
 
 ---
 
+## Unreleased
+
+- **新增来源 skill 吸收 Bangumi 多轮修复经验**：权威接入指南不再只覆盖「把抓取、discover、配置和推荐卡接上」，补齐这次真实适配暴露出的通用护栏：匿名可用但支持可选凭据的第三类鉴权、observed identity 与 verified evidence 分离、后端独占账号解析/准入、字段省略/清空/掩码的局部更新语义、2xx warning、关闭来源时仍展示凭据状态、外部 schema 类型防御与真实反例、多 lane 公平分页和去重后计预算、cursor/429 关键词生命周期、跨平台作者/内容 ID 文案、按真实传输层给网络提示，以及 discovery smoke 与收藏→事件→初始化 smoke 分开验收。Codex/Claude 两份 `add-platform-source` skill 已同步；Bangumi 模块文档中关于 popup 准入 guard 仍为 `xfail` 的过时描述也一并纠正为当前已完成状态。
+
+---
+
 ## v0.3.180：慢 AI 服务不再被误杀——初始化超时改为「有进展就不打断」（2026-07-20）
 
 - **真实推荐词请求不再把合法的多行 singleton JSON 判坏**：使用当前 `openai_compatible / deepseek-v4-flash` 对真实 B 站候选重跑推荐词时，服务商连续 HTTP 200 并返回合法 `{"bvid","expression","topic_label"}`，生产解析却落成 `ExpressionBatchMalformed`。根因是 `extract_llm_json_list(..., allow_singleton=True)` 把 root dict 原样交给“必须是 list”的 coercer；旧测试用单行 JSON，恰好被后面的 JSONL fallback 偶然救回，掩盖了契约失效，而真实 provider 的 pretty-printed 多行对象无法走 JSONL。现在 singleton 分支显式包装为单元素列表，单行与多行对象统一命中正式解析路径；测试改为多行 fixture，并新增推荐引擎单候选落库回归。
