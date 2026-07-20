@@ -188,7 +188,7 @@ jobs:
         working-directory: extension
 
   web-test:
-    name: Web JS build + unit tests
+    name: Web TypeScript + runtime drift + unit tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -203,6 +203,9 @@ jobs:
 
       - name: Install root dev tooling
         run: npm ci
+
+      - name: Typecheck web TypeScript sources (strict)
+        run: npm run typecheck:web
 
       - name: Verify checked-in web runtime assets
         # Python/Docker/desktop installs intentionally have no root Node step.

@@ -104,3 +104,21 @@ def test_supported_runtime_builds_consume_tracked_web_tree_without_node() -> Non
     assert all("python packaging/build.py" in workflow for workflow in desktop_workflows)
     for runtime_path in [dockerfile, spec, ci, release_docker, *desktop_workflows]:
         assert "npm run build:web" not in runtime_path
+
+
+def test_web_ci_typechecks_before_runtime_drift_and_javascript_tests() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    _, separator, web_and_following_jobs = ci.partition("\n  web-test:\n")
+    assert separator, "web-test CI job is missing"
+    web_job, separator, _ = web_and_following_jobs.partition("\n  web-guided-init-e2e:\n")
+    assert separator, "web-test CI job boundary is missing"
+
+    install = "run: npm ci"
+    typecheck = "run: npm run typecheck:web"
+    drift_check = "run: npm run check:web-build"
+    javascript_tests = "run: node --test tests/js/"
+    commands = (install, typecheck, drift_check, javascript_tests)
+    for command in commands:
+        assert command in web_job, f"web-test CI job is missing: {command}"
+    command_positions = [web_job.index(command) for command in commands]
+    assert command_positions == sorted(command_positions)
