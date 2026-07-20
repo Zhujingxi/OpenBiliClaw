@@ -1,3 +1,4 @@
+// @ts-check
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -19,9 +20,15 @@ import {
   updateSavedBatchButtonState,
 } from "../../src/openbiliclaw/web/shared/saved-sync-core.js";
 
+/**
+ * @template T
+ * @returns {{ promise: Promise<T>, resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void }}
+ */
 function deferred() {
-  let resolve;
-  let reject;
+  /** @type {(value: T | PromiseLike<T>) => void} */
+  let resolve = () => {};
+  /** @type {(reason?: unknown) => void} */
+  let reject = () => {};
   const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
@@ -51,14 +58,25 @@ function createScheduler() {
   };
 }
 
+/**
+ * @param {Record<string, any>} [data]
+ * @returns {{ dataset: Record<string, any>; focusCalls: number; focus(): void; closest?: (() => any) | null }}
+ */
 function createAction(data = {}) {
   return {
     dataset: data,
     focusCalls: 0,
-    focus() { this.focusCalls += 1; },
+    focus() {
+      this.focusCalls += 1;
+    },
   };
 }
 
+/**
+ * @param {string} itemKey
+ * @param {ReturnType<typeof createAction>[]} actions
+ * @returns {{ dataset: { itemKey: string }; querySelectorAll(selector: string): ReturnType<typeof createAction>[] }}
+ */
 function createCard(itemKey, actions) {
   const card = {
     dataset: { itemKey },
@@ -70,6 +88,12 @@ function createCard(itemKey, actions) {
   return card;
 }
 
+/**
+ * @param {any[]} cards
+ * @param {any[]} [listActions]
+ * @param {any} [heading]
+ * @returns {any}
+ */
 function createFocusRoot(cards, listActions = [], heading = null) {
   return {
     querySelectorAll(selector) {
@@ -82,10 +106,13 @@ function createFocusRoot(cards, listActions = [], heading = null) {
         return listActions.find((action) => action.dataset.savedListAction === exact[1]) || null;
       }
       if (selector.includes('[data-saved-list-action="sync-all"]')) {
-        return listActions.find((action) => (
-          action.dataset.savedListAction === "sync-all"
-          || action.dataset.savedListAction === "retry"
-        )) || null;
+        return (
+          listActions.find(
+            (action) =>
+              action.dataset.savedListAction === "sync-all" ||
+              action.dataset.savedListAction === "retry",
+          ) || null
+        );
       }
       return null;
     },
@@ -219,7 +246,9 @@ test("task recovery retains ownership when the initial fetch fails and releases 
   const terminal = [];
   const coordinator = createSavedTaskCoordinator({
     tracker,
-    fetchTask: async () => { throw new Error("recovery_fetch_failed"); },
+    fetchTask: async () => {
+      throw new Error("recovery_fetch_failed");
+    },
   });
 
   await coordinator.recover(
@@ -277,17 +306,27 @@ test("dialog focus controller traps Tab, handles Escape, and restores the live o
   const listeners = new Map();
   const document = {
     activeElement: null,
-    addEventListener(type, listener) { listeners.set(type, listener); },
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
     removeEventListener(type, listener) {
       if (listeners.get(type) === listener) listeners.delete(type);
     },
   };
+  /** @type {any} */
   const first = createAction();
+  /** @type {any} */
   const last = createAction();
   first.closest = () => null;
   last.closest = () => null;
-  first.focus = () => { first.focusCalls += 1; document.activeElement = first; };
-  last.focus = () => { last.focusCalls += 1; document.activeElement = last; };
+  first.focus = () => {
+    first.focusCalls += 1;
+    document.activeElement = first;
+  };
+  last.focus = () => {
+    last.focusCalls += 1;
+    document.activeElement = last;
+  };
   const dialog = { querySelectorAll: () => [first, last], focus() {} };
   const liveOpener = createAction();
   let closes = 0;
@@ -295,19 +334,38 @@ test("dialog focus controller traps Tab, handles Escape, and restores the live o
     dialog,
     document,
     resolveOpener: () => liveOpener,
-    onClose: () => { closes += 1; },
+    onClose: () => {
+      closes += 1;
+    },
   });
 
   controller.activate();
   const keydown = listeners.get("keydown");
   document.activeElement = last;
   let prevented = 0;
-  keydown({ key: "Tab", shiftKey: false, preventDefault: () => { prevented += 1; } });
+  keydown({
+    key: "Tab",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented += 1;
+    },
+  });
   assert.equal(first.focusCalls, 1);
   document.activeElement = first;
-  keydown({ key: "Tab", shiftKey: true, preventDefault: () => { prevented += 1; } });
+  keydown({
+    key: "Tab",
+    shiftKey: true,
+    preventDefault: () => {
+      prevented += 1;
+    },
+  });
   assert.equal(last.focusCalls, 1);
-  keydown({ key: "Escape", preventDefault: () => { prevented += 1; } });
+  keydown({
+    key: "Escape",
+    preventDefault: () => {
+      prevented += 1;
+    },
+  });
 
   assert.equal(prevented, 3);
   assert.equal(closes, 1);
@@ -390,14 +448,17 @@ test("strict API and normalization preserve both desktop request shapes", async 
   await api.sync("favorite", [normalized.item_key]);
   await api.pollTask("task/1");
 
-  assert.deepEqual(requests.map((request) => request.path), [
-    "/saved/favorite",
-    "/saved/favorite/remove",
-    "/saved/favorite/status?item_key=youtube%3Avideo-1",
-    "/saved/favorite?limit=25&offset=5",
-    "/saved/favorite/sync",
-    "/saved-sync/tasks/task%2F1",
-  ]);
+  assert.deepEqual(
+    requests.map((request) => request.path),
+    [
+      "/saved/favorite",
+      "/saved/favorite/remove",
+      "/saved/favorite/status?item_key=youtube%3Avideo-1",
+      "/saved/favorite?limit=25&offset=5",
+      "/saved/favorite/sync",
+      "/saved-sync/tasks/task%2F1",
+    ],
+  );
   assert.equal(JSON.parse(requests[0].options.body).author_name, "author");
   assert.throws(() => api.list("unknown"), /Unknown saved list/);
 });
@@ -406,8 +467,12 @@ test("batch button state is DOM-injected and the ES module installs its classic 
   const attributes = new Map([["aria-busy", "true"]]);
   const button = {
     disabled: false,
-    setAttribute(name, value) { attributes.set(name, value); },
-    removeAttribute(name) { attributes.delete(name); },
+    setAttribute(name, value) {
+      attributes.set(name, value);
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
   };
 
   updateSavedBatchButtonState(button, 0);

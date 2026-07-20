@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+        "target": "es2022",
+        "module": "nodenext",
+        "moduleResolution": "nodenext",
+        "lib": ["es2022"],
+        "allowJs": true,
+        "checkJs": false,
+        "strict": true,
+        "noImplicitAny": false,
+        "noEmit": true,
+        "types": ["node"],
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true
+    },
+    "include": [
+        "../extension/scripts/**/*.mjs",
+        "*.mjs",
+        "../tests/js/**/*.mjs",
+        "../tests/web_model_config_state.test.mjs",
+        "../eslint.config.mjs"
+    ]
+}

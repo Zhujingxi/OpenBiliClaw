@@ -1,3 +1,4 @@
+// @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -10,9 +11,7 @@ import {
 let controller = {};
 let controllerLoadError = null;
 try {
-  controller = await import(
-    "../../src/openbiliclaw/web/js/mobile-model-settings-controller.js"
-  );
+  controller = await import("../../src/openbiliclaw/web/js/mobile-model-settings-controller.js");
 } catch (error) {
   controllerLoadError = error;
 }
@@ -28,9 +27,15 @@ function requiredExport(name) {
   return controller[name];
 }
 
+/**
+ * @template T
+ * @returns {{ promise: Promise<T>, resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void }}
+ */
 function deferred() {
-  let resolve;
-  let reject;
+  /** @type {(value: T | PromiseLike<T>) => void} */
+  let resolve = () => {};
+  /** @type {(reason?: unknown) => void} */
+  let reject = () => {};
   const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
@@ -69,9 +74,15 @@ function loadRecoveryHarness(createRecovery) {
     tone: "",
   };
   const recovery = createRecovery({
-    setLocked(value) { visible.locked = value; },
-    setBusy(value) { visible.busy = value; },
-    setRetryVisible(value) { visible.retry = value; },
+    setLocked(value) {
+      visible.locked = value;
+    },
+    setBusy(value) {
+      visible.busy = value;
+    },
+    setRetryVisible(value) {
+      visible.retry = value;
+    },
     onLoading() {
       visible.status = "loading";
       visible.tone = "";
@@ -94,23 +105,22 @@ function loadRecoveryHarness(createRecovery) {
 
 test("stable error IDs and fields are read only from own mapped properties", () => {
   const readFieldError = requiredExport("readOwnMobileModelFieldError");
-  const mapped = mapServerFieldErrors(hydrateModelConfig({}), [{
-    connection_id: "constructor",
-    path: "models.chat.connections.0.name",
-    code: "invalid_name",
-    message: "Use a distinct connection name.",
-    source: "models",
-  }]);
+  const mapped = mapServerFieldErrors(hydrateModelConfig({}), [
+    {
+      connection_id: "constructor",
+      path: "models.chat.connections.0.name",
+      code: "invalid_name",
+      message: "Use a distinct connection name.",
+      source: "models",
+    },
+  ]);
 
   assert.equal(
     readFieldError(mapped.fieldErrors.byConnection, "constructor", "name")?.message,
     "Use a distinct connection name.",
   );
   assert.equal(readFieldError({}, "constructor", "name"), null);
-  assert.equal(
-    readFieldError(mapped.fieldErrors.byConnection, "constructor", "constructor"),
-    null,
-  );
+  assert.equal(readFieldError(mapped.fieldErrors.byConnection, "constructor", "constructor"), null);
   assert.equal(readFieldError(mapped.fieldErrors.byConnection, "__proto__", "name"), null);
 });
 
@@ -165,7 +175,9 @@ test("Saved Sync reload before first Models still loads descriptors and unlocks 
   const createCoordinator = requiredExport("createMobileModelResourceCoordinator");
   let snapshotRequests = 0;
   let descriptorRequests = 0;
+  /** @type {any} */
   let visibleSnapshot = null;
+  /** @type {any} */
   let installedDescriptors = null;
   let editorLocked = true;
   const coordinator = createCoordinator({
@@ -178,9 +190,15 @@ test("Saved Sync reload before first Models still loads descriptors and unlocks 
       return { connection_types: [{ id: "openai_compatible" }] };
     },
     blocked: () => false,
-    applySnapshot(snapshot) { visibleSnapshot = snapshot; },
-    installDescriptors(descriptors) { installedDescriptors = descriptors; },
-    onReadinessChange(readiness) { editorLocked = !readiness.ready; },
+    applySnapshot(snapshot) {
+      visibleSnapshot = snapshot;
+    },
+    installDescriptors(descriptors) {
+      installedDescriptors = descriptors;
+    },
+    onReadinessChange(readiness) {
+      editorLocked = !readiness.ready;
+    },
   });
 
   await coordinator.reloadSnapshot();
@@ -217,7 +235,9 @@ test("descriptor failure remains retryable after snapshot success", async () => 
     },
     blocked: () => false,
     applySnapshot() {},
-    installDescriptors() { installed = true; },
+    installDescriptors() {
+      installed = true;
+    },
   });
 
   await assert.rejects(coordinator.enterModels(), /descriptor registry unavailable/);
@@ -247,8 +267,12 @@ test("newer reload wins over an in-flight full load while current descriptors in
     },
     descriptorRequest: () => descriptor.promise,
     blocked: () => false,
-    applySnapshot(snapshot) { visibleRevision = snapshot.revision; },
-    installDescriptors(value) { descriptorId = value.connection_types[0].id; },
+    applySnapshot(snapshot) {
+      visibleRevision = snapshot.revision;
+    },
+    installDescriptors(value) {
+      descriptorId = value.connection_types[0].id;
+    },
   });
 
   const fullLoad = coordinator.enterModels();
@@ -275,7 +299,9 @@ test("readiness stays locked until both independently loaded resources are ready
     blocked: () => false,
     applySnapshot() {},
     installDescriptors() {},
-    onReadinessChange(readiness) { transitions.push({ ...readiness }); },
+    onReadinessChange(readiness) {
+      transitions.push({ ...readiness });
+    },
   });
 
   const load = coordinator.enterModels();
@@ -312,7 +338,9 @@ test("a rejected winning reload leaves stale full-load completion visibly retrya
     snapshotRequest: () => snapshots[requestIndex++].promise,
     descriptorRequest: () => descriptors.promise,
     blocked: () => false,
-    applySnapshot(snapshot) { visibleRevision = snapshot.revision; },
+    applySnapshot(snapshot) {
+      visibleRevision = snapshot.revision;
+    },
     installDescriptors() {},
     onReadinessChange: recovery.onReadinessChange,
   });
@@ -372,7 +400,9 @@ test("a late winning reload clears an interim retry state and unlocks only when 
     },
     descriptorRequest: () => descriptors.promise,
     blocked: () => false,
-    applySnapshot(snapshot) { visibleRevision = snapshot.revision; },
+    applySnapshot(snapshot) {
+      visibleRevision = snapshot.revision;
+    },
     installDescriptors() {},
     onReadinessChange: recovery.onReadinessChange,
   });
@@ -400,6 +430,7 @@ test("a late winning reload clears an interim retry state and unlocks only when 
 });
 
 function exactDraftHarness(createRenderer) {
+  /** @type {any} */
   const state = {
     model: "old-model",
     preset: "custom",
@@ -408,6 +439,7 @@ function exactDraftHarness(createRenderer) {
     errors: ["stale validation"],
     credential: "keep",
   };
+  /** @type {any} */
   const visible = {
     row: "old-model / custom / Probe passed",
     probe: "Probe passed",
@@ -417,16 +449,26 @@ function exactDraftHarness(createRenderer) {
     inspectorRebuilds: 0,
   };
   const renderer = createRenderer({
-    clearInlineErrors() { visible.inlineErrors = []; },
-    renderErrorSummary() { visible.errors = [...state.errors]; },
+    clearInlineErrors() {
+      visible.inlineErrors = [];
+    },
+    renderErrorSummary() {
+      visible.errors = [...state.errors];
+    },
     renderRouteList() {
       visible.row = `${state.model} / ${state.preset} / ${
         state.probe?.ok ? "Probe passed" : "Not probed"
       } / ${state.sharedModel}`;
     },
-    renderProbeStatus() { visible.probe = state.probe?.ok ? "Probe passed" : "Not probed"; },
-    renderInspector() { visible.inspectorRebuilds += 1; },
-    renderCredential() { visible.credential = state.credential; },
+    renderProbeStatus() {
+      visible.probe = state.probe?.ok ? "Probe passed" : "Not probed";
+    },
+    renderInspector() {
+      visible.inspectorRebuilds += 1;
+    },
+    renderCredential() {
+      visible.credential = state.credential;
+    },
   });
   return { state, visible, renderer };
 }
@@ -480,8 +522,18 @@ test("credential and shared embedding edits refresh visible exact-probe and prov
 });
 
 test("dialog close resolves the current live opener after the shell replaced it", () => {
-  const oldOpener = { focusCalls: 0, focus() { this.focusCalls += 1; } };
-  const liveOpener = { focusCalls: 0, focus() { this.focusCalls += 1; } };
+  const oldOpener = {
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
+  const liveOpener = {
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
   const document = {
     activeElement: null,
     addEventListener() {},
@@ -502,7 +554,12 @@ test("dialog close resolves the current live opener after the shell replaced it"
 });
 
 test("dialog close does not fall back to a detached opener when resolution fails", () => {
-  const detachedOpener = { focusCalls: 0, focus() { this.focusCalls += 1; } };
+  const detachedOpener = {
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
   const controllerInstance = createDialogFocusController({
     dialog: { querySelectorAll: () => [], focus() {} },
     document: { addEventListener() {}, removeEventListener() {} },
@@ -519,33 +576,34 @@ test("invalid Runtime numbers produce field feedback and block the save callback
   const guardRuntime = requiredExport("guardMobileModelRuntime");
   const validateNumbers = requiredExport("validateMobileModelNumbers");
   let requests = 0;
+  /** @type {any} */
   let visibleErrors = {};
-  const accepted = guardRuntime(
-    { concurrency: 17, timeout_seconds: 9 },
-    (errors) => { visibleErrors = errors; },
-  );
+  const accepted = guardRuntime({ concurrency: 17, timeout_seconds: 9 }, (errors) => {
+    visibleErrors = errors;
+  });
   if (accepted) requests += 1;
 
   assert.equal(accepted, false);
   assert.equal(requests, 0);
   assert.match(visibleErrors.concurrency, /1.*16/);
   assert.match(visibleErrors.timeout_seconds, /10/);
-  const unified = validateNumbers(numericState({
-    models: {
-      ...numericState().models,
-      chat: { ...numericState().models.chat, concurrency: 17, timeout_seconds: 9 },
-    },
-  }));
+  const unified = validateNumbers(
+    numericState({
+      models: {
+        ...numericState().models,
+        chat: { ...numericState().models.chat, concurrency: 17, timeout_seconds: 9 },
+      },
+    }),
+  );
   assert.equal(visibleErrors.concurrency, unified.byPath["models.chat.concurrency"].message);
   assert.equal(
     visibleErrors.timeout_seconds,
     unified.byPath["models.chat.timeout_seconds"].message,
   );
 
-  const valid = guardRuntime(
-    { concurrency: 16, timeout_seconds: 10 },
-    (errors) => { visibleErrors = errors; },
-  );
+  const valid = guardRuntime({ concurrency: 16, timeout_seconds: 10 }, (errors) => {
+    visibleErrors = errors;
+  });
   assert.equal(valid, true);
   assert.deepEqual(visibleErrors, {});
 });
@@ -585,12 +643,17 @@ test("all model numeric constraints are fieldized before save without clamping t
   state.models.embedding.settings.output_dimensionality = -4;
   state.models.embedding.settings.similarity_threshold = 1.01;
   let saveCalls = 0;
+  /** @type {any} */
   let visibleErrors = null;
   const validation = createValidation({
-    renderErrors(errors) { visibleErrors = errors; },
+    renderErrors(errors) {
+      visibleErrors = errors;
+    },
   });
 
-  const accepted = validation.runSaveIfValid(state, () => { saveCalls += 1; });
+  const accepted = validation.runSaveIfValid(state, () => {
+    saveCalls += 1;
+  });
   assert.equal(accepted, false);
   assert.equal(saveCalls, 0);
   assert.equal(state.models.chat.connections[0].num_ctx, -1);
@@ -607,10 +670,7 @@ test("all model numeric constraints are fieldized before save without clamping t
     visibleErrors.byConnection["chat-primary"].num_ctx.path,
     "models.chat.connections.0.num_ctx",
   );
-  assert.equal(
-    visibleErrors.byConnection["chat-fallback"].num_ctx.connectionId,
-    "chat-fallback",
-  );
+  assert.equal(visibleErrors.byConnection["chat-fallback"].num_ctx.connectionId, "chat-fallback");
   assert.equal(visibleErrors.firstError.path, "models.chat.concurrency");
 
   state.models.chat.concurrency = 16;
@@ -619,7 +679,12 @@ test("all model numeric constraints are fieldized before save without clamping t
   state.models.chat.connections[1].num_ctx = 1;
   state.models.embedding.settings.output_dimensionality = 0;
   state.models.embedding.settings.similarity_threshold = 1;
-  assert.equal(validation.runSaveIfValid(state, () => { saveCalls += 1; }), true);
+  assert.equal(
+    validation.runSaveIfValid(state, () => {
+      saveCalls += 1;
+    }),
+    true,
+  );
   assert.equal(saveCalls, 1);
   assert.equal(visibleErrors.valid, true);
 
@@ -638,7 +703,9 @@ test("an invalid numeric draft blocks exact-probe callbacks before serialization
   const validation = createValidation();
 
   assert.equal(
-    validation.runProbeIfValid(state, () => { probeCalls += 1; }),
+    validation.runProbeIfValid(state, () => {
+      probeCalls += 1;
+    }),
     false,
   );
   assert.equal(probeCalls, 0);
@@ -646,7 +713,9 @@ test("an invalid numeric draft blocks exact-probe callbacks before serialization
 
   state.models.chat.connections[0].num_ctx = 0;
   assert.equal(
-    validation.runProbeIfValid(state, () => { probeCalls += 1; }),
+    validation.runProbeIfValid(state, () => {
+      probeCalls += 1;
+    }),
     true,
   );
   assert.equal(probeCalls, 1);
@@ -658,7 +727,9 @@ test("numeric error lifecycle revalidates invalid edits and authoritative replac
   const rendered = [];
   const validation = createValidation({
     getState: () => state,
-    renderErrors(errors) { rendered.push(errors); },
+    renderErrors(errors) {
+      rendered.push(errors);
+    },
   });
 
   state.models.chat.concurrency = 0;
@@ -694,8 +765,9 @@ test("numeric connection errors treat prototype-like stable IDs as own keys", ()
   const state = numericState();
   state.models.chat.connections[0] = { id: "__proto__", num_ctx: -1 };
   state.models.chat.connections[1] = { id: "constructor", num_ctx: -2 };
-  const previousPrototypeError = Object.prototype.num_ctx;
-  const previousConstructorError = Object.num_ctx;
+  /** @type {any} */
+  let previousPrototypeError = /** @type {any} */ (Object.prototype).num_ctx;
+  const previousConstructorError = /** @type {any} */ (Object).num_ctx;
 
   try {
     const errors = validateNumbers(state);
@@ -703,13 +775,14 @@ test("numeric connection errors treat prototype-like stable IDs as own keys", ()
     assert.equal(Object.hasOwn(errors.byConnection, "constructor"), true);
     assert.match(errors.byConnection.__proto__.num_ctx.message, /0/);
     assert.match(errors.byConnection.constructor.num_ctx.message, /0/);
-    assert.equal(Object.prototype.num_ctx, previousPrototypeError);
-    assert.equal(Object.num_ctx, previousConstructorError);
+    assert.equal(/** @type {any} */ (Object.prototype).num_ctx, previousPrototypeError);
+    assert.equal(/** @type {any} */ (Object).num_ctx, previousConstructorError);
   } finally {
-    if (previousPrototypeError === undefined) delete Object.prototype.num_ctx;
-    else Object.prototype.num_ctx = previousPrototypeError;
-    if (previousConstructorError === undefined) delete Object.num_ctx;
-    else Object.num_ctx = previousConstructorError;
+    if (previousPrototypeError === undefined)
+      delete (/** @type {any} */ (Object.prototype).num_ctx);
+    else /** @type {any} */ (Object.prototype).num_ctx = previousPrototypeError;
+    if (previousConstructorError === undefined) delete (/** @type {any} */ (Object).num_ctx);
+    else /** @type {any} */ (Object).num_ctx = previousConstructorError;
   }
 });
 
@@ -740,10 +813,7 @@ test("Pydantic validation details map indexes to stable IDs without echoing valu
   assert.equal(normalized[0].path, "models.chat.connections.1.num_ctx");
   assert.equal(normalized[0].connection_id, "chat-fallback");
   assert.match(normalized[0].message, /0/);
-  assert.equal(
-    normalized[1].path,
-    "models.embedding.settings.output_dimensionality",
-  );
+  assert.equal(normalized[1].path, "models.embedding.settings.output_dimensionality");
   assert.equal(normalized[2].connection_id, "chat-primary");
   assert.equal(JSON.stringify(normalized).includes("SECRET_VALUE"), false);
   assert.equal(JSON.stringify(normalized).includes("sk-secret-value"), false);

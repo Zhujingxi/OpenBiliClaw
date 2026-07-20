@@ -1,7 +1,8 @@
+// @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import * as modelConfigState from "../src/openbiliclaw/web/shared/model-config-state.js";
+import * as modelConfigStateNs from "../src/openbiliclaw/web/shared/model-config-state.js";
 import {
   appendRouteItem,
   applyPreset,
@@ -19,6 +20,22 @@ import {
   updateRouteSetting,
 } from "../src/openbiliclaw/web/shared/model-config-state.js";
 
+/**
+ * The canonical .js state module predates TS conversion and exports no
+ * types; this suite drives its loose-record API, so the namespace is used
+ * through any and hydrated state is treated as Record<string, any>.
+ * @type {any}
+ */
+const modelConfigState = modelConfigStateNs;
+
+/**
+ * Test fixture: the canonical state module treats connections as loose
+ * records, so fixtures are typed as Record<string, any> throughout this file
+ * (the .js source predates TS conversion and has no exported types).
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function connection(id, overrides = {}) {
   return {
     id,
@@ -45,6 +62,11 @@ function connection(id, overrides = {}) {
   };
 }
 
+/**
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function provider(id, overrides = {}) {
   const item = connection(id, overrides);
   delete item.model;
@@ -56,6 +78,11 @@ function provider(id, overrides = {}) {
   return item;
 }
 
+/**
+ * @param {string[]} [ids]
+ * @param {string} [revision]
+ * @returns {Record<string, any>}
+ */
 function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
   return {
     revision,
@@ -83,9 +110,15 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
   };
 }
 
+/**
+ * @template T
+ * @returns {{ promise: Promise<T>, resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void }}
+ */
 function deferred() {
-  let resolve;
-  let reject;
+  /** @type {(value: T | PromiseLike<T>) => void} */
+  let resolve = () => {};
+  /** @type {(reason?: unknown) => void} */
+  let reject = () => {};
   const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
@@ -350,8 +383,8 @@ test("server field errors map by connection ID instead of array position", () =>
 });
 
 test("server field errors cannot prototype-pollute through IDs or paths", () => {
-  const previousPrototypeError = Object.prototype.num_ctx;
-  const previousConstructorError = Object.constructor_error;
+  const previousPrototypeError = /** @type {any} */ (Object.prototype).num_ctx;
+  const previousConstructorError = /** @type {any} */ (Object).constructor_error;
   try {
     const state = mapServerFieldErrors(hydrateModelConfig(snapshot()), [
       {
@@ -378,13 +411,13 @@ test("server field errors cannot prototype-pollute through IDs or paths", () => 
       state.fieldErrors.byConnection.constructor.constructor_error.message,
       "Invalid field.",
     );
-    assert.equal(Object.prototype.num_ctx, previousPrototypeError);
-    assert.equal(Object.constructor_error, previousConstructorError);
+    assert.equal(/** @type {any} */ (Object.prototype).num_ctx, previousPrototypeError);
+    assert.equal(/** @type {any} */ (Object).constructor_error, previousConstructorError);
   } finally {
-    if (previousPrototypeError === undefined) delete Object.prototype.num_ctx;
-    else Object.prototype.num_ctx = previousPrototypeError;
-    if (previousConstructorError === undefined) delete Object.constructor_error;
-    else Object.constructor_error = previousConstructorError;
+    if (previousPrototypeError === undefined) delete /** @type {any} */ (Object.prototype).num_ctx;
+    else /** @type {any} */ (Object.prototype).num_ctx = previousPrototypeError;
+    if (previousConstructorError === undefined) delete /** @type {any} */ (Object).constructor_error;
+    else /** @type {any} */ (Object).constructor_error = previousConstructorError;
   }
 });
 
@@ -464,11 +497,11 @@ test("record fingerprint edits invalidate only that record's exact probe", () =>
     source.models.chat.connections[1].probe = { ok: true, connection_id: "b" };
     const changed = updateRouteField(hydrateModelConfig(source), "chat", "a", field, value);
 
-    assert.equal(changed.models.chat.connections[0].probe, null, field);
+    assert.equal(changed.models.chat.connections[0].probe, null, String(field));
     assert.deepEqual(
       changed.models.chat.connections[1].probe,
       { ok: true, connection_id: "b" },
-      field,
+      String(field),
     );
   }
 
@@ -532,7 +565,7 @@ test("shared embedding setting edits invalidate every provider probe", () => {
     assert.deepEqual(
       changed.models.embedding.providers.map((item) => item.probe),
       [null, null],
-      field,
+      String(field),
     );
   }
 });
@@ -799,6 +832,7 @@ test("independent full load rechecks snapshot and descriptor ownership after set
   const firstDescriptors = deferred();
   const latestDescriptors = deferred();
   let visibleSnapshot = null;
+  /** @type {any} */
   let visibleDescriptors = null;
 
   const load = modelConfigState.loadIndependentModelResources({
@@ -835,6 +869,7 @@ test("blocked snapshot is retained as remote while descriptor sibling still inst
   const pendingDescriptors = deferred();
   let dirty = false;
   let remoteSnapshot = null;
+  /** @type {any} */
   let visibleDescriptors = null;
 
   const load = modelConfigState.loadIndependentModelResources({

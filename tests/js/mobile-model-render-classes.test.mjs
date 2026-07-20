@@ -1,3 +1,4 @@
+// @ts-check
 // Reproduction of the mobile model-settings styling regression (P2) and its
 // fix. The shared renderers must emit class names that the mobile stylesheet
 // actually styles when the caller passes the mobile class prefix. Desktop
@@ -14,10 +15,7 @@ import {
 } from "../../src/openbiliclaw/web/shared/model-config-render.js";
 
 const root = resolve(import.meta.dirname, "..", "..");
-const mobileCss = readFileSync(
-  resolve(root, "src/openbiliclaw/web/css/app.css"),
-  "utf-8",
-);
+const mobileCss = readFileSync(resolve(root, "src/openbiliclaw/web/css/app.css"), "utf-8");
 const desktopCss = readFileSync(
   resolve(root, "src/openbiliclaw/web/desktop/assets/css/app.css"),
   "utf-8",
@@ -48,6 +46,10 @@ const GROUPS = [
   },
 ];
 
+/**
+ * @param {Record<string, unknown>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
 function makeRecord(overrides = {}) {
   return {
     id: "conn-1",
@@ -69,6 +71,10 @@ function makeRecord(overrides = {}) {
   };
 }
 
+/**
+ * @param {string} html
+ * @returns {string[]}
+ */
 function extractClasses(html) {
   const classes = new Set();
   for (const match of html.matchAll(/class="([^"]+)"/g)) {
@@ -79,14 +85,28 @@ function extractClasses(html) {
   return [...classes];
 }
 
+/**
+ * The shared renderers' JSDoc currently types `options` as
+ * `{ classPrefix?: string }` only; the remaining parameters are accepted at
+ * runtime but not declared (pre-TS-conversion source). Cast to a call shape
+ * that matches the real API.
+ * @type {(options: { groups?: unknown[], record?: Record<string, unknown>, kind?: string, classPrefix?: string }) => string}
+ */
+const renderTypeGroups = /** @type {any} */ (renderConnectionTypeGroups);
+
+/**
+ * @type {(options: { record?: Record<string, unknown>, descriptor?: Record<string, unknown>, kind?: string, classPrefix?: string }) => { html: string }}
+ */
+const renderCredEditor = /** @type {any} */ (renderCredentialEditor);
+
 test("mobile prefix emits classes styled by the mobile stylesheet", () => {
-  const typeHtml = renderConnectionTypeGroups({
+  const typeHtml = renderTypeGroups({
     groups: GROUPS,
     record: makeRecord(),
     kind: "chat",
     classPrefix: "mobile-model",
   });
-  const credentialHtml = renderCredentialEditor({
+  const credentialHtml = renderCredEditor({
     record: makeRecord(),
     descriptor: DESCRIPTOR,
     kind: "chat",
@@ -119,31 +139,22 @@ test("mobile prefix emits classes styled by the mobile stylesheet", () => {
     `expected mobile-model-credential-action in ${credentialClasses}`,
   );
   assert.match(mobileCss, /\.mobile-model-credential-actions\b/);
-  assert.match(
-    mobileCss,
-    /\.mobile-model-credential-actions button\[aria-pressed="true"\]/,
-  );
+  assert.match(mobileCss, /\.mobile-model-credential-actions button\[aria-pressed="true"\]/);
 
   // The desktop-only classes must NOT leak into the mobile render.
   assert.ok(!typeClasses.includes("model-type-group"), "desktop class leaked");
   assert.ok(!typeClasses.includes("model-type-option"), "desktop class leaked");
-  assert.ok(
-    !credentialClasses.includes("model-credential-actions"),
-    "desktop class leaked",
-  );
-  assert.ok(
-    !credentialClasses.includes("model-credential-action"),
-    "desktop class leaked",
-  );
+  assert.ok(!credentialClasses.includes("model-credential-actions"), "desktop class leaked");
+  assert.ok(!credentialClasses.includes("model-credential-action"), "desktop class leaked");
 });
 
 test("default prefix preserves desktop classes byte-for-byte", () => {
-  const typeHtml = renderConnectionTypeGroups({
+  const typeHtml = renderTypeGroups({
     groups: GROUPS,
     record: makeRecord(),
     kind: "chat",
   });
-  const credentialHtml = renderCredentialEditor({
+  const credentialHtml = renderCredEditor({
     record: makeRecord(),
     descriptor: DESCRIPTOR,
     kind: "chat",

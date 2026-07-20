@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -16,6 +17,14 @@ const CWS_V1_API_BASE = "https://www.googleapis.com/chromewebstore/v1.1";
 const CWS_V2_API_BASE = "https://chromewebstore.googleapis.com/v2";
 const CWS_SCOPE = "https://www.googleapis.com/auth/chromewebstore";
 const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * @typedef {import("./chrome-webstore-metadata-lib.mjs").Listing} Listing
+ * @typedef {{ clientId: string, clientSecret: string, refreshToken: string, publisherId: string, extensionId: string }} Credentials
+ * @typedef {{ listing: string, mode: string, replacePending: boolean, publish: boolean, help?: boolean }} CliOptions
+ * @typedef {typeof fetch} FetchImpl
+ * @typedef {(milliseconds: number) => Promise<unknown>} SleepFn
+ */
 
 function usage() {
   console.log(`Usage:
@@ -37,7 +46,12 @@ Options:
 `);
 }
 
+/**
+ * @param {string[]} argv
+ * @returns {CliOptions}
+ */
 export function parseArgs(argv) {
+  /** @type {CliOptions} */
   const options = {
     listing: "",
     mode: "",
@@ -84,6 +98,11 @@ export function parseArgs(argv) {
   return options;
 }
 
+/**
+ * @param {Record<string, string | undefined>} env
+ * @param {string} name
+ * @returns {string}
+ */
 function requiredEnv(env, name) {
   const value = env[name]?.trim();
   if (!value) {
@@ -92,6 +111,10 @@ function requiredEnv(env, name) {
   return value;
 }
 
+/**
+ * @param {Record<string, string | undefined>} env
+ * @returns {Credentials}
+ */
 function credentialsFromEnv(env) {
   return {
     clientId: requiredEnv(env, "CHROME_WEBSTORE_CLIENT_ID"),
@@ -102,15 +125,29 @@ function credentialsFromEnv(env) {
   };
 }
 
+/**
+ * @param {number} status
+ * @returns {boolean}
+ */
 function transientStatus(status) {
   return status === 429 || status >= 500;
 }
 
+/**
+ * @param {string} operation
+ * @param {string} url
+ * @param {RequestInit} options
+ * @param {{ fetchImpl: FetchImpl, sleep?: SleepFn }} deps
+ * @returns {Promise<any>} Parsed JSON body; shape varies per CWS API endpoint.
+ */
 export async function requestJson(
   operation,
   url,
   options,
-  { fetchImpl, sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) },
+  {
+    fetchImpl,
+    sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  },
 ) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response;
@@ -123,12 +160,15 @@ export async function requestJson(
         signal: controller.signal,
       });
     } catch (error) {
-      throw new Error(`${operation} request failed: ${error?.message ?? String(error)}`);
+      throw new Error(
+        `${operation} request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     } finally {
       clearTimeout(timeout);
     }
 
     const text = await response.text();
+    /** @type {any} */
     let payload = {};
     if (text.trim()) {
       try {
@@ -151,6 +191,11 @@ export async function requestJson(
   throw new Error(`${operation} exhausted its bounded retry`);
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<string>}
+ */
 async function getAccessToken(credentials, fetchImpl) {
   const body = new URLSearchParams({
     client_id: credentials.clientId,
@@ -177,7 +222,13 @@ async function getAccessToken(credentials, fetchImpl) {
   return payload.access_token;
 }
 
+/**
+ * @param {string} accessToken
+ * @param {boolean} [json]
+ * @returns {Record<string, string>}
+ */
 function bearerHeaders(accessToken, json = false) {
+  /** @type {Record<string, string>} */
   const headers = { Authorization: `Bearer ${accessToken}` };
   if (json) {
     headers["Content-Type"] = "application/json";
@@ -185,17 +236,33 @@ function bearerHeaders(accessToken, json = false) {
   return headers;
 }
 
+/**
+ * @param {string} extensionId
+ * @param {boolean} [draft]
+ * @returns {string}
+ */
 function v1ItemUrl(extensionId, draft = false) {
   const url = `${CWS_V1_API_BASE}/items/${encodeURIComponent(extensionId)}`;
   return draft ? `${url}?projection=DRAFT` : url;
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} method
+ * @returns {string}
+ */
 function v2ItemUrl(credentials, method) {
   const publisherId = encodeURIComponent(credentials.publisherId);
   const extensionId = encodeURIComponent(credentials.extensionId);
   return `${CWS_V2_API_BASE}/publishers/${publisherId}/items/${extensionId}:${method}`;
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} accessToken
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<any>}
+ */
 async function getDraft(credentials, accessToken, fetchImpl) {
   return await requestJson(
     "Chrome Web Store v1.1 draft probe",
@@ -205,6 +272,13 @@ async function getDraft(credentials, accessToken, fetchImpl) {
   );
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} accessToken
+ * @param {Record<string, unknown>} payload
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<any>}
+ */
 async function putDraft(credentials, accessToken, payload, fetchImpl) {
   return await requestJson(
     "Chrome Web Store v1.1 metadata update",
@@ -218,6 +292,12 @@ async function putDraft(credentials, accessToken, payload, fetchImpl) {
   );
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} accessToken
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<any>}
+ */
 async function fetchStatus(credentials, accessToken, fetchImpl) {
   return await requestJson(
     "Chrome Web Store v2 status",
@@ -227,6 +307,12 @@ async function fetchStatus(credentials, accessToken, fetchImpl) {
   );
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} accessToken
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<any>}
+ */
 async function cancelSubmission(credentials, accessToken, fetchImpl) {
   return await requestJson(
     "Chrome Web Store v2 cancellation",
@@ -240,6 +326,12 @@ async function cancelSubmission(credentials, accessToken, fetchImpl) {
   );
 }
 
+/**
+ * @param {Credentials} credentials
+ * @param {string} accessToken
+ * @param {FetchImpl} fetchImpl
+ * @returns {Promise<any>}
+ */
 async function publishItem(credentials, accessToken, fetchImpl) {
   return await requestJson(
     "Chrome Web Store v2 publish",
@@ -253,11 +345,21 @@ async function publishItem(credentials, accessToken, fetchImpl) {
   );
 }
 
+/**
+ * @param {any} status CWS v2 fetchStatus response; shape is Google-defined.
+ * @returns {string}
+ */
 export function findReviewState(status) {
   const state = status?.submittedItemRevisionStatus?.state;
   return typeof state === "string" ? state : "";
 }
 
+/**
+ * @param {Record<string, unknown>} draft
+ * @param {Listing} canonical
+ * @param {ReturnType<typeof summarizeDraft>} probe
+ * @returns {void}
+ */
 function requireSafeMetadataUpdate(draft, canonical, probe) {
   if (!probe.summary.present || !probe.description.present) {
     throw new Error(
@@ -267,6 +369,10 @@ function requireSafeMetadataUpdate(draft, canonical, probe) {
   buildMetadataPayload(draft, canonical);
 }
 
+/**
+ * @param {{ options: CliOptions, env: Record<string, string | undefined>, fetchImpl?: FetchImpl, readFileImpl?: typeof readFile, log?: (...args: unknown[]) => void }} deps
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function runMetadataCommand({
   options,
   env,
@@ -339,7 +445,9 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(`Chrome Web Store metadata command failed: ${error.message}`);
+    console.error(
+      `Chrome Web Store metadata command failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exitCode = 1;
   });
 }

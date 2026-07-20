@@ -1,3 +1,5 @@
+// @ts-check
+
 import { execSync } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
