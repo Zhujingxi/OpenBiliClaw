@@ -253,3 +253,84 @@ def test_admission_query_orders_preferred_platforms_ahead_of_fifo(tmp_path: Path
     # Default (no preference) keeps the legacy FIFO evaluated_at ordering.
     default = db.get_evaluated_discovery_candidates_for_admission(limit=10)
     assert [row["candidate_key"] for row in default] == ["reddit:A", "reddit:B", "bangumi:C"]
+
+
+def _seed_pending(db: Database, *, key: str, platform: str, strategy: str, order: int) -> None:
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=key,
+                source_platform=platform,
+                source_strategy=strategy,
+                content_id=key,
+                title=key,
+            )
+        ]
+    )
+    db.conn.execute(
+        "UPDATE discovery_candidates "
+        "SET last_seen_at = datetime('2026-07-20 00:00:00', '+' || ? || ' seconds') "
+        "WHERE candidate_key = ?",
+        (order, key),
+    )
+    db.conn.commit()
+
+
+def test_claim_prefers_under_share_pending_rows(tmp_path: Path) -> None:
+    # Task 9 (Phase 8): reddit's older backlog would otherwise be claimed first
+    # and burn LLM on rows that can't enter the pool; under-share bangumi must
+    # win the claim window instead.
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    for i in range(5):
+        _seed_pending(db, key=f"reddit:{i}", platform="reddit", strategy="reddit", order=i)
+    for i in range(3):
+        _seed_pending(db, key=f"bangumi:{i}", platform="bangumi", strategy="bangumi", order=10 + i)
+
+    rows = db.claim_discovery_candidates_for_eval(
+        limit=3, claim_token="t", preferred_source_platforms=["bangumi"]
+    )
+    assert [row["source_platform"] for row in rows] == ["bangumi", "bangumi", "bangumi"]
+
+
+def test_claim_without_preference_keeps_legacy_round_robin(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    for i in range(5):
+        _seed_pending(db, key=f"reddit:{i}", platform="reddit", strategy="reddit", order=i)
+    for i in range(3):
+        _seed_pending(db, key=f"bangumi:{i}", platform="bangumi", strategy="bangumi", order=10 + i)
+
+    rows = db.claim_discovery_candidates_for_eval(limit=3, claim_token="t")
+    # Legacy round-robin over sources in window order (reddit appears first).
+    assert [row["source_platform"] for row in rows] == ["reddit", "bangumi", "reddit"]
+
+
+def test_pipeline_claim_batch_prioritizes_under_share_source(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    for i in range(5):
+        _seed_pending(db, key=f"reddit:{i}", platform="reddit", strategy="reddit", order=i)
+    for i in range(3):
+        _seed_pending(db, key=f"bangumi:{i}", platform="bangumi", strategy="bangumi", order=10 + i)
+    # bangumi under its 50 share (visible pool empty → available 0); reddit is
+    # absent from targets → target 0 → not under-share → not preferred.
+    pipeline = _pipeline(db, share_targets={"bangumi": 50})
+
+    claim = pipeline.claim_batch(limit=3)
+    assert claim is not None
+    assert [row["source_platform"] for row in claim.rows] == ["bangumi", "bangumi", "bangumi"]
+
+
+def test_pipeline_claim_batch_without_strategy_is_legacy(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    for i in range(5):
+        _seed_pending(db, key=f"reddit:{i}", platform="reddit", strategy="reddit", order=i)
+    for i in range(3):
+        _seed_pending(db, key=f"bangumi:{i}", platform="bangumi", strategy="bangumi", order=10 + i)
+    pipeline = _pipeline(db, share_targets=None)
+
+    claim = pipeline.claim_batch(limit=3)
+    assert claim is not None
+    assert [row["source_platform"] for row in claim.rows] == ["reddit", "bangumi", "reddit"]

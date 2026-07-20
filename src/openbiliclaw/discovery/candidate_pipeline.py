@@ -488,10 +488,24 @@ class DiscoveryCandidatePipeline:
             return None
         token = secrets.token_hex(16)
         claim_fn = self.database.claim_discovery_candidates_for_eval
+        # Pool-share fairness (spec 2026-07-20, Phase 8): claim under-share
+        # sources' pending rows first so the evaluator isn't burned on an
+        # over-supplied backlog that admission won't seat. Empty list / older DB
+        # (TypeError) → legacy claim order.
+        preferred = self._under_share_platforms()
         try:
-            rows = list(claim_fn(limit=claim_limit, claim_token=token))
+            rows = list(
+                claim_fn(
+                    limit=claim_limit,
+                    claim_token=token,
+                    preferred_source_platforms=preferred,
+                )
+            )
         except TypeError:
-            rows = list(claim_fn(limit=claim_limit))
+            try:
+                rows = list(claim_fn(limit=claim_limit, claim_token=token))
+            except TypeError:
+                rows = list(claim_fn(limit=claim_limit))
         if not rows:
             return None
         stored_tokens = {str(row.get("claim_token") or "") for row in rows}

@@ -129,10 +129,13 @@ class _FakeRebalanceDB:
         pool_count: int,
         available_by_family: dict[str, int],
         evaluated_by_family: dict[str, int],
+        pending_by_family: dict[str, int] | None = None,
     ) -> None:
         self.pool_count = pool_count
         self.available_by_family = dict(available_by_family)
         self.evaluated_by_family = dict(evaluated_by_family)
+        # Task 9: admission-waiting supply = evaluated + pending_eval (+ evaluating).
+        self.pending_by_family = dict(pending_by_family or {})
         self.demote_calls: list[tuple[str, int]] = []
 
     def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
@@ -145,6 +148,12 @@ class _FakeRebalanceDB:
 
     def count_evaluated_discovery_candidates_by_source(self) -> dict[str, int]:
         return dict(self.evaluated_by_family)
+
+    def count_admission_waiting_discovery_candidates_by_source(self) -> dict[str, int]:
+        merged: dict[str, int] = dict(self.evaluated_by_family)
+        for family, count in self.pending_by_family.items():
+            merged[family] = merged.get(family, 0) + int(count)
+        return merged
 
     def demote_lowest_ranked_pool_rows(self, *, source_family: str, limit: int) -> int:
         self.demote_calls.append((source_family, limit))
@@ -256,6 +265,48 @@ def test_rebalance_reclaims_disabled_source_rows_absent_from_targets() -> None:
     assert db.demote_calls == [("bilibili", 3)]
 
 
+def test_rebalance_fillable_counts_pending_eval_not_only_evaluated() -> None:
+    # Task 9 (D9): the pool is pinned full by an orphan occupier, so bangumi
+    # can never REACH the evaluated stage — its supply sits in pending_eval. If
+    # fillable only counted evaluated rows, rebalance would never fire and the
+    # pool stays full forever (third chicken-and-egg). Counting pending_eval as
+    # waiting supply lets the demote proceed; the second-round admission backfill
+    # keeps the global cap intact even if a demoted row later fails eval.
+    db = _FakeRebalanceDB(
+        pool_count=300,
+        available_by_family={"bilibili": 141, "reddit": 152, "xiaohongshu": 7},
+        evaluated_by_family={},  # nothing has reached 'evaluated' yet
+        pending_by_family={"bangumi": 5},  # supply is stuck in pending_eval
+    )
+    controller = _controller(
+        database=db,
+        pool_target_count=300,
+        pool_source_shares={"bangumi": 1, "reddit": 1},
+    )
+
+    demoted = controller._rebalance_pool_shares()
+
+    assert demoted == 3
+    assert db.demote_calls == [("bilibili", 3)]
+
+
+def test_rebalance_still_noop_when_no_waiting_supply_of_any_stage() -> None:
+    db = _FakeRebalanceDB(
+        pool_count=300,
+        available_by_family={"bilibili": 141, "reddit": 152, "xiaohongshu": 7},
+        evaluated_by_family={},
+        pending_by_family={},
+    )
+    controller = _controller(
+        database=db,
+        pool_target_count=300,
+        pool_source_shares={"bangumi": 1, "reddit": 1},
+    )
+
+    assert controller._rebalance_pool_shares() == 0
+    assert db.demote_calls == []
+
+
 def test_rebalance_merges_bilibili_strategy_keys_when_reclaiming_orphan() -> None:
     # Note #2: a disabled bilibili source may surface under its four strategy
     # names rather than the "bilibili" family key. They must merge to one
@@ -275,6 +326,37 @@ def test_rebalance_merges_bilibili_strategy_keys_when_reclaiming_orphan() -> Non
 
     assert demoted == 3
     assert db.demote_calls == [("bilibili", 3)]
+
+
+def test_count_admission_waiting_includes_pending_and_evaluating(tmp_path: Path) -> None:
+    from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bangumi:{i}",
+                source_platform="bangumi",
+                source_strategy="bangumi",
+                content_id=f"bangumi-{i}",
+                title=f"b{i}",
+            )
+            for i in range(4)
+        ]
+    )
+    # 2 stay pending_eval, 1 evaluating, 1 evaluated.
+    db.conn.execute(
+        "UPDATE discovery_candidates SET status='evaluating' WHERE candidate_key='bangumi:0'"
+    )
+    db.conn.execute(
+        "UPDATE discovery_candidates SET status='evaluated' WHERE candidate_key='bangumi:1'"
+    )
+    db.conn.commit()
+
+    # evaluated-only counter sees 1; admission-waiting counter sees all 4.
+    assert db.count_evaluated_discovery_candidates_by_source().get("bangumi", 0) == 1
+    assert db.count_admission_waiting_discovery_candidates_by_source().get("bangumi", 0) == 4
 
 
 def test_demote_lowest_ranked_pool_rows_evicts_lowest_score_first(tmp_path: Path) -> None:
@@ -381,3 +463,91 @@ def test_run_pool_share_maintenance_invokes_rebalance_then_summary() -> None:
     controller.run_pool_share_maintenance()
 
     assert calls == ["rebalance", "summary"]
+
+
+# ── Task 9 (integration): coordinator chain — rebalance frees a slot from
+#    pending-only under-share supply, then share-aware claim pulls it. ──
+
+
+class _ClaimCachingEngine:
+    def cache_evaluated_results(self, items: list[object]) -> int:
+        return len(items)
+
+
+def _seed_pending_row(db: Database, *, key: str, platform: str, strategy: str, order: int) -> None:
+    from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=key,
+                source_platform=platform,
+                source_strategy=strategy,
+                content_id=key,
+                title=key,
+            )
+        ]
+    )
+    db.conn.execute(
+        "UPDATE discovery_candidates "
+        "SET last_seen_at = datetime('2026-07-20 00:00:00', '+' || ? || ' seconds') "
+        "WHERE candidate_key = ?",
+        (order, key),
+    )
+    db.conn.commit()
+
+
+def test_chain_rebalance_from_pending_then_claim_under_share(tmp_path: Path) -> None:
+    from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    # Pool pinned full by an orphan (disabled) bilibili source absent from shares.
+    for i in range(4):
+        db.cache_content(
+            f"BVbili{i}",
+            title=f"bili {i}",
+            up_name="UP",
+            source="search",
+            source_platform="bilibili",
+            relevance_score=0.8,
+            relevance_reason="seed",
+            pool_expression="x",
+            pool_topic_label="x",
+            style_key="deep_dive",
+            topic_group=f"g{i}",
+        )
+    # Under-share bangumi supply exists ONLY as pending_eval (never evaluated,
+    # because the full pool idles the evaluator); reddit backlog is older.
+    for i in range(5):
+        _seed_pending_row(db, key=f"reddit:{i}", platform="reddit", strategy="reddit", order=i)
+    for i in range(3):
+        _seed_pending_row(
+            db, key=f"bangumi:{i}", platform="bangumi", strategy="bangumi", order=10 + i
+        )
+
+    controller = _controller(
+        database=db,
+        pool_target_count=3,
+        pool_source_shares={"bangumi": 1},
+    )
+
+    # (1) The coordinator's pre-admit hook: rebalance must fire even though the
+    #     only under-share supply is pending_eval, freeing 3 orphan bilibili slots.
+    controller.run_pool_share_maintenance()
+    stale = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM content_cache WHERE pool_status = 'stale'"
+    ).fetchone()["c"]
+    assert stale == 3
+
+    # (2) The coordinator's fill path: share-aware claim pulls bangumi ahead of
+    #     the older reddit backlog.
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_ClaimCachingEngine(),  # type: ignore[arg-type]
+        pool_target_count=3,
+    )
+    pipeline.source_share_targets = controller._source_target_counts
+    claim = pipeline.claim_batch(limit=3)
+    assert claim is not None
+    assert [row["source_platform"] for row in claim.rows] == ["bangumi", "bangumi", "bangumi"]

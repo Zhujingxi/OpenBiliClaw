@@ -3083,15 +3083,29 @@ class ContinuousRefreshController:
     def _source_deficit(self, source_family: str) -> int:
         return self._source_requested_count(source_family)
 
-    def _evaluated_waiting_by_family(self) -> dict[str, int]:
-        """Return admission-waiting ``evaluated`` candidate counts per family."""
-        count_fn = getattr(self.database, "count_evaluated_discovery_candidates_by_source", None)
+    def _waiting_supply_by_family(self) -> dict[str, int]:
+        """Return admission-waiting candidate counts per family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): counts every
+        non-terminal stage (``pending_eval`` + ``evaluating`` + ``evaluated``),
+        not just ``evaluated`` — an orphan occupier pins the pool full, so an
+        under-share source never reaches ``evaluated`` and eviction would never
+        fire if we only counted the last stage. Falls back to the older
+        evaluated-only counter if the wider one is unavailable.
+        """
+        count_fn = getattr(
+            self.database, "count_admission_waiting_discovery_candidates_by_source", None
+        )
+        if not callable(count_fn):
+            count_fn = getattr(
+                self.database, "count_evaluated_discovery_candidates_by_source", None
+            )
         if not callable(count_fn):
             return {}
         try:
             counts = count_fn()
         except Exception:
-            logger.debug("evaluated-waiting-by-source snapshot failed", exc_info=True)
+            logger.debug("waiting-supply-by-source snapshot failed", exc_info=True)
             return {}
         return {str(family): int(count) for family, count in dict(counts).items()}
 
@@ -3123,10 +3137,11 @@ class ContinuousRefreshController:
 
         target_counts = self._source_target_counts()
         available_by_source = self._count_pool_available_candidates_by_source()
-        waiting_by_source = self._evaluated_waiting_by_family()
+        waiting_by_source = self._waiting_supply_by_family()
 
         # Budget = how many freed slots an under-share source could actually
-        # fill right now (deficit clamped by its evaluated waiting supply).
+        # fill soon (deficit clamped by its admission-waiting supply — any of
+        # pending_eval / evaluating / evaluated, see _waiting_supply_by_family).
         fillable = 0
         for family, target in target_counts.items():
             deficit = int(target) - self._platform_source_count(available_by_source, family)
