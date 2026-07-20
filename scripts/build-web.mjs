@@ -5,10 +5,16 @@
  * (loose ES module, specifiers unchanged). If no .ts files exist yet
  * (pre-migration), verify the existing .js files are present and exit 0 —
  * this lets CI wire `build:web` before any source is migrated.
+ *
+ * Emission is type-stripping, not bundling/transpiling: esbuild `transform`
+ * without a `format` rewrite keeps `export`/`import` declarations inline and
+ * the source text otherwise untouched, which the Python frontend-contract
+ * guards (source-text markers like `export function <name>`) depend on.
+ * charset "utf8" keeps the CJK UI copy literal for the copy guards.
  */
-import { build } from "esbuild";
-import { readdirSync, existsSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { transform } from "esbuild";
+import { readdirSync, existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,15 +49,17 @@ if (entryPoints.length === 0) {
 }
 
 for (const entry of entryPoints) {
-  await build({
-    entryPoints: [entry],
-    outfile: entry.replace(/\.ts$/, ".js"),
-    bundle: false,
-    format: "esm",
+  const source = readFileSync(entry, "utf8");
+  const sourceName = basename(entry);
+  const outputName = sourceName.replace(/\.ts$/, ".js");
+  const { code, map } = await transform(source, {
+    loader: "ts",
     target: "es2022",
-    platform: "browser",
-    sourcemap: true,
-    logLevel: "warning",
+    charset: "utf8",
+    sourcemap: "external",
+    sourcefile: sourceName,
   });
+  writeFileSync(entry.replace(/\.ts$/, ".js"), `${code}//# sourceMappingURL=${outputName}.map\n`);
+  writeFileSync(entry.replace(/\.ts$/, ".js.map"), map);
 }
 console.log(`[build-web] emitted ${entryPoints.length} file(s)`);

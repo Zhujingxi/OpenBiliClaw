@@ -94,7 +94,7 @@ guided-init 的 `InitPrereqs.chat_ready()` 只读取 production `OrderedLLMRoute
 
 ## 公开 API
 
-桌面静态入口把 `/web/shared/model-config-state.js` 作为可复用、无 DOM 的状态边界，并让 `/web/assets/js/model-settings.js` 只负责 descriptor/API/DOM 编排。两者与 desktop CSS/app shell 一起进入静态资源 hash，`/web` HTML 引用会附带同一 cache-busting revision；shared mount 位于通用 `/web` mount 之前，避免被 SPA 静态目录吞掉。
+桌面静态入口把 TypeScript 源 `web/shared/model-config-state.ts` 构建出的 `/web/shared/model-config-state.js` 作为可复用、无 DOM 的状态边界，并让 `/web/assets/js/model-settings.js` 只负责 descriptor/API/DOM 编排。运行时 URL 和 import specifier 保持 `.js`；两者与 desktop CSS/app shell 一起进入静态资源 hash，`/web` HTML 引用会附带同一 cache-busting revision。shared mount 位于通用 `/web` mount 之前，避免被 SPA 静态目录吞掉。
 
 模型 runtime bundle 与 coordinator 边界：
 

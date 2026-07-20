@@ -12,13 +12,91 @@
  * same descriptor set produces structurally identical markup everywhere.
  */
 
-const CATEGORY_LABELS = {
+import type {
+  ConnectionDescriptor,
+  DescriptorField,
+  RouteKind,
+  RouteRecord,
+} from "./model-config-state.js";
+
+// TODO(types): opaque backend descriptor payloads are narrowed locally to the
+// fields these renderers actually read (plan §1 any-policy).
+interface RenderField extends DescriptorField {
+  label?: string;
+  required?: boolean;
+  input_type?: string;
+  choices?: string[];
+  help?: string;
+  placeholder?: string;
+}
+
+interface RenderPreset {
+  id: string;
+  label?: string;
+  capabilities?: string[];
+  defaults?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+interface RenderDescriptor extends ConnectionDescriptor {
+  id: string;
+  label: string;
+  help?: string;
+  category: string;
+  capabilities?: string[];
+  fields?: RenderField[];
+  preset_definitions?: RenderPreset[];
+}
+
+interface DescriptorGroup {
+  category: string;
+  connection_types?: RenderDescriptor[];
+  [key: string]: unknown;
+}
+
+type ErrorMarkup = (recordId: string, field: string) => string;
+
+interface DescriptorFieldOptions {
+  record: RouteRecord;
+  descriptor: RenderDescriptor;
+  field: RenderField;
+  kind: RouteKind;
+  locked?: boolean;
+  errorMarkup?: ErrorMarkup;
+  fieldClass?: string;
+  fullWidthFields?: boolean;
+  numCtxDescribedBy?: string;
+}
+
+interface CredentialEditorOptions {
+  record: RouteRecord;
+  descriptor: RenderDescriptor;
+  kind: RouteKind;
+  locked?: boolean;
+  errorMarkup?: ErrorMarkup;
+  fieldClass?: string;
+  credentialValueId?: string;
+  noteClass?: string;
+  classPrefix?: string;
+}
+
+interface ConnectionTypeGroupsOptions {
+  groups?: DescriptorGroup[];
+  record: RouteRecord | null;
+  kind: RouteKind;
+  locked?: boolean;
+  query?: string;
+  emptyLabel?: string;
+  classPrefix?: string;
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
   api_protocol: "API 协议",
   local_runtime: "本地 Runtime",
   oauth: "OAuth 连接",
 };
 
-export function escapeHtml(value) {
+export function escapeHtml(value: unknown): string {
   return String(value ?? "").replace(
     /[&<>'"]/g,
     (character) => ({
@@ -27,32 +105,31 @@ export function escapeHtml(value) {
       ">": "&gt;",
       "'": "&#39;",
       '"': "&quot;",
-    })[character],
+    } as Record<string, string>)[character],
   );
 }
 
-export function disabledMarkup(disabled) {
+export function disabledMarkup(disabled: unknown): string {
   return disabled ? ' disabled aria-disabled="true"' : "";
 }
 
-export function categoryLabel(category) {
-  return CATEGORY_LABELS[category] || String(category || "");
+export function categoryLabel(category: unknown): string {
+  return CATEGORY_LABELS[category as string] || String(category || "");
 }
 
 /**
  * Render one descriptor field (non-credential) for a route item.
  *
- * @param {object} options
- * @param {object} options.record hydrated route item (chat connection or embedding provider)
- * @param {object} options.descriptor ConnectionTypeDescriptorOut for record.type
- * @param {object} options.field DescriptorFieldOut to render
- * @param {string} options.kind "chat" | "embedding"
- * @param {boolean} options.locked route-level override lock
- * @param {(recordId: string, field: string) => string} options.errorMarkup inline-error renderer
- * @param {string} [options.fieldClass] label class, e.g. "settings-field" | "mobile-model-field" | "model-field"
- * @param {boolean} [options.fullWidthFields] whether base_url-style fields span the grid
+ * @param options.record hydrated route item (chat connection or embedding provider)
+ * @param options.descriptor ConnectionTypeDescriptorOut for record.type
+ * @param options.field DescriptorFieldOut to render
+ * @param options.kind "chat" | "embedding"
+ * @param options.locked route-level override lock
+ * @param options.errorMarkup inline-error renderer
+ * @param options.fieldClass label class, e.g. "settings-field" | "mobile-model-field" | "model-field"
+ * @param options.fullWidthFields whether base_url-style fields span the grid
  */
-export function renderDescriptorField(options) {
+export function renderDescriptorField(options: DescriptorFieldOptions): string {
   const {
     record,
     descriptor,
@@ -102,14 +179,15 @@ export function renderDescriptorField(options) {
  * Render the credential editor for a route item. OAuth descriptors render a
  * read-only status line (decision 10 of the redesign plan).
  *
- * @param {object} options
- * @param {string} [options.classPrefix] class prefix for the action row and
+ * @param options.classPrefix class prefix for the action row and
  *   buttons, e.g. "model" (desktop) or "mobile-model" (mobile). The mobile
  *   stylesheet styles `.mobile-model-credential-actions` and its pressed
  *   buttons; the desktop stylesheet styles `.model-credential-actions` and
  *   `.model-credential-action`.
  */
-export function renderCredentialEditor(options) {
+export function renderCredentialEditor(
+  options: CredentialEditorOptions,
+): { hidden: boolean; html: string } {
   const {
     record,
     descriptor,
@@ -125,7 +203,7 @@ export function renderCredentialEditor(options) {
   const definition = descriptor?.fields?.find((field) => field.name === "credential");
   if (!definition) return { hidden: true, html: "" };
   const credential = record.credential;
-  const status = credential.status || {};
+  const status = credential.status || ({} as RouteRecord["credential"]["status"]);
   const disabled = disabledMarkup(locked);
   if (descriptor.category === "oauth") {
     const importedReference = status.credential_ref || definition.choices?.[0] || descriptor.label;
@@ -138,7 +216,7 @@ export function renderCredentialEditor(options) {
       ${errorMarkup(record.id, "credential")}`,
     };
   }
-  const actions = [
+  const actions: Array<[string, string]> = [
     ["keep", "保留现有凭据"],
     ["set", "设置 API Key"],
     ["env", "环境变量"],
@@ -163,15 +241,14 @@ export function renderCredentialEditor(options) {
  * Render the grouped, searchable connection-type listbox. The caller owns the
  * search-query state; this renders from the *filtered* descriptor groups.
  *
- * @param {object} options
- * @param {string} [options.classPrefix] class prefix for the group, title,
+ * @param options.classPrefix class prefix for the group, title,
  *   option, and empty-state classes, e.g. "model" (desktop) or "mobile-model"
  *   (mobile). The mobile stylesheet styles `.mobile-model-type-group`,
  *   `.mobile-model-type-option`, and `.mobile-model-connection-type-groups`;
  *   the desktop stylesheet styles `.model-type-group`, `.model-type-option`,
  *   and `.model-empty-types`.
  */
-export function renderConnectionTypeGroups(options) {
+export function renderConnectionTypeGroups(options: ConnectionTypeGroupsOptions): string {
   const {
     groups,
     record,
@@ -183,7 +260,7 @@ export function renderConnectionTypeGroups(options) {
   } = options;
   if (!record) return "";
   const needle = String(query || "").trim().toLowerCase();
-  const blocks = [];
+  const blocks: string[] = [];
   for (const group of groups || []) {
     const matches = (group.connection_types || []).filter((descriptor) => {
       if (!descriptor.capabilities?.includes(kind)) return false;
@@ -212,14 +289,15 @@ export function renderConnectionTypeGroups(options) {
 }
 
 /** Keyboard roving-tabindex handler for the connection-type listbox. */
-export function moveTypeOptionFocus(event) {
+export function moveTypeOptionFocus(event: KeyboardEvent): void {
   if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-  const options = [
-    ...event.currentTarget.querySelectorAll('[role="option"]:not(:disabled)'),
+  const options: HTMLElement[] = [
+    ...(event.currentTarget as HTMLElement)
+      .querySelectorAll<HTMLElement>('[role="option"]:not(:disabled)'),
   ];
   if (!options.length) return;
-  const current = event.target.closest('[role="option"]');
-  let index = Math.max(0, options.indexOf(current));
+  const current = (event.target as HTMLElement).closest("[role=\"option\"]") as HTMLElement | null;
+  let index = Math.max(0, options.indexOf(current as HTMLElement));
   if (event.key === "Home") index = 0;
   else if (event.key === "End") index = options.length - 1;
   else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
@@ -230,9 +308,9 @@ export function moveTypeOptionFocus(event) {
 }
 
 /** After rendering, give the selected (or first) option the roving tabindex. */
-export function applyTypeOptionRovingTabindex(host) {
+export function applyTypeOptionRovingTabindex(host: HTMLElement | null): void {
   if (!host) return;
-  const options = [...host.querySelectorAll('[role="option"]:not(:disabled)')];
+  const options: HTMLElement[] = [...host.querySelectorAll<HTMLElement>('[role="option"]:not(:disabled)')];
   if (!options.length) return;
   const selected = options.find(
     (option) => option.getAttribute("aria-selected") === "true",

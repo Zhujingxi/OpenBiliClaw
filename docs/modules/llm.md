@@ -402,7 +402,7 @@ stats = cache.stats()
 
 `build_runtime_model_bundle()` 从 `Config.models` 一次性构造 `OrderedLLMRoute`、有序 Embedding service、`UsageRecorder` 与 `LLMService`。API runtime、CLI、OpenClaw 和独立评测脚本都复用这条 composition；Soul、Discovery、Recommendation 与 Dialogue 共享同一 Chat route 和稳定 gate。旧 module override DTO/parser、vendor registry 和 provider bucket builder 已删除；legacy 仅存在于 `model_config` 的只读迁移 adapter 与 `/api/config` 的无凭据投影。
 
-各端模型编辑器（桌面 Web / 移动 Web / 插件 popup / `/setup/` 向导）都基于同一条 `GET/PUT /api/model-config` + descriptor + exact probe 契约；Web 共享 `web/shared/model-config-state.js` 与插件 `popup/popup-model-config-state.js` 两份 DOM-free 状态机由 `tests/js/model-config-parity.test.mjs` 的 13 个行为向量钉住行为对等（含 `__proto__` 等 prototype-like 稳定 ID 的 own-property 字段错误桶，以及等 revision 远端快照不再误判为远端更新）。编辑器文案中文优先（上移 / 下移 / 未命名连接等），`Chat / Embedding / Runtime / Primary / Fallback` 等技术术语保留英文。
+各端模型编辑器（桌面 Web / 移动 Web / 插件 popup / `/setup/` 向导）都基于同一条 `GET/PUT /api/model-config` + descriptor + exact probe 契约；Web 的权威 DOM-free 状态机源码是 `web/shared/model-config-state.ts`，构建后仍以 `/web/shared/model-config-state.js` 提供。插件 `popup/popup-model-config-state.js` 是该构建产物的 checked-in 同步副本；`tests/js/model-config-parity.test.mjs` 的 byte-for-byte 漂移守卫与 14 个行为向量钉住两端对等（含 `__proto__` 等 prototype-like 稳定 ID 的 own-property 字段错误桶，以及等 revision 远端快照不再误判为远端更新）。编辑器文案中文优先（上移 / 下移 / 未命名连接等），`Chat / Embedding / Runtime / Primary / Fallback` 等技术术语保留英文。
 
 ### 异常体系
 
