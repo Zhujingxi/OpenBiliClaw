@@ -39,7 +39,7 @@
       "tests/test_xhs_browser_e2e/TestBackendApi.py::test_health",
       "tests/test_xhs_browser_e2e/TestBackendApi.py::test_next_task_empty",
       "tests/test_xhs_browser_e2e/TestBackendApi.py::test_observed_urls_ingest",
-      "tests/test_xhs_browser_e2e/TestBackendApi.py::test_task_result",
+      "tests/test_xhs_browser_e2e/TestBackendApi.py::test_task_result_rejects_unknown",
       "tests/test_xhs_browser_e2e/TestChromeXhsPages.py::test_explore_has_note_links",
       "tests/test_xhs_browser_e2e/TestChromeXhsPages.py::test_explore_page_loads",
       "tests/test_xhs_browser_e2e/TestChromeXhsPages.py::test_search_page_cards_without_scroll",
