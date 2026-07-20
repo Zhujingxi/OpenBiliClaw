@@ -1,8 +1,155 @@
-function normalizeBvid(bvid) {
+type UnknownRecord = Record<string, unknown>;
+
+interface CanonicalSavedItemInput {
+  source_platform?: unknown;
+  platform?: unknown;
+  content_url?: unknown;
+  url?: unknown;
+  bvid?: unknown;
+  content_id?: unknown;
+  content_type?: unknown;
+  item_key?: unknown;
+  [key: string]: unknown;
+}
+
+interface QueueOutcome {
+  status?: unknown;
+  value?: {
+    saved?: unknown;
+    item_key?: unknown;
+    [key: string]: unknown;
+  };
+}
+
+type SavedSyncStatus =
+  | "pending"
+  | "syncing"
+  | "synced"
+  | "already_synced"
+  | "login_required"
+  | "unsupported"
+  | "rate_limited"
+  | "extension_required"
+  | "failed";
+type SavedPresentationStatus = SavedSyncStatus | "not_started";
+
+interface SavedSyncPresentation {
+  label: string;
+  tone: string;
+  retryable: boolean;
+  busy?: boolean;
+  localOnly?: boolean;
+  actionable?: boolean;
+  actionLabel?: string;
+  detail?: string;
+}
+
+interface SavedSyncItem {
+  item_key: string;
+  status: SavedSyncStatus;
+  resolved_action: "watch_later" | "favorite";
+  resolved_target: string;
+  error_code: string;
+  error_message: string;
+}
+
+interface SavedSyncTask {
+  task_id: string;
+  items: SavedSyncItem[];
+}
+
+interface SavedSyncCallbacks {
+  onTerminal?: (task: SavedSyncTask) => void;
+  onProgress?: (task: SavedSyncTask) => void;
+  onBackground?: (task: SavedSyncTask) => void;
+  onPollError?: (error: unknown, task?: SavedSyncTask) => void;
+}
+
+type SavedTimer = ReturnType<typeof setTimeout>;
+
+interface SavedSyncTrackerEntry {
+  taskId: string;
+  task: SavedSyncTask;
+  callbacks: SavedSyncCallbacks;
+  startedAt: number;
+  backgroundAnnounced: boolean;
+  polling: boolean;
+  timer: SavedTimer | null;
+}
+
+interface SavedSyncTracker {
+  has(taskId: unknown): boolean;
+  track(initial: unknown, callbacks?: SavedSyncCallbacks): string | null;
+  resume(taskId: unknown): boolean;
+  stop(taskId: unknown): boolean;
+  resumeAll(): number;
+  dispose(): void;
+}
+
+interface SavedSyncTrackerOptions {
+  poll?: (taskId: string) => Promise<unknown>;
+  now?: () => number;
+  isVisible?: () => boolean;
+  schedule?: (run: () => void, delay: number) => SavedTimer;
+  cancel?: (timer: SavedTimer) => void;
+  foregroundHorizonMs?: unknown;
+  visibleDelayMs?: unknown;
+  hiddenDelayMs?: unknown;
+}
+
+interface SavedTaskCoordinatorOptions extends SavedSyncCallbacks {
+  tracker?: SavedSyncTracker;
+  fetchTask?: (taskId: string) => Promise<unknown>;
+}
+
+interface FocusElementLike {
+  dataset?: Record<string, string | undefined>;
+  closest?: (selector: string) => FocusElementLike | null;
+  querySelectorAll?: (selector: string) => ArrayLike<FocusElementLike> | Iterable<FocusElementLike>;
+  querySelector?: (selector: string) => FocusElementLike | null;
+  focus?: () => void;
+}
+
+interface SavedFocusToken {
+  kind?: string;
+  itemKey?: string;
+  action: string;
+  index?: number;
+}
+
+interface SavedButtonLike {
+  setAttribute: (name: string, value: string) => void;
+  removeAttribute: (name: string) => void;
+  textContent?: string | null;
+  title?: string;
+  disabled?: boolean;
+  isConnected?: boolean;
+}
+
+interface SavedToggleLabels {
+  checkedTitle: string;
+  uncheckedTitle: string;
+  checkedAriaLabel?: string;
+  uncheckedAriaLabel?: string;
+  checkedText?: string;
+  uncheckedText?: string;
+}
+
+interface SavedToggleEntry {
+  button: SavedButtonLike;
+  labels: SavedToggleLabels;
+}
+
+interface SavedToggleRegistryOptions {
+  labels?: Partial<SavedToggleLabels>;
+  onChange?: ((change: { bvid: string; saved: boolean }) => void) | null;
+}
+
+function normalizeBvid(bvid: unknown) {
   return String(bvid || "").trim();
 }
 
-function inferSavedPlatform(value, contentUrl) {
+function inferSavedPlatform(value: unknown, contentUrl: unknown) {
   const explicit = String(value || "").trim().toLowerCase();
   if (explicit) return explicit;
   try {
@@ -18,7 +165,7 @@ function inferSavedPlatform(value, contentUrl) {
 }
 
 /** Preserve server-issued canonical identity without parsing namespaced keys into content IDs. */
-export function normalizeCanonicalSavedItem(item = {}) {
+export function normalizeCanonicalSavedItem(item: CanonicalSavedItemInput = {}) {
   const sourcePlatform = inferSavedPlatform(item.source_platform || item.platform, item.content_url);
   const legacyId = String(item.bvid || "").trim();
   const contentId = String(item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : "")).trim();
@@ -34,10 +181,15 @@ export function normalizeCanonicalSavedItem(item = {}) {
   };
 }
 
-export function partitionSavedQueueResults(queue, results) {
-  const rows = Array.isArray(queue) ? queue : [];
-  const outcomes = Array.isArray(results) ? results : [];
-  const saved = [];
+export function partitionSavedQueueResults(queue: unknown, results: unknown) {
+  const rows = (Array.isArray(queue) ? queue : []) as CanonicalSavedItemInput[];
+  const outcomes = (Array.isArray(results) ? results : []) as QueueOutcome[];
+  const saved: Array<{
+    index: number;
+    item: CanonicalSavedItemInput;
+    itemKey: string;
+    value: NonNullable<QueueOutcome["value"]>;
+  }> = [];
   const savedIndexes = new Set();
   outcomes.forEach((result, index) => {
     if (result?.status !== "fulfilled" || result.value?.saved === false || !rows[index]) return;
@@ -46,7 +198,7 @@ export function partitionSavedQueueResults(queue, results) {
       index,
       item: rows[index],
       itemKey: String(result.value?.item_key || rows[index]?.item_key || "").trim(),
-      value: result.value,
+      value: result.value as NonNullable<QueueOutcome["value"]>,
     });
   });
   return {
@@ -57,7 +209,7 @@ export function partitionSavedQueueResults(queue, results) {
   };
 }
 
-const SAVED_SYNC_STATUSES = new Set([
+const SAVED_SYNC_STATUSES: ReadonlySet<unknown> = new Set([
   "pending",
   "syncing",
   "synced",
@@ -69,7 +221,7 @@ const SAVED_SYNC_STATUSES = new Set([
   "failed",
 ]);
 
-const SYNC_PRESENTATIONS = {
+const SYNC_PRESENTATIONS: Record<SavedPresentationStatus, SavedSyncPresentation> = {
   not_started: { label: "待同步", tone: "neutral", retryable: false },
   pending: { label: "待同步", tone: "info", retryable: false },
   syncing: { label: "同步中", tone: "info", retryable: false },
@@ -82,14 +234,14 @@ const SYNC_PRESENTATIONS = {
   failed: { label: "同步失败", tone: "error", retryable: true },
 };
 
-const RETRY_DETAILS = {
+const RETRY_DETAILS: Partial<Record<SavedPresentationStatus, string>> = {
   login_required: "请登录对应平台后重试。",
   rate_limited: "平台请求过于频繁，请稍后重试。",
   extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
   failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。",
 };
 
-const PLATFORM_LABELS = {
+const PLATFORM_LABELS: Record<string, string> = {
   bilibili: "B站",
   youtube: "YouTube",
   twitter: "X",
@@ -99,36 +251,38 @@ const PLATFORM_LABELS = {
   reddit: "Reddit",
 };
 
-function safeSyncText(value, maxLength = 240) {
+function safeSyncText(value: unknown, maxLength = 240) {
   return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
 }
 
 export function createSavedSubmissionFence() {
-  const keys = new Set();
-  const normalize = (value) => safeSyncText(value, 2048);
+  const keys = new Set<string>();
+  const normalize = (value: unknown) => safeSyncText(value, 2048);
   return {
-    has(itemKey) { return keys.has(normalize(itemKey)); },
-    claim(itemKeys) {
+    has(itemKey: unknown) { return keys.has(normalize(itemKey)); },
+    claim(itemKeys: unknown) {
       const candidates = [...new Set((Array.isArray(itemKeys) ? itemKeys : []).map(normalize))]
         .filter(Boolean);
       if (!candidates.length || candidates.some((key) => keys.has(key))) return false;
       for (const key of candidates) keys.add(key);
       return true;
     },
-    release(itemKeys) {
+    release(itemKeys: unknown) {
       for (const itemKey of Array.isArray(itemKeys) ? itemKeys : []) keys.delete(normalize(itemKey));
     },
   };
 }
 
 export function getSavedSyncPresentation(
-  status,
-  errorCode = "",
-  resolvedTarget = "",
-  errorMessage = "",
-  syncTaskId = "",
+  status: unknown,
+  errorCode: unknown = "",
+  resolvedTarget: unknown = "",
+  errorMessage: unknown = "",
+  syncTaskId: unknown = "",
 ) {
-  const normalizedStatus = SAVED_SYNC_STATUSES.has(status) ? status : (status ? "failed" : "not_started");
+  const normalizedStatus = (
+    SAVED_SYNC_STATUSES.has(status) ? status : (status ? "failed" : "not_started")
+  ) as SavedPresentationStatus;
   const code = safeSyncText(errorCode, 96);
   const target = safeSyncText(resolvedTarget);
   const message = safeSyncText(errorMessage);
@@ -170,24 +324,30 @@ export function getSavedSyncPresentation(
   return presentation;
 }
 
-export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
+export function isSavedSyncEligibleStatus(
+  status: unknown,
+  errorCode: unknown = "",
+  syncTaskId: unknown = "",
+) {
   return getSavedSyncPresentation(status, errorCode, "", "", syncTaskId).actionable;
 }
 
-export function updateSavedBatchButtonState(button, pendingCount) {
+export function updateSavedBatchButtonState(button: SavedButtonLike, pendingCount: number) {
   const disabled = pendingCount <= 0;
   button.disabled = disabled;
   button.setAttribute("aria-disabled", String(disabled));
   button.removeAttribute("aria-busy");
 }
 
-export function sanitizeSavedSyncTask(payload) {
-  const rows = Array.isArray(payload?.items) ? payload.items : [];
+export function sanitizeSavedSyncTask(payload: unknown): SavedSyncTask {
+  const rows = Array.isArray((payload as UnknownRecord | null)?.items)
+    ? (payload as UnknownRecord).items as UnknownRecord[]
+    : [];
   return {
-    task_id: safeSyncText(payload?.task_id, 64),
+    task_id: safeSyncText((payload as UnknownRecord | null)?.task_id, 64),
     items: rows.slice(0, 500).map((item) => ({
       item_key: safeSyncText(item?.item_key, 2048),
-      status: SAVED_SYNC_STATUSES.has(item?.status) ? item.status : "failed",
+      status: (SAVED_SYNC_STATUSES.has(item?.status) ? item.status : "failed") as SavedSyncStatus,
       resolved_action: item?.resolved_action === "watch_later" ? "watch_later" : "favorite",
       resolved_target: safeSyncText(item?.resolved_target),
       error_code: safeSyncText(item?.error_code, 96),
@@ -196,9 +356,9 @@ export function sanitizeSavedSyncTask(payload) {
   };
 }
 
-export function summarizeSavedSyncResults(items) {
-  const groups = new Map();
-  for (const item of Array.isArray(items) ? items : []) {
+export function summarizeSavedSyncResults(items: unknown) {
+  const groups = new Map<string, { success: number; total: number }>();
+  for (const item of (Array.isArray(items) ? items : []) as UnknownRecord[]) {
     const platform = safeSyncText(item?.item_key, 2048).split(":", 1)[0] || "unknown";
     const group = groups.get(platform) || { success: 0, total: 0 };
     group.total += 1;
@@ -213,35 +373,48 @@ export function summarizeSavedSyncResults(items) {
 }
 
 export function createRetainedSavedListState() {
-  let value = { items: [], total: 0, loaded: false, error: "" };
+  let value: { items: unknown[]; total: number; loaded: boolean; error: string } = {
+    items: [], total: 0, loaded: false, error: "",
+  };
   return {
-    commit(payload = {}) {
+    commit(payload: { items?: unknown; total?: unknown } = {}) {
       const items = Array.isArray(payload.items) ? payload.items : [];
       value = { items, total: Number(payload.total) || 0, loaded: true, error: "" };
     },
-    fail(reason) {
-      value = { ...value, error: String(reason?.message || reason || "保存列表加载失败。").trim() };
+    fail(reason: unknown) {
+      value = {
+        ...value,
+        error: String(
+          (reason as { message?: unknown } | null)?.message || reason || "保存列表加载失败。",
+        ).trim(),
+      };
     },
     snapshot() { return { ...value, items: [...value.items] }; },
   };
 }
 
-export function captureSavedFocus(root, activeElement = globalThis.document?.activeElement) {
+export function captureSavedFocus(
+  root: FocusElementLike | null | undefined,
+  activeElement: FocusElementLike | null | undefined = globalThis.document?.activeElement as HTMLElement | null,
+) {
   const listAction = String(activeElement?.dataset?.savedListAction || "").trim();
   if (root && listAction) return { kind: "list", action: listAction };
   const card = activeElement?.closest?.("[data-item-key]");
   const itemKey = String(card?.dataset?.itemKey || "").trim();
   const action = String(activeElement?.dataset?.savedAction || "").trim();
-  const cards = Array.from(root?.querySelectorAll?.("[data-item-key]") || []);
-  const index = cards.indexOf(card);
+  const cards = Array.from(root?.querySelectorAll?.("[data-item-key]") || []) as FocusElementLike[];
+  const index = cards.indexOf(card as FocusElementLike);
   return root && itemKey && action ? { itemKey, action, index: Math.max(0, index) } : null;
 }
 
-export function restoreSavedFocus(root, token) {
+export function restoreSavedFocus(
+  root: FocusElementLike | null | undefined,
+  token: SavedFocusToken | null | undefined,
+) {
   if (!root || !token?.action) return false;
-  const cards = Array.from(root.querySelectorAll?.("[data-item-key]") || []);
-  const focusAction = (card) => {
-    const actions = Array.from(card?.querySelectorAll?.("[data-saved-action]") || []);
+  const cards = Array.from(root.querySelectorAll?.("[data-item-key]") || []) as FocusElementLike[];
+  const focusAction = (card: FocusElementLike | undefined) => {
+    const actions = Array.from(card?.querySelectorAll?.("[data-saved-action]") || []) as FocusElementLike[];
     const action = actions.find((candidate) => candidate.dataset?.savedAction === token.action)
       || actions[0];
     action?.focus?.();
@@ -281,29 +454,29 @@ export function restoreSavedFocus(root, token) {
   return false;
 }
 
-export function createSavedSyncTaskTracker(options = {}) {
-  const poll = options.poll;
+export function createSavedSyncTaskTracker(options: SavedSyncTrackerOptions = {}) {
+  const poll = options.poll as NonNullable<SavedSyncTrackerOptions["poll"]>;
   const now = options.now || Date.now;
   const isVisible = options.isVisible || (() => typeof document === "undefined" || !document.hidden);
-  const schedule = options.schedule || ((run, delay) => setTimeout(run, delay));
+  const schedule = options.schedule || ((run: () => void, delay: number) => setTimeout(run, delay));
   const cancel = options.cancel || clearTimeout;
   const foregroundHorizonMs = Number(options.foregroundHorizonMs ?? 20_000);
   const visibleDelayMs = Number(options.visibleDelayMs ?? 750);
   const hiddenDelayMs = Number(options.hiddenDelayMs ?? 5_000);
-  const active = new Map();
-  const terminal = (task) => {
+  const active = new Map<string, SavedSyncTrackerEntry>();
+  const terminal = (task: SavedSyncTask) => {
     const rows = Array.isArray(task?.items) ? task.items : [];
     return rows.every((item) => SAVED_SYNC_STATUSES.has(item?.status)
       && !["pending", "syncing"].includes(item.status));
   };
-  const queue = (entry, delay = null) => {
+  const queue = (entry: SavedSyncTrackerEntry, delay: number | null = null) => {
     if (!active.has(entry.taskId)) return;
     entry.timer = schedule(
       () => tick(entry),
       delay ?? (isVisible() ? visibleDelayMs : hiddenDelayMs),
     );
   };
-  const tick = async (entry) => {
+  const tick = async (entry: SavedSyncTrackerEntry) => {
     if (!active.has(entry.taskId) || entry.polling) return;
     entry.polling = true;
     try {
@@ -328,9 +501,9 @@ export function createSavedSyncTaskTracker(options = {}) {
     }
     queue(entry);
   };
-  const api = {
-    has(taskId) { return active.has(safeSyncText(taskId, 64)); },
-    track(initial, callbacks = {}) {
+  const api: SavedSyncTracker = {
+    has(taskId: unknown) { return active.has(safeSyncText(taskId, 64)); },
+    track(initial: unknown, callbacks: SavedSyncCallbacks = {}) {
       const task = sanitizeSavedSyncTask(initial);
       const taskId = task.task_id;
       if (!taskId) return null;
@@ -341,7 +514,7 @@ export function createSavedSyncTaskTracker(options = {}) {
         existing.callbacks = { ...existing.callbacks, ...callbacks };
         return taskId;
       }
-      const entry = {
+      const entry: SavedSyncTrackerEntry = {
         taskId, task, callbacks, startedAt: now(), backgroundAnnounced: false,
         polling: false, timer: null,
       };
@@ -350,14 +523,14 @@ export function createSavedSyncTaskTracker(options = {}) {
       queue(entry);
       return taskId;
     },
-    resume(taskId) {
+    resume(taskId: unknown) {
       const entry = active.get(safeSyncText(taskId, 64));
       if (!entry || entry.polling) return false;
       if (entry.timer != null) cancel(entry.timer);
       queue(entry, 0);
       return true;
     },
-    stop(taskId) {
+    stop(taskId: unknown) {
       const entry = active.get(safeSyncText(taskId, 64));
       if (!entry) return false;
       if (entry.timer != null) cancel(entry.timer);
@@ -377,20 +550,20 @@ export function createSavedSyncTaskTracker(options = {}) {
   return api;
 }
 
-export function createSavedTaskCoordinator(options = {}) {
-  const tracker = options.tracker;
-  const fetchTask = options.fetchTask;
-  const ownersByTask = new Map();
-  const taskByItem = new Map();
-  const recovering = new Map();
+export function createSavedTaskCoordinator(options: SavedTaskCoordinatorOptions = {}) {
+  const tracker = options.tracker as SavedSyncTracker;
+  const fetchTask = options.fetchTask as NonNullable<SavedTaskCoordinatorOptions["fetchTask"]>;
+  const ownersByTask = new Map<string, Set<string>>();
+  const taskByItem = new Map<string, string>();
+  const recovering = new Map<string, Promise<unknown>>();
   let disposed = false;
-  const release = (taskId) => {
+  const release = (taskId: string) => {
     for (const itemKey of ownersByTask.get(taskId) || []) {
       if (taskByItem.get(itemKey) === taskId) taskByItem.delete(itemKey);
     }
     ownersByTask.delete(taskId);
   };
-  const claim = (taskId, itemKeys) => {
+  const claim = (taskId: string, itemKeys: string[]) => {
     const keys = new Set(ownersByTask.get(taskId) || []);
     for (const key of (itemKeys || []).map((value) => safeSyncText(value, 2048)).filter(Boolean)) {
       keys.add(key);
@@ -398,45 +571,45 @@ export function createSavedTaskCoordinator(options = {}) {
     ownersByTask.set(taskId, keys);
     for (const key of keys) taskByItem.set(key, taskId);
   };
-  const track = (task, itemKeys, callbacks = {}) => {
-    const taskId = safeSyncText(task?.task_id, 64);
+  const track = (task: unknown, itemKeys: string[], callbacks: SavedSyncCallbacks = {}) => {
+    const taskId = safeSyncText((task as { task_id?: unknown } | null)?.task_id, 64);
     if (!taskId || disposed) return null;
     claim(taskId, itemKeys);
     return tracker.track(task, {
       ...callbacks,
-      onTerminal(terminalTask) {
+      onTerminal(terminalTask: SavedSyncTask) {
         release(taskId);
         callbacks.onTerminal?.(terminalTask);
         options.onTerminal?.(terminalTask);
       },
-      onProgress(progressTask) {
+      onProgress(progressTask: SavedSyncTask) {
         callbacks.onProgress?.(progressTask);
         options.onProgress?.(progressTask);
       },
-      onBackground(progressTask) {
+      onBackground(progressTask: SavedSyncTask) {
         callbacks.onBackground?.(progressTask);
         options.onBackground?.(progressTask);
       },
-      onPollError(error, progressTask) {
+      onPollError(error: unknown, progressTask?: SavedSyncTask) {
         callbacks.onPollError?.(error, progressTask);
         options.onPollError?.(error, progressTask);
       },
     });
   };
   return {
-    owns(itemKey) { return taskByItem.has(safeSyncText(itemKey, 2048)); },
-    taskFor(itemKey) { return taskByItem.get(safeSyncText(itemKey, 2048)) || ""; },
+    owns(itemKey: unknown) { return taskByItem.has(safeSyncText(itemKey, 2048)); },
+    taskFor(itemKey: unknown) { return taskByItem.get(safeSyncText(itemKey, 2048)) || ""; },
     track,
-    async recover(rows, callbacks = {}) {
+    async recover(rows: unknown, callbacks: SavedSyncCallbacks = {}) {
       if (disposed) return;
-      const grouped = new Map();
-      for (const row of Array.isArray(rows) ? rows : []) {
-        if (!["pending", "syncing"].includes(row?.sync_status)) continue;
+      const grouped = new Map<string, string[]>();
+      for (const row of (Array.isArray(rows) ? rows : []) as UnknownRecord[]) {
+        if (!["pending", "syncing"].includes(row?.sync_status as string)) continue;
         const taskId = safeSyncText(row?.sync_task_id, 64);
         const itemKey = safeSyncText(row?.item_key, 2048);
         if (!taskId || !itemKey) continue;
         if (!grouped.has(taskId)) grouped.set(taskId, []);
-        grouped.get(taskId).push(itemKey);
+        grouped.get(taskId)!.push(itemKey);
       }
       await Promise.all(Array.from(grouped, async ([taskId, itemKeys]) => {
         claim(taskId, itemKeys);
@@ -469,7 +642,10 @@ export function createSavedTaskCoordinator(options = {}) {
   };
 }
 
-function mergeLabels(baseLabels, overrideLabels) {
+function mergeLabels(
+  baseLabels: Partial<SavedToggleLabels>,
+  overrideLabels?: Partial<SavedToggleLabels>,
+): SavedToggleLabels {
   return {
     checkedTitle: "取消保存",
     uncheckedTitle: "保存",
@@ -478,7 +654,11 @@ function mergeLabels(baseLabels, overrideLabels) {
   };
 }
 
-function applyButtonState(button, saved, labels) {
+function applyButtonState(
+  button: SavedButtonLike | null | undefined,
+  saved: boolean,
+  labels: SavedToggleLabels,
+) {
   if (!button) return;
   if (typeof button.setAttribute === "function") {
     button.setAttribute("aria-pressed", saved ? "true" : "false");
@@ -499,27 +679,29 @@ function applyButtonState(button, saved, labels) {
   }
 }
 
-export function createSavedToggleRegistry({ labels = {}, onChange = null } = {}) {
+export function createSavedToggleRegistry(
+  { labels = {}, onChange = null }: SavedToggleRegistryOptions = {},
+) {
   const defaultLabels = mergeLabels(labels);
-  const savedBvids = new Set();
-  const buttonsByBvid = new Map();
-  const mutationVersions = new Map();
-  const busyBvids = new Set();
+  const savedBvids = new Set<string>();
+  const buttonsByBvid = new Map<string, Set<SavedToggleEntry>>();
+  const mutationVersions = new Map<string, number>();
+  const busyBvids = new Set<string>();
 
-  function nextVersion(bvid) {
+  function nextVersion(bvid: string) {
     const version = (mutationVersions.get(bvid) || 0) + 1;
     mutationVersions.set(bvid, version);
     return version;
   }
 
-  function isDetached(button) {
+  function isDetached(button: SavedButtonLike | null | undefined) {
     // Buttons removed from the DOM (e.g. via replaceChildren on re-render)
     // report isConnected === false. Test doubles that omit the property
     // (isConnected === undefined) are treated as live and kept.
     return button != null && button.isConnected === false;
   }
 
-  function syncButtons(bvid) {
+  function syncButtons(bvid: string) {
     const entries = buttonsByBvid.get(bvid);
     if (!entries) return;
     const saved = savedBvids.has(bvid);
@@ -549,7 +731,7 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
     }
   }
 
-  function applySaved(key, saved) {
+  function applySaved(key: string, saved: boolean) {
     if (saved) {
       savedBvids.add(key);
     } else {
@@ -558,24 +740,28 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
     syncButtons(key);
   }
 
-  function setSaved(bvid, saved) {
+  function setSaved(bvid: unknown, saved: boolean) {
     const key = normalizeBvid(bvid);
     if (!key) return;
     nextVersion(key);
     applySaved(key, saved);
   }
 
-  function registerButton(bvid, button, buttonLabels = {}) {
+  function registerButton(
+    bvid: unknown,
+    button: SavedButtonLike | null | undefined,
+    buttonLabels: Partial<SavedToggleLabels> = {},
+  ) {
     const key = normalizeBvid(bvid);
     if (!key || !button) return () => {};
-    const entry = {
+    const entry: SavedToggleEntry = {
       button,
       labels: mergeLabels(defaultLabels, buttonLabels),
     };
     if (!buttonsByBvid.has(key)) {
       buttonsByBvid.set(key, new Set());
     }
-    buttonsByBvid.get(key).add(entry);
+    buttonsByBvid.get(key)!.add(entry);
     applyButtonState(button, savedBvids.has(key), entry.labels);
     return () => {
       const entries = buttonsByBvid.get(key);
@@ -587,7 +773,10 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
     };
   }
 
-  async function hydrateStatus(bvid, loadStatus) {
+  async function hydrateStatus(
+    bvid: unknown,
+    loadStatus: ((key: string) => Promise<unknown>) | unknown,
+  ) {
     const key = normalizeBvid(bvid);
     if (!key || typeof loadStatus !== "function") return null;
     const version = mutationVersions.get(key) || 0;
@@ -599,8 +788,8 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
       if (busyBvids.has(key) || (mutationVersions.get(key) || 0) !== version) {
         return result;
       }
-      if (result && typeof result.saved === "boolean") {
-        applySaved(key, result.saved);
+      if (result && typeof (result as { saved?: unknown }).saved === "boolean") {
+        applySaved(key, (result as { saved: boolean }).saved);
       }
       return result;
     } catch {
@@ -608,7 +797,13 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
     }
   }
 
-  async function toggle(bvid, { add, remove }) {
+  async function toggle(
+    bvid: unknown,
+    { add, remove }: {
+      add: (key: string) => Promise<unknown>;
+      remove: (key: string) => Promise<unknown>;
+    },
+  ) {
     const key = normalizeBvid(bvid);
     if (!key || busyBvids.has(key)) return false;
     const wasSaved = savedBvids.has(key);
@@ -618,8 +813,8 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
     applySaved(key, optimisticSaved);
     try {
       const result = await (wasSaved ? remove(key) : add(key));
-      const finalSaved = result && typeof result.saved === "boolean"
-        ? result.saved
+      const finalSaved = result && typeof (result as { saved?: unknown }).saved === "boolean"
+        ? (result as { saved: boolean }).saved
         : optimisticSaved;
       // Bump again before applying the confirmed state: invalidates any
       // hydration whose status GET started during this write and resolves
@@ -642,7 +837,7 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
 
   return {
     hydrateStatus,
-    isSaved(bvid) {
+    isSaved(bvid: unknown) {
       return savedBvids.has(normalizeBvid(bvid));
     },
     pruneDetached,

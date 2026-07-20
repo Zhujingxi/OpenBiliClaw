@@ -29,30 +29,120 @@ import {
   probeModelConnection,
   updateModelConfig,
 } from "./popup-api.js";
+import type {
+  ConnectionDescriptor,
+  DescriptorField,
+  EmbeddingSettings,
+  ModelConfigState,
+  PresetDefinition,
+  ProbeSignature,
+  RawSnapshot,
+  RouteKind,
+  RouteRecord,
+} from "./popup-model-config-state.js";
+
+type EditorRoute = RouteKind | "runtime";
+
+interface PopupPreset extends PresetDefinition {
+  label: string;
+}
+
+interface PopupDescriptorField extends DescriptorField {
+  label: string;
+  help?: string;
+  input_type?: string;
+  required?: boolean;
+  choices?: string[];
+  placeholder?: string;
+}
+
+interface PopupConnectionDescriptor extends ConnectionDescriptor {
+  id: string;
+  label: string;
+  category: string;
+  help?: string;
+  fields: PopupDescriptorField[];
+  preset_definitions?: PopupPreset[];
+}
+
+interface ConnectionTypeGroup {
+  category: string;
+  connection_types: PopupConnectionDescriptor[];
+}
+
+interface ConnectionTypesPayload {
+  connection_types: PopupConnectionDescriptor[];
+  groups: ConnectionTypeGroup[];
+}
+
+interface MigrationIssue {
+  id: string;
+  reason?: string;
+  code: string;
+  field: string;
+  provider?: string;
+  allowed_actions?: string[];
+}
+
+type EditorState = ModelConfigState & {
+  activeRoute: EditorRoute;
+  migration: { issues?: MigrationIssue[] } | null;
+  migration_resolutions: Record<string, { action?: string }>;
+  remoteUpdate: { latestRevision: string; snapshot: RawSnapshot } | null;
+};
+
+interface ModelConfigPayload {
+  models: {
+    chat: { connections: RouteRecord[] };
+    embedding: { providers: RouteRecord[]; settings: EmbeddingSettings };
+  };
+}
+
+interface ModelConfigUpdateResponse {
+  snapshot: RawSnapshot;
+  [key: string]: unknown;
+}
+
+interface ModelErrorDetails {
+  error?: string;
+  latest?: RawSnapshot;
+  errors?: unknown[];
+}
+
+interface ModelApiError extends Error {
+  status?: number;
+  details?: ModelErrorDetails;
+}
+
+interface InitModelSettingsOptions {
+  onToast?: (message: string, tone: string) => void;
+}
 
 const CONFIG_RELOADED_TYPE = "config_reloaded";
-const CATEGORY_LABELS = {
+const CATEGORY_LABELS: Record<string, string> = {
   api_protocol: "API 协议",
   local_runtime: "本地 Runtime",
   oauth: "OAuth 连接",
 };
-const ROUTE_OVERRIDE_PATHS = {
+const ROUTE_OVERRIDE_PATHS: Record<RouteKind, string> = {
   chat: "models.chat.connections",
   embedding: "models.embedding.providers",
 };
 
-let state = null;
-let connectionTypes = { connection_types: [], groups: [] };
+let state = null as unknown as EditorState;
+let connectionTypes: ConnectionTypesPayload = { connection_types: [], groups: [] };
 let draggedId = "";
 let initialized = false;
-let notify = () => {};
+let notify: (message: string, tone: string) => void = () => {};
 const modelOperations = createModelOperationGate();
 const snapshotRequestGate = createLatestRequestGate();
 const descriptorRequestGate = createLatestRequestGate();
 
-const byId = (id) => document.getElementById(id);
-const disabledMarkup = (disabled) => (disabled ? ' disabled aria-disabled="true"' : "");
-const escapeHtml = (value) => String(value ?? "").replace(
+const byId = <T extends HTMLElement = HTMLInputElement>(id: string) => (
+  document.getElementById(id) as T
+);
+const disabledMarkup = (disabled: boolean) => (disabled ? ' disabled aria-disabled="true"' : "");
+const escapeHtml = (value: unknown) => String(value ?? "").replace(
   /[&<>'"]/g,
   (character) => ({
     "&": "&amp;",
@@ -60,15 +150,15 @@ const escapeHtml = (value) => String(value ?? "").replace(
     ">": "&gt;",
     "'": "&#39;",
     '"': "&quot;",
-  })[character],
+  } as Record<string, string>)[character],
 );
 
-function modelControlLocked(path) {
+function modelControlLocked(path: string) {
   if (!state) return null;
   return state.overrideLocks?.[path] || null;
 }
 
-function routeLocked(kind) {
+function routeLocked(kind: EditorRoute) {
   return kind === "chat" || kind === "embedding"
     ? modelControlLocked(ROUTE_OVERRIDE_PATHS[kind])
     : null;
@@ -78,7 +168,7 @@ function modelMutationBlocked() {
   return !state || modelOperations.saveInFlight;
 }
 
-function setModelEditorLocked(locked) {
+function setModelEditorLocked(locked: boolean) {
   const controls = modelOperations.controlState();
   const editorLocked = Boolean(locked || controls.editorLocked);
   const boundary = byId("popupModelEditorBoundary");
@@ -90,7 +180,7 @@ function setModelEditorLocked(locked) {
   byId("popupModelProbeButton").disabled = editorLocked || controls.probeDisabled;
 }
 
-function probeRequestVisible(signature) {
+function probeRequestVisible(signature: ProbeSignature) {
   return Boolean(
     state
     && state.activeRoute === signature.kind
@@ -105,44 +195,45 @@ function activeItems() {
     : state.models.embedding.providers;
 }
 
-function descriptorFor(typeId) {
+function descriptorFor(typeId: string) {
   return connectionTypes.connection_types.find((descriptor) => descriptor.id === typeId) || null;
 }
 
-function presetFor(descriptor, presetId) {
+function presetFor(descriptor: PopupConnectionDescriptor | null, presetId: string) {
   return descriptor?.preset_definitions?.find((preset) => preset.id === presetId) || null;
 }
 
-function descriptorsFor(kind) {
+function descriptorsFor(kind: RouteKind) {
   return connectionTypes.connection_types.filter(
     (descriptor) => descriptor.capabilities?.includes(kind),
   );
 }
 
 function selectedIndex() {
+  if (state.activeRoute === "runtime") return -1;
   const record = selectedRecord(state, state.activeRoute);
   return record ? activeItems().findIndex((item) => item.id === record.id) : -1;
 }
 
-function derivedRole(index) {
+function derivedRole(index: number) {
   return index === 0 ? "Primary" : `Fallback ${index}`;
 }
 
-function fieldError(recordId, field) {
+function fieldError(recordId: string, field: string) {
   return state?.fieldErrors?.byConnection?.[recordId]?.[field] || null;
 }
 
-function errorMarkup(recordId, field) {
+function errorMarkup(recordId: string, field: string) {
   const error = fieldError(recordId, field);
   return error ? `<span class="model-field-error" role="alert">${escapeHtml(error.message)}</span>` : "";
 }
 
-function uniqueId(kind) {
+function uniqueId(kind: RouteKind) {
   const token = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `${kind}-${token}`;
 }
 
-function setStatus(message, tone = "") {
+function setStatus(message: string, tone = "") {
   const element = byId("popupModelSaveStatus");
   if (!element) return;
   element.textContent = message;
@@ -150,7 +241,7 @@ function setStatus(message, tone = "") {
   else delete element.dataset.tone;
 }
 
-function safeHealth(record) {
+function safeHealth(record: RouteRecord) {
   if (record?.circuit?.state === "open") {
     return { label: record.circuit.failure_kind || "熔断已打开", tone: "error" };
   }
@@ -160,14 +251,14 @@ function safeHealth(record) {
 }
 
 function renderTabs() {
-  document.querySelectorAll("[data-popup-model-route]").forEach((tab) => {
+  document.querySelectorAll<HTMLElement>("[data-popup-model-route]").forEach((tab) => {
     const active = tab.dataset.popupModelRoute === state.activeRoute;
     tab.classList.toggle("is-active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
   });
   const runtime = state.activeRoute === "runtime";
   byId("popupModelRuntimeView").hidden = !runtime;
-  document.querySelector('[data-popup-model-view="route"]').hidden = runtime;
+  document.querySelector<HTMLElement>('[data-popup-model-view="route"]')!.hidden = runtime;
   byId("popupModelEmbeddingSharedSettings").hidden = state.activeRoute !== "embedding";
 }
 
@@ -256,7 +347,7 @@ function renderRouteList() {
 }
 
 function renderConnectionTypes() {
-  const record = selectedRecord(state, state.activeRoute);
+  const record = selectedRecord(state, state.activeRoute as RouteKind);
   if (!record) return;
   const locked = Boolean(routeLocked(state.activeRoute));
   const query = String(byId("popupModelTypeSearch")?.value || "").trim().toLowerCase();
@@ -285,18 +376,22 @@ function renderConnectionTypes() {
       </section>`);
   }
   host.innerHTML = blocks.join("") || '<p class="model-empty-types">没有匹配的连接类型。</p>';
-  const options = [...host.querySelectorAll('[role="option"]:not(:disabled)')];
+  const options = [...(host.querySelectorAll<HTMLElement>(
+    '[role="option"]:not(:disabled)',
+  ) as unknown as Iterable<HTMLElement>)];
   const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
   const roving = selected || options[0];
   if (roving) roving.tabIndex = 0;
 }
 
-function moveTypeOptionFocus(event) {
+function moveTypeOptionFocus(event: KeyboardEvent) {
   if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-  const options = [...event.currentTarget.querySelectorAll('[role="option"]:not(:disabled)')];
+  const options = [...((event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(
+    '[role="option"]:not(:disabled)',
+  ) as unknown as Iterable<HTMLElement>)];
   if (!options.length) return;
-  const current = event.target.closest('[role="option"]');
-  let index = Math.max(0, options.indexOf(current));
+  const current = (event.target as HTMLElement).closest<HTMLElement>('[role="option"]');
+  let index = Math.max(0, current ? options.indexOf(current) : -1);
   if (event.key === "Home") index = 0;
   else if (event.key === "End") index = options.length - 1;
   else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
@@ -307,16 +402,20 @@ function moveTypeOptionFocus(event) {
 }
 
 function focusSelectedTypeOption() {
-  const record = selectedRecord(state, state.activeRoute);
+  const record = selectedRecord(state, state.activeRoute as RouteKind);
   if (!record) return;
   window.requestAnimationFrame(() => {
     byId("popupModelConnectionTypeGroups")
-      ?.querySelector(`[data-model-type="${CSS.escape(record.type)}"]`)
+      ?.querySelector<HTMLElement>(`[data-model-type="${CSS.escape(record.type)}"]`)
       ?.focus();
   });
 }
 
-function renderDescriptorField(record, descriptor, field) {
+function renderDescriptorField(
+  record: RouteRecord,
+  descriptor: PopupConnectionDescriptor,
+  field: PopupDescriptorField,
+) {
   if (field.name === "credential") return "";
   if (field.capabilities?.length && !field.capabilities.includes(state.activeRoute)) return "";
   if (field.presets?.length && !field.presets.includes(record.preset)) return "";
@@ -342,10 +441,13 @@ function renderDescriptorField(record, descriptor, field) {
     ${help}${errorMarkup(record.id, field.name)}</label>`;
 }
 
-function renderCredential(record, descriptor) {
+function renderCredential(
+  record: RouteRecord,
+  descriptor: PopupConnectionDescriptor | null,
+) {
   const host = byId("popupModelCredentialEditor");
   const definition = descriptor?.fields?.find((field) => field.name === "credential");
-  if (!definition) {
+  if (!descriptor || !definition) {
     host.hidden = true;
     host.innerHTML = "";
     return;
@@ -403,16 +505,15 @@ function renderInspector() {
   byId("popupModelInspectorFields").innerHTML = `
     <label class="settings-field full"><span>连接名称</span><input data-model-field="name" value="${escapeHtml(record.name)}" autocomplete="off" required${disabledMarkup(locked)}>${errorMarkup(record.id, "name")}</label>
     <label class="settings-field full"><span>稳定 ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>`;
-  const descriptorFields = descriptor ? descriptor.fields : [];
-  byId("popupModelDescriptorFields").innerHTML = descriptorFields
-    .map((field) => renderDescriptorField(record, descriptor, field))
-    .join("");
+  byId("popupModelDescriptorFields").innerHTML = descriptor
+    ? descriptor.fields.map((field) => renderDescriptorField(record, descriptor, field)).join("")
+    : "";
   renderConnectionTypes();
   renderCredential(record, descriptor);
   renderProbeStatus(record);
 }
 
-function renderProbeStatus(record) {
+function renderProbeStatus(record: RouteRecord | null) {
   const status = byId("popupModelProbeStatus");
   const probe = record?.probe;
   if (!probe) {
@@ -422,7 +523,9 @@ function renderProbeStatus(record) {
   }
   const dimensions = probe.observed_dimension ? ` · ${probe.observed_dimension} 维` : "";
   const latency = probe.latency_ms ? ` · ${probe.latency_ms} ms` : "";
-  const timestamp = probe.probed_at ? ` · ${new Date(probe.probed_at).toLocaleString()}` : "";
+  const timestamp = probe.probed_at
+    ? ` · ${new Date(String(probe.probed_at)).toLocaleString()}`
+    : "";
   status.textContent = `${probe.ok ? "通过" : probe.error_code || "失败"}${dimensions}${latency}${timestamp}`;
   status.dataset.tone = probe.ok ? "success" : "error";
 }
@@ -430,7 +533,7 @@ function renderProbeStatus(record) {
 function beginModelSave() {
   const save = modelOperations.beginSave();
   if (save?.invalidatedProbe && state) {
-    renderProbeStatus(selectedRecord(state, state.activeRoute));
+    renderProbeStatus(selectedRecord(state, state.activeRoute as RouteKind));
   }
   return save;
 }
@@ -454,7 +557,7 @@ function renderRuntime() {
     <div class="model-runtime-card"><span>当前健康状态</span><strong>${healthy} 个探测通过 · ${open} 个熔断打开</strong></div>`;
 }
 
-function migrationResolution(action) {
+function migrationResolution(action: string): Record<string, unknown> {
   if (action === "add_to_chat_route") {
     return { action };
   }
@@ -497,9 +600,9 @@ function render() {
   setStatus(state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`);
 }
 
-function focusMovedRow(id) {
+function focusMovedRow(id: string) {
   window.requestAnimationFrame(() => {
-    const row = document.querySelector(`[data-model-record-id="${CSS.escape(id)}"]`);
+    const row = document.querySelector<HTMLElement>(`[data-model-record-id="${CSS.escape(id)}"]`);
     if (row) row.focus();
   });
 }
@@ -509,27 +612,32 @@ function focusNarrowDetail() {
 }
 
 function focusSelectedRouteControl() {
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime") return;
+  const record = selectedRecord(state, kind);
   if (!record) return;
   window.requestAnimationFrame(() => {
-    document.querySelector(`[data-model-select="${CSS.escape(record.id)}"]`)?.focus();
+    document.querySelector<HTMLElement>(`[data-model-select="${CSS.escape(record.id)}"]`)?.focus();
   });
 }
 
-function moveSelected(delta) {
+function moveSelected(delta: number) {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const record = selectedRecord(state, kind);
   if (!record) return;
   const target = selectedIndex() + delta;
-  state = moveRouteItem(state, state.activeRoute, record.id, target);
+  state = moveRouteItem(state, kind, record.id, target);
   render();
   focusMovedRow(record.id);
 }
 
-function selectRecord(id, openDetail = true) {
+function selectRecord(id: string, openDetail = true) {
   if (modelMutationBlocked()) return;
-  state = selectRouteItem(state, state.activeRoute, id);
+  const kind = state.activeRoute;
+  if (kind === "runtime") return;
+  state = selectRouteItem(state, kind, id);
   byId("popupModelRouteLayout").classList.toggle("is-detail", openDetail);
   renderRouteList();
   renderInspector();
@@ -538,13 +646,14 @@ function selectRecord(id, openDetail = true) {
 
 function addConnection() {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const descriptor = descriptorsFor(state.activeRoute)[0];
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const descriptor = descriptorsFor(kind)[0];
   if (!descriptor) return;
   const preset = descriptor.preset_definitions?.find(
-    (candidate) => candidate.capabilities?.includes(state.activeRoute),
+    (candidate) => candidate.capabilities?.includes(kind),
   );
-  const id = uniqueId(state.activeRoute);
+  const id = uniqueId(kind);
   const record = {
     id,
     name: descriptor.label,
@@ -552,7 +661,7 @@ function addConnection() {
     preset: preset?.id || "",
     base_url: "",
     credential: { action: descriptor.category === "oauth" ? "keep" : "clear", value: "" },
-    ...(state.activeRoute === "chat" ? {
+    ...(kind === "chat" ? {
       model: "",
       api_mode: "",
       reasoning_effort: "",
@@ -562,39 +671,41 @@ function addConnection() {
     } : {}),
   };
   try {
-    state = appendRouteItem(state, state.activeRoute, record);
-    if (preset) state = applyPreset(state, state.activeRoute, id, preset);
+    state = appendRouteItem(state, kind, record);
+    if (preset) state = applyPreset(state, kind, id, preset);
     byId("popupModelRouteLayout").classList.add("is-detail");
     render();
     focusNarrowDetail();
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus((error as Error).message, "error");
   }
 }
 
 function removeSelected() {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const record = selectedRecord(state, kind);
   if (!record || !window.confirm(`移除 ${record.name || record.id}？`)) return;
   try {
-    state = removeRouteItem(state, state.activeRoute, record.id);
+    state = removeRouteItem(state, kind, record.id);
     byId("popupModelRouteLayout").classList.remove("is-detail");
     render();
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus((error as Error).message, "error");
   }
 }
 
-function changeType(typeId) {
+function changeType(typeId: string) {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const record = selectedRecord(state, kind);
   const descriptor = descriptorFor(typeId);
   if (!record || !descriptor || record.type === typeId) return;
   const previousDescriptor = descriptorFor(record.type);
   const previousPreset = presetFor(previousDescriptor, record.preset);
-  let result = changeConnectionType(state, state.activeRoute, record.id, descriptor, {
+  let result = changeConnectionType(state, kind, record.id, descriptor, {
     confirmed: false,
     previousDescriptor,
   });
@@ -603,33 +714,34 @@ function changeType(typeId) {
       `切换连接类型会清除这些不兼容字段：${result.incompatibleFields.join(", ")}。继续吗？`,
     );
     if (!confirmed) return;
-    result = changeConnectionType(state, state.activeRoute, record.id, descriptor, {
+    result = changeConnectionType(state, kind, record.id, descriptor, {
       confirmed: true,
       previousDescriptor,
     });
   }
   state = result.state;
-  const updated = selectedRecord(state, state.activeRoute);
+  const updated = selectedRecord(state, kind);
   const preset = descriptor.preset_definitions?.find((candidate) => candidate.id === updated?.preset);
   if (preset) {
-    state = applyPreset(state, state.activeRoute, record.id, preset, { previousPreset });
+    state = applyPreset(state, kind, record.id, preset, { previousPreset });
   }
   render();
   focusSelectedTypeOption();
 }
 
-function updateField(field, target) {
+function updateField(field: string, target: HTMLInputElement | HTMLSelectElement) {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const record = selectedRecord(state, kind);
   if (!record) return;
-  let value = target.value;
+  let value: string | number = target.value;
   if (target.type === "number") value = Number(target.value);
   if (field === "preset") {
     const descriptor = descriptorFor(record.type);
-    const preset = presetFor(descriptor, value);
+    const preset = presetFor(descriptor, String(value));
     if (preset) {
-      let result = changePreset(state, state.activeRoute, record.id, descriptor, preset, {
+      let result = changePreset(state, kind, record.id, descriptor, preset, {
         confirmed: false,
       });
       if (result.incompatibleFields.length) {
@@ -640,7 +752,7 @@ function updateField(field, target) {
           renderInspector();
           return;
         }
-        result = changePreset(state, state.activeRoute, record.id, descriptor, preset, {
+        result = changePreset(state, kind, record.id, descriptor, preset, {
           confirmed: true,
         });
       }
@@ -648,23 +760,25 @@ function updateField(field, target) {
     }
     renderInspector();
   } else {
-    state = updateRouteField(state, state.activeRoute, record.id, field, value);
+    state = updateRouteField(state, kind, record.id, field, value);
     if (field === "name") {
-      byId("popupModelInspectorTitle").textContent = value || "连接详情";
+      byId("popupModelInspectorTitle").textContent = String(value || "连接详情");
       renderRouteList();
     }
   }
   setStatus("有未保存的模型更改。");
 }
 
-function updateCredential(action, value = "", rerender = true) {
+function updateCredential(action: string, value = "", rerender = true) {
   if (modelMutationBlocked()) return;
-  if (routeLocked(state.activeRoute)) return;
-  const record = selectedRecord(state, state.activeRoute);
+  const kind = state.activeRoute;
+  if (kind === "runtime" || routeLocked(kind)) return;
+  const record = selectedRecord(state, kind);
   if (!record) return;
-  state = updateRouteField(state, state.activeRoute, record.id, "credential", { action, value });
+  state = updateRouteField(state, kind, record.id, "credential", { action, value });
   if (rerender) {
-    renderCredential(selectedRecord(state, state.activeRoute), descriptorFor(record.type));
+    const updated = selectedRecord(state, kind);
+    if (updated) renderCredential(updated, descriptorFor(record.type));
   }
   setStatus("有未保存的模型更改。");
 }
@@ -672,8 +786,9 @@ function updateCredential(action, value = "", rerender = true) {
 async function probeSelected() {
   if (!state || modelOperations.saveInFlight) return;
   const kind = state.activeRoute;
+  if (kind === "runtime") return;
   const record = selectedRecord(state, kind);
-  if (!record || kind === "runtime") return;
+  if (!record) return;
   const generation = modelOperations.beginProbe();
   const signature = createProbeSignature(state, kind, record.id);
   const status = byId("popupModelProbeStatus");
@@ -711,13 +826,14 @@ async function probeSelected() {
     }
   } catch (error) {
     if (!modelOperations.isProbeCurrent(generation)) return;
-    if (error.status === 409 && error.details?.latest) {
-      state = receiveRemoteSnapshot(state, error.details.latest);
+    const modelError = error as ModelApiError;
+    if (modelError.status === 409 && modelError.details?.latest) {
+      state = receiveRemoteSnapshot(state, modelError.details.latest);
       render();
     }
     if (probeRequestVisible(signature)) {
       if (probeSignatureMatches(state, signature)) {
-        status.textContent = error.details?.error || error.message || "探测失败";
+        status.textContent = modelError.details?.error || modelError.message || "探测失败";
         status.dataset.tone = "error";
       } else {
         renderProbeStatus(selectedRecord(state, signature.kind));
@@ -729,8 +845,8 @@ async function probeSelected() {
   }
 }
 
-function retainSelection(next, previous) {
-  for (const kind of ["chat", "embedding"]) {
+function retainSelection(next: EditorState, previous: EditorState | null): EditorState {
+  for (const kind of ["chat", "embedding"] as const) {
     const id = previous?.selected?.[kind];
     const items = kind === "chat" ? next.models.chat.connections : next.models.embedding.providers;
     if (id && items.some((item) => item.id === id)) next.selected[kind] = id;
@@ -748,22 +864,25 @@ async function saveModels() {
   setModelEditorLocked(true);
   setStatus("正在验证并热重载模型路由…");
   try {
-    const result = await updateModelConfig(toModelConfigPayload(state));
+    const result = await updateModelConfig(
+      toModelConfigPayload(state),
+    ) as ModelConfigUpdateResponse;
     state = retainSelection(hydrateModelConfig(result.snapshot), state);
     render();
     setStatus("模型路由已保存并热重载。", "success");
     notify("模型路由已保存", "success");
   } catch (error) {
-    if (error.status === 409 && error.details?.error === "revision_conflict") {
-      state = receiveRemoteSnapshot(state, error.details.latest);
+    const modelError = error as ModelApiError;
+    if (modelError.status === 409 && modelError.details?.error === "revision_conflict") {
+      state = receiveRemoteSnapshot(state, modelError.details.latest);
       render();
       setStatus("保存被拒绝：远端已有更新。", "error");
-    } else if (Array.isArray(error.details?.errors)) {
-      state = mapServerFieldErrors(state, error.details.errors);
+    } else if (Array.isArray(modelError.details?.errors)) {
+      state = mapServerFieldErrors(state, modelError.details.errors);
       render();
       setStatus("请修正标记的模型字段。", "error");
     } else {
-      setStatus(error.details?.error || error.message || "模型保存失败。", "error");
+      setStatus(modelError.details?.error || modelError.message || "模型保存失败。", "error");
     }
   } finally {
     if (modelOperations.finishSave(generation)) {
@@ -776,7 +895,7 @@ async function fetchModelSnapshot(remote = false) {
   if (modelOperations.saveInFlight) return;
   await applyLatestSnapshotRequest({
     gate: snapshotRequestGate,
-    request: () => fetchModelConfig(),
+    request: async () => await fetchModelConfig() as RawSnapshot,
     blocked: () => modelOperations.saveInFlight,
     apply: (snapshot) => {
       if (state?.dirty) state = receiveRemoteSnapshot(state, snapshot);
@@ -793,8 +912,8 @@ async function loadModelSettings() {
     const loaded = await loadIndependentModelResources({
       gate: snapshotRequestGate,
       descriptorGate: descriptorRequestGate,
-      snapshotRequest: () => fetchModelConfig(),
-      descriptorRequest: () => fetchModelConnectionTypes(),
+      snapshotRequest: async () => await fetchModelConfig() as RawSnapshot,
+      descriptorRequest: async () => await fetchModelConnectionTypes() as unknown as ConnectionTypesPayload,
       blocked: () => modelOperations.saveInFlight || Boolean(state?.dirty),
       onSnapshotBlocked: (snapshot) => {
         if (!state?.dirty || modelOperations.saveInFlight) return;
@@ -812,7 +931,7 @@ async function loadModelSettings() {
     });
     return loaded;
   } catch (error) {
-    setStatus(error.message || "无法读取模型配置。", "error");
+    setStatus((error as Error).message || "无法读取模型配置。", "error");
     return false;
   }
 }
@@ -822,10 +941,12 @@ function confirmLeave() {
 }
 
 function bindEvents() {
-  document.querySelectorAll("[data-popup-model-route]").forEach((tab) => {
+  document.querySelectorAll<HTMLElement>("[data-popup-model-route]").forEach((tab) => {
     tab.addEventListener("click", () => {
       if (modelMutationBlocked()) return;
-      state.activeRoute = tab.dataset.popupModelRoute;
+      const route = tab.dataset.popupModelRoute;
+      if (route !== "chat" && route !== "embedding" && route !== "runtime") return;
+      state.activeRoute = route;
       byId("popupModelRouteLayout").classList.remove("is-detail");
       render();
     });
@@ -848,62 +969,78 @@ function bindEvents() {
   });
   byId("popupModelTypeSearch").addEventListener("input", renderConnectionTypes);
   byId("popupModelConnectionTypeGroups").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-model-type]");
-    if (button) changeType(button.dataset.modelType);
+    const button = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-model-type]");
+    if (button?.dataset.modelType) changeType(button.dataset.modelType);
   });
   byId("popupModelConnectionTypeGroups").addEventListener("keydown", moveTypeOptionFocus);
   byId("popupModelInspectorFields").addEventListener("input", (event) => {
-    const field = event.target.dataset.modelField;
-    if (field) updateField(field, event.target);
+    const target = event.target as HTMLInputElement | HTMLSelectElement;
+    const field = target.dataset.modelField;
+    if (field) updateField(field, target);
   });
   byId("popupModelDescriptorFields").addEventListener("input", (event) => {
-    const field = event.target.dataset.modelField;
-    if (field && event.target.tagName !== "SELECT") updateField(field, event.target);
+    const target = event.target as HTMLInputElement | HTMLSelectElement;
+    const field = target.dataset.modelField;
+    if (field && target.tagName !== "SELECT") updateField(field, target);
   });
   byId("popupModelDescriptorFields").addEventListener("change", (event) => {
-    const field = event.target.dataset.modelField;
-    if (field) updateField(field, event.target);
+    const target = event.target as HTMLInputElement | HTMLSelectElement;
+    const field = target.dataset.modelField;
+    if (field) updateField(field, target);
   });
   byId("popupModelCredentialEditor").addEventListener("click", (event) => {
-    const action = event.target.closest("[data-model-credential-action]")?.dataset.modelCredentialAction;
+    const action = (event.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-model-credential-action]")
+      ?.dataset.modelCredentialAction;
     if (action) updateCredential(action);
   });
   byId("popupModelCredentialEditor").addEventListener("input", (event) => {
-    if (event.target.id === "popupModelCredentialValue") {
-      const record = selectedRecord(state, state.activeRoute);
-      updateCredential(record.credential.action, event.target.value, false);
+    const target = event.target as HTMLInputElement;
+    const kind = state.activeRoute;
+    if (target.id === "popupModelCredentialValue" && kind !== "runtime") {
+      const record = selectedRecord(state, kind);
+      if (record) updateCredential(record.credential.action, target.value, false);
     }
   });
   byId("popupModelRouteList").addEventListener("click", (event) => {
-    const id = event.target.closest("[data-model-select]")?.dataset.modelSelect;
+    const id = (event.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-model-select]")
+      ?.dataset.modelSelect;
     if (id) selectRecord(id);
   });
   byId("popupModelRouteList").addEventListener("keydown", (event) => {
-    const row = event.target.closest("[data-model-record-id]");
-    if (!row || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    const keyboardEvent = event as KeyboardEvent;
+    const row = (keyboardEvent.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-model-record-id]");
+    if (!row || !keyboardEvent.altKey || !["ArrowUp", "ArrowDown"].includes(keyboardEvent.key)) return;
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
-    event.preventDefault();
-    selectRecord(row.dataset.modelRecordId, false);
-    moveSelected(event.key === "ArrowUp" ? -1 : 1);
+    keyboardEvent.preventDefault();
+    if (row.dataset.modelRecordId) selectRecord(row.dataset.modelRecordId, false);
+    moveSelected(keyboardEvent.key === "ArrowUp" ? -1 : 1);
   });
   byId("popupModelRouteList").addEventListener("dragstart", (event) => {
-    const row = event.target.closest("[data-model-record-id]");
+    const dragEvent = event as DragEvent;
+    const row = (dragEvent.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-model-record-id]");
     if (!row || modelMutationBlocked() || routeLocked(state.activeRoute)) {
-      event.preventDefault();
+      dragEvent.preventDefault();
       return;
     }
-    draggedId = row.dataset.modelRecordId;
+    draggedId = row.dataset.modelRecordId || "";
     row.classList.add("is-dragging");
-    event.dataTransfer.effectAllowed = "move";
+    if (dragEvent.dataTransfer) dragEvent.dataTransfer.effectAllowed = "move";
   });
   byId("popupModelRouteList").addEventListener("dragover", (event) => event.preventDefault());
   byId("popupModelRouteList").addEventListener("drop", (event) => {
-    event.preventDefault();
-    if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
-    const target = event.target.closest("[data-model-record-id]");
+    const dragEvent = event as DragEvent;
+    dragEvent.preventDefault();
+    const kind = state.activeRoute;
+    if (kind === "runtime" || modelMutationBlocked() || routeLocked(kind)) return;
+    const target = (dragEvent.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-model-record-id]");
     if (!target || !draggedId) return;
     const targetIndex = activeItems().findIndex((item) => item.id === target.dataset.modelRecordId);
-    state = moveRouteItem(state, state.activeRoute, draggedId, targetIndex);
+    state = moveRouteItem(state, kind, draggedId, targetIndex);
     const moved = draggedId;
     draggedId = "";
     render();
@@ -914,24 +1051,25 @@ function bindEvents() {
     document.querySelectorAll(".model-route-row.is-dragging").forEach((row) => row.classList.remove("is-dragging"));
   });
   byId("popupModelEmbeddingEnabled").addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
     if (modelMutationBlocked()) return;
     if (modelControlLocked("models.embedding.enabled")) {
       renderEmbeddingSettings();
       return;
     }
     const providersLocked = Boolean(routeLocked("embedding"));
-    if (!event.target.checked && state.models.embedding.providers.length && !providersLocked) {
+    if (!target.checked && state.models.embedding.providers.length && !providersLocked) {
     if (!window.confirm("停用 Embedding 会清空当前 Provider 路由。继续吗？")) {
-        event.target.checked = true;
+        target.checked = true;
         return;
       }
       state = updateRouteSetting(state, "embedding", "enabled", false);
       state.models.embedding.providers = [];
       state.selected.embedding = "";
     } else {
-      state = updateRouteSetting(state, "embedding", "enabled", event.target.checked);
+      state = updateRouteSetting(state, "embedding", "enabled", target.checked);
       if (
-        event.target.checked
+        target.checked
         && state.models.embedding.providers.length === 0
         && !providersLocked
       ) addConnection();
@@ -942,41 +1080,48 @@ function bindEvents() {
     ["popupModelEmbeddingModel", "model", "text", "models.embedding.settings.model"],
     ["popupModelEmbeddingDimension", "output_dimensionality", "number", "models.embedding.settings.output_dimensionality"],
     ["popupModelEmbeddingSimilarity", "similarity_threshold", "number", "models.embedding.settings.similarity_threshold"],
-  ]) {
+  ] as const) {
     byId(id).addEventListener("input", (event) => {
+      const target = event.target as HTMLInputElement;
       if (modelMutationBlocked()) return;
       if (modelControlLocked(path)) return;
-      const value = kind === "number" ? Number(event.target.value) : event.target.value;
+      const value = kind === "number" ? Number(target.value) : target.value;
       state = updateRouteSetting(state, "embedding", field, value);
       setStatus("有未保存的模型更改。");
     });
   }
   byId("popupModelEmbeddingMultimodal").addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
     if (modelMutationBlocked()) return;
     if (modelControlLocked("models.embedding.settings.multimodal_enabled")) return;
-    state = updateRouteSetting(state, "embedding", "multimodal_enabled", event.target.checked);
+    state = updateRouteSetting(state, "embedding", "multimodal_enabled", target.checked);
     setStatus("有未保存的模型更改。");
   });
   byId("popupModelChatConcurrency").addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
     if (modelMutationBlocked()) return;
     if (modelControlLocked("models.chat.concurrency")) return;
-    state = updateRouteSetting(state, "chat", "concurrency", Number(event.target.value));
+    state = updateRouteSetting(state, "chat", "concurrency", Number(target.value));
     setStatus("有未保存的模型更改。");
   });
   byId("popupModelChatTimeout").addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
     if (modelMutationBlocked()) return;
     if (modelControlLocked("models.chat.timeout_seconds")) return;
-    state = updateRouteSetting(state, "chat", "timeout_seconds", Number(event.target.value));
+    state = updateRouteSetting(state, "chat", "timeout_seconds", Number(target.value));
     setStatus("有未保存的模型更改。");
   });
   byId("popupModelMigrationPanel").addEventListener("click", (event) => {
     if (modelMutationBlocked()) return;
-    const button = event.target.closest("[data-migration-action]");
-    if (!button) return;
+    const button = (event.target as HTMLElement | null)
+      ?.closest<HTMLElement>("[data-migration-action]");
+    const migrationId = button?.dataset.migrationId;
+    const migrationAction = button?.dataset.migrationAction;
+    if (!migrationId || !migrationAction) return;
     state = setMigrationResolution(
       state,
-      button.dataset.migrationId,
-      migrationResolution(button.dataset.migrationAction),
+      migrationId,
+      migrationResolution(migrationAction),
     );
     renderMigration();
     setStatus("迁移选择尚未保存。");
@@ -987,7 +1132,8 @@ function bindEvents() {
     event.returnValue = "";
   });
   window.addEventListener("openbiliclaw:config-reloaded", (event) => {
-    if (event.detail?.type && event.detail.type !== CONFIG_RELOADED_TYPE) return;
+    const detail = (event as CustomEvent<{ type?: string }>).detail;
+    if (detail?.type && detail.type !== CONFIG_RELOADED_TYPE) return;
     if (modelOperations.saveInFlight) return;
     void fetchModelSnapshot(true).catch(() => {});
   });
@@ -1017,7 +1163,7 @@ export async function enableLocalOllamaEmbeddingRoute() {
   const loaded = await loadModelSettings();
   if (!state || !modelOperations.canStartSaveAfterLoad({
     startedSaveGeneration,
-    loadResult: loaded,
+    loadResult: loaded || null,
     state,
   })) {
     throw new Error(
@@ -1040,7 +1186,9 @@ export async function enableLocalOllamaEmbeddingRoute() {
   setModelEditorLocked(true);
   setStatus("正在启用本地 Ollama Embedding…");
   try {
-    const result = await updateModelConfig(toModelConfigPayload(prepared));
+    const result = await updateModelConfig(
+      toModelConfigPayload(prepared),
+    ) as ModelConfigUpdateResponse;
     state = retainSelection(hydrateModelConfig(result.snapshot), prepared);
     state.activeRoute = "embedding";
     render();
@@ -1048,16 +1196,22 @@ export async function enableLocalOllamaEmbeddingRoute() {
     notify("本地 Ollama Embedding 已启用", "success");
     return result;
   } catch (error) {
-    if (error.status === 409 && error.details?.error === "revision_conflict") {
-      if (error.details?.latest) state = receiveRemoteSnapshot(state, error.details.latest);
+    const modelError = error as ModelApiError;
+    if (modelError.status === 409 && modelError.details?.error === "revision_conflict") {
+      if (modelError.details?.latest) {
+        state = receiveRemoteSnapshot(state, modelError.details.latest);
+      }
       render();
       setStatus("启用被拒绝：模型配置已在其他位置更新。请检查后重试。", "error");
-    } else if (Array.isArray(error.details?.errors)) {
-      state = mapServerFieldErrors(prepared, error.details.errors);
+    } else if (Array.isArray(modelError.details?.errors)) {
+      state = mapServerFieldErrors(prepared, modelError.details.errors);
       render();
       setStatus("本地 Ollama 设置未通过模型配置验证。", "error");
     } else {
-      setStatus(error.details?.error || error.message || "无法启用本地 Ollama Embedding。", "error");
+      setStatus(
+        modelError.details?.error || modelError.message || "无法启用本地 Ollama Embedding。",
+        "error",
+      );
     }
     throw error;
   } finally {
@@ -1067,7 +1221,7 @@ export async function enableLocalOllamaEmbeddingRoute() {
   }
 }
 
-export function initPopupModelSettings(options = {}) {
+export function initPopupModelSettings(options: InitModelSettingsOptions = {}) {
   if (typeof options.onToast === "function") notify = options.onToast;
   if (!initialized && byId("popupModelRouteTabs")) {
     bindEvents();

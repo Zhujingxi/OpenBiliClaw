@@ -1,8 +1,6 @@
-// GENERATED FILE — DO NOT EDIT DIRECTLY.
-// Source of truth: model-config-state.js in the web app's shared modules
-// (see src/openbiliclaw/web for the canonical copy).
-// Regenerate with: node extension/scripts/sync-model-config-state.mjs
-// Drift guard: tests/js/model-config-parity.test.mjs
+// Popup-local strict TypeScript implementation of the shared model-config
+// state contract. Runtime parity with the web implementation is guarded by
+// tests/js/model-config-parity.test.mjs.
 
 /**
  * DOM-free state transitions for every web model-route editor.
@@ -11,6 +9,222 @@
  * replaces that status with an explicit write action and keeps the safe status
  * beside it, so a masked or raw persisted secret can never enter a draft.
  */
+
+export type RouteKind = "chat" | "embedding";
+export type EditorRouteKind = RouteKind | "runtime";
+
+export interface CredentialStatus {
+  source: string;
+  configured: boolean;
+  env_name: string;
+  credential_ref: string;
+  oauth_logged_in: boolean;
+}
+
+export interface CredentialDraft {
+  action: string;
+  value: string;
+  status: CredentialStatus;
+  [key: string]: unknown;
+}
+
+export interface CircuitSummary {
+  state: string;
+  failure_kind?: string;
+  permanent?: boolean;
+  retry_after_seconds?: number;
+  [key: string]: unknown;
+}
+
+export interface ProbeResult {
+  ok?: boolean;
+  fingerprint?: string;
+  [key: string]: unknown;
+}
+
+export interface RouteRecord {
+  id: string;
+  name: string;
+  type: string;
+  preset: string;
+  base_url: string;
+  credential: CredentialDraft;
+  probe: ProbeResult | null;
+  circuit: CircuitSummary;
+  model?: string;
+  api_mode?: string;
+  reasoning_effort?: string;
+  http_referer?: string;
+  x_title?: string;
+  num_ctx?: number;
+  [key: string]: unknown;
+}
+
+export interface FieldError {
+  path: string;
+  code: string;
+  message: string;
+  source: string;
+}
+
+export interface FieldErrors {
+  byConnection: Record<string, Record<string, FieldError>>;
+  global: FieldError[];
+}
+
+export interface OverrideEntry {
+  path: string;
+  source: string;
+  [key: string]: unknown;
+}
+
+export interface EmbeddingSettings {
+  model: string;
+  output_dimensionality: number;
+  similarity_threshold: number;
+  multimodal_enabled: boolean;
+  [key: string]: unknown;
+}
+
+export interface MigrationIssue {
+  id: string;
+  code: string;
+  field: string;
+  reason?: string;
+  provider?: string;
+  allowed_actions?: string[];
+  [key: string]: unknown;
+}
+
+export interface ModelConfigState {
+  revision: string;
+  source: string;
+  models: {
+    schema_version: number;
+    chat: {
+      connections: RouteRecord[];
+      concurrency: number;
+      timeout_seconds: number;
+      [key: string]: unknown;
+    };
+    embedding: {
+      enabled: boolean;
+      settings: EmbeddingSettings;
+      providers: RouteRecord[];
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  migration: { issues?: MigrationIssue[]; [key: string]: unknown } | null;
+  overrides: OverrideEntry[];
+  overrideLocks: Record<string, OverrideEntry | null>;
+  selected: { chat: string; embedding: string; [key: string]: string };
+  touched: Record<string, boolean>;
+  dirty: boolean;
+  remoteUpdate: { latestRevision: string; snapshot: RawSnapshot } | null;
+  fieldErrors: FieldErrors;
+  migration_resolutions: Record<string, { action?: string; [key: string]: unknown }>;
+  activeRoute: EditorRouteKind;
+  [key: string]: unknown;
+}
+
+export interface RequestGate {
+  begin(): number;
+  invalidate(): void;
+  isCurrent(candidate: number): boolean;
+}
+
+interface LatestRequestOptions<T> {
+  gate: RequestGate;
+  generation: number;
+  request: () => Promise<T>;
+  blocked: () => boolean;
+  apply: (value: T) => void;
+  onBlocked?: ((value: T) => void) | null;
+}
+
+export interface SnapshotRequestOptions<T> {
+  gate: RequestGate;
+  request: () => Promise<T>;
+  blocked: () => boolean;
+  apply: (value: T) => void;
+  onBlocked?: ((value: T) => void) | null;
+}
+
+export interface IndependentResourcesOptions<S, D> {
+  gate: RequestGate;
+  descriptorGate?: RequestGate;
+  snapshotRequest: () => Promise<S>;
+  descriptorRequest: () => Promise<D>;
+  blocked: () => boolean;
+  onSnapshotBlocked?: ((value: S) => void) | null;
+  applySnapshot: (value: S) => void;
+  installDescriptors: (value: D) => void;
+}
+
+export interface DescriptorField {
+  name: string;
+  capabilities?: string[];
+  presets?: string[];
+  [key: string]: unknown;
+}
+
+export interface PresetDefinition {
+  id: string;
+  defaults?: Record<string, unknown>;
+  capabilities?: string[];
+  [key: string]: unknown;
+}
+
+export interface ConnectionDescriptor {
+  id?: string;
+  label?: string;
+  category?: string;
+  capabilities?: string[];
+  fields?: DescriptorField[];
+  preset_definitions?: PresetDefinition[];
+  presets?: Array<string | PresetDefinition>;
+  [key: string]: unknown;
+}
+
+export interface ProbeSignature {
+  revision: string;
+  kind: RouteKind;
+  id: string;
+  fingerprint: string;
+}
+
+export interface ModelOperationGate {
+  readonly saveGeneration: number;
+  readonly saveInFlight: boolean;
+  readonly probeInFlight: boolean;
+  beginProbe(): number;
+  isProbeCurrent(candidate: number): boolean;
+  finishProbe(candidate: number): boolean;
+  beginSave(): { generation: number; invalidatedProbe: boolean } | null;
+  finishSave(candidate: number): boolean;
+  canStartSaveAfterLoad(args: {
+    startedSaveGeneration: number;
+    loadResult: { snapshotApplied?: boolean; descriptorsInstalled?: boolean } | null;
+    state: ModelConfigState | null;
+  }): boolean;
+  controlState(): { editorLocked: boolean; saveDisabled: boolean; probeDisabled: boolean };
+}
+
+// TODO(types): backend model-config snapshots are opaque at this browser
+// boundary; narrow only the wire fields read during hydration.
+/** Raw server snapshot shape (loosely typed; fields normalized on hydrate). */
+export type RawSnapshot = {
+  revision?: unknown;
+  source?: unknown;
+  models?: unknown;
+  overrides?: unknown;
+  migration?: unknown;
+  [key: string]: unknown;
+} | null | undefined;
+
+/** Raw route record from the wire (every field unknown until hydrated). */
+export type RawRecord = Record<string, unknown> | null | undefined;
 
 const MAX_ROUTE_ITEMS = 10;
 const CHAT_FIELDS = [
@@ -50,16 +264,16 @@ const OVERRIDE_CONTROL_PATHS = [
   "models.embedding.providers",
 ];
 
-function clone(value) {
+function clone<T>(value: T): T {
   if (typeof structuredClone === "function") return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 }
 
-function valuesEqual(left, right) {
+function valuesEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-export function createLatestRequestGate() {
+export function createLatestRequestGate(): RequestGate {
   let generation = 0;
   return {
     begin() {
@@ -69,20 +283,20 @@ export function createLatestRequestGate() {
     invalidate() {
       generation += 1;
     },
-    isCurrent(candidate) {
+    isCurrent(candidate: number) {
       return candidate === generation;
     },
   };
 }
 
-async function applyLatestRequestGeneration({
+async function applyLatestRequestGeneration<T>({
   gate,
   generation,
   request,
   blocked,
   apply,
   onBlocked = null,
-}) {
+}: LatestRequestOptions<T>): Promise<boolean> {
   let value;
   try {
     value = await request();
@@ -99,13 +313,13 @@ async function applyLatestRequestGeneration({
   return true;
 }
 
-export async function applyLatestSnapshotRequest(options) {
+export async function applyLatestSnapshotRequest<T>(options: SnapshotRequestOptions<T>): Promise<boolean> {
   const generation = options.gate.begin();
   return applyLatestRequestGeneration({ ...options, generation });
 }
 
 /** Coordinate one revisioned save with exact-probe request ownership. */
-export function createModelOperationGate() {
+export function createModelOperationGate(): ModelOperationGate {
   let saveGeneration = 0;
   let saveInFlight = false;
   let probeGeneration = 0;
@@ -126,10 +340,10 @@ export function createModelOperationGate() {
       probeInFlight = true;
       return probeGeneration;
     },
-    isProbeCurrent(candidate) {
+    isProbeCurrent(candidate: number) {
       return candidate === probeGeneration;
     },
-    finishProbe(candidate) {
+    finishProbe(candidate: number) {
       if (candidate !== probeGeneration) return false;
       probeInFlight = false;
       return true;
@@ -143,12 +357,12 @@ export function createModelOperationGate() {
       probeInFlight = false;
       return { generation: saveGeneration, invalidatedProbe };
     },
-    finishSave(candidate) {
+    finishSave(candidate: number) {
       if (!saveInFlight || candidate !== saveGeneration) return false;
       saveInFlight = false;
       return true;
     },
-    canStartSaveAfterLoad({ startedSaveGeneration, loadResult, state }) {
+    canStartSaveAfterLoad({ startedSaveGeneration, loadResult, state }: { startedSaveGeneration: number; loadResult: { snapshotApplied?: boolean; descriptorsInstalled?: boolean } | null; state: ModelConfigState | null }) {
       return Boolean(
         loadResult?.snapshotApplied === true
         && loadResult?.descriptorsInstalled === true
@@ -172,7 +386,7 @@ export function createModelOperationGate() {
  * both siblings settle. A locally blocked snapshot can still be retained as a
  * remote update while the winning descriptor registry installs normally.
  */
-export async function loadIndependentModelResources({
+export async function loadIndependentModelResources<S, D>({
   gate,
   descriptorGate = createLatestRequestGate(),
   snapshotRequest,
@@ -181,7 +395,7 @@ export async function loadIndependentModelResources({
   onSnapshotBlocked = null,
   applySnapshot,
   installDescriptors,
-}) {
+}: IndependentResourcesOptions<S, D>): Promise<{ snapshotApplied: boolean; descriptorsInstalled: boolean }> {
   const snapshotGeneration = gate.begin();
   const descriptorGeneration = descriptorGate.begin();
   const snapshotLoad = applyLatestRequestGeneration({
@@ -223,13 +437,13 @@ export async function loadIndependentModelResources({
   };
 }
 
-function normalizeOverridePath(path) {
+function normalizeOverridePath(path: unknown): string {
   return String(path || "")
     .replace(/\[(\d+)\]/g, ".$1")
     .replace(/^\.+|\.+$/g, "");
 }
 
-function buildOverrideLocks(overrides) {
+function buildOverrideLocks(overrides: unknown): Record<string, OverrideEntry | null> {
   const entries = (Array.isArray(overrides) ? overrides : []).map((override) => ({
     path: String(override?.path || ""),
     source: String(override?.source || ""),
@@ -251,19 +465,19 @@ function buildOverrideLocks(overrides) {
   return locks;
 }
 
-function routeKey(kind) {
+function routeKey(kind: RouteKind): "connections" | "providers" {
   if (kind === "chat") return "connections";
   if (kind === "embedding") return "providers";
   throw new Error(`Unknown model route: ${kind}`);
 }
 
-function routeItems(state, kind) {
-  return state.models[kind][routeKey(kind)];
+function routeItems(state: ModelConfigState, kind: RouteKind): RouteRecord[] {
+  return state.models[kind][routeKey(kind)] as RouteRecord[];
 }
 
-function safeCredentialStatus(raw) {
-  const source = ["none", "inline", "env", "oauth"].includes(raw?.source)
-    ? raw.source
+function safeCredentialStatus(raw: RawRecord): CredentialStatus {
+  const source = ["none", "inline", "env", "oauth"].includes(raw?.source as string)
+    ? raw!.source as string
     : "none";
   return {
     source,
@@ -274,7 +488,7 @@ function safeCredentialStatus(raw) {
   };
 }
 
-function hydrateCredential(raw) {
+function hydrateCredential(raw: RawRecord): CredentialDraft {
   return {
     action: "keep",
     value: "",
@@ -282,16 +496,16 @@ function hydrateCredential(raw) {
   };
 }
 
-function hydrateRecord(raw, kind) {
-  const record = {
+function hydrateRecord(raw: RawRecord, kind: RouteKind): RouteRecord {
+  const record: RouteRecord = {
     id: String(raw?.id || ""),
     name: String(raw?.name || ""),
     type: String(raw?.type || ""),
     preset: String(raw?.preset || ""),
     base_url: String(raw?.base_url || ""),
-    credential: hydrateCredential(raw?.credential),
-    probe: raw?.probe ? clone(raw.probe) : null,
-    circuit: raw?.circuit ? clone(raw.circuit) : { state: "closed" },
+    credential: hydrateCredential(raw?.credential as RawRecord),
+    probe: raw?.probe ? clone(raw.probe) as ProbeResult : null,
+    circuit: raw?.circuit ? clone(raw.circuit) as CircuitSummary : { state: "closed" },
   };
   if (kind === "chat") {
     Object.assign(record, {
@@ -300,17 +514,17 @@ function hydrateRecord(raw, kind) {
       reasoning_effort: String(raw?.reasoning_effort || ""),
       http_referer: String(raw?.http_referer || ""),
       x_title: String(raw?.x_title || ""),
-      num_ctx: Number.isFinite(Number(raw?.num_ctx)) ? Number(raw.num_ctx) : 0,
+      num_ctx: Number.isFinite(Number(raw?.num_ctx)) ? Number(raw!.num_ctx) : 0,
     });
   }
   return record;
 }
 
-function emptyFieldErrors() {
+function emptyFieldErrors(): FieldErrors {
   return { byConnection: {}, global: [] };
 }
 
-function ownFieldErrorBucket(container, key) {
+function ownFieldErrorBucket(container: Record<string, Record<string, FieldError>>, key: string): Record<string, FieldError> {
   if (!Object.hasOwn(container, key)) {
     Object.defineProperty(container, key, {
       value: {},
@@ -322,50 +536,54 @@ function ownFieldErrorBucket(container, key) {
   return container[key];
 }
 
-function touchedKey(kind, id, field) {
+function touchedKey(kind: RouteKind, id: string, field: string): string {
   return `${kind}:${id}:${field}`;
 }
 
-function markChanged(state) {
+function markChanged<T extends ModelConfigState>(state: T): T {
   state.dirty = true;
   state.fieldErrors = emptyFieldErrors();
   return state;
 }
 
-function findIndex(state, kind, id) {
+function findIndex(state: ModelConfigState, kind: RouteKind, id: string): number {
   const index = routeItems(state, kind).findIndex((item) => item.id === id);
   if (index < 0) throw new Error(`Unknown ${kind} connection ID: ${id}`);
   return index;
 }
 
-function cleanDraftRecord(record, kind) {
+function cleanDraftRecord(record: RawRecord, kind: RouteKind): RouteRecord {
   const hydrated = hydrateRecord(record, kind);
-  const action = record?.credential?.action;
-  if (["keep", "set", "clear", "env"].includes(action)) {
-    hydrated.credential.action = action;
-    hydrated.credential.value = ["set", "env"].includes(action)
-      ? String(record.credential.value || "")
+  const action = (record?.credential as RawRecord)?.action;
+  if (["keep", "set", "clear", "env"].includes(action as string)) {
+    hydrated.credential.action = action as string;
+    hydrated.credential.value = ["set", "env"].includes(action as string)
+      ? String((record!.credential as RawRecord)!.value || "")
       : "";
-  } else if (!record?.credential?.source && !record?.credential?.status) {
+  } else if (!(record?.credential as RawRecord)?.source && !(record?.credential as RawRecord)?.status) {
     hydrated.credential.action = "clear";
   }
   return hydrated;
 }
 
-export function hydrateModelConfig(snapshot) {
+export function hydrateModelConfig(snapshot: RawSnapshot): ModelConfigState {
   const source = snapshot && typeof snapshot === "object" ? snapshot : {};
-  const models = source.models && typeof source.models === "object" ? source.models : {};
-  const chat = models.chat && typeof models.chat === "object" ? models.chat : {};
-  const embedding = models.embedding && typeof models.embedding === "object"
+  const models = (source.models && typeof source.models === "object" ? source.models : {}) as Record<string, unknown>;
+  const chat = (models.chat && typeof models.chat === "object" ? models.chat : {}) as Record<string, unknown>;
+  const embedding = (models.embedding && typeof models.embedding === "object"
     ? models.embedding
-    : {};
+    : {}) as Record<string, unknown>;
+
   const connections = Array.isArray(chat.connections)
-    ? chat.connections.map((item) => hydrateRecord(item, "chat"))
+    ? chat.connections.map((item: unknown) => hydrateRecord(item as RawRecord, "chat"))
     : [];
   const providers = Array.isArray(embedding.providers)
-    ? embedding.providers.map((item) => hydrateRecord(item, "embedding"))
+    ? embedding.providers.map((item: unknown) => hydrateRecord(item as RawRecord, "embedding"))
     : [];
-  const overrides = clone(Array.isArray(source.overrides) ? source.overrides : []);
+  const overrides = clone(Array.isArray(source.overrides) ? source.overrides : []) as OverrideEntry[];
+  const migration = clone(
+    source.migration || { state: "none", confirmed: true, issues: [] },
+  ) as ModelConfigState["migration"];
   return {
     revision: String(source.revision || ""),
     source: String(source.source || ""),
@@ -379,20 +597,20 @@ export function hydrateModelConfig(snapshot) {
       embedding: {
         enabled: Boolean(embedding.enabled),
         settings: {
-          model: String(embedding.settings?.model || ""),
+          model: String((embedding.settings as RawRecord)?.model || ""),
           output_dimensionality: Math.max(
             0,
-            Number(embedding.settings?.output_dimensionality) || 0,
+            Number((embedding.settings as RawRecord)?.output_dimensionality) || 0,
           ),
-          similarity_threshold: Number.isFinite(Number(embedding.settings?.similarity_threshold))
-            ? Number(embedding.settings.similarity_threshold)
+          similarity_threshold: Number.isFinite(Number((embedding.settings as RawRecord)?.similarity_threshold))
+            ? Number((embedding.settings as RawRecord)!.similarity_threshold)
             : 0.82,
-          multimodal_enabled: Boolean(embedding.settings?.multimodal_enabled),
+          multimodal_enabled: Boolean((embedding.settings as RawRecord)?.multimodal_enabled),
         },
         providers,
       },
     },
-    migration: clone(source.migration || { state: "none", confirmed: true, issues: [] }),
+    migration,
     overrides,
     overrideLocks: buildOverrideLocks(overrides),
     selected: {
@@ -404,17 +622,17 @@ export function hydrateModelConfig(snapshot) {
     remoteUpdate: null,
     fieldErrors: emptyFieldErrors(),
     migration_resolutions: {},
-  };
+  } as ModelConfigState;
 }
 
-export function selectRouteItem(state, kind, id) {
+export function selectRouteItem(state: ModelConfigState, kind: RouteKind, id: string): ModelConfigState {
   findIndex(state, kind, id);
   const next = clone(state);
   next.selected[kind] = id;
   return next;
 }
 
-export function appendRouteItem(state, kind, record) {
+export function appendRouteItem(state: ModelConfigState, kind: RouteKind, record: RawRecord): ModelConfigState {
   const current = routeItems(state, kind);
   if (current.length >= MAX_ROUTE_ITEMS) {
     throw new Error(`${kind} route has a maximum 10 connections.`);
@@ -431,7 +649,7 @@ export function appendRouteItem(state, kind, record) {
   return markChanged(next);
 }
 
-export function removeRouteItem(state, kind, id) {
+export function removeRouteItem(state: ModelConfigState, kind: RouteKind, id: string): ModelConfigState {
   const current = routeItems(state, kind);
   const index = findIndex(state, kind, id);
   if (kind === "chat" && current.length <= 1) {
@@ -452,7 +670,7 @@ export function removeRouteItem(state, kind, id) {
   return markChanged(next);
 }
 
-export function moveRouteItem(state, kind, id, targetIndex) {
+export function moveRouteItem(state: ModelConfigState, kind: RouteKind, id: string, targetIndex: number): ModelConfigState {
   const current = routeItems(state, kind);
   const from = findIndex(state, kind, id);
   const to = Math.max(0, Math.min(current.length - 1, Number(targetIndex)));
@@ -464,21 +682,21 @@ export function moveRouteItem(state, kind, id, targetIndex) {
   return markChanged(next);
 }
 
-export function updateRouteField(state, kind, id, field, value) {
+export function updateRouteField(state: ModelConfigState, kind: RouteKind, id: string, field: string, value: unknown): ModelConfigState {
   const next = clone(state);
   const index = findIndex(next, kind, id);
-  const item = next.models[kind][routeKey(kind)][index];
+  const item = (next.models[kind][routeKey(kind)] as RouteRecord[])[index];
   if (field === "id") throw new Error("Stable connection IDs cannot be edited.");
   const previousValue = item[field] === undefined ? undefined : clone(item[field]);
   if (field === "credential") {
-    const action = String(value?.action || "keep");
+    const action = String((value as RawRecord)?.action || "keep");
     if (!["keep", "set", "clear", "env"].includes(action)) {
       throw new Error(`Unknown credential action: ${action}`);
     }
     item.credential = {
       ...item.credential,
       action,
-      value: ["set", "env"].includes(action) ? String(value?.value || "") : "",
+      value: ["set", "env"].includes(action) ? String((value as RawRecord)?.value || "") : "",
     };
   } else {
     item[field] = value;
@@ -490,7 +708,7 @@ export function updateRouteField(state, kind, id, field, value) {
   return markChanged(next);
 }
 
-export function updateRouteSetting(state, kind, field, value) {
+export function updateRouteSetting(state: ModelConfigState, kind: RouteKind, field: string, value: unknown): ModelConfigState {
   const next = clone(state);
   if (kind === "embedding" && field in next.models.embedding.settings) {
     const changed = !valuesEqual(next.models.embedding.settings[field], value);
@@ -505,7 +723,7 @@ export function updateRouteSetting(state, kind, field, value) {
   return markChanged(next);
 }
 
-export function applyPreset(state, kind, id, presetDefinition, options = {}) {
+export function applyPreset(state: ModelConfigState, kind: RouteKind, id: string, presetDefinition: PresetDefinition | null | undefined, options: { previousPreset?: PresetDefinition | null } = {}): ModelConfigState {
   const next = clone(state);
   const index = findIndex(next, kind, id);
   const item = routeItems(next, kind)[index];
@@ -526,23 +744,23 @@ export function applyPreset(state, kind, id, presetDefinition, options = {}) {
 }
 
 export function changePreset(
-  state,
-  kind,
-  id,
-  descriptor,
-  presetDefinition,
-  options = {},
-) {
+  state: ModelConfigState,
+  kind: RouteKind,
+  id: string,
+  descriptor: ConnectionDescriptor | null | undefined,
+  presetDefinition: PresetDefinition | null | undefined,
+  options: { confirmed?: boolean } = {},
+): { state: ModelConfigState; incompatibleFields: string[]; changed: boolean } {
   const index = findIndex(state, kind, id);
   const item = routeItems(state, kind)[index];
   const nextPreset = String(presetDefinition?.id || "");
   const allowed = new Set(
     (descriptor?.fields || [])
-      .filter((field) => (
+      .filter((field: DescriptorField) => (
         (!field.capabilities?.length || field.capabilities.includes(kind))
         && (!field.presets?.length || field.presets.includes(nextPreset))
       ))
-      .map((field) => field.name),
+      .map((field: DescriptorField) => field.name),
   );
   const possible = kind === "chat" ? CHAT_FIELDS : EMBEDDING_FIELDS;
   const incompatibleFields = possible.filter(
@@ -564,12 +782,12 @@ export function changePreset(
   };
 }
 
-function isPopulated(field, value) {
+function isPopulated(field: string, value: unknown): boolean {
   if (field === "credential") {
-    const status = value?.status;
+    const status = (value as CredentialDraft | null | undefined)?.status;
     return Boolean(
-      value?.action === "set"
-      || value?.action === "env"
+      (value as CredentialDraft | null | undefined)?.action === "set"
+      || (value as CredentialDraft | null | undefined)?.action === "env"
       || status?.configured
       || status?.source === "oauth",
     );
@@ -579,7 +797,7 @@ function isPopulated(field, value) {
   return Boolean(value);
 }
 
-function clearField(item, field) {
+function clearField(item: RouteRecord, field: string): void {
   if (field === "credential") {
     item.credential = {
       action: "clear",
@@ -593,7 +811,13 @@ function clearField(item, field) {
   }
 }
 
-export function changeConnectionType(state, kind, id, descriptor, options = {}) {
+export function changeConnectionType(
+  state: ModelConfigState,
+  kind: RouteKind,
+  id: string,
+  descriptor: ConnectionDescriptor | null | undefined,
+  options: { confirmed?: boolean; previousDescriptor?: ConnectionDescriptor | null } = {},
+): { state: ModelConfigState; incompatibleFields: string[]; changed: boolean } {
   const index = findIndex(state, kind, id);
   const item = routeItems(state, kind)[index];
   const previousCategory = String(options.previousDescriptor?.category || "");
@@ -602,15 +826,15 @@ export function changeConnectionType(state, kind, id, descriptor, options = {}) 
     && ((previousCategory === "oauth") !== (nextCategory === "oauth"));
   const allowed = new Set(
     (descriptor?.fields || [])
-      .filter((field) => (
+      .filter((field: DescriptorField) => (
         (!field.capabilities?.length || field.capabilities.includes(kind))
         && (!field.presets?.length || field.presets.includes(item.preset))
       ))
-      .map((field) => field.name),
+      .map((field: DescriptorField) => field.name),
   );
   const possible = kind === "chat" ? CHAT_FIELDS : EMBEDDING_FIELDS;
   const incompatibleFields = possible.filter(
-    (field) => !allowed.has(field) && isPopulated(field, item[field]),
+    (field: string) => !allowed.has(field) && isPopulated(field, item[field]),
   );
   if (
     credentialSemanticsChanged
@@ -640,19 +864,19 @@ export function changeConnectionType(state, kind, id, descriptor, options = {}) 
   }
   candidate.type = String(descriptor?.id || "");
   const presets = (descriptor?.preset_definitions || descriptor?.presets || [])
-    .filter((preset) => (
+    .filter((preset: string | PresetDefinition) => (
       typeof preset === "string"
       || !preset.capabilities?.length
       || preset.capabilities.includes(kind)
     ))
-    .map((preset) => (typeof preset === "string" ? preset : preset.id));
+    .map((preset: string | PresetDefinition) => (typeof preset === "string" ? preset : preset.id));
   if (!presets.includes(candidate.preset)) candidate.preset = presets[0] || "";
   candidate.probe = null;
   next.touched[touchedKey(kind, id, "type")] = true;
   return { state: markChanged(next), incompatibleFields, changed: true };
 }
 
-function fieldFromPath(path) {
+function fieldFromPath(path: unknown): string {
   if (String(path).includes(".credentials.") || String(path).includes("models.credentials")) {
     return "credential";
   }
@@ -660,7 +884,7 @@ function fieldFromPath(path) {
   return parts.at(-1) || "configuration";
 }
 
-export function mapServerFieldErrors(state, errors) {
+export function mapServerFieldErrors(state: ModelConfigState, errors: unknown): ModelConfigState {
   const next = clone(state);
   next.fieldErrors = emptyFieldErrors();
   for (const raw of Array.isArray(errors) ? errors : []) {
@@ -687,12 +911,12 @@ export function mapServerFieldErrors(state, errors) {
   return next;
 }
 
-export function receiveRemoteSnapshot(state, snapshot) {
+export function receiveRemoteSnapshot(state: ModelConfigState, snapshot: RawSnapshot): ModelConfigState {
   const remoteRevision = String(snapshot?.revision || "");
   if (!remoteRevision || remoteRevision === state.revision) return clone(state);
   if (!state.dirty) {
     const hydrated = hydrateModelConfig(snapshot);
-    for (const kind of ["chat", "embedding"]) {
+    for (const kind of ["chat", "embedding"] as RouteKind[]) {
       const selectedId = state.selected?.[kind];
       if (selectedId && routeItems(hydrated, kind).some((item) => item.id === selectedId)) {
         hydrated.selected[kind] = selectedId;
@@ -709,7 +933,7 @@ export function receiveRemoteSnapshot(state, snapshot) {
   return next;
 }
 
-export function setMigrationResolution(state, issueId, resolution) {
+export function setMigrationResolution(state: ModelConfigState, issueId: unknown, resolution: Record<string, unknown>): ModelConfigState {
   const next = clone(state);
   const selected = clone(resolution);
   delete selected.position;
@@ -717,9 +941,9 @@ export function setMigrationResolution(state, issueId, resolution) {
   return markChanged(next);
 }
 
-function credentialPayload(credential) {
-  const action = ["keep", "set", "clear", "env"].includes(credential?.action)
-    ? credential.action
+function credentialPayload(credential: RawRecord): Record<string, unknown> {
+  const action = ["keep", "set", "clear", "env"].includes(credential?.action as string)
+    ? credential!.action as string
     : "keep";
   if (action === "set" || action === "env") {
     return { action, value: String(credential?.value || "") };
@@ -727,7 +951,7 @@ function credentialPayload(credential) {
   return { action };
 }
 
-function chatPayload(item) {
+function chatPayload(item: RouteRecord): Record<string, unknown> {
   return {
     id: String(item.id || ""),
     name: String(item.name || ""),
@@ -744,7 +968,7 @@ function chatPayload(item) {
   };
 }
 
-function embeddingPayload(item) {
+function embeddingPayload(item: RouteRecord): Record<string, unknown> {
   return {
     id: String(item.id || ""),
     name: String(item.name || ""),
@@ -755,7 +979,7 @@ function embeddingPayload(item) {
   };
 }
 
-function embeddingSettingsPayload(settings) {
+function embeddingSettingsPayload(settings: RawRecord): Record<string, unknown> {
   return {
     model: String(settings?.model || ""),
     output_dimensionality: Math.max(
@@ -767,7 +991,7 @@ function embeddingSettingsPayload(settings) {
   };
 }
 
-export function createProbeSignature(state, kind, id) {
+export function createProbeSignature(state: ModelConfigState, kind: RouteKind, id: string): ProbeSignature {
   const index = findIndex(state, kind, id);
   const item = routeItems(state, kind)[index];
   const draft = kind === "chat"
@@ -784,11 +1008,11 @@ export function createProbeSignature(state, kind, id) {
   };
 }
 
-export function probeSignatureMatches(state, signature) {
+export function probeSignatureMatches(state: ModelConfigState, signature: ProbeSignature | null | undefined): boolean {
   if (!signature || typeof signature !== "object") return false;
   try {
     return valuesEqual(
-      createProbeSignature(state, signature.kind, signature.id),
+      createProbeSignature(state, signature.kind as RouteKind, signature.id),
       signature,
     );
   } catch (_error) {
@@ -796,24 +1020,24 @@ export function probeSignatureMatches(state, signature) {
   }
 }
 
-export function applyProbeResult(state, signature, result) {
+export function applyProbeResult(state: ModelConfigState, signature: ProbeSignature, result: unknown): { state: ModelConfigState; accepted: boolean } {
   const next = clone(state);
   if (!probeSignatureMatches(next, signature)) {
     return { state: next, accepted: false };
   }
-  const index = findIndex(next, signature.kind, signature.id);
-  const stored = clone(result);
+  const index = findIndex(next, signature.kind as RouteKind, signature.id);
+  const stored = clone(result) as ProbeResult | null;
   // Persist the exact-draft fingerprint alongside the probe so the settings UI
   // can detect "changed since last verified" (decision 4) even if a later
   // mutation path forgot to clear the probe chip.
   if (stored && typeof stored === "object" && !stored.fingerprint) {
     stored.fingerprint = signature.fingerprint;
   }
-  routeItems(next, signature.kind)[index].probe = stored;
+  routeItems(next, signature.kind as RouteKind)[index].probe = stored;
   return { state: next, accepted: true };
 }
 
-export function toModelConfigPayload(state) {
+export function toModelConfigPayload(state: ModelConfigState) {
   // The backend rejects enabled=false WITH providers outright
   // (embedding_disabled_with_providers). Route items stay in client state so a
   // same-session re-enable restores them, but the wire payload must not carry
@@ -840,7 +1064,7 @@ export function toModelConfigPayload(state) {
   };
 }
 
-export function selectedRecord(state, kind) {
+export function selectedRecord(state: ModelConfigState, kind: RouteKind): RouteRecord | null {
   if (kind !== "chat" && kind !== "embedding") return null;
   return routeItems(state, kind).find((item) => item.id === state.selected[kind]) || null;
 }
@@ -852,7 +1076,7 @@ export function selectedRecord(state, kind) {
  * closed/unknown circuit so callers can render nothing. `nowMs` is injectable
  * for deterministic tests and countdown re-renders.
  */
-export function circuitView(record, nowMs = Date.now()) {
+export function circuitView(record: RouteRecord | null | undefined, nowMs: number = Date.now()): { state: string; failureKind: string; permanent: boolean; retrySeconds: number | null; label: string } | null {
   const circuit = record?.circuit;
   if (!circuit || circuit.state !== "open") return null;
   const retryAfter = Number(circuit.retry_after_seconds);
@@ -872,7 +1096,7 @@ export function circuitView(record, nowMs = Date.now()) {
 }
 
 /** Throttled aria-live announcement key: only changes on state transitions. */
-export function circuitAnnouncementKey(record) {
+export function circuitAnnouncementKey(record: RouteRecord | null | undefined): string {
   const circuit = record?.circuit;
   if (!circuit || circuit.state !== "open") return "closed";
   return `open:${circuit.failure_kind || ""}:${circuit.permanent ? "1" : "0"}`;
@@ -886,7 +1110,7 @@ export function circuitAnnouncementKey(record) {
  * with a failed probe) return false — the settings UI only warns about
  * *unverified changes* on top of a previously verified draft.
  */
-export function hasUnverifiedChanges(state, kind, id) {
+export function hasUnverifiedChanges(state: ModelConfigState, kind: RouteKind, id: string): boolean {
   let index;
   try {
     index = findIndex(state, kind, id);
@@ -908,9 +1132,9 @@ export function hasUnverifiedChanges(state, kind, id) {
 }
 
 /** Collect every route item with unverified changes for a save-time warning. */
-export function unverifiedConnections(state) {
+export function unverifiedConnections(state: ModelConfigState): Array<{ kind: RouteKind; id: string; name: string }> {
   const changed = [];
-  for (const kind of ["chat", "embedding"]) {
+  for (const kind of ["chat", "embedding"] as RouteKind[]) {
     for (const item of routeItems(state, kind)) {
       if (hasUnverifiedChanges(state, kind, item.id)) {
         changed.push({ kind, id: item.id, name: item.name || item.id });
@@ -923,12 +1147,12 @@ export function unverifiedConnections(state) {
 /* ── Override-lock selectors (decision 7) ──────────────────────────── */
 
 /** Lock descriptor ({path, source}) for a control path, or null when editable. */
-export function overrideLockFor(state, path) {
+export function overrideLockFor(state: ModelConfigState | null | undefined, path: string): OverrideEntry | null {
   return state?.overrideLocks?.[path] || null;
 }
 
 /** True when any model control is locked by a higher-priority config source. */
-export function hasOverrideLocks(state) {
+export function hasOverrideLocks(state: ModelConfigState | null | undefined): boolean {
   return Object.values(state?.overrideLocks || {}).some(Boolean);
 }
 
@@ -940,7 +1164,7 @@ export function hasOverrideLocks(state) {
  * embedding step, one provider) while preserving every other route item
  * verbatim in the serialized PUT payload.
  */
-export function createSingleConnectionDraft(state, kind, id) {
+export function createSingleConnectionDraft(state: ModelConfigState, kind: RouteKind, id: string) {
   const index = findIndex(state, kind, id);
   const record = routeItems(state, kind)[index];
   return {
@@ -957,13 +1181,13 @@ export function createSingleConnectionDraft(state, kind, id) {
     get preservedFallbackCount() {
       return Math.max(0, routeItems(state, kind).length - 1);
     },
-    updateField(field, value) {
+    updateField(field: string, value: unknown) {
       return updateRouteField(state, kind, record.id, field, value);
     },
-    applyPreset(presetDefinition, options) {
+    applyPreset(presetDefinition: PresetDefinition | null | undefined, options?: { previousPreset?: PresetDefinition | null }) {
       return applyPreset(state, kind, record.id, presetDefinition, options);
     },
-    changeType(descriptor, options) {
+    changeType(descriptor: ConnectionDescriptor | null | undefined, options?: { confirmed?: boolean; previousDescriptor?: ConnectionDescriptor | null }) {
       return changeConnectionType(state, kind, record.id, descriptor, options);
     },
     probeSignature() {
@@ -983,7 +1207,7 @@ export function createSingleConnectionDraft(state, kind, id) {
  * credential-bearing record can disappear without the user editing the model
  * route explicitly.
  */
-export function prepareLocalOllamaEmbedding(state, descriptor, defaults) {
+export function prepareLocalOllamaEmbedding(state: ModelConfigState, descriptor: ConnectionDescriptor | null | undefined, defaults: Record<string, unknown> | null | undefined): ModelConfigState {
   if (state?.dirty) {
     throw new Error("Unsaved model changes must be saved or reloaded first.");
   }

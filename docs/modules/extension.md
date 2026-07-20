@@ -2,7 +2,7 @@
 
 > popup 的模型 tab 直接编辑 revisioned Chat / Embedding route；Primary 与 fallback 是同一条最多 10 项的有序列表，Runtime tab 继续承载 Chat 总并发与超时。
 
-模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机 `popup/popup-model-config-state.js` 是由 `extension/scripts/sync-model-config-state.mjs` 从 `src/openbiliclaw/web/shared/model-config-state.js` 逐字节生成的 checked-in artifact，公共 API 与 Web 端完全一致；漂移由 `tests/js/model-config-parity.test.mjs` 的 byte-for-byte 守卫 + 14 个 web ↔ extension 行为对齐向量钉住，修改必须落在共享源上，重新生成副本。
+模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机已迁移为 strict TypeScript `popup/popup-model-config-state.ts`；它保留与 Web 共享状态机一致的公共 API，`tests/js/model-config-parity.test.mjs` 继续以 14 个 web ↔ extension 行为向量钉住 hydrate、路由增删改移、payload、冲突与 probe fingerprint 等运行时语义，不再依赖 checked-in JavaScript 副本或逐字节同步脚本。
 
 ## 模块范围
 
@@ -19,6 +19,7 @@
 | 8.1 行为采集 | ✅ | `content/kernel.ts` + `shared/platforms/*` + `service-worker.ts` 已接通统一事件链；B 站 / 小红书 / 抖音 / YouTube / X / 知乎都通过 `PlatformAdapter` 产出同一 `BehaviorEvent` 形态，平台差异只保留在 selector、内容 ID 和 action 识别中；Reddit 通过插件任务源接入初始化 saved/upvoted/subscribed 信号和 discovery search/hot/subreddit/related；click 监听在 capture 阶段执行，scroll 同时覆盖页面和内部滚动容器 |
 | 8.2 后端 API | ✅ | Python 侧 `/api/events`、`/api/health`、`/api/recommendations` 已可联调；`/api/events` 在 soul 画像明确未初始化时只返回 `not_initialized` 拒收结果，不写 memory，首轮画像信号由 guided init 的来源任务拉取 |
 | 8.3 Side Panel | ✅ | 已切到 side panel 主入口，继续复用 `popup/` 页面承载推荐 / 稍后 / 收藏 / 画像 / 对话五个 tab；顶部功能区提供「手机版」入口（v0.3.154 起为手机图形 + 「手机版」文字标签，与相邻图标同款白底样式），按当前插件后端地址生成 `/m/` 扫码链接；460px 以下窄宽度会把 Web、二维码、消息、设置按钮换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠；如果当前后端地址仍是 `127.0.0.1` / `localhost`，会先调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成二维码，提示为 info 状态；后端会优先返回 `192.168.x.x` / `10.x.x.x` / `172.16-31.x.x` 这类真实局域网地址，排除 `198.18.x.x` 等 VPN/TUN 地址；移动 Web 推荐页首屏先渲染 `/api/recommendations`，再异步补 runtime status / activity / delight，慢请求不会让页面无限停在 loading；聊天改走后端 durable turn，Chrome 丢弃或切 tab 后可恢复；惊喜推荐、兴趣猜测和避雷探针的内联聊天也会按 `scope=delight/probe/avoidance_probe` 恢复 pending/completed/failed turn；聊天 tab 激活时隐藏底部活动栏，聊天记录区独立滚动并占满上方空间，输入框固定在底部且会轮播想法、口味、自我描述、近期状态等多场景提示语 |
+| Popup TypeScript 源码与构建 | ✅ | `popup.ts` 与 15 个 `popup-*.ts` 采用 strict TypeScript，模块 import 与 `popup.html` 继续使用 `.js` 运行时 specifier；`tsconfig.popup.json` 独立检查源码，`scripts/build-popup.mjs` 不打包地逐文件发射到 `popup-built/`，Chrome / Firefox 构建与打包再把这些 JavaScript 工件覆盖进最终 `popup/`。浏览器脚本加载顺序与 loose ES module 边界保持不变。 |
 | Durable 对话失败展示 | ✅ | side panel 的主聊天在 `turn.status === "failed"` 时优先渲染后端持久化的安全 `turn.error`，不把历史遗留 `turn.reply` 误当成功；惊喜/探针内联 turn 只有 `completed` 才显示成功并移除已处理探针，`failed` 显示 `turn.error`、恢复 handled/按钮状态并保留卡片供重试。 |
 | Runtime stream 合并刷新 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对 `activity.added` / `profile_updated` 等运行时事件做 debounce 与 single-flight；`refresh.pool_updated` 只合并池子状态并刷新 header / pool chips / 底部可换提示 / 空态文案，不再重拉推荐列表，避免覆盖用户已经 append 出来的历史卡片。插件 side panel 从离线转在线时（包括首次 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上的竞态）会立即调度推荐刷新；popup 离线期间会每 1 秒轻量重探测 `/api/ping`，runtime-stream 自身也固定每 1 秒重连，成功后停止轮询并切回在线刷新流程，避免后端已启动但插件仍停在“后端还没开张”的旧空态。 |
 | 兴趣挑战探针 UI | ✅ | `interest.probe` 和 `speculative_interests` 会保留后端的 `probe_mode` / `challenge` metadata；profile 页确认会向 `/api/interest-probes/respond` 传 `surface="profile"`，写回为 `profile_confirmed`，而 inbox / runtime probe 卡片确认保持默认 `probe_confirmed`。插件 side panel、移动 Web 和桌面 Web 会把普通 `near` 兴趣探针与 `lateral/bridge/wildcard` 挑战探针拆成不同样式和提示：普通兴趣强调继续探索，挑战探针提示“把口味往侧边推一点”，区别于避雷探针。四个可见动作固定为「确认喜欢 / 暂时搁置 / 确认不喜欢 / 多聊聊」，分别提交 `confirm / defer / reject / chat`；用户处理同一 domain 后，三端会用 handled probe key 立即从 inbox、画像页和 runtime hydration 里隐藏该探针，避免后端旧快照/缓存再次把它展示出来。 |
@@ -94,11 +95,11 @@ extension/
 │   └── chrome-webstore-upload.mjs
 ├── popup/
 │   ├── popup.html
-│   ├── popup.js
-│   ├── popup-autostart-control.js
-│   ├── popup-connection-poller.js # popup HTTP / runtime-stream 三态协调与离线 /api/ping 重探测
-│   ├── popup-saved-sync.js
-│   └── popup-helpers.js    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
+│   ├── popup.ts
+│   ├── popup-autostart-control.ts
+│   ├── popup-connection-poller.ts # popup HTTP / runtime-stream 三态协调与离线 /api/ping 重探测
+│   ├── popup-saved-sync.ts
+│   └── popup-helpers.ts    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
 ├── src/
 │   ├── background/
 │   │   ├── buffer.ts
@@ -500,9 +501,9 @@ npm run build
 - popup 设置页字段与 `/api/config` schema 的基础对齐
 - popup API durable chat turn：`startChatTurn()`、`fetchChatTurn()`、`fetchChatTurns()` 会分别调用 `/api/chat/turns`、`/api/chat/turns/{turn_id}` 和列表接口
 - `renderDurableChatTurn(turn)`：`completed` 渲染 `turn.reply`，`failed` 渲染安全 `turn.error`，字段缺失时才使用本地固定兜底文案
-- popup 连接状态稳定性：`popup-connection-poller.js` 覆盖 HTTP / runtime-stream 三态投影、失败探活才离线、旧探活 revision guard、`/api/ping` 失败后持续重探测与恢复回调；`popup-stream.js` 另覆盖主动关闭不会误触发断线通知
+- popup 连接状态稳定性：`popup-connection-poller.ts` 覆盖 HTTP / runtime-stream 三态投影、失败探活才离线、旧探活 revision guard、`/api/ping` 失败后持续重探测与恢复回调；`popup-stream.ts` 另覆盖主动关闭不会误触发断线通知
 - popup 聊天布局：历史 hydrate 与切回聊天 tab 都会触发滚到底部，避免 hidden view 恢复后停在旧消息
-- Chrome / Firefox 打包布局守卫：`tests/packaging-layout.test.ts` 检查两条 zip 都包含 manifest、popup 与构建产物，并断言产物 bundle 中没有抖音 debug relay 残留
+- Chrome / Firefox 打包布局守卫：`tests/packaging-layout.test.ts` 检查两条 zip 都包含 manifest、`popup/popup.js` 与构建产物，拒绝 popup TypeScript 源码或根目录 `popup*.js` 泄入归档，并断言产物 bundle 中没有抖音 debug relay 残留
 - `dist/` 运行时脚本可被 Chrome 直接加载
 
 ## Release 分发

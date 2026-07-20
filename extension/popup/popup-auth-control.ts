@@ -10,21 +10,42 @@
  * fake fetch and duck-typed elements (no jsdom).
  */
 
-export function createAuthApi({ getBaseUrl, fetchImpl } = {}) {
-  const doFetch = fetchImpl || ((...args) => fetch(...args));
+type FetchLike = typeof fetch;
+
+interface AuthStatus {
+  can_manage?: boolean;
+  enabled?: boolean;
+  env_managed?: boolean;
+  [key: string]: unknown;
+}
+
+interface AuthApiOptions {
+  getBaseUrl: () => Promise<string>;
+  fetchImpl?: FetchLike;
+}
+
+interface AuthControlElements {
+  checkbox?: Pick<HTMLInputElement, "checked" | "disabled" | "addEventListener">;
+  password?: Pick<HTMLInputElement, "value" | "hidden" | "focus">;
+  saveBtn?: Pick<HTMLElement, "hidden" | "addEventListener">;
+  hint?: Pick<HTMLElement, "textContent">;
+}
+
+export function createAuthApi({ getBaseUrl, fetchImpl }: AuthApiOptions) {
+  const doFetch: FetchLike = fetchImpl || fetch.bind(globalThis);
 
   async function status() {
     try {
       const base = await getBaseUrl();
       const res = await doFetch(`${base}/auth/status`);
       if (!res.ok) return null;
-      return await res.json();
+      return await res.json() as AuthStatus;
     } catch {
       return null;
     }
   }
 
-  async function setEnabled(enabled, password = "") {
+  async function setEnabled(enabled: boolean, password = "") {
     const base = await getBaseUrl();
     const payload = enabled ? { enabled: true, password } : { enabled: false };
     const res = await doFetch(`${base}/auth/admin`, {
@@ -50,11 +71,11 @@ export function createAuthApi({ getBaseUrl, fetchImpl } = {}) {
  * @param els {checkbox, password, saveBtn, hint} — duck-typed elements.
  * @param opts {getBaseUrl, fetchImpl}
  */
-export function initAuthControl(els = {}, opts = {}) {
+export function initAuthControl(els: AuthControlElements = {}, opts: AuthApiOptions) {
   const api = createAuthApi(opts);
-  let current = null;
+  let current: AuthStatus | null = null;
 
-  const setHint = (msg) => {
+  const setHint = (msg: string) => {
     if (els.hint) els.hint.textContent = msg;
   };
 
@@ -96,7 +117,7 @@ export function initAuthControl(els = {}, opts = {}) {
     return current;
   }
 
-  async function apply(enabled) {
+  async function apply(enabled: boolean) {
     const password = els.password ? String(els.password.value || "") : "";
     if (enabled && !password.trim()) {
       setHint("请输入要设置的访问密码。");
@@ -124,9 +145,10 @@ export function initAuthControl(els = {}, opts = {}) {
     await load();
   }
 
-  if (els.checkbox && typeof els.checkbox.addEventListener === "function") {
-    els.checkbox.addEventListener("change", () => {
-      if (!els.checkbox.checked) {
+  const checkbox = els.checkbox;
+  if (checkbox && typeof checkbox.addEventListener === "function") {
+    checkbox.addEventListener("change", () => {
+      if (!checkbox.checked) {
         // unchecking disables immediately
         void apply(false);
       } else {

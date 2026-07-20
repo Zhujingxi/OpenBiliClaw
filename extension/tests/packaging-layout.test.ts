@@ -12,7 +12,27 @@ function zipLayout(path) {
 }
 
 function zipEntryText(path, entry) {
-  return execSync(`unzip -p "${path}" "${entry}"`, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return execSync(`unzip -p "${path}" "${entry}"`, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function zipEntries(path) {
+  return execSync(`unzip -Z1 "${path}"`, { encoding: "utf8" }).split("\n").filter(Boolean);
+}
+
+function assertPopupModuleGraph(path) {
+  const entries = new Set(zipEntries(path));
+  const modules = [...entries].filter((entry) => /^popup\/popup(?:-[^/]+)?\.js$/.test(entry));
+  assert.equal(modules.length, 16, "all popup TypeScript modules must be emitted");
+  for (const entry of modules) {
+    const source = zipEntryText(path, entry);
+    for (const match of source.matchAll(/(?:from\s+|import\s+)["'](\.\/popup[^"']+\.js)["']/g)) {
+      const target = `popup/${match[1].slice(2)}`;
+      assert.ok(entries.has(target), `${entry} imports missing archive entry ${target}`);
+    }
+  }
 }
 
 test("chrome and firefox packages contain manifest, popup, bundles, and no debug relay", () => {
@@ -26,6 +46,17 @@ test("chrome and firefox packages contain manifest, popup, bundles, and no debug
   assert.match(chromeLayout, /manifest\.json/);
   assert.match(chromeLayout, /popup\/popup\.html/);
   assert.match(chromeLayout, /popup\/popup\.js/);
+  assert.doesNotMatch(chromeLayout, /popup\/popup(?:-[^/]+)?\.ts/);
+  assert.doesNotMatch(
+    chromeLayout,
+    /^\s*\d+\s+\S+\s+\S+\s+popup(?:-[^/]+)?\.js$/m,
+    "compiled popup modules must stay below popup/ instead of leaking at the archive root",
+  );
+  const chromePopupHtml = zipEntryText(chromeZip, "popup/popup.html");
+  const chromePopupEntry = zipEntryText(chromeZip, "popup/popup.js");
+  assert.match(chromePopupHtml, /<script type="module" src="popup\.js"><\/script>/);
+  assert.match(chromePopupEntry, /from "\.\/popup-helpers\.js"/);
+  assertPopupModuleGraph(chromeZip);
   assert.match(chromeLayout, /dist\/background\/service-worker\.js/);
   for (const content of ["douyin", "bilibili", "xiaohongshu", "x", "youtube", "zhihu", "reddit"]) {
     assert.match(chromeLayout, new RegExp(`dist/content/${content}\\.js`), content);
@@ -37,9 +68,15 @@ test("chrome and firefox packages contain manifest, popup, bundles, and no debug
   const firefoxLayout = zipLayout(firefoxZip);
   assert.match(firefoxLayout, /manifest\.json/);
   assert.match(firefoxLayout, /popup\/popup\.html/);
+  assert.match(firefoxLayout, /popup\/popup\.js/);
+  assert.doesNotMatch(firefoxLayout, /popup\/popup(?:-[^/]+)?\.ts/);
+  assertPopupModuleGraph(firefoxZip);
   assert.match(firefoxLayout, /background\/service-worker\.js/);
   assert.match(firefoxLayout, /content\/douyin\.js/);
   const firefoxDouyin = zipEntryText(firefoxZip, "content/douyin.js");
-  assert.ok(!firefoxDouyin.includes("/sources/_debug/log"), "debug relay leaked into firefox bundle");
+  assert.ok(
+    !firefoxDouyin.includes("/sources/_debug/log"),
+    "debug relay leaked into firefox bundle",
+  );
   assert.ok(!/debugLog\s*\(/.test(firefoxDouyin), "debugLog call leaked into firefox bundle");
 });

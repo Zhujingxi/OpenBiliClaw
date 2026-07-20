@@ -88,6 +88,10 @@ backend.err
 
 # TypeScript migration emitted artifacts (Phase B-E)
 node_modules/
+# Generated popup JS (esbuild output emits directly to popup/)
+extension/popup/*.js
+extension/popup/*.js.map
+# TSC intermediate output directory (build-popup.mjs now emits directly to popup/)
 extension/popup-built/
 src/openbiliclaw/web/**/*.js.map
 # Emitted sibling .js next to migrated web .ts sources

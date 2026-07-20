@@ -121,6 +121,14 @@ if (isFirefox) {
   await cp(resolve(root, "icons"), resolve(root, `${outDir}/icons`), { recursive: true });
   console.log(`📁 Copied popup/ → ${outDir}/popup/`);
   console.log(`📁 Copied icons/ → ${outDir}/icons/`);
+} else {
+  // Chrome/Edge loads the extension from the repo root, so compiled popup
+  // JS must be available in popup/ alongside popup.html. Overlay the esbuild
+  // output into the popup source directory (untracked via .gitignore).
+  if (existsSync(resolve(root, "popup-built"))) {
+    await cp(resolve(root, "popup-built"), resolve(root, "popup"), { recursive: true });
+    console.log("📁 Copied popup-built/ → popup/");
+  }
 }
 
 console.log(`\n✅ Build complete: ${outDir}/\n`);

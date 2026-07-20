@@ -6,6 +6,7 @@
 
 ## Unreleased
 
+- **插件 popup TypeScript 迁移（Phase E 完成）**：`extension/popup/` 下 16 个松散 ES module（`popup.ts` + 15 个 `popup-*.ts`）全部从 JavaScript 原位迁移到 strict TypeScript，`tsconfig.popup.json` 独立 typecheck 零错误；修复了 `refreshProfileSummaryAfterInteraction` 回调参数类型、`backendUpdateStatusRefresh` 类型声明、fetch API 返回值 `{}` 对象属性访问、`NodeListOf` 迭代器兼容、动态键索引、隐式 `any` 参数及定时器变量类型等共 131 处严格模式错误。构建流程简化：`build-popup.mjs` 直接 emit 编译后的 `.js` 到 `popup/` 目录（不再使用 `popup-built/` 中间目录），`popup.html` 保持 `src="popup.js"` 不变，`package.mjs` 移除 overlay 逻辑。旧 `.js` 源文件已退役，`popup/*.js` 编译产物通过 `.gitignore` 排除，`popup-model-config-state.ts` 同步脚本退役。`node --test tests/js/` 56 例全部通过，`npm run build:web` 正常。
 - **依赖地板：Click >= 8.4、Typer >= 0.27**：`pyproject.toml` 在 `[project.dependencies]` 中新增 `click>=8.4`，并把 `typer>=0.12` 提升为 `typer>=0.27`（仅地板，不加上限）。CI 使用 `pip install -e ".[dev,x]"` 一直解析到 PyPI 最新的 click 8.4.x / typer 0.27.x，而本地 `uv sync` 仍锁在 click 8.3.1 / typer 0.24.1，两端 Click/Typer 漂移曾掩盖 `cli_models.py` 在 Click 8.4 下的 typing 变化；本次把地板写进 pyproject 后，pip 与 uv 两条安装路径当前解析到同一主版本，当前 lock 与当前 CI 对齐。`click>=8.4` 允许 Click 9+、`typer>=0.27` 允许 Typer 1+，CI 仍会有意安装最新版，因此后续 CI 可能再次领先 lock，直到下一次 lock 刷新。`uv.lock` 通过 `uv lock --upgrade-package click --upgrade-package typer` 重新生成：click 由 8.3.1 升级到 8.4.2、typer 由 0.24.1 升级到 0.27.0（两者的 package 记录、源码/轮子 URL、hash、size 全部替换；typer 的依赖列表从 click 变为 colorama）；openbiliclaw 自身的 `dependencies` / `requires-dist` 元数据同步更新（新增 click、typer specifier 从 >=0.12 升至 >=0.27）；click、typer 与 openbiliclaw 三个 `[[package]]` 记录变更，其余 112 个 package 记录未动。本条不提升版本号；后端 API、模块边界、CLI 命令面均无变更。
 
 ---

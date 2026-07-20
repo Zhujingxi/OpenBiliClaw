@@ -7,13 +7,13 @@
  * working on the un-migrated tree.
  */
 import { build } from "esbuild";
-import { readdirSync, existsSync, statSync } from "node:fs";
+import { readdirSync, existsSync, rmSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const extRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const popupDir = join(extRoot, "popup");
-const outDir = join(extRoot, "popup-built");
+const outDir = join(extRoot, "popup");
 
 /** @param {string} dir @returns {string[]} */
 function walkTs(dir) {
@@ -38,11 +38,24 @@ if (entryPoints.length === 0) {
   process.exit(0);
 }
 
+// Clean up stale compiled .js files from popup/ (the old source .js files
+// are tracked by git and should already be removed). This prevents shadowed
+// imports when a .ts file was renamed or removed.
+for (const entry of readdirSync(popupDir)) {
+  if (entry.endsWith(".js") && !entry.endsWith(".d.ts")) {
+    // Only remove .js files that have a corresponding .ts file (not hand-written scripts).
+    const tsPath = join(popupDir, entry.replace(/\.js$/, ".ts"));
+    if (existsSync(tsPath)) {
+      rmSync(join(popupDir, entry), { force: true });
+    }
+  }
+}
+
 for (const entry of entryPoints) {
-  const rel = entry.slice(popupDir.length + 1).replace(/\.ts$/, ".js");
+  const outName = entry.slice(popupDir.length + 1).replace(/\.ts$/, ".js");
   await build({
     entryPoints: [entry],
-    outfile: join(outDir, rel),
+    outfile: join(outDir, outName),
     bundle: false,
     format: "esm",
     target: "es2022",
@@ -51,4 +64,4 @@ for (const entry of entryPoints) {
     logLevel: "warning",
   });
 }
-console.log(`[build-popup] emitted ${entryPoints.length} file(s) -> popup-built/`);
+console.log(`[build-popup] emitted ${entryPoints.length} file(s) -> popup/`);

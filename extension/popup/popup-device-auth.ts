@@ -5,60 +5,121 @@ export const SESSION_STORAGE_KEY = "obc_auth_session";
 const LEGACY_KEYS = ["obc_auth_password", "obc_auth_token"];
 const REFRESH_SKEW_SECONDS = 60;
 
-let cachedSession = null;
+interface PopupSession {
+  token: string;
+  expires_at: number;
+}
+
+type StorageValues = Record<string, unknown>;
+type FetchLike = typeof fetch;
+
+interface StorageAreaLike {
+  get(keys: string | string[], callback: (items: StorageValues) => void): unknown;
+  set(items: StorageValues, callback: () => void): unknown;
+  remove(keys: string | string[], callback: () => void): unknown;
+}
+
+interface ExchangeOptions {
+  getBaseUrl?: () => Promise<string>;
+  fetchImpl?: FetchLike;
+  signal?: AbortSignal;
+  force?: boolean;
+}
+
+interface AuthenticatedFetchOptions {
+  signal?: AbortSignal;
+  sessionToken?: string | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hasThen(value: unknown): value is { then: (...args: unknown[]) => unknown } {
+  return ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function";
+}
+
+function observeReturnedPromise(
+  value: unknown,
+  onFulfilled: (result?: unknown) => void,
+  onRejected: () => void,
+): void {
+  if (!hasThen(value)) return;
+  const chained = value.then(onFulfilled);
+  if (
+    ((typeof chained === "object" && chained !== null) || typeof chained === "function") &&
+    typeof (chained as { catch?: unknown }).catch === "function"
+  ) {
+    (chained as { catch: (handler: () => void) => unknown }).catch(onRejected);
+  }
+}
+
+let cachedSession: PopupSession | null = null;
 let sessionLoaded = false;
-let refreshInFlight = null;
+let refreshInFlight: Promise<string | null> | null = null;
 let lastExchangeError = "invalid_device_key";
 
-function storageLocal() {
+function storageLocal(): StorageAreaLike | null {
   try {
-    return globalThis.chrome?.storage?.local ?? null;
+    const storage: unknown = globalThis.chrome?.storage?.local;
+    if (!isRecord(storage)) return null;
+    if (
+      typeof storage.get !== "function" ||
+      typeof storage.set !== "function" ||
+      typeof storage.remove !== "function"
+    ) return null;
+    return storage as unknown as StorageAreaLike;
   } catch {
     return null;
   }
 }
 
-function storageGet(keys) {
+function storageGet(keys: string | string[]): Promise<StorageValues> {
   const storage = storageLocal();
   if (!storage?.get) return Promise.resolve({});
-  return new Promise((resolve) => {
+  return new Promise<StorageValues>((resolve) => {
     try {
       const maybePromise = storage.get(keys, (items) => resolve(items || {}));
-      if (maybePromise?.then) maybePromise.then(resolve).catch(() => resolve({}));
+      observeReturnedPromise(
+        maybePromise,
+        (items) => resolve(isRecord(items) ? items : {}),
+        () => resolve({}),
+      );
     } catch {
       resolve({});
     }
   });
 }
 
-function storageSet(items) {
+function storageSet(items: StorageValues): Promise<void> {
   const storage = storageLocal();
   if (!storage?.set) return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve) => {
     try {
       const maybePromise = storage.set(items, () => resolve());
-      if (maybePromise?.then) maybePromise.then(resolve).catch(resolve);
+      observeReturnedPromise(maybePromise, () => resolve(), () => resolve());
     } catch {
       resolve();
     }
   });
 }
 
-function storageRemove(keys) {
+function storageRemove(keys: string | string[]): Promise<void> {
   const storage = storageLocal();
   if (!storage?.remove) return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve) => {
     try {
       const maybePromise = storage.remove(keys, () => resolve());
-      if (maybePromise?.then) maybePromise.then(resolve).catch(resolve);
+      observeReturnedPromise(maybePromise, () => resolve(), () => resolve());
     } catch {
       resolve();
     }
   });
 }
 
-function parseSession(value) {
-  if (!value || typeof value !== "object") return null;
+function parseSession(value: unknown): PopupSession | null {
+  if (!isRecord(value)) return null;
   const token = typeof value.token === "string" ? value.token.trim() : "";
   const expiresAt = Number(value.expires_at);
   return token && Number.isFinite(expiresAt) && expiresAt > 0
@@ -66,7 +127,7 @@ function parseSession(value) {
     : null;
 }
 
-async function loadSession() {
+async function loadSession(): Promise<PopupSession | null> {
   if (sessionLoaded) return cachedSession;
   const items = await storageGet(SESSION_STORAGE_KEY);
   cachedSession = parseSession(items[SESSION_STORAGE_KEY]);
@@ -74,25 +135,25 @@ async function loadSession() {
   return cachedSession;
 }
 
-async function saveSession(session) {
+async function saveSession(session: PopupSession): Promise<void> {
   cachedSession = parseSession(session);
   if (!cachedSession) throw new Error("invalid_device_session");
   sessionLoaded = true;
   await storageSet({ [SESSION_STORAGE_KEY]: cachedSession });
 }
 
-export async function clearPopupSession() {
+export async function clearPopupSession(): Promise<void> {
   cachedSession = null;
   sessionLoaded = true;
   await storageRemove(SESSION_STORAGE_KEY);
 }
 
-export async function readPopupSessionToken() {
+export async function readPopupSessionToken(): Promise<string | null> {
   const session = await loadSession();
   return session && session.expires_at > Date.now() / 1000 ? session.token : null;
 }
 
-async function exchange(options = {}, keyOverride = "") {
+async function exchange(options: ExchangeOptions = {}, keyOverride = ""): Promise<string | null> {
   const items = keyOverride ? {} : await storageGet(DEVICE_KEY_STORAGE_KEY);
   const key = keyOverride || (typeof items[DEVICE_KEY_STORAGE_KEY] === "string"
     ? items[DEVICE_KEY_STORAGE_KEY].trim() : "");
@@ -102,7 +163,7 @@ async function exchange(options = {}, keyOverride = "") {
   }
   const base = await (options.getBaseUrl || getBackendBaseUrl)();
   const doFetch = options.fetchImpl || globalThis.fetch.bind(globalThis);
-  let response;
+  let response: Response;
   try {
     response = await doFetch(`${base}/auth/extension-token`, {
       method: "POST",
@@ -117,16 +178,24 @@ async function exchange(options = {}, keyOverride = "") {
   }
   if (!response.ok) {
     try {
-      const payload = await response.json();
-      lastExchangeError = String(payload?.error || "invalid_device_key");
+      const payload: unknown = await response.json();
+      lastExchangeError = String(
+        isRecord(payload) ? payload.error || "invalid_device_key" : "invalid_device_key",
+      );
     } catch {
       lastExchangeError = "invalid_device_key";
     }
     await clearPopupSession();
     return null;
   }
-  const payload = await response.json();
-  if (!payload?.ok || !payload?.token || !Number.isFinite(Number(payload?.expires_at))) {
+  const payload: unknown = await response.json();
+  if (
+    !isRecord(payload) ||
+    !payload.ok ||
+    typeof payload.token !== "string" ||
+    !payload.token ||
+    !Number.isFinite(Number(payload.expires_at))
+  ) {
     lastExchangeError = "invalid_device_key";
     await clearPopupSession();
     return null;
@@ -150,7 +219,7 @@ async function exchange(options = {}, keyOverride = "") {
   return payload.token;
 }
 
-export async function ensurePopupSession(options = {}) {
+export async function ensurePopupSession(options: ExchangeOptions = {}): Promise<string | null> {
   const session = await loadSession();
   if (!options.force && session && session.expires_at > Date.now() / 1000 + REFRESH_SKEW_SECONDS) {
     return session.token;
@@ -162,7 +231,10 @@ export async function ensurePopupSession(options = {}) {
   return refreshInFlight;
 }
 
-export async function pairDeviceKey(key, options = {}) {
+export async function pairDeviceKey(
+  key: unknown,
+  options: ExchangeOptions = {},
+): Promise<string> {
   const normalized = String(key || "").trim();
   if (!normalized) throw new Error("missing_device_key");
   cachedSession = null;
@@ -179,7 +251,7 @@ export async function pairDeviceKey(key, options = {}) {
   return token;
 }
 
-function withBearer(init, token) {
+function withBearer(init: RequestInit, token: string | null): RequestInit {
   const original = init?.headers;
   if (original instanceof Headers) {
     const headers = new Headers(original);
@@ -187,9 +259,9 @@ function withBearer(init, token) {
     else headers.delete("Authorization");
     return { ...init, headers };
   }
-  const headers = Array.isArray(original)
+  const headers: Record<string, string> = Array.isArray(original)
     ? Object.fromEntries(original)
-    : { ...(original || {}) };
+    : { ...((original || {}) as Record<string, string>) };
   for (const key of Object.keys(headers)) {
     if (key.toLowerCase() === "authorization") delete headers[key];
   }
@@ -198,16 +270,16 @@ function withBearer(init, token) {
 }
 
 export async function popupAuthenticatedFetch(
-  url,
-  init = {},
-  fetchImpl = globalThis.fetch.bind(globalThis),
-  options = {},
-) {
-  const signal = options.signal || init?.signal;
+  url: RequestInfo | URL,
+  init: RequestInit = {},
+  fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
+  options: AuthenticatedFetchOptions = {},
+): Promise<Response> {
+  const signal = options.signal || init?.signal || undefined;
   const token = Object.hasOwn(options, "sessionToken")
     ? options.sessionToken
     : await ensurePopupSession({ fetchImpl, signal });
-  const first = await fetchImpl(url, withBearer(init, token));
+  const first = await fetchImpl(url, withBearer(init, token ?? null));
   if (first.status !== 401 || !token) return first;
   const current = await readPopupSessionToken();
   const refreshed = current && current !== token
@@ -217,7 +289,7 @@ export async function popupAuthenticatedFetch(
   return fetchImpl(url, withBearer(init, refreshed));
 }
 
-export function __resetPopupDeviceAuthForTests() {
+export function __resetPopupDeviceAuthForTests(): void {
   cachedSession = null;
   sessionLoaded = false;
   refreshInFlight = null;
