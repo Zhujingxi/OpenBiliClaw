@@ -85,3 +85,10 @@ backend.err
 
 # Playwright CLI local cache (tool artifact)
 .playwright-cli/
+
+# TypeScript migration emitted artifacts (Phase B-E)
+node_modules/
+extension/popup-built/
+src/openbiliclaw/web/**/*.js.map
+# Emitted sibling .js files are intentionally tracked runtime assets. Clean
+# Python, Docker, and desktop installs do not require the dev-only Node toolchain.

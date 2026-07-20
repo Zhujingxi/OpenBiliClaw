@@ -1,0 +1,22 @@
+{
+  "name": "openbiliclaw-web-tooling",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Dev-only Node tooling for the OpenBiliClaw web app (mobile/desktop/shared JS->TS). Never required by any Python install path.",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "check:web-build": "node scripts/build-web.mjs --check",
+    "typecheck:web": "tsc -p src/openbiliclaw/web/tsconfig.json --noEmit",
+    "test:js": "node --test tests/js/",
+    "lint": "eslint .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.10",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.20.0"
+  }
+}

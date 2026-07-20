@@ -9,6 +9,10 @@
  * shared module; tests/js/model-config-parity.test.mjs asserts the copy never
  * drifts from the source.
  *
+ * Since the TS migration (plan Phase B) the canonical source is
+ * model-config-state.ts; build:web emits its runtime model-config-state.js,
+ * which remains the byte-for-byte input for this checked-in popup artifact.
+ *
  * Usage: node extension/scripts/sync-model-config-state.mjs [--check]
  *   --check   exit non-zero when the popup copy differs from the source
  *             (used by CI-style drift guards) without rewriting the file.
@@ -21,7 +25,7 @@ const sourcePath = resolve(root, "src/openbiliclaw/web/shared/model-config-state
 const targetPath = resolve(root, "extension/popup/popup-model-config-state.js");
 
 const BANNER = `// GENERATED FILE — DO NOT EDIT DIRECTLY.
-// Source of truth: model-config-state.js in the web app's shared modules
+// Source of truth: model-config-state.ts in the web app's shared modules
 // (see src/openbiliclaw/web for the canonical copy).
 // Regenerate with: node extension/scripts/sync-model-config-state.mjs
 // Drift guard: tests/js/model-config-parity.test.mjs
@@ -46,8 +50,9 @@ if (current === generated) {
 
 if (checkOnly) {
   console.error(
-    "popup-model-config-state.js is out of sync with src/openbiliclaw/web/shared/model-config-state.js.\n" +
-      "Run: node extension/scripts/sync-model-config-state.mjs",
+    "popup-model-config-state.js is out of sync with the emitted " +
+      "src/openbiliclaw/web/shared/model-config-state.js.\n" +
+      "Run: npm run build:web && node extension/scripts/sync-model-config-state.mjs",
   );
   process.exit(1);
 }
