@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.180 (2026-07-20)**
+📌 Latest: **v0.3.181 (2026-07-20)**
 
-- **A slow AI service no longer fails initialization** — a run that keeps producing results is never cut off (the old fixed 15-minute cap killed healthy-but-slow models), and every stage ceiling was relaxed.
-- **No more false "stalled" warnings** — progress is judged against the pace this run actually demonstrates.
-- **Community link is now Discord** — the expired WeChat QR code is gone.
+- **Recommendations are no longer dominated by one source** — pool shares are enforced end-to-end, closing the four blind spots that let Reddit fill all 300 slots while Bangumi / Douyin / YouTube sat at zero.
+- **Desktop web platform tabs are now a real recommendation scope** — "Shuffle / Load more" draws only from the selected platform, and each tab shows its true servable inventory.
+- **Delight picks wait for their real copy** — placeholder text is no longer promoted as a friend-style recommendation.
+- **Pacing tuned from real feedback** — initialization drops unreliable time estimates for elapsed time and true progress; the delight carousel slows from 4s to 60s.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
