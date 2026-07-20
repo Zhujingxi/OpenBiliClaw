@@ -13,7 +13,7 @@
 // a slow app cold-start to background us, short enough not to strand the user.
 const APP_LAUNCH_FALLBACK_MS = 1600;
 
-function safeParseUrl(url) {
+function safeParseUrl(url: unknown): URL | null {
   const text = typeof url === "string" ? url.trim() : "";
   if (!text) return null;
   try {
@@ -23,7 +23,7 @@ function safeParseUrl(url) {
   }
 }
 
-function hostMatches(host, hostname) {
+function hostMatches(host: string, hostname: string): boolean {
   return host === hostname || host.endsWith(`.${hostname}`);
 }
 
@@ -33,7 +33,7 @@ function hostMatches(host, hostname) {
  * parsed (short links like b23.tv / xhslink.com) — callers then use the web
  * URL as-is, which is today's behavior.
  */
-export function buildAppDeepLink(url) {
+export function buildAppDeepLink(url: unknown): string {
   const parsed = safeParseUrl(url);
   if (!parsed) return "";
   const host = parsed.hostname.toLowerCase();
@@ -94,14 +94,14 @@ export function buildAppDeepLink(url) {
   return "";
 }
 
-export function isMobileUserAgent(ua, maxTouchPoints = 0) {
+export function isMobileUserAgent(ua: unknown, maxTouchPoints = 0): boolean {
   const text = typeof ua === "string" ? ua : "";
   if (/android|iphone|ipad|ipod/i.test(text)) return true;
   // iPadOS 13+ reports a Macintosh UA but is the only "Mac" with multitouch.
   return /macintosh/i.test(text) && maxTouchPoints > 1;
 }
 
-function isMobilePlatform() {
+function isMobilePlatform(): boolean {
   if (typeof navigator === "undefined") return false;
   return isMobileUserAgent(navigator.userAgent, navigator.maxTouchPoints || 0);
 }
@@ -123,7 +123,7 @@ const APP_LAUNCH_REFOCUS_GRACE_MS = 900;
 // - Fallback opens the web URL in a NEW tab. If the popup is blocked (the
 //   click's user activation has expired — guaranteed on iOS Safari), show
 //   an inline toast whose button opens the tab with a fresh gesture.
-function launchAppThenFallback(schemeUrl, webUrl) {
+function launchAppThenFallback(schemeUrl: string, webUrl: string): void {
   let timer = 0;
   let settled = false;
   const clearTimer = () => {
@@ -165,7 +165,7 @@ function launchAppThenFallback(schemeUrl, webUrl) {
 // Minimal self-contained toast (inline styles, no CSS dependency): tells the
 // user the app didn't launch and offers the web page via a real tap, which
 // carries fresh user activation so the new tab is never popup-blocked.
-function showWebFallbackToast(webUrl) {
+function showWebFallbackToast(webUrl: string): void {
   const existing = document.getElementById("obc-app-launch-toast");
   if (existing) existing.remove();
   const bar = document.createElement("div");
@@ -205,12 +205,12 @@ function showWebFallbackToast(webUrl) {
  * Open a recommendation's content URL. Mobile + known platform → try the
  * native app first, fall back to web; anything else → new-tab web page.
  */
-export function openContentUrl(url) {
+export function openContentUrl(url: unknown): void {
   if (!url) return;
   const deepLink = isMobilePlatform() ? buildAppDeepLink(url) : "";
   if (deepLink) {
-    launchAppThenFallback(deepLink, url);
+    launchAppThenFallback(deepLink, url as string);
   } else {
-    window.open(url, "_blank");
+    window.open(url as string, "_blank");
   }
 }

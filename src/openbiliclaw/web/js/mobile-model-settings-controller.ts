@@ -4,42 +4,115 @@ import {
   loadIndependentModelResources,
 } from "../shared/model-config-state.js";
 
+// TODO(types): replace these provisional UI/backend boundaries with generated
+// model-config contracts once the API schema is exported for the web client.
+type OpaqueRecord = Record<string, unknown>;
+
+interface ResourceReadiness {
+  snapshotReady: boolean;
+  descriptorsReady: boolean;
+  ready: boolean;
+  loading: boolean;
+}
+
+interface MobileModelResourceOptions {
+  snapshotGate?: ObscLatestRequestGate;
+  descriptorGate?: ObscLatestRequestGate;
+  snapshotRequest: () => Promise<unknown>;
+  descriptorRequest: () => Promise<unknown>;
+  onReadinessChange?: (readiness: ResourceReadiness) => void;
+  blocked?: (context: { remote: boolean }) => boolean;
+  applySnapshot?: (snapshot: unknown, context: { remote: boolean }) => void;
+  installDescriptors?: (descriptors: unknown) => void;
+  onSnapshotBlocked?: (snapshot: unknown, context: { remote: boolean }) => void;
+}
+
+interface MobileModelLoadRecoveryOptions {
+  setLocked?: (locked: boolean) => void;
+  setBusy?: (busy: boolean) => void;
+  setRetryVisible?: (visible: boolean) => void;
+  onReady?: (readiness: ResourceReadiness) => void;
+  onLoading?: () => void;
+  onRecoverableIncomplete?: (readiness: ResourceReadiness) => void;
+  onError?: (error: unknown, readiness: ResourceReadiness) => void;
+}
+
+interface ExactDraftRenderOptions {
+  clearInlineErrors?: () => void;
+  renderErrorSummary?: () => void;
+  renderRouteList?: () => void;
+  renderInspector?: () => void;
+  renderCredential?: () => void;
+  renderProbeStatus?: () => void;
+}
+
+interface NumericError {
+  path: string;
+  field: string;
+  route: string;
+  connectionId: string;
+  message: string;
+}
+
+interface NumericValidationResult {
+  valid: boolean;
+  byPath: Record<string, NumericError>;
+  byConnection: Record<string, Record<string, NumericError>>;
+  firstError: NumericError | null;
+}
+
+interface MobileNumericState extends OpaqueRecord {
+  models?: {
+    chat?: OpaqueRecord & { connections?: Array<OpaqueRecord> };
+    embedding?: OpaqueRecord & {
+      settings?: OpaqueRecord;
+      providers?: Array<OpaqueRecord>;
+    };
+  };
+}
+
+interface NumericValidationControllerOptions {
+  getState?: () => MobileNumericState | null | undefined;
+  renderErrors?: (errors: NumericValidationResult) => void;
+  focusFirstError?: (error: NumericError | null) => void;
+}
+
 /**
  * Own the independently versioned snapshot and descriptor loads used by the
  * mobile Models editor. A successful sibling stays ready when the other fails.
  */
-export function createMobileModelResourceCoordinator(options = {}) {
+export function createMobileModelResourceCoordinator(options: MobileModelResourceOptions) {
   const snapshotGate = options.snapshotGate || createLatestRequestGate();
   const descriptorGate = options.descriptorGate || createLatestRequestGate();
   let snapshotReady = false;
   let descriptorsReady = false;
   let loading = false;
-  let enterPromise = null;
+  let enterPromise: Promise<ResourceReadiness> | null = null;
   let invalidated = false;
 
-  const readiness = () => ({
+  const readiness = (): ResourceReadiness => ({
     snapshotReady,
     descriptorsReady,
     ready: snapshotReady && descriptorsReady,
     loading,
   });
   const notify = () => options.onReadinessChange?.(readiness());
-  const blocked = (remote) => Boolean(options.blocked?.({ remote }));
+  const blocked = (remote: boolean) => Boolean(options.blocked?.({ remote }));
 
-  const applySnapshot = (snapshot, remote) => {
+  const applySnapshot = (snapshot: unknown, remote: boolean) => {
     if (invalidated) return;
     options.applySnapshot?.(snapshot, { remote });
     snapshotReady = true;
     notify();
   };
-  const installDescriptors = (descriptors) => {
+  const installDescriptors = (descriptors: unknown) => {
     if (invalidated) return;
     options.installDescriptors?.(descriptors);
     descriptorsReady = true;
     notify();
   };
 
-  async function loadSnapshot(remote = false) {
+  async function loadSnapshot(remote = false): Promise<unknown> {
     return applyLatestSnapshotRequest({
       gate: snapshotGate,
       request: options.snapshotRequest,
@@ -49,7 +122,7 @@ export function createMobileModelResourceCoordinator(options = {}) {
     });
   }
 
-  async function loadDescriptors() {
+  async function loadDescriptors(): Promise<boolean> {
     const generation = descriptorGate.begin();
     let descriptors;
     try {
@@ -63,7 +136,7 @@ export function createMobileModelResourceCoordinator(options = {}) {
     return true;
   }
 
-  async function loadBoth() {
+  async function loadBoth(): Promise<unknown> {
     return loadIndependentModelResources({
       gate: snapshotGate,
       descriptorGate,
@@ -125,8 +198,8 @@ export function createMobileModelResourceCoordinator(options = {}) {
  * that settles without both resources is a visible failure even when its
  * underlying stale request was correctly ignored.
  */
-export function createMobileModelLoadRecoveryController(options = {}) {
-  function onReadinessChange(readiness) {
+export function createMobileModelLoadRecoveryController(options: MobileModelLoadRecoveryOptions = {}) {
+  function onReadinessChange(readiness: ResourceReadiness): ResourceReadiness {
     const loading = Boolean(readiness?.loading);
     const ready = Boolean(readiness?.ready) && !loading;
     options.setLocked?.(!ready);
@@ -145,7 +218,7 @@ export function createMobileModelLoadRecoveryController(options = {}) {
       options.setRetryVisible?.(false);
       options.onLoading?.();
     },
-    settleEntry(readiness) {
+    settleEntry(readiness: ResourceReadiness) {
       onReadinessChange(readiness);
       options.setBusy?.(false);
       if (!readiness?.ready) {
@@ -154,7 +227,7 @@ export function createMobileModelLoadRecoveryController(options = {}) {
       }
       return readiness;
     },
-    failEntry(error, readiness) {
+    failEntry(error: unknown, readiness: ResourceReadiness) {
       onReadinessChange(readiness);
       options.setBusy?.(false);
       options.setRetryVisible?.(true);
@@ -165,26 +238,34 @@ export function createMobileModelLoadRecoveryController(options = {}) {
 }
 
 /** Read a stable-ID field error without consulting object prototypes. */
-export function readOwnMobileModelFieldError(byConnection, recordId, field) {
+export function readOwnMobileModelFieldError(
+  byConnection: unknown,
+  recordId: string,
+  field: string,
+): unknown {
   if (
     !byConnection
     || typeof byConnection !== "object"
     || !Object.hasOwn(byConnection, recordId)
   ) return null;
-  const fields = byConnection[recordId];
+  const fields = (byConnection as OpaqueRecord)[recordId];
   if (!fields || typeof fields !== "object" || !Object.hasOwn(fields, field)) return null;
-  return fields[field] || null;
+  return (fields as OpaqueRecord)[field] || null;
 }
 
 /**
  * Refresh every derived exact-draft surface without rebuilding the live input
  * unless a structural choice (such as a preset) actually requires it.
  */
-export function createExactDraftRenderCoordinator(options = {}) {
+export function createExactDraftRenderCoordinator(options: ExactDraftRenderOptions = {}) {
   function refresh({
     rebuildInspector = false,
     rerenderCredential = false,
     clearInlineErrors = true,
+  }: {
+    rebuildInspector?: boolean;
+    rerenderCredential?: boolean;
+    clearInlineErrors?: boolean;
   } = {}) {
     if (clearInlineErrors) options.clearInlineErrors?.();
     options.renderErrorSummary?.();
@@ -195,7 +276,7 @@ export function createExactDraftRenderCoordinator(options = {}) {
   }
 
   return {
-    afterDraftMutation(optionsForRefresh = {}) {
+    afterDraftMutation(optionsForRefresh: Parameters<typeof refresh>[0] = {}) {
       refresh(optionsForRefresh);
     },
     beforeRouteList() {
@@ -205,7 +286,10 @@ export function createExactDraftRenderCoordinator(options = {}) {
 }
 
 /** Validate the server's Runtime integer bounds before issuing a model PUT. */
-export function guardMobileModelRuntime(chat, showErrors = () => {}) {
+export function guardMobileModelRuntime(
+  chat: OpaqueRecord & { connections?: Array<OpaqueRecord> },
+  showErrors: (errors: Record<string, string>) => void = () => {},
+) {
   const validation = validateMobileModelNumbers({
     models: {
       chat: { ...chat, connections: chat?.connections || [] },
@@ -217,7 +301,7 @@ export function guardMobileModelRuntime(chat, showErrors = () => {}) {
       },
     },
   });
-  const errors = {};
+  const errors: Record<string, string> = {};
   for (const [field, path] of [
     ["concurrency", "models.chat.concurrency"],
     ["timeout_seconds", "models.chat.timeout_seconds"],
@@ -228,7 +312,7 @@ export function guardMobileModelRuntime(chat, showErrors = () => {}) {
   return Object.keys(errors).length === 0;
 }
 
-const NUMERIC_MESSAGES = {
+const NUMERIC_MESSAGES: Record<string, string> = {
   concurrency: "Chat 并发数必须是 1 到 16 之间的整数。",
   timeout_seconds: "整条 route 超时必须是至少 10 秒的整数。",
   num_ctx: "Context window 必须是大于或等于 0 的整数。",
@@ -237,12 +321,12 @@ const NUMERIC_MESSAGES = {
 };
 
 /** Preserve an emptied number input as an invalid draft instead of coercing it to zero. */
-export function parseMobileModelNumericDraft(rawValue) {
+export function parseMobileModelNumericDraft(rawValue: unknown): number | "" {
   const value = String(rawValue ?? "");
   return value.trim() ? Number(value) : "";
 }
 
-function emptyNumericErrors() {
+function emptyNumericErrors(): NumericValidationResult {
   return {
     valid: true,
     byPath: {},
@@ -251,7 +335,10 @@ function emptyNumericErrors() {
   };
 }
 
-function ownErrorBucket(container, key) {
+function ownErrorBucket(
+  container: Record<string, Record<string, NumericError>>,
+  key: string,
+): Record<string, NumericError> {
   if (!Object.hasOwn(container, key)) {
     Object.defineProperty(container, key, {
       value: {},
@@ -263,13 +350,13 @@ function ownErrorBucket(container, key) {
   return container[key];
 }
 
-function addNumericError(result, {
+function addNumericError(result: NumericValidationResult, {
   path,
   field,
   route,
   connectionId = "",
   message,
-}) {
+}: Omit<NumericError, "connectionId"> & { connectionId?: string }): void {
   const error = {
     path,
     field,
@@ -292,15 +379,20 @@ function addNumericError(result, {
 }
 
 /** Validate every strict numeric field before the mobile editor serializes a PUT. */
-export function validateMobileModelNumbers(state) {
+export function validateMobileModelNumbers(
+  state: MobileNumericState | null | undefined,
+): NumericValidationResult {
   const result = emptyNumericErrors();
   const chat = state?.models?.chat || {};
   const embedding = state?.models?.embedding?.settings || {};
+  const concurrency = chat.concurrency as number;
+  const timeoutSeconds = chat.timeout_seconds as number;
+  const outputDimensionality = embedding.output_dimensionality as number;
 
   if (
-    !Number.isInteger(chat.concurrency)
-    || chat.concurrency < 1
-    || chat.concurrency > 16
+    !Number.isInteger(concurrency)
+    || concurrency < 1
+    || concurrency > 16
   ) {
     addNumericError(result, {
       path: "models.chat.concurrency",
@@ -309,7 +401,7 @@ export function validateMobileModelNumbers(state) {
       message: NUMERIC_MESSAGES.concurrency,
     });
   }
-  if (!Number.isInteger(chat.timeout_seconds) || chat.timeout_seconds < 10) {
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10) {
     addNumericError(result, {
       path: "models.chat.timeout_seconds",
       field: "timeout_seconds",
@@ -318,7 +410,8 @@ export function validateMobileModelNumbers(state) {
     });
   }
   for (const [index, connection] of (chat.connections || []).entries()) {
-    if (Number.isInteger(connection?.num_ctx) && connection.num_ctx >= 0) continue;
+    const numCtx = connection?.num_ctx as number;
+    if (Number.isInteger(numCtx) && numCtx >= 0) continue;
     addNumericError(result, {
       path: `models.chat.connections.${index}.num_ctx`,
       field: "num_ctx",
@@ -328,8 +421,8 @@ export function validateMobileModelNumbers(state) {
     });
   }
   if (
-    !Number.isInteger(embedding.output_dimensionality)
-    || embedding.output_dimensionality < 0
+    !Number.isInteger(outputDimensionality)
+    || outputDimensionality < 0
   ) {
     addNumericError(result, {
       path: "models.embedding.settings.output_dimensionality",
@@ -355,16 +448,23 @@ export function validateMobileModelNumbers(state) {
 }
 
 /** Keep local numeric feedback derived from the current draft, never historical edits. */
-export function createMobileModelNumericValidationController(options = {}) {
+export function createMobileModelNumericValidationController(
+  options: NumericValidationControllerOptions = {},
+) {
   let current = emptyNumericErrors();
 
-  function revalidate(state = options.getState?.()) {
+  function revalidate(
+    state: MobileNumericState | null | undefined = options.getState?.(),
+  ): NumericValidationResult {
     current = validateMobileModelNumbers(state);
     options.renderErrors?.(current);
     return current;
   }
 
-  function runIfValid(state, callback) {
+  function runIfValid(
+    state: MobileNumericState | null | undefined,
+    callback: (() => void) | null | undefined,
+  ): boolean {
     const errors = revalidate(state);
     if (!errors.valid) {
       options.focusFirstError?.(errors.firstError);
@@ -378,22 +478,28 @@ export function createMobileModelNumericValidationController(options = {}) {
     errors() {
       return current;
     },
-    afterDraftMutation(state) {
+    afterDraftMutation(state: MobileNumericState | null | undefined) {
       return revalidate(state);
     },
-    afterAuthoritativeHydration(state) {
+    afterAuthoritativeHydration(state: MobileNumericState | null | undefined) {
       return revalidate(state);
     },
-    runSaveIfValid(state, save) {
+    runSaveIfValid(
+      state: MobileNumericState | null | undefined,
+      save: (() => void) | null | undefined,
+    ) {
       return runIfValid(state, save);
     },
-    runProbeIfValid(state, probe) {
+    runProbeIfValid(
+      state: MobileNumericState | null | undefined,
+      probe: (() => void) | null | undefined,
+    ) {
       return runIfValid(state, probe);
     },
   };
 }
 
-function normalizedValidationPath(rawLocation) {
+function normalizedValidationPath(rawLocation: unknown): string {
   const location = Array.isArray(rawLocation) ? [...rawLocation] : [];
   if (location[0] === "body") location.shift();
   const segments = location.map((segment) => {
@@ -404,7 +510,10 @@ function normalizedValidationPath(rawLocation) {
   return segments.join(".") || "models";
 }
 
-function validationConnectionId(path, state) {
+function validationConnectionId(
+  path: string,
+  state: MobileNumericState | null | undefined,
+): string {
   const parts = path.split(".");
   const chatIndex = parts[0] === "models"
     && parts[1] === "chat"
@@ -425,7 +534,7 @@ function validationConnectionId(path, state) {
   return "";
 }
 
-function validationMessage(path) {
+function validationMessage(path: string): string {
   if (path === "models.chat.concurrency") return NUMERIC_MESSAGES.concurrency;
   if (path === "models.chat.timeout_seconds") return NUMERIC_MESSAGES.timeout_seconds;
   if (/^models\.chat\.connections\.\d+\.num_ctx$/.test(path)) {
@@ -441,7 +550,10 @@ function validationMessage(path) {
 }
 
 /** Convert secret-safe Pydantic details to the editor's stable field-error contract. */
-export function normalizeMobileModelValidationDetails(details, state) {
+export function normalizeMobileModelValidationDetails(
+  details: unknown,
+  state: MobileNumericState | null | undefined,
+) {
   return (Array.isArray(details) ? details : []).map((raw) => {
     const path = normalizedValidationPath(raw?.loc);
     const rawCode = String(raw?.type || "validation_failed");

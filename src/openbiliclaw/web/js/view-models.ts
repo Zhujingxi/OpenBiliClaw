@@ -5,9 +5,20 @@
  * adapted for mobile state model. No DOM, no fetch, no side effects.
  */
 
+// TODO(types): replace this provisional mobile/backend payload boundary with
+// endpoint-specific generated contracts once the API schemas are exported.
+type OpaqueRecord = Record<string, unknown>;
+
+interface MobilePayload extends OpaqueRecord {
+  pool?: { topics?: unknown[]; total?: unknown };
+  dimensions?: Record<string, MobilePayload> | MobilePayload[];
+}
+
+type StringMap = Record<string, string>;
+
 // ── Text / Number Primitives ─────────────────────────────────
 
-function normalizeText(value) {
+function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
@@ -15,28 +26,28 @@ function normalizeText(value) {
 // absent so the profile panel falls back to its "still observing" copy.
 const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
 
-function stripPlaceholderText(value) {
+function stripPlaceholderText(value: unknown): string {
   const text = normalizeText(value);
   return UNKNOWNISH_TEXT.has(text.toLowerCase()) ? "" : text;
 }
 
-function normalizeStrList(raw) {
+function normalizeStrList(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
 }
 
-function coerceNumber(value) {
+function coerceNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
-function clamp01(value, fallback = 0.5) {
+function clamp01(value: unknown, fallback = 0.5): number {
   const n = coerceNumber(value);
   if (n === null) return fallback;
   return Math.max(0, Math.min(1, n));
 }
 
-function round3(value) {
+function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
 
@@ -50,7 +61,7 @@ const DEFAULT_DELIGHT_REASON = "这条可能会给你一点意外之喜。";
 
 // ── Cover URL ────────────────────────────────────────────────
 
-export function normalizeCoverUrl(value) {
+export function normalizeCoverUrl(value: unknown): string {
   const text = normalizeText(value);
   if (!text) return "";
   let url = text;
@@ -67,19 +78,22 @@ export function normalizeCoverUrl(value) {
   return url;
 }
 
-export function getCoverImageAttrs(value) {
+export function getCoverImageAttrs(value: unknown): { src: string } | null {
   const src = normalizeCoverUrl(value);
   if (!src) return null;
   return { src: `/api/image-proxy?url=${encodeURIComponent(src)}` };
 }
 
-export function getRecommendationCoverPreloadUrls(items, { start = 0, limit = 12 } = {}) {
+export function getRecommendationCoverPreloadUrls(
+  items: unknown,
+  { start = 0, limit = 12 }: { start?: unknown; limit?: unknown } = {},
+): string[] {
   const safeStart = Math.max(0, Math.trunc(coerceNumber(start) ?? 0));
   const safeLimit = Math.max(0, Math.trunc(coerceNumber(limit) ?? 0));
   if (!Array.isArray(items) || safeLimit <= 0) return [];
 
-  const seen = new Set();
-  const urls = [];
+  const seen = new Set<string>();
+  const urls: string[] = [];
   for (const item of items.slice(safeStart)) {
     const attrs = getCoverImageAttrs(item?.cover_url ?? item);
     if (!attrs || seen.has(attrs.src)) continue;
@@ -91,8 +105,11 @@ export function getRecommendationCoverPreloadUrls(items, { start = 0, limit = 12
 }
 
 export function getRecommendationImageLoadingAttrs(
-  index,
-  { eagerCount = Infinity, highPriorityCount = 2 } = {},
+  index: unknown,
+  { eagerCount = Infinity, highPriorityCount = 2 }: {
+    eagerCount?: unknown;
+    highPriorityCount?: unknown;
+  } = {},
 ) {
   // Default eagerCount is Infinity: every cover loads eagerly so a card slid into
   // view on scroll never shows the white placeholder while a native lazy <img>
@@ -115,6 +132,11 @@ export function shouldAutoAppendRecommendations({
   autoAppendExhausted = false,
   activeTab = "recommend",
   userArmed = false,
+}: {
+  loading?: boolean;
+  autoAppendExhausted?: boolean;
+  activeTab?: string;
+  userArmed?: boolean;
 } = {}) {
   return Boolean(
     userArmed &&
@@ -126,7 +148,7 @@ export function shouldAutoAppendRecommendations({
 
 // ── Source Platform ──────────────────────────────────────────
 
-const SOURCE_LABEL_MAP = {
+const SOURCE_LABEL_MAP: StringMap = {
   bilibili: "Bilibili",
   xiaohongshu: "Xiaohongshu",
   douyin: "Douyin",
@@ -137,7 +159,7 @@ const SOURCE_LABEL_MAP = {
   web: "Web",
 };
 
-const SOURCE_ALIAS_MAP = {
+const SOURCE_ALIAS_MAP: StringMap = {
   bili: "bilibili",
   bilibili: "bilibili",
   xhs: "xiaohongshu",
@@ -156,7 +178,7 @@ const SOURCE_ALIAS_MAP = {
   reddit: "reddit",
 };
 
-const RUNTIME_TOPIC_LABEL_MAP = {
+const RUNTIME_TOPIC_LABEL_MAP: StringMap = {
   search: "站内搜索",
   related_chain: "相关推荐",
   trending: "站内热榜",
@@ -197,7 +219,7 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "reddit-related": "Reddit 相关",
 };
 
-function urlHostMatches(url, hostnames) {
+function urlHostMatches(url: unknown, hostnames: string[]): boolean {
   const text = normalizeText(url);
   if (!text) return false;
   try {
@@ -209,7 +231,7 @@ function urlHostMatches(url, hostnames) {
   }
 }
 
-export function normalizeSourcePlatform(item) {
+export function normalizeSourcePlatform(item: MobilePayload | null | undefined): string {
   const explicit = normalizeText(item?.source_platform).toLowerCase();
   if (explicit && SOURCE_ALIAS_MAP[explicit]) return SOURCE_ALIAS_MAP[explicit];
   const url = normalizeText(item?.content_url);
@@ -229,7 +251,7 @@ export function normalizeSourcePlatform(item) {
 }
 
 /** Preserve canonical saved identity without treating UI row IDs or namespaced IDs as content IDs. */
-export function normalizeSavedIdentity(item = {}) {
+export function normalizeSavedIdentity(item: MobilePayload = {}) {
   const sourcePlatform = normalizeSourcePlatform(item);
   const legacyId = normalizeText(item?.bvid);
   const contentId = normalizeText(
@@ -246,11 +268,12 @@ export function normalizeSavedIdentity(item = {}) {
   };
 }
 
-export function getSourceLabel(source) {
-  return SOURCE_LABEL_MAP[source] || source || "Web";
+export function getSourceLabel(source: unknown): string {
+  const normalized = normalizeText(source);
+  return SOURCE_LABEL_MAP[normalized] || normalized || "Web";
 }
 
-function formatRuntimeTopicLabel(value) {
+function formatRuntimeTopicLabel(value: unknown): string {
   const text = normalizeText(value);
   if (!text) return "";
   const key = text.toLowerCase();
@@ -262,9 +285,9 @@ function formatRuntimeTopicLabel(value) {
   return text;
 }
 
-function formatRuntimeTopicList(topics) {
-  const seen = new Set();
-  const labels = [];
+function formatRuntimeTopicList(topics: unknown): string {
+  const seen = new Set<string>();
+  const labels: string[] = [];
   for (const topic of Array.isArray(topics) ? topics : []) {
     const label = formatRuntimeTopicLabel(topic);
     if (!label || seen.has(label)) continue;
@@ -274,7 +297,7 @@ function formatRuntimeTopicList(topics) {
   return labels.slice(0, 3).join(" / ");
 }
 
-function formatCompactRuntimeTopicList(topics) {
+function formatCompactRuntimeTopicList(topics: unknown): string {
   const full = formatRuntimeTopicList(topics);
   return full
     .replace(/小红书任务 \/ 小红书探索/g, "小红书任务 / 探索")
@@ -285,20 +308,20 @@ function formatCompactRuntimeTopicList(topics) {
 
 // ── URL Builders ─────────────────────────────────────────────
 
-export function buildVideoUrl(bvid) {
+export function buildVideoUrl(bvid: unknown): string {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
 
-export function buildYouTubeUrl(videoId) {
+export function buildYouTubeUrl(videoId: unknown): string {
   return `https://www.youtube.com/watch?v=${normalizeText(videoId)}`;
 }
 
-export function buildTwitterUrl(statusId) {
+export function buildTwitterUrl(statusId: unknown): string {
   return `https://x.com/i/status/${normalizeText(statusId)}`;
 }
 
-export function buildContentUrl(item) {
-  if (item?.content_url) return item.content_url;
+export function buildContentUrl(item: MobilePayload | null | undefined): string {
+  if (item?.content_url) return item.content_url as string;
   const platform = normalizeSourcePlatform(item);
   const vid = normalizeText(item?.content_id || item?.bvid);
   if (!vid) return "";
@@ -308,7 +331,10 @@ export function buildContentUrl(item) {
   return buildVideoUrl(vid);
 }
 
-export function buildRecommendationClickPayload(item, contentUrl = "") {
+export function buildRecommendationClickPayload(
+  item: MobilePayload | null | undefined,
+  contentUrl = "",
+) {
   const bvid = normalizeText(item?.bvid || item?.content_id);
   const contentId = normalizeText(item?.content_id || item?.bvid);
   return {
@@ -325,7 +351,7 @@ export function buildRecommendationClickPayload(item, contentUrl = "") {
 
 // ── Recommendation Normalization ─────────────────────────────
 
-export function normalizeRecommendation(item) {
+export function normalizeRecommendation(item: MobilePayload | null | undefined) {
   const bvid = normalizeText(item?.bvid);
   const sourcePlatform = normalizeSourcePlatform(item);
   const contentId = normalizeText(item?.content_id)
@@ -356,7 +382,7 @@ export function normalizeRecommendation(item) {
   };
 }
 
-export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+export function reconcileRecommendationReplacement(currentItems: unknown, incomingItems: unknown) {
   const current = Array.isArray(currentItems) ? currentItems : [];
   const incoming = Array.isArray(incomingItems) ? incomingItems : [];
   const preserved = incoming.length === 0 && current.length > 0;
@@ -366,7 +392,10 @@ export function reconcileRecommendationReplacement(currentItems, incomingItems) 
   };
 }
 
-export function formatPublishedTime(item, now = Date.now()) {
+export function formatPublishedTime(
+  item: MobilePayload | null | undefined,
+  now = Date.now(),
+): string {
   const parsed = Date.parse(String(item?.published_at || ""));
   if (Number.isFinite(parsed)) {
     const diff = now - parsed;
@@ -387,7 +416,7 @@ export function formatPublishedTime(item, now = Date.now()) {
   return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
 }
 
-export function getPublishedTimeDisplay(item, now = Date.now()) {
+export function getPublishedTimeDisplay(item: MobilePayload | null | undefined, now = Date.now()) {
   const text = formatPublishedTime(item, now);
   if (!text) return null;
   const parsed = Date.parse(String(item?.published_at || ""));
@@ -400,7 +429,7 @@ export function getPublishedTimeDisplay(item, now = Date.now()) {
 // ── Engagement stats ─────────────────────────────────────────
 // Condense a raw count into Chinese-style 万/亿 units. Empty string for
 // non-positive values so callers render nothing.
-export function formatCountCn(n) {
+export function formatCountCn(n: unknown): string {
   const value = Math.floor(Number(n) || 0);
   if (value <= 0) return "";
   if (value >= 100000000)
@@ -412,13 +441,13 @@ export function formatCountCn(n) {
 
 // Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
-export function recommendationStats(item) {
-  const segments = [];
-  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
-  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
-  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
-  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
-  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+export function recommendationStats(item: MobilePayload | null | undefined): string {
+  const segments: string[] = [];
+  if (Number(item?.view_count) > 0) segments.push(`▶ ${formatCountCn(item?.view_count)}`);
+  if (Number(item?.like_count) > 0) segments.push(`👍 ${formatCountCn(item?.like_count)}`);
+  if (Number(item?.comment_count) > 0) segments.push(`💬 ${formatCountCn(item?.comment_count)}`);
+  if (Number(item?.favorite_count) > 0) segments.push(`⭐ ${formatCountCn(item?.favorite_count)}`);
+  if (Number(item?.danmaku_count) > 0) segments.push(`弹幕 ${formatCountCn(item?.danmaku_count)}`);
   return segments.join(" · ");
 }
 
@@ -436,7 +465,7 @@ const TEXT_CARD_CONTENT_TYPES = new Set([
 // (X tweet/thread, Zhihu answer/article/question) render a no-cover text card from
 // body_text/title instead of an <img>, so the web UI never paints a
 // broken-image node.
-export function getRecommendationCardKind(item) {
+export function getRecommendationCardKind(item: MobilePayload | null | undefined) {
   const contentType = normalizeText(item?.content_type).toLowerCase();
   const coverUrl = normalizeCoverUrl(item?.cover_url);
   const isText = TEXT_CARD_CONTENT_TYPES.has(contentType) || !coverUrl;
@@ -452,7 +481,11 @@ export function getRecommendationCardKind(item) {
 
 // ── Feedback ─────────────────────────────────────────────────
 
-export function buildFeedbackPayload(recommendationId, feedbackType, note = "") {
+export function buildFeedbackPayload(
+  recommendationId: unknown,
+  feedbackType: unknown,
+  note: unknown = "",
+) {
   return {
     recommendation_id: Number(recommendationId),
     feedback_type: normalizeText(feedbackType),
@@ -460,14 +493,14 @@ export function buildFeedbackPayload(recommendationId, feedbackType, note = "") 
   };
 }
 
-export function validateCommentInput(note) {
+export function validateCommentInput(note: unknown) {
   if (!normalizeText(note)) {
     return { valid: false, message: "请先写一句你的想法。" };
   }
   return { valid: true, message: "" };
 }
 
-export function getCommentSubmitUiState(state) {
+export function getCommentSubmitUiState(state: unknown) {
   const normalized = normalizeText(state) || "idle";
   if (normalized === "submitting") {
     return { buttonLabel: "发送中...", disabled: true, statusMessage: "正在发出去，记一下你的这句。" };
@@ -483,7 +516,7 @@ export function getCommentSubmitUiState(state) {
 
 // ── Delight ──────────────────────────────────────────────────
 
-export function normalizeDelightCandidate(item) {
+export function normalizeDelightCandidate(item: MobilePayload | null | undefined) {
   return {
     bvid: normalizeText(item?.bvid),
     item_key: normalizeText(item?.item_key),
@@ -515,7 +548,10 @@ export function normalizeDelightCandidate(item) {
   };
 }
 
-export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
+export function getDelightUiState(
+  delight: MobilePayload | null | undefined,
+  { highlightBvid = "" }: { highlightBvid?: unknown } = {},
+) {
   const normalized = normalizeDelightCandidate(delight);
   if (!normalized.bvid) {
     return {
@@ -581,7 +617,7 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
  * Map a UI action string to the backend API token and local UI state.
  * CRITICAL: Never send UI state strings (viewed/rejected/chatted) to /api/delight/respond.
  */
-export function getDelightActionState(action) {
+export function getDelightActionState(action: unknown) {
   switch (action) {
     case "view":
       return { apiResponse: "view", uiState: "viewed", permanent: false };
@@ -625,7 +661,7 @@ export function getAvoidanceProbeMessageActions() {
 
 // ── Pool Status (simple — backward compat) ───────────────────
 
-export function normalizePoolStatus(status) {
+export function normalizePoolStatus(status: MobilePayload | null | undefined) {
   const topics = Array.isArray(status?.recent_pool_topics)
     ? status.recent_pool_topics
     : (Array.isArray(status?.pool?.topics) ? status.pool.topics : []);
@@ -648,7 +684,7 @@ export function normalizePoolStatus(status) {
 
 // ── Runtime Status ───────────────────────────────────────────
 
-export function normalizeRuntimeStatus(status) {
+export function normalizeRuntimeStatus(status: MobilePayload | null | undefined) {
   return {
     initialized: Boolean(status?.initialized),
     initialized_known: typeof status?.initialized === "boolean",
@@ -672,7 +708,10 @@ export function normalizeRuntimeStatus(status) {
   };
 }
 
-export function mergeRuntimeStatusEvent(status, event) {
+export function mergeRuntimeStatusEvent(
+  status: MobilePayload | null | undefined,
+  event: MobilePayload | null | undefined,
+) {
   const runtime = normalizeRuntimeStatus(status);
   const next = { ...runtime };
   if (typeof event?.initialized === "boolean") {
@@ -702,7 +741,7 @@ export function mergeRuntimeStatusEvent(status, event) {
 
 // ── Pool Status (semantic — primary for mobile) ──────────────
 
-export function getPoolStatusSummary(status) {
+export function getPoolStatusSummary(status: MobilePayload | null | undefined) {
   const runtime = normalizeRuntimeStatus(status);
   if (!runtime.initialized) return null;
 
@@ -758,7 +797,7 @@ export function getPoolStatusSummary(status) {
   };
 }
 
-export function getReadyRecommendationHint(status) {
+export function getReadyRecommendationHint(status: MobilePayload | null | undefined) {
   const runtime = normalizeRuntimeStatus(status);
   if (runtime.initialized_known && !runtime.initialized) {
     return {
@@ -785,6 +824,11 @@ export function getMobileRecommendationHeaderState({
   activityFeed = null,
   runtimeEvent = null,
   activityExpanded = false,
+}: {
+  runtimeStatus?: MobilePayload | null;
+  activityFeed?: MobilePayload | null;
+  runtimeEvent?: MobilePayload | null;
+  activityExpanded?: boolean;
 } = {}) {
   const runtime = normalizeRuntimeStatus(runtimeStatus);
   const poolSummary = getPoolStatusSummary(runtimeStatus);
@@ -839,16 +883,16 @@ export function getMobileRecommendationHeaderState({
 
 // ── Activity Feed ────────────────────────────────────────────
 
-function getHintBannerState(tone) {
+function getHintBannerState(tone: unknown) {
   const normalized = normalizeText(tone);
   if (normalized === "success" || normalized === "error") return { tone: normalized };
   return { tone: "info" };
 }
 
-export function normalizeActivityFeed(payload) {
+export function normalizeActivityFeed(payload: MobilePayload | null | undefined) {
   const items = Array.isArray(payload?.items)
     ? payload.items
-        .filter((item) => item && typeof item === "object")
+        .filter((item): item is MobilePayload => Boolean(item) && typeof item === "object")
         .map((item, index) => ({
           id: normalizeText(item.id) || `activity-${index}`,
           kind: normalizeText(item.kind) || "activity",
@@ -868,7 +912,15 @@ export function normalizeActivityFeed(payload) {
   };
 }
 
-export function getActivityCardState({ feed = null, runtimeEvent = null, expanded = false }) {
+export function getActivityCardState({
+  feed = null,
+  runtimeEvent = null,
+  expanded = false,
+}: {
+  feed?: MobilePayload | null;
+  runtimeEvent?: MobilePayload | null;
+  expanded?: boolean;
+}) {
   const normalizedFeed = normalizeActivityFeed(feed);
   const liveMessage = normalizeText(runtimeEvent?.message) || normalizedFeed.live_summary;
   const headline = normalizedFeed.headline || "最近还没新动静，先多刷一阵。";
@@ -884,20 +936,20 @@ export function getActivityCardState({ feed = null, runtimeEvent = null, expande
 
 // ── MBTI ─────────────────────────────────────────────────────
 
-function normalizeDimensionPair(key) {
+function normalizeDimensionPair(key: unknown): [string, string] | null {
   const letters = normalizeText(key).replace(/[^A-Za-z]/g, "").toUpperCase();
   if (letters.length < 2) return null;
   return [letters[0], letters[1]];
 }
 
-function normalizeArrayDimension(dim) {
+function normalizeArrayDimension(dim: MobilePayload | null | undefined) {
   const left = normalizeText(dim?.left) || normalizeText(dim?.label);
   const right = normalizeText(dim?.right);
   if (!left && !right) return null;
   return { left, right, score: round3(clamp01(dim?.score ?? dim?.value)) };
 }
 
-function normalizeObjectDimension(key, dim) {
+function normalizeObjectDimension(key: unknown, dim: MobilePayload | null | undefined) {
   const pair = normalizeDimensionPair(key);
   if (!pair) return null;
   const [left, right] = pair;
@@ -909,7 +961,7 @@ function normalizeObjectDimension(key, dim) {
   return { left, right, score: round3(score) };
 }
 
-export function normalizeMbtiDimensions(mbti) {
+export function normalizeMbtiDimensions(mbti: MobilePayload | null | undefined) {
   const raw = mbti?.dimensions;
   if (Array.isArray(raw)) return raw.map(normalizeArrayDimension).filter(Boolean);
   if (!raw || typeof raw !== "object") return [];
@@ -923,21 +975,22 @@ export function normalizeMbtiDimensions(mbti) {
 
 // ── Chat Turn ────────────────────────────────────────────────
 
-export function normalizeChatTurn(turn) {
+export function normalizeChatTurn(turn: unknown) {
   if (!turn || typeof turn !== "object") {
     return { turn_id: "", message: "", response: "", status: "", error: "" };
   }
+  const row = turn as MobilePayload;
   return {
     ...turn,
-    turn_id: normalizeText(turn.turn_id),
-    message: normalizeText(turn.message),
-    response: normalizeText(turn.response) || normalizeText(turn.reply),
-    status: normalizeText(turn.status),
-    error: normalizeText(turn.error),
+    turn_id: normalizeText(row.turn_id),
+    message: normalizeText(row.message),
+    response: normalizeText(row.response) || normalizeText(row.reply),
+    status: normalizeText(row.status),
+    error: normalizeText(row.error),
   };
 }
 
-export function getMobileChatSession(scope = "chat") {
+export function getMobileChatSession(scope: unknown = "chat") {
   return {
     session: "popup",
     scope: normalizeText(scope) || "chat",
@@ -946,7 +999,9 @@ export function getMobileChatSession(scope = "chat") {
 
 // ── Cognition Updates ────────────────────────────────────────
 
-export function normalizeCognitionUpdateCard(item) {
+export function normalizeCognitionUpdateCard(
+  item: MobilePayload | string | null | undefined,
+) {
   const fallbackContextLine = "基于最近几条相关内容";
   if (typeof item === "string") {
     return {
@@ -990,7 +1045,7 @@ export function normalizeCognitionUpdateCard(item) {
   };
 }
 
-function normalizeCognitionHistoryItems(items) {
+function normalizeCognitionHistoryItems(items: unknown) {
   if (!Array.isArray(items)) return [];
   return items
     .map((item) => {
@@ -1014,7 +1069,10 @@ function normalizeCognitionHistoryItems(items) {
     .filter((item) => item.summary);
 }
 
-export function buildNextCognitionHistoryState(currentState, nextSummaryPage) {
+export function buildNextCognitionHistoryState(
+  currentState: MobilePayload | null | undefined,
+  nextSummaryPage: MobilePayload | null | undefined,
+) {
   const existingItems = normalizeCognitionHistoryItems(
     Array.isArray(currentState?.items)
       ? currentState.items
@@ -1032,9 +1090,9 @@ export function buildNextCognitionHistoryState(currentState, nextSummaryPage) {
 
 // ── Profile Summary ──────────────────────────────────────────
 
-function normalizeMBTI(raw) {
+function normalizeMBTI(raw: MobilePayload | null | undefined) {
   if (!raw || !raw.type) return null;
-  const dims = {};
+  const dims: Record<string, { pole: string; strength: number }> = {};
   if (raw.dimensions && typeof raw.dimensions === "object") {
     for (const [k, v] of Object.entries(raw.dimensions)) {
       dims[k] = { pole: normalizeText(v?.pole), strength: Number(v?.strength ?? 0.5) };
@@ -1043,7 +1101,7 @@ function normalizeMBTI(raw) {
   return { type: normalizeText(raw.type), dimensions: dims, confidence: Number(raw.confidence ?? 0) };
 }
 
-export function getMbtiDisplayState(mbti) {
+export function getMbtiDisplayState(mbti: MobilePayload | null | undefined) {
   const normalized = normalizeMBTI(mbti);
   if (!normalized?.type) {
     return { type: "", confidence_label: "", dimensions: [] };
@@ -1056,7 +1114,7 @@ export function getMbtiDisplayState(mbti) {
   };
 }
 
-function normalizeInterestDomains(raw) {
+function normalizeInterestDomains(raw: unknown) {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((d) => d?.domain)
@@ -1065,13 +1123,13 @@ function normalizeInterestDomains(raw) {
       weight: Number(d.weight ?? 0.5),
       specifics: Array.isArray(d.specifics)
         ? d.specifics
-            .filter((s) => s?.name)
-            .map((s) => ({ name: normalizeText(s.name), weight: Number(s.weight ?? 0.5) }))
+            .filter((s: MobilePayload) => s?.name)
+            .map((s: MobilePayload) => ({ name: normalizeText(s.name), weight: Number(s.weight ?? 0.5) }))
         : [],
     }));
 }
 
-function normalizeStyle(raw) {
+function normalizeStyle(raw: MobilePayload | null | undefined) {
   if (!raw) return null;
   return {
     preferred_duration: normalizeText(raw.preferred_duration),
@@ -1082,24 +1140,24 @@ function normalizeStyle(raw) {
   };
 }
 
-const DURATION_LABELS = {
+const DURATION_LABELS: StringMap = {
   short: "短视频",
   medium: "中等",
   long: "长视频",
 };
 
-const PACE_LABELS = {
+const PACE_LABELS: StringMap = {
   fast: "快节奏",
   moderate: "适中",
   slow: "慢节奏",
 };
 
-function mappedLabel(map, value) {
+function mappedLabel(map: StringMap, value: unknown): string {
   const text = normalizeText(value);
   return map[text] || text;
 }
 
-export function getProfileStyleDisplay(style) {
+export function getProfileStyleDisplay(style: MobilePayload | null | undefined) {
   const normalized = normalizeStyle(style);
   if (!normalized) return null;
   return {
@@ -1109,7 +1167,7 @@ export function getProfileStyleDisplay(style) {
   };
 }
 
-function normalizeContext(raw) {
+function normalizeContext(raw: MobilePayload | null | undefined) {
   if (!raw) return null;
   return {
     weekday_patterns: stripPlaceholderText(raw.weekday_patterns),
@@ -1119,7 +1177,7 @@ function normalizeContext(raw) {
   };
 }
 
-export function getContextPatternRows(context) {
+export function getContextPatternRows(context: MobilePayload | null | undefined) {
   const normalized = normalizeContext(context);
   if (!normalized) return [];
   return [
@@ -1130,22 +1188,22 @@ export function getContextPatternRows(context) {
   ].filter((row) => row.value);
 }
 
-function normalizeProbeMode(value) {
+function normalizeProbeMode(value: unknown): string {
   const mode = normalizeText(value);
   return ["near", "lateral", "bridge", "wildcard"].includes(mode) ? mode : "near";
 }
 
-function isChallengeProbe(mode, explicit) {
+function isChallengeProbe(mode: string, explicit: unknown): boolean {
   return Boolean(explicit) || ["lateral", "bridge", "wildcard"].includes(mode);
 }
 
-export function normalizeProfileSummary(summary) {
+export function normalizeProfileSummary(summary: MobilePayload | null | undefined) {
   return {
     initialized: Boolean(summary?.initialized),
     personality_portrait: normalizeText(summary?.personality_portrait) || DEFAULT_PORTRAIT,
     core_traits: normalizeStrList(summary?.core_traits),
     deep_needs: normalizeStrList(summary?.deep_needs),
-    mbti: normalizeMBTI(summary?.mbti),
+    mbti: normalizeMBTI(summary?.mbti as MobilePayload | null | undefined),
     values: normalizeStrList(summary?.values),
     motivational_drivers: normalizeStrList(summary?.motivational_drivers),
     likes: normalizeInterestDomains(summary?.likes),
@@ -1154,8 +1212,8 @@ export function normalizeProfileSummary(summary) {
     life_stage: normalizeText(summary?.life_stage),
     current_phase: normalizeText(summary?.current_phase),
     cognitive_style: normalizeStrList(summary?.cognitive_style),
-    style: normalizeStyle(summary?.style),
-    context: normalizeContext(summary?.context),
+    style: normalizeStyle(summary?.style as MobilePayload | null | undefined),
+    context: normalizeContext(summary?.context as MobilePayload | null | undefined),
     exploration_openness: typeof summary?.exploration_openness === "number"
       ? Math.max(0, Math.min(1, summary.exploration_openness))
       : 0.5,
@@ -1175,8 +1233,8 @@ export function normalizeProfileSummary(summary) {
               status: normalizeText(item.status) || "active",
               specifics: Array.isArray(item.specifics)
                 ? item.specifics
-                    .filter((s) => s?.name)
-                    .map((s) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
+                    .filter((s: MobilePayload) => s?.name)
+                    .map((s: MobilePayload) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
                 : [],
             };
           })
@@ -1195,8 +1253,8 @@ export function normalizeProfileSummary(summary) {
             status: normalizeText(item.status) || "active",
             specifics: Array.isArray(item.specifics)
               ? item.specifics
-                  .filter((s) => s?.name)
-                  .map((s) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
+                  .filter((s: MobilePayload) => s?.name)
+                  .map((s: MobilePayload) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
               : [],
           }))
       : [],
@@ -1211,7 +1269,7 @@ export function normalizeProfileSummary(summary) {
           .map((item) => ({
             hypothesis: normalizeText(item.hypothesis),
             evidence: Array.isArray(item.evidence)
-              ? item.evidence.map((e) => normalizeText(e)).filter(Boolean) : [],
+              ? item.evidence.map((e: unknown) => normalizeText(e)).filter(Boolean) : [],
             confidence: typeof item.confidence === "number"
               ? Math.max(0, Math.min(1, item.confidence)) : 0.5,
             validated: Boolean(item.validated),
@@ -1233,7 +1291,7 @@ export function normalizeProfileSummary(summary) {
 
 // ── Timestamp ────────────────────────────────────────────────
 
-export function formatRelativeTimestamp(isoString, now = Date.now()) {
+export function formatRelativeTimestamp(isoString: unknown, now = Date.now()): string {
   const text = normalizeText(isoString);
   if (!text) return "";
   const parsed = Date.parse(text);
