@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 /**
  * Sync the canonical model-config state module into the extension popup.
  *

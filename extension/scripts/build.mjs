@@ -1,3 +1,4 @@
+// @ts-check
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { build } from "esbuild";
@@ -95,10 +96,11 @@ if (isFirefox) {
     await readFile(resolve(root, "manifest.firefox.json"), "utf-8"),
   );
   // Preserve Firefox manifest field order: insert version right after `name`.
+  /** @type {Record<string, unknown>} */
   const merged = {};
   for (const [key, value] of Object.entries(firefoxManifest)) {
     merged[key] = value;
-    if (key === "name") merged.version = chromeManifest.version;
+    if (key === "name") merged.version = /** @type {{ version?: string }} */ (chromeManifest).version;
   }
   await writeFile(
     resolve(root, `${outDir}/manifest.json`),

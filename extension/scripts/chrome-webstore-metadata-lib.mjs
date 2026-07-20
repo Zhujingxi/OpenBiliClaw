@@ -1,3 +1,4 @@
+// @ts-check
 import { createHash } from "node:crypto";
 
 const PRESERVED_FIELDS = [
@@ -8,6 +9,14 @@ const PRESERVED_FIELDS = [
   "supportUrl",
 ];
 
+/** @typedef {{ summary: string, description: string, homepageUrl: string, supportUrl: string }} Listing */
+/** @typedef {Record<string, unknown>} Draft */
+
+/**
+ * @param {string} markdown
+ * @param {string} heading
+ * @returns {string}
+ */
 function fencedBlock(markdown, heading) {
   const marker = `## ${heading}`;
   const headingStart = markdown.indexOf(marker);
@@ -27,6 +36,11 @@ function fencedBlock(markdown, heading) {
   return match[1].trim();
 }
 
+/**
+ * @param {string} markdown
+ * @param {string[]} labels
+ * @returns {string}
+ */
 function documentedUrl(markdown, labels) {
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -40,6 +54,10 @@ function documentedUrl(markdown, labels) {
   throw new Error(`Missing documented URL: ${labels.join(" or ")}`);
 }
 
+/**
+ * @param {string} markdown
+ * @returns {Listing}
+ */
 export function parseListingMarkdown(markdown) {
   return {
     summary: fencedBlock(markdown, "Short Description"),
@@ -53,6 +71,10 @@ export function parseListingMarkdown(markdown) {
   };
 }
 
+/**
+ * @param {Listing} listing
+ * @returns {void}
+ */
 export function validateListingMetadata(listing) {
   if (!listing.summary || !listing.description) {
     throw new Error("Summary and description are required");
@@ -69,10 +91,18 @@ export function validateListingMetadata(listing) {
   }
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function sha256(value) {
   return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
 
+/**
+ * @param {unknown} value
+ * @returns {{ present: boolean, length: number, sha256: string }}
+ */
 function fieldSummary(value) {
   return {
     present: typeof value === "string",
@@ -81,6 +111,10 @@ function fieldSummary(value) {
   };
 }
 
+/**
+ * @param {Draft} draft
+ * @returns {{ fieldNames: string[], summary: ReturnType<typeof fieldSummary>, description: ReturnType<typeof fieldSummary>, assetFieldNames: string[] }}
+ */
 export function summarizeDraft(draft) {
   const fieldNames = Object.keys(draft).sort();
   return {
@@ -91,11 +125,17 @@ export function summarizeDraft(draft) {
   };
 }
 
+/**
+ * @param {Draft} draft
+ * @param {Listing} listing
+ * @returns {Record<string, unknown>}
+ */
 export function buildMetadataPayload(draft, listing) {
   if (typeof draft.title !== "string" || typeof draft.defaultLocale !== "string") {
     throw new Error("Draft lacks the title/defaultLocale identity fields required for a safe update");
   }
 
+  /** @type {Record<string, unknown>} */
   const payload = {};
   for (const field of PRESERVED_FIELDS) {
     if (typeof draft[field] === "string") {
@@ -113,6 +153,11 @@ export function buildMetadataPayload(draft, listing) {
   return payload;
 }
 
+/**
+ * @param {Listing} actual
+ * @param {Listing} expected
+ * @returns {void}
+ */
 export function verifyMetadataReadback(actual, expected) {
   if (actual.summary !== expected.summary || actual.description !== expected.description) {
     throw new Error("Metadata read-back did not exactly match the canonical listing copy");

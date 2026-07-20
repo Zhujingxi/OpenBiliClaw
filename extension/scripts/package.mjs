@@ -1,3 +1,5 @@
+// @ts-check
+
 import { execSync } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";

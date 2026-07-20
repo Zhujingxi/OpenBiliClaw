@@ -1,3 +1,4 @@
+// @ts-check
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -6,9 +7,19 @@ import test from "node:test";
 import * as popupState from "../../extension/popup/popup-model-config-state.js";
 import * as webState from "../../src/openbiliclaw/web/shared/model-config-state.js";
 
+/**
+ * The popup module is a byte-synced copy of the web module (asserted below),
+ * so both namespaces expose the same loose-record API. Typed as any here
+ * because the pre-TS-conversion .js source exports no types.
+ * @type {any}
+ */
+const popupImpl = popupState;
+/** @type {any} */
+const webImpl = webState;
+
 const IMPLEMENTATIONS = [
-  ["web", webState],
-  ["extension", popupState],
+  ["web", webImpl],
+  ["extension", popupImpl],
 ];
 
 test("extension popup state module is a synced copy of the shared source", () => {
@@ -28,6 +39,11 @@ test("extension popup state module is a synced copy of the shared source", () =>
   );
 });
 
+/**
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function connection(id, overrides = {}) {
   return {
     id,
@@ -54,6 +70,11 @@ function connection(id, overrides = {}) {
   };
 }
 
+/**
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function provider(id, overrides = {}) {
   const item = connection(id, overrides);
   for (const field of [
@@ -67,6 +88,11 @@ function provider(id, overrides = {}) {
   return item;
 }
 
+/**
+ * @param {string[]} [ids]
+ * @param {string} [revision]
+ * @returns {Record<string, any>}
+ */
 function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
   return {
     revision,
@@ -95,7 +121,11 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
 }
 
 test("field-error vectors keep prototype-like stable IDs as own keys", () => {
-  const previousPrototypeError = Object.prototype.num_ctx;
+  // Deliberately touching Object.prototype fields to prove the state module
+  // keeps prototype-like stable IDs as own keys; typed via any since
+  // Object.prototype has no declared num_ctx.
+  const proto = /** @type {any} */ (Object.prototype);
+  const previousPrototypeError = proto.num_ctx;
   try {
     for (const [name, implementation] of IMPLEMENTATIONS) {
       const state = implementation.mapServerFieldErrors(
@@ -118,11 +148,11 @@ test("field-error vectors keep prototype-like stable IDs as own keys", () => {
         "Invalid context window.",
         name,
       );
-      assert.equal(Object.prototype.num_ctx, previousPrototypeError, name);
+      assert.equal(proto.num_ctx, previousPrototypeError, name);
     }
   } finally {
-    if (previousPrototypeError === undefined) delete Object.prototype.num_ctx;
-    else Object.prototype.num_ctx = previousPrototypeError;
+    if (previousPrototypeError === undefined) delete proto.num_ctx;
+    else proto.num_ctx = previousPrototypeError;
   }
 });
 
@@ -158,6 +188,7 @@ const TYPE_DESCRIPTOR = {
   preset_definitions: [],
 };
 
+/** @type {Array<[string, (implementation: any) => any]>} */
 const PARITY_VECTORS = [
   ["hydrate", (implementation) => implementation.hydrateModelConfig(snapshot())],
   ["append", (implementation) => implementation.appendRouteItem(

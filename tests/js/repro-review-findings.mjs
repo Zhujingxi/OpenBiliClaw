@@ -1,3 +1,4 @@
+// @ts-check
 // Reproduction of review findings 1+2 against the setup wizard's usage of the
 // shared model-config state module. Run: node tests/js/repro-review-findings.mjs
 import assert from "node:assert/strict";

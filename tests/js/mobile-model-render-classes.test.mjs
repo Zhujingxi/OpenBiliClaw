@@ -1,3 +1,4 @@
+// @ts-check
 // Reproduction of the mobile model-settings styling regression (P2) and its
 // fix. The shared renderers must emit class names that the mobile stylesheet
 // actually styles when the caller passes the mobile class prefix. Desktop
@@ -48,6 +49,10 @@ const GROUPS = [
   },
 ];
 
+/**
+ * @param {Record<string, unknown>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
 function makeRecord(overrides = {}) {
   return {
     id: "conn-1",
@@ -69,6 +74,10 @@ function makeRecord(overrides = {}) {
   };
 }
 
+/**
+ * @param {string} html
+ * @returns {string[]}
+ */
 function extractClasses(html) {
   const classes = new Set();
   for (const match of html.matchAll(/class="([^"]+)"/g)) {
@@ -79,14 +88,28 @@ function extractClasses(html) {
   return [...classes];
 }
 
+/**
+ * The shared renderers' JSDoc currently types `options` as
+ * `{ classPrefix?: string }` only; the remaining parameters are accepted at
+ * runtime but not declared (pre-TS-conversion source). Cast to a call shape
+ * that matches the real API.
+ * @type {(options: { groups?: unknown[], record?: Record<string, unknown>, kind?: string, classPrefix?: string }) => string}
+ */
+const renderTypeGroups = /** @type {any} */ (renderConnectionTypeGroups);
+
+/**
+ * @type {(options: { record?: Record<string, unknown>, descriptor?: Record<string, unknown>, kind?: string, classPrefix?: string }) => { html: string }}
+ */
+const renderCredEditor = /** @type {any} */ (renderCredentialEditor);
+
 test("mobile prefix emits classes styled by the mobile stylesheet", () => {
-  const typeHtml = renderConnectionTypeGroups({
+  const typeHtml = renderTypeGroups({
     groups: GROUPS,
     record: makeRecord(),
     kind: "chat",
     classPrefix: "mobile-model",
   });
-  const credentialHtml = renderCredentialEditor({
+  const credentialHtml = renderCredEditor({
     record: makeRecord(),
     descriptor: DESCRIPTOR,
     kind: "chat",
@@ -138,12 +161,12 @@ test("mobile prefix emits classes styled by the mobile stylesheet", () => {
 });
 
 test("default prefix preserves desktop classes byte-for-byte", () => {
-  const typeHtml = renderConnectionTypeGroups({
+  const typeHtml = renderTypeGroups({
     groups: GROUPS,
     record: makeRecord(),
     kind: "chat",
   });
-  const credentialHtml = renderCredentialEditor({
+  const credentialHtml = renderCredEditor({
     record: makeRecord(),
     descriptor: DESCRIPTOR,
     kind: "chat",

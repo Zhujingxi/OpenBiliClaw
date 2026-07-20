@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 
 import { readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
@@ -8,6 +9,11 @@ import { uploadWithPendingReplacement } from "./chrome-webstore-pending.mjs";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CWS_API_BASE = "https://chromewebstore.googleapis.com";
 const CWS_SCOPE = "https://www.googleapis.com/auth/chromewebstore";
+
+/**
+ * @typedef {{ zip: string, publish: boolean, staged: boolean, skipReview: boolean, replacePending: boolean, deployPercentage: number | null, pollIntervalSeconds: number, waitTimeoutSeconds: number }} CliOptions
+ * @typedef {{ clientId: string, clientSecret: string, refreshToken: string, publisherId: string, extensionId: string }} Credentials
+ */
 
 function usage() {
   console.log(`Usage:
@@ -33,7 +39,12 @@ Options:
 `);
 }
 
+/**
+ * @param {string[]} argv
+ * @returns {CliOptions}
+ */
 function parseArgs(argv) {
+  /** @type {CliOptions} */
   const options = {
     zip: "",
     publish: false,
@@ -104,6 +115,11 @@ function parseArgs(argv) {
   return options;
 }
 
+/**
+ * @param {string | undefined} value
+ * @param {string} flag
+ * @returns {number}
+ */
 function parsePositiveInt(value, flag) {
   const parsed = Number.parseInt(value ?? "", 10);
   if (!Number.isInteger(parsed) || parsed < 1) {
@@ -112,6 +128,10 @@ function parsePositiveInt(value, flag) {
   return parsed;
 }
 
+/**
+ * @param {string} name
+ * @returns {string}
+ */
 function requireEnv(name) {
   const value = process.env[name]?.trim();
   if (!value) {
@@ -120,9 +140,15 @@ function requireEnv(name) {
   return value;
 }
 
+/**
+ * @param {string} url
+ * @param {RequestInit} options
+ * @returns {Promise<any>} Parsed JSON body; shape varies per CWS API endpoint.
+ */
 async function requestJson(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
+  /** @type {any} */
   let payload = {};
   if (text.trim()) {
     try {
@@ -133,11 +159,14 @@ async function requestJson(url, options) {
   }
   if (!response.ok) {
     const details = JSON.stringify(payload, null, 2);
-    const error = new Error(
+    const error = /** @type {Error & { chromeWebStoreReason?: string }} */ (new Error(
       `HTTP ${response.status} ${response.statusText} from ${url}\n${details}`,
-    );
+    ));
     const errorInfo = Array.isArray(payload?.error?.details)
-      ? payload.error.details.find((detail) => typeof detail?.reason === "string")
+      ? payload.error.details.find(
+          /** @param {any} detail */
+          (detail) => typeof detail?.reason === "string",
+        )
       : null;
     if (errorInfo) {
       error.chromeWebStoreReason = errorInfo.reason;
@@ -147,6 +176,10 @@ async function requestJson(url, options) {
   return payload;
 }
 
+/**
+ * @param {{ clientId: string, clientSecret: string, refreshToken: string }} credentials
+ * @returns {Promise<string>}
+ */
 async function getAccessToken({ clientId, clientSecret, refreshToken }) {
   const body = new URLSearchParams({
     client_id: clientId,
@@ -168,10 +201,18 @@ async function getAccessToken({ clientId, clientSecret, refreshToken }) {
   return payload.access_token;
 }
 
+/**
+ * @param {{ publisherId: string, extensionId: string }} ids
+ * @returns {string}
+ */
 function itemName({ publisherId, extensionId }) {
   return `publishers/${publisherId}/items/${extensionId}`;
 }
 
+/**
+ * @param {{ archivePath: string, accessToken: string, publisherId: string, extensionId: string }} args
+ * @returns {Promise<any>}
+ */
 async function uploadArchive({ archivePath, accessToken, publisherId, extensionId }) {
   const file = await readFile(archivePath);
   const uploadUrl = `${CWS_API_BASE}/upload/v2/${itemName({
@@ -188,6 +229,10 @@ async function uploadArchive({ archivePath, accessToken, publisherId, extensionI
   });
 }
 
+/**
+ * @param {{ accessToken: string, publisherId: string, extensionId: string }} args
+ * @returns {Promise<any>}
+ */
 async function fetchStatus({ accessToken, publisherId, extensionId }) {
   const statusUrl = `${CWS_API_BASE}/v2/${itemName({
     publisherId,
@@ -199,6 +244,10 @@ async function fetchStatus({ accessToken, publisherId, extensionId }) {
   });
 }
 
+/**
+ * @param {{ accessToken: string, publisherId: string, extensionId: string }} args
+ * @returns {Promise<any>}
+ */
 async function cancelSubmission({ accessToken, publisherId, extensionId }) {
   const cancelUrl = `${CWS_API_BASE}/v2/${itemName({
     publisherId,
@@ -214,10 +263,18 @@ async function cancelSubmission({ accessToken, publisherId, extensionId }) {
   });
 }
 
+/**
+ * @param {any} payload CWS fetchStatus/upload response; shape is Google-defined.
+ * @returns {string}
+ */
 function uploadState(payload) {
   return String(payload.uploadState || payload.lastAsyncUploadState || "");
 }
 
+/**
+ * @param {{ accessToken: string, publisherId: string, extensionId: string, options: CliOptions }} args
+ * @returns {Promise<any>}
+ */
 async function waitForUpload({ accessToken, publisherId, extensionId, options }) {
   const deadline = Date.now() + options.waitTimeoutSeconds * 1000;
   while (Date.now() < deadline) {
@@ -239,11 +296,16 @@ async function waitForUpload({ accessToken, publisherId, extensionId, options })
   );
 }
 
+/**
+ * @param {{ accessToken: string, publisherId: string, extensionId: string, options: CliOptions }} args
+ * @returns {Promise<any>}
+ */
 async function publishItem({ accessToken, publisherId, extensionId, options }) {
   const publishUrl = `${CWS_API_BASE}/v2/${itemName({
     publisherId,
     extensionId,
   })}:publish`;
+  /** @type {{ publishType: string, skipReview?: boolean, deployInfos?: Array<{ deployPercentage: number }> }} */
   const body = {
     publishType: options.staged ? "STAGED_PUBLISH" : "DEFAULT_PUBLISH",
   };
@@ -274,6 +336,7 @@ async function main() {
     throw new Error(`Chrome Web Store upload expects a .zip archive: ${archivePath}`);
   }
 
+  /** @type {Credentials} */
   const credentials = {
     clientId: requireEnv("CHROME_WEBSTORE_CLIENT_ID"),
     clientSecret: requireEnv("CHROME_WEBSTORE_CLIENT_SECRET"),

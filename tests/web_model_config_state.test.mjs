@@ -1,7 +1,8 @@
+// @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import * as modelConfigState from "../src/openbiliclaw/web/shared/model-config-state.js";
+import * as modelConfigStateNs from "../src/openbiliclaw/web/shared/model-config-state.js";
 import {
   appendRouteItem,
   applyPreset,
@@ -19,6 +20,22 @@ import {
   updateRouteSetting,
 } from "../src/openbiliclaw/web/shared/model-config-state.js";
 
+/**
+ * The canonical .js state module predates TS conversion and exports no
+ * types; this suite drives its loose-record API, so the namespace is used
+ * through any and hydrated state is treated as Record<string, any>.
+ * @type {any}
+ */
+const modelConfigState = modelConfigStateNs;
+
+/**
+ * Test fixture: the canonical state module treats connections as loose
+ * records, so fixtures are typed as Record<string, any> throughout this file
+ * (the .js source predates TS conversion and has no exported types).
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function connection(id, overrides = {}) {
   return {
     id,
@@ -45,6 +62,11 @@ function connection(id, overrides = {}) {
   };
 }
 
+/**
+ * @param {string} id
+ * @param {Record<string, any>} [overrides]
+ * @returns {Record<string, any>}
+ */
 function provider(id, overrides = {}) {
   const item = connection(id, overrides);
   delete item.model;
@@ -56,6 +78,11 @@ function provider(id, overrides = {}) {
   return item;
 }
 
+/**
+ * @param {string[]} [ids]
+ * @param {string} [revision]
+ * @returns {Record<string, any>}
+ */
 function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
   return {
     revision,
@@ -83,9 +110,15 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
   };
 }
 
+/**
+ * @template T
+ * @returns {{ promise: Promise<T>, resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void }}
+ */
 function deferred() {
-  let resolve;
-  let reject;
+  /** @type {(value: T | PromiseLike<T>) => void} */
+  let resolve = () => {};
+  /** @type {(reason?: unknown) => void} */
+  let reject = () => {};
   const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
