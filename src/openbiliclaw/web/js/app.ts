@@ -21,10 +21,29 @@ import { initChatView, onStreamEvent as chatStreamEvent, toggleMessages, loadNot
 import { initWatchLaterView, initFavoritesView } from "./views/saved.js";
 import { openMobileSettings } from "./views/model-settings.js";
 
+type TabId = "recommend" | "watchLater" | "favorites" | "profile" | "chat";
+
+interface TabDefinition {
+  id: TabId;
+  icon: string;
+  label: string;
+}
+
+// TODO(types): expand when the runtime-stream event schema is shared with the web client.
+interface RuntimeEvent {
+  type?: unknown;
+}
+
+// TODO(types): replace with the canonical health response once the API schema is exported.
+interface HealthResponse {
+  status?: unknown;
+  reason?: unknown;
+}
+
 // ── DOM refs ─────────────────────────────────────────────────
-const $app = document.getElementById("app");
-const $statusBar = document.getElementById("status-bar");
-const $tabBar = document.getElementById("tab-bar");
+const $app = document.getElementById("app") as HTMLElement;
+const $statusBar = document.getElementById("status-bar") as HTMLElement;
+const $tabBar = document.getElementById("tab-bar") as HTMLElement;
 
 // ── Status Bar ───────────────────────────────────────────────
 function renderStatusBar() {
@@ -61,7 +80,7 @@ function renderStatusBar() {
   const unread = state.messages.notifications.length + state.messages.delights.length;
   const badge = document.createElement("span");
   badge.className = "badge-count";
-  badge.dataset.count = unread;
+  badge.dataset.count = unread as unknown as string;
   badge.textContent = unread > 0 ? (unread > 99 ? "99+" : String(unread)) : "";
   bell.appendChild(badge);
   bell.addEventListener("click", () => toggleMessages());
@@ -96,7 +115,7 @@ function renderStatusBar() {
 }
 
 // ── Tab Bar ──────────────────────────────────────────────────
-const TABS = [
+const TABS: readonly TabDefinition[] = [
   { id: "recommend", icon: "\u2728", label: "\u63A8\u8350" },
   { id: "watchLater", icon: "🕐", label: "稍后" },
   { id: "favorites", icon: "⭐", label: "收藏" },
@@ -120,16 +139,16 @@ function renderTabBar() {
       let target = null;
       if (e.key === "ArrowRight") target = TABS[(TABS.indexOf(tab) + 1) % TABS.length];
       else if (e.key === "ArrowLeft") target = TABS[(TABS.indexOf(tab) - 1 + TABS.length) % TABS.length];
-      if (target) { e.preventDefault(); navigateToTab(target.id); $tabBar.querySelector(`[aria-selected="true"]`)?.focus(); }
+      if (target) { e.preventDefault(); navigateToTab(target.id); $tabBar.querySelector<HTMLElement>(`[aria-selected="true"]`)?.focus(); }
     });
     $tabBar.appendChild(el);
   }
 }
 
 // ── Views ────────────────────────────────────────────────────
-const views = {};
+const views = {} as Partial<Record<TabId, HTMLDivElement>>;
 
-function ensureView(id) {
+function ensureView(id: TabId): HTMLDivElement {
   if (views[id]) return views[id];
   const el = document.createElement("div");
   el.className = "view";
@@ -141,17 +160,17 @@ function ensureView(id) {
 
 function initActiveView() {
   const id = state.activeTab;
-  if (id === "recommend") initRecommendView(views.recommend);
-  else if (id === "watchLater") initWatchLaterView(views.watchLater);
-  else if (id === "favorites") initFavoritesView(views.favorites);
-  else if (id === "profile") initProfileView(views.profile);
-  else if (id === "chat") initChatView(views.chat);
+  if (id === "recommend") initRecommendView(views.recommend!);
+  else if (id === "watchLater") initWatchLaterView(views.watchLater!);
+  else if (id === "favorites") initFavoritesView(views.favorites!);
+  else if (id === "profile") initProfileView(views.profile!);
+  else if (id === "chat") initChatView(views.chat!);
 }
 
 /**
  * Navigate to a tab. Exported for cross-view use (e.g. delight "聊一聊" → chat).
  */
-export function navigateToTab(id) {
+export function navigateToTab(id: string): void {
   if (!TABS.find((t) => t.id === id)) return;
   location.hash = `#/${id}`;
   patchState({ activeTab: id });
@@ -163,9 +182,9 @@ export function navigateToTab(id) {
 }
 
 // ── Hash Router ──────────────────────────────────────────────
-function readHash() {
+function readHash(): TabId {
   const hash = location.hash.replace("#/", "").replace("#", "");
-  return TABS.find((t) => t.id === hash) ? hash : "recommend";
+  return (TABS.find((t) => t.id === hash) ? hash : "recommend") as TabId;
 }
 
 // ── WebSocket ────────────────────────────────────────────────
@@ -179,7 +198,7 @@ const stream = createStreamClient({
   },
   onEvent(payload) {
     patchState({ runtimeEvent: payload });
-    if (payload?.type === "config_reloaded") {
+    if ((payload as RuntimeEvent | null | undefined)?.type === "config_reloaded") {
       window.dispatchEvent(new CustomEvent("openbiliclaw:config-reloaded", {
         detail: payload,
       }));
@@ -191,7 +210,7 @@ const stream = createStreamClient({
 });
 
 // ── State subscription — re-render shell on relevant changes ─
-subscribe((_state, changed) => {
+subscribe((_state: unknown, changed: Record<string, unknown>) => {
   if ("online" in changed || "degraded" in changed || "degradedReason" in changed || "messages" in changed) {
     renderStatusBar();
   }
@@ -201,7 +220,7 @@ subscribe((_state, changed) => {
 });
 
 // ── Badge update hook (backward compat for chat.js) ──────────
-export function setUnreadCount(n) {
+export function setUnreadCount(n: number): void {
   // Chat view updates messages directly in state now, but keep this
   // as a convenience bridge during transition.
   renderStatusBar();
@@ -219,11 +238,11 @@ async function startApp() {
 
   // Health check with degraded detection
   try {
-    const health = await fetchHealth();
+    const health = await fetchHealth() as HealthResponse;
     patchState({
       online: true,
       degraded: health.status === "degraded",
-      degradedReason: health.reason || "",
+      degradedReason: (health.reason as string | null | undefined) || "",
     });
   } catch {
     const alive = await checkHealth();

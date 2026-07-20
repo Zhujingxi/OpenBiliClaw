@@ -18,7 +18,69 @@ import {
 } from "../saved-sync-runtime.js";
 
 const PAGE_SIZE = 50;
-const PRESENTATION = {
+type Presentation = [label: string, tone: string, retryable: boolean];
+
+// TODO(types): Replace these provisional payload shapes with shared API/runtime contracts.
+interface SavedItemInput {
+  [key: string]: unknown;
+  source_platform?: unknown;
+  content_id?: unknown;
+  bvid?: unknown;
+  id?: unknown;
+  item_key?: unknown;
+  content_url?: unknown;
+  content_type?: unknown;
+  title?: unknown;
+  author_name?: unknown;
+  up_name?: unknown;
+  cover_url?: unknown;
+  sync_status?: unknown;
+  sync_task_id?: unknown;
+  resolved_target?: unknown;
+  error_code?: unknown;
+  error_message?: unknown;
+}
+
+interface SavedListItem extends SavedItemInput {
+  item_key: string;
+  source_platform: string;
+  content_id: string;
+  content_url: string;
+  content_type: string;
+  title: string;
+  author_name: string;
+  cover_url: string;
+  sync_status: string;
+  resolved_target: string;
+  error_code: string;
+  error_message: string;
+}
+
+interface SavedListResponse {
+  items?: unknown;
+  total?: unknown;
+}
+
+interface SavedListSnapshot {
+  items: SavedListItem[];
+  total: number;
+  loaded: boolean;
+  error: string;
+}
+
+interface ErrorPayload {
+  message?: string;
+}
+
+interface SavedViewConfig {
+  listKind: string;
+  icon: string;
+  title: string;
+  emptyText: string;
+  countId: string;
+}
+
+const PRESENTATION: Record<string, Presentation> = {
   not_started: ["待同步", "neutral", false],
   pending: ["待同步", "neutral", false],
   syncing: ["同步中", "info", false],
@@ -30,42 +92,45 @@ const PRESENTATION = {
   extension_required: ["需要连接插件", "warning", true],
   failed: ["同步失败", "error", true],
 };
-const PLATFORM_NAMES = {
+const PLATFORM_NAMES: Record<string, string> = {
   bilibili: "B站", youtube: "YouTube", twitter: "X", xiaohongshu: "小红书",
   douyin: "抖音", zhihu: "知乎", reddit: "Reddit",
 };
 
-function esc(s) {
+function esc(s: unknown): string {
   const el = document.createElement("span");
   el.textContent = s == null ? "" : String(s);
   return el.innerHTML;
 }
 
-function safeText(value, maxLength = 240) {
+function safeText(value: unknown, maxLength = 240): string {
   return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
 }
 
-export function normalizeSavedListItem(item = {}) {
-  const platform = safeText(item.source_platform || "bilibili", 64);
-  const contentId = safeText(item.content_id || item.bvid || item.id, 2048);
+export function normalizeSavedListItem(item: unknown = {}): SavedListItem {
+  const raw = item as SavedItemInput;
+  const platform = safeText(raw.source_platform || "bilibili", 64);
+  const contentId = safeText(raw.content_id || raw.bvid || raw.id, 2048);
   return {
-    ...item,
-    item_key: safeText(item.item_key || `${platform}:${contentId}`, 2048),
+    ...raw,
+    item_key: safeText(raw.item_key || `${platform}:${contentId}`, 2048),
     source_platform: platform,
     content_id: contentId,
-    content_url: safeText(item.content_url, 2048),
-    content_type: safeText(item.content_type || "video", 128),
-    title: safeText(item.title || contentId),
-    author_name: safeText(item.author_name || item.up_name),
-    cover_url: safeText(item.cover_url, 2048),
-    sync_status: PRESENTATION[item.sync_status] ? item.sync_status : (item.sync_status ? "failed" : ""),
-    resolved_target: safeText(item.resolved_target),
-    error_code: safeText(item.error_code, 96),
-    error_message: safeText(item.error_message),
+    content_url: safeText(raw.content_url, 2048),
+    content_type: safeText(raw.content_type || "video", 128),
+    title: safeText(raw.title || contentId),
+    author_name: safeText(raw.author_name || raw.up_name),
+    cover_url: safeText(raw.cover_url, 2048),
+    sync_status: PRESENTATION[raw.sync_status as string]
+      ? raw.sync_status as string
+      : (raw.sync_status ? "failed" : ""),
+    resolved_target: safeText(raw.resolved_target),
+    error_code: safeText(raw.error_code, 96),
+    error_message: safeText(raw.error_message),
   };
 }
 
-export function getSavedSyncViewModel(item) {
+export function getSavedSyncViewModel(item: unknown) {
   const normalized = normalizeSavedListItem(item);
   const statusKey = normalized.sync_status || "not_started";
   let [label, tone, retryable] = PRESENTATION[statusKey] || PRESENTATION.failed;
@@ -121,13 +186,13 @@ export function getSavedSyncViewModel(item) {
   };
 }
 
-function summarize(items) {
-  const groups = new Map();
+function summarize(items: ObscSavedSyncTaskItem[]): string {
+  const groups = new Map<string, [number, number]>();
   for (const item of items) {
     const platform = safeText(item.item_key, 2048).split(":", 1)[0] || "unknown";
     const group = groups.get(platform) || [0, 0];
     group[1] += 1;
-    if (["synced", "already_synced"].includes(item.status)) group[0] += 1;
+    if (["synced", "already_synced"].includes(item.status as string)) group[0] += 1;
     groups.set(platform, group);
   }
   return Array.from(groups, ([platform, [success, total]]) => (
@@ -135,7 +200,11 @@ function summarize(items) {
   )).join(" · ");
 }
 
-export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
+export function isSavedSyncEligibleStatus(
+  status: unknown,
+  errorCode: unknown = "",
+  syncTaskId: unknown = "",
+): boolean {
   return getSavedSyncViewModel({
     sync_status: status,
     error_code: errorCode,
@@ -143,28 +212,28 @@ export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "
   }).actionable;
 }
 
-function eligible(item) {
+function eligible(item: SavedListItem): boolean {
   return getSavedSyncViewModel(item).actionable;
 }
 
-function createSavedView(cfg) {
-  let $root = null;
-  let items = [];
+function createSavedView(cfg: SavedViewConfig) {
+  let $root: HTMLElement | null = null;
+  let items: SavedListItem[] = [];
   let total = 0;
   let loading = false;
   let loaded = false;
   const syncingKeys = createSavedSubmissionFence();
   let message = "";
   let messageIsError = false;
-  let pendingFocus = null;
+  let pendingFocus: ObscSavedFocusToken | null = null;
   let visibilityBound = false;
   const retained = createRetainedSavedListState();
   const taskTracker = createDurableTaskTracker({
-    poll: (taskId) => pollSavedSyncTask(safeText(taskId, 64)),
+    poll: (taskId: unknown) => pollSavedSyncTask(safeText(taskId, 64)),
   });
   const taskCoordinator = createSavedTaskCoordinator({
     tracker: taskTracker,
-    fetchTask: (taskId) => pollSavedSyncTask(safeText(taskId, 64)),
+    fetchTask: (taskId: unknown) => pollSavedSyncTask(safeText(taskId, 64)),
   });
 
   const recoveredTaskCallbacks = () => ({
@@ -183,18 +252,18 @@ function createSavedView(cfg) {
       messageIsError = false;
       renderList();
     },
-    onTerminal: (terminalTask) => {
-      message = summarize(terminalTask.items) || "同步已完成";
+    onTerminal: (terminalTask: ObscSavedSyncTask) => {
+      message = summarize(terminalTask.items!) || "同步已完成";
       messageIsError = false;
       void load();
     },
   });
 
-  function renderShell(bodyHtml) {
+  function renderShell(bodyHtml: string): void {
     const pending = items.filter((item) => (
       eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
     )).length;
-    $root.innerHTML = `
+    $root!.innerHTML = `
       <div class="saved-view">
         <div class="saved-head">
           <span class="saved-head-icon" aria-hidden="true">${cfg.icon}</span>
@@ -208,21 +277,25 @@ function createSavedView(cfg) {
         </div>
         <div class="saved-body">${bodyHtml}</div>
       </div>`;
-    $root.querySelector(".saved-sync-all")?.addEventListener("click", (event) => {
+    $root!.querySelector<HTMLButtonElement>(".saved-sync-all")?.addEventListener("click", (event) => {
       pendingFocus = captureSavedFocus($root, event.currentTarget)
         || { kind: "list", action: "sync-all" };
       void runSync(items.filter((item) => (
         eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
-      )), event.currentTarget, true);
+      )), event.currentTarget as HTMLButtonElement, true);
     });
-    $root.querySelector(".saved-load-retry")?.addEventListener("click", (event) => {
+    $root!.querySelector<HTMLButtonElement>(".saved-load-retry")?.addEventListener("click", (event) => {
       pendingFocus = captureSavedFocus($root, event.currentTarget)
         || { kind: "list", action: "retry" };
       void load();
     });
   }
 
-  async function runSync(selected, activeButton, confirmBatch = false) {
+  async function runSync(
+    selected: SavedListItem[],
+    activeButton: HTMLButtonElement,
+    confirmBatch = false,
+  ): Promise<void> {
     selected = selected.filter((item) => (
       eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
     ));
@@ -244,7 +317,7 @@ function createSavedView(cfg) {
     let submitted = false;
     try {
       const task = await syncSavedItems(cfg.listKind, selectedKeys);
-      const taskId = safeText(task?.task_id, 64);
+      const taskId = safeText((task as ObscSavedSyncTask | null)?.task_id, 64);
       if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
       taskCoordinator.track(task, selectedKeys, {
         onProgress: () => {
@@ -262,8 +335,8 @@ function createSavedView(cfg) {
           messageIsError = false;
           renderList();
         },
-        onTerminal: (terminalTask) => {
-          message = summarize(terminalTask.items) || "同步已完成";
+        onTerminal: (terminalTask: ObscSavedSyncTask) => {
+          message = summarize(terminalTask.items!) || "同步已完成";
           messageIsError = false;
           void load();
         },
@@ -271,8 +344,8 @@ function createSavedView(cfg) {
       submitted = true;
       message = `同步任务已提交 · ${selected.length} 项`;
       await load();
-    } catch (error) {
-      message = error?.message || "同步失败，请稍后重试。";
+    } catch (error: unknown) {
+      message = (error as ErrorPayload | null)?.message || "同步失败，请稍后重试。";
       messageIsError = true;
     } finally {
       syncingKeys.release(selectedKeys);
@@ -321,18 +394,18 @@ function createSavedView(cfg) {
     }).join("");
     renderShell(`<div class="saved-list">${cards}</div>`);
 
-    for (const card of $root.querySelectorAll(".saved-card")) {
-      const item = items.find((row) => row.item_key === card.dataset.itemKey);
-      const open = card.querySelector(".saved-card-open");
+    for (const card of $root!.querySelectorAll<HTMLElement>(".saved-card")) {
+      const item = items.find((row) => row.item_key === card.dataset.itemKey)!;
+      const open = card.querySelector<HTMLButtonElement>(".saved-card-open");
       open?.addEventListener("click", () => {
         if (open.dataset.url) openContentUrl(open.dataset.url);
       });
-      card.querySelector(".saved-card-sync")?.addEventListener("click", (event) => {
+      card.querySelector<HTMLButtonElement>(".saved-card-sync")?.addEventListener("click", (event) => {
         pendingFocus = captureSavedFocus($root, event.currentTarget)
           || { itemKey: item.item_key, action: "sync", index: 0 };
-        void runSync([item], event.currentTarget);
+        void runSync([item], event.currentTarget as HTMLButtonElement);
       });
-      const remove = card.querySelector(".saved-card-remove");
+      const remove = card.querySelector<HTMLButtonElement>(".saved-card-remove")!;
       remove.addEventListener("click", async () => {
         pendingFocus = captureSavedFocus($root, remove)
           || { itemKey: item.item_key, action: "remove", index: 0 };
@@ -340,9 +413,9 @@ function createSavedView(cfg) {
         try {
           await removeSavedItem(cfg.listKind, item.item_key);
           await load();
-        } catch (error) {
+        } catch (error: unknown) {
           remove.disabled = false;
-          message = error?.message || "本地移除失败，请重试。";
+          message = (error as ErrorPayload | null)?.message || "本地移除失败，请重试。";
           messageIsError = true;
           renderList();
         }
@@ -356,18 +429,18 @@ function createSavedView(cfg) {
     renderList();
     const hadLoadError = Boolean(retained.snapshot().error);
     try {
-      const data = await fetchSavedItems(cfg.listKind, PAGE_SIZE, 0);
+      const data = await fetchSavedItems(cfg.listKind, PAGE_SIZE, 0) as SavedListResponse | null;
       retained.commit({
         items: (Array.isArray(data?.items) ? data.items : []).map(normalizeSavedListItem),
         total: Number(data?.total) || (Array.isArray(data?.items) ? data.items.length : 0),
       });
-      ({ items, total, loaded } = retained.snapshot());
+      ({ items, total, loaded } = retained.snapshot() as SavedListSnapshot);
       await taskCoordinator.recover(items, recoveredTaskCallbacks());
       if (hadLoadError) message = "";
       messageIsError = false;
     } catch (error) {
       retained.fail(error);
-      ({ items, total, loaded } = retained.snapshot());
+      ({ items, total, loaded } = retained.snapshot() as SavedListSnapshot);
       message = retained.snapshot().error;
       messageIsError = true;
     } finally {
@@ -376,7 +449,7 @@ function createSavedView(cfg) {
     }
   }
 
-  return function init(rootEl) {
+  return function init(rootEl: HTMLElement): void {
     $root = rootEl;
     if (!visibilityBound) {
       visibilityBound = true;

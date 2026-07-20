@@ -3,7 +3,20 @@
  * Mirrors extension popup-stream.js without Chrome dependencies.
  */
 
-function buildWsUrl() {
+export interface StreamClientOptions {
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
+  onEvent?: (event: unknown) => void;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+}
+
+export interface StreamClient {
+  connect: () => void;
+  disconnect: () => void;
+}
+
+function buildWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/api/runtime-stream`;
 }
@@ -14,9 +27,9 @@ export function createStreamClient({
   onEvent = () => {},
   onConnect = () => {},
   onDisconnect = () => {},
-} = {}) {
-  let socket = null;
-  let reconnectTimer = null;
+}: StreamClientOptions = {}): StreamClient {
+  let socket: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let wasConnected = false;
   let currentDelay = reconnectDelayMs;
@@ -46,7 +59,7 @@ export function createStreamClient({
       currentDelay = reconnectDelayMs;
       onConnect();
     };
-    socket.onmessage = (event) => {
+    socket.onmessage = (event: MessageEvent) => {
       try { onEvent(JSON.parse(event.data)); } catch { /* ignore */ }
     };
     socket.onclose = () => {

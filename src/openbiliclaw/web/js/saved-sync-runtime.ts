@@ -25,17 +25,20 @@ export {
   restoreSavedFocus,
 };
 
-export const captureSavedFocus = (root, activeElement = globalThis.document?.activeElement) =>
+export const captureSavedFocus = (
+  root: unknown,
+  activeElement: unknown = globalThis.document?.activeElement,
+) =>
   coreCaptureSavedFocus(root, activeElement);
 
-export const createDialogFocusController = (options = {}) =>
+export const createDialogFocusController = (options: ObscDialogFocusControllerOptions = {}) =>
   coreCreateDialogFocusController({ document: globalThis.document, ...options });
 
-export const createDurableTaskTracker = (options = {}) =>
+export const createDurableTaskTracker = (options: ObscDurableTaskTrackerOptions = {}) =>
   coreCreateDurableTaskTracker({
     now: Date.now,
     isVisible: () => typeof document === "undefined" || !document.hidden,
-    schedule: (run, delay) => setTimeout(run, delay),
-    cancel: (handle) => clearTimeout(handle),
+    schedule: (run: () => void, delay: number) => setTimeout(run, delay),
+    cancel: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     ...options,
   });

@@ -8,7 +8,11 @@
 
 import { login } from "../api.js";
 
-export function renderLoginView($app, { onSuccess } = {}) {
+interface LoginViewOptions {
+  onSuccess?: () => void;
+}
+
+export function renderLoginView($app: Element, { onSuccess }: LoginViewOptions = {}): void {
   $app.innerHTML = "";
 
   const wrap = document.createElement("section");
@@ -51,7 +55,7 @@ export function renderLoginView($app, { onSuccess } = {}) {
 
   let busy = false;
 
-  async function submit(event) {
+  async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (busy) return;
     const password = input.value;
@@ -83,7 +87,7 @@ export function renderLoginView($app, { onSuccess } = {}) {
     }
   }
 
-  function showError(message) {
+  function showError(message: string): void {
     error.textContent = message;
     error.hidden = false;
     input.select();

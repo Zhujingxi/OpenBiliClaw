@@ -28,13 +28,15 @@ export const state = {
   pendingChatContext: null,
 };
 
-const listeners = new Set();
+type StateListener = (current: typeof state, changed: object) => void;
+
+const listeners = new Set<StateListener>();
 
 /**
  * Shallow-merge partial into state and notify listeners.
  * For Set/Array fields, callers must pass a new collection (no in-place mutation).
  */
-export function patchState(partial) {
+export function patchState(partial: object | null | undefined): void {
   if (!partial || typeof partial !== "object") return;
   Object.assign(state, partial);
   for (const fn of listeners) {
@@ -46,7 +48,7 @@ export function patchState(partial) {
  * Subscribe to state changes. Returns an unsubscribe function.
  * @param {(state: object, changed: object) => void} listener
  */
-export function subscribe(listener) {
+export function subscribe(listener: StateListener): () => boolean {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
