@@ -1660,8 +1660,8 @@ class RecommendationEngine:
                 result.get("topic_group", ""), field="topic_group", content_key=content.bvid
             )
             if reason is None or topic_group is None:
-                # relevance_reason feeds user-visible delight copy, so a
-                # non-string here must not be repr'd into the pool.
+                # Keep malformed evaluator output out of persisted diagnostics;
+                # delight display copy is gated separately on pool_expression.
                 content.relevance_score = 0.01
                 content.relevance_reason = "classification_failed"
                 continue
@@ -1684,8 +1684,10 @@ class RecommendationEngine:
 
         Evo already runs the expensive candidate evaluator and the pool-copy
         path writes user-facing ``pool_expression`` into ``content_cache``.
-        Delight reuses ``relevance_score`` for scoring and prefers
-        ``pool_expression`` for card copy instead of paying another LLM pass.
+        Delight starts only after both ``pool_expression`` and
+        ``pool_topic_label`` are ready, then reuses ``relevance_score`` and
+        atomically snapshots that formal copy. The evaluator's diagnostic
+        ``relevance_reason`` is never delight state or display copy.
         """
         from openbiliclaw.recommendation.delight import effective_delight_threshold
 
@@ -1719,13 +1721,26 @@ class RecommendationEngine:
         for candidate in candidates:
             persisted_score = max(0.01, min(1.0, float(candidate.relevance_score or 0.0)))
             if persisted_score < effective_threshold:
-                self._database.update_delight_score(
+                persisted = self._database.update_delight_score(
                     candidate.bvid,
                     delight_score=persisted_score,
                     delight_reason="",
                     delight_hook="",
                 )
-                scored_count += 1
+                if persisted:
+                    scored_count += 1
+                continue
+
+            reason = self._evo_delight_reason(candidate)
+            hook = self._evo_delight_hook(candidate)
+            if not reason or not hook:
+                # The storage query must never return an uncopied row. Keep an
+                # engine-level guard for adapters and read/write races so no
+                # delight score is written before formal copy is ready.
+                logger.warning(
+                    "Delight readiness gate leak: bvid=%s has incomplete formal copy",
+                    candidate.bvid,
+                )
                 continue
 
             # Only nudge candidates that ALREADY qualify: visual never changes
@@ -1734,14 +1749,18 @@ class RecommendationEngine:
             visual_bonus = await self._visual_cover_bonus(candidate, visual_anchor_vecs)
             final_score = min(1.0, persisted_score + visual_bonus)
 
-            reason = self._evo_delight_reason(candidate)
-            hook = self._evo_delight_hook(candidate)
-            self._database.update_delight_score(
+            persisted = self._database.update_delight_score(
                 candidate.bvid,
                 delight_score=final_score,
                 delight_reason=reason,
                 delight_hook=hook,
             )
+            if not persisted:
+                logger.info(
+                    "Delight admission deferred because formal copy changed: %s",
+                    candidate.bvid,
+                )
+                continue
             scored_count += 1
             logger.info(
                 "Delight candidate found from Evo result: %s (score=%.3f, "
@@ -1962,30 +1981,11 @@ class RecommendationEngine:
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
-        reason = (item.pool_expression or "").strip()
-        if reason:
-            return reason
-        reason = (item.relevance_reason or "").strip()
-        if reason:
-            return reason
-        topic = (
-            (item.pool_topic_label or "").strip()
-            or (item.topic_group or "").strip()
-            or (item.topic_key or "").strip()
-        )
-        if topic:
-            return f"这条内容和你当前画像里的「{topic}」方向匹配度很高。"
-        return "Evo 判断这条内容和你当前的兴趣画像匹配度很高。"
+        return (item.pool_expression or "").strip()
 
     @staticmethod
     def _evo_delight_hook(item: DiscoveredContent) -> str:
-        hook = (
-            (item.pool_topic_label or "").strip()
-            or (item.topic_group or "").strip()
-            or (item.topic_key or "").strip()
-            or (item.style_key or "").strip()
-        )
-        return hook or "高契合"
+        return (item.pool_topic_label or "").strip()
 
     async def _precompute_batch(
         self,

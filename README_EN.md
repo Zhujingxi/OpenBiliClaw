@@ -614,6 +614,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 │             → pool accounting · viewed identity    │
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
+│ Delight gate: formal copy/topic ready → score + atomic snapshot → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle hot path: PoolServeSnapshot → isolated serve DB worker → short rec+shown write │
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │

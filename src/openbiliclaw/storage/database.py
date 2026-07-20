@@ -682,18 +682,34 @@ _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = DEFAULT_ADMISSION_MIN_SCORE
 
 
+# A row cannot enter delight scoring until the same user-facing copy gate as
+# the regular feed has completed. Keeping this predicate explicit prevents a
+# relevance evaluator's internal ``reason`` from becoming either delight state
+# or card copy while ``pool_expression`` is still pending.
+def _delight_ready_copy_sql() -> str:
+    return """
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+    """
+
+
 # Rows claimed by the surprise (delight) channel: already delivered as a
-# delight, or currently delight-eligible (the pending-queue predicate). The
-# regular feed's servable gate excludes them so the same content never shows
-# up in both the recommendation list and the surprise tray.
+# delight, or scored above the current threshold with its formal pool copy
+# synchronized into the delight snapshot. Requiring the exact snapshot keeps
+# stale evaluator reasons from claiming rows and preserves the profile-aware
+# scorer decision (for example the conservative 0.80 threshold).
 def _delight_claim_guard_sql() -> str:
     return """
                   AND NOT (
                     COALESCE(delight_notified, 0) = 1
                     OR (
                       COALESCE(delight_score, 0.0) >= ?
-                      AND COALESCE(delight_reason, '') != ''
-                      AND COALESCE(delight_hook, '') != ''
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+                      AND TRIM(COALESCE(delight_reason, '')) =
+                          TRIM(COALESCE(pool_expression, ''))
+                      AND TRIM(COALESCE(delight_hook, '')) =
+                          TRIM(COALESCE(pool_topic_label, ''))
                     )
                   )
 """
@@ -12312,12 +12328,13 @@ class Database:
         floor = min(1.0, max(0.0, floor))
 
         cursor = conn.execute(
-            """
+            f"""
             SELECT COALESCE(delight_score, 0.0) AS score
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
               AND COALESCE(feedback_type, '') != 'dislike'
               AND COALESCE(delight_score, 0.0) > 0.0
+              {_delight_ready_copy_sql()}
             ORDER BY score DESC
             """
         )
@@ -12359,6 +12376,12 @@ class Database:
     ) -> list[dict[str, Any]]:
         """Return up to ``limit`` un-notified delight candidates ordered by score.
 
+        Queue readiness is stricter than merely having a score and arbitrary
+        non-empty metadata: ``pool_expression`` / ``pool_topic_label`` must be
+        ready, and the persisted delight copy must be their synchronized
+        snapshot.  This keeps evaluator-only ``relevance_reason`` text off all
+        delight API and runtime-stream surfaces.
+
         Restricts to ``pool_status IN ('fresh', 'shown')`` —  ``suppressed``
         items have been trimmed out of the active pool by topic-group cap
         or source-share quota and shouldn't reappear as delights. Without
@@ -12388,8 +12411,11 @@ class Database:
             WHERE COALESCE(delight_score, 0.0) >= ?
               AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
-              AND COALESCE(delight_reason, '') != ''
-              AND COALESCE(delight_hook, '') != ''
+              {_delight_ready_copy_sql()}
+              AND TRIM(COALESCE(delight_reason, '')) =
+                  TRIM(COALESCE(pool_expression, ''))
+              AND TRIM(COALESCE(delight_hook, '')) =
+                  TRIM(COALESCE(pool_topic_label, ''))
               AND {feedback_clause}
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
             ORDER BY delight_score DESC, relevance_score DESC, discovered_at DESC
@@ -12418,25 +12444,52 @@ class Database:
         delight_score: float,
         delight_reason: str,
         delight_hook: str = "",
-    ) -> None:
-        """Persist the computed delight score and explanation for a pool item."""
-        self._execute_write(
+    ) -> bool:
+        """Persist delight state only after formal recommendation copy is ready.
+
+        Non-empty display metadata must be the exact current
+        ``pool_expression`` / ``pool_topic_label`` snapshot. The conditional
+        write is the durable admission boundary: an evaluator reason or an
+        uncopied row cannot become delight state even if an upstream caller
+        regresses.
+        """
+        reason = str(delight_reason or "").strip()
+        hook = str(delight_hook or "").strip()
+        if bool(reason) != bool(hook):
+            logger.warning("Refusing partial delight copy for %s", bvid)
+            return False
+
+        snapshot_guard = ""
+        params: tuple[Any, ...]
+        if reason:
+            snapshot_guard = """
+              AND TRIM(COALESCE(pool_expression, '')) = ?
+              AND TRIM(COALESCE(pool_topic_label, '')) = ?
             """
+            params = (delight_score, reason, hook, bvid, reason, hook)
+        else:
+            params = (delight_score, reason, hook, bvid)
+
+        cursor = self._execute_write(
+            f"""
             UPDATE content_cache
             SET delight_score = ?,
                 delight_reason = ?,
                 delight_hook = ?
             WHERE bvid = ?
+              {_delight_ready_copy_sql()}
+              {snapshot_guard}
             """,
-            (delight_score, delight_reason, delight_hook, bvid),
+            params,
         )
+        return cursor.rowcount > 0
 
     def count_delight_candidates(
         self,
         *,
         min_delight_score: float = 0.85,
     ) -> int:
-        """Return the number of un-notified delight candidates."""
+        """Return the number of copy-ready, un-notified delight candidates."""
         admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
             f"""
@@ -12445,8 +12498,11 @@ class Database:
             WHERE COALESCE(delight_score, 0.0) >= ?
               AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
-              AND COALESCE(delight_reason, '') != ''
-              AND COALESCE(delight_hook, '') != ''
+              {_delight_ready_copy_sql()}
+              AND TRIM(COALESCE(delight_reason, '')) =
+                  TRIM(COALESCE(pool_expression, ''))
+              AND TRIM(COALESCE(delight_hook, '')) =
+                  TRIM(COALESCE(pool_topic_label, ''))
               AND COALESCE(feedback_type, '') = ''
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
             """,
@@ -12463,13 +12519,15 @@ class Database:
         min_relevance_score: float = 0.55,
         xhs_self_nickname: str = "",
     ) -> list[dict[str, Any]]:
-        """Return pool candidates that still need delight backfill or copy.
+        """Return copy-ready pool candidates that still need delight synchronization.
 
         Two-stage retrieval: ``relevance_score >= min_relevance_score``
         is the cheap pre-filter (the discovery LLM already judged user-
         content fit during ``evaluate_batch``), then the caller reuses that
         Evo relevance result to populate delight fields only on this
-        shortlist.
+        shortlist. Rows with unfinished ``pool_expression`` /
+        ``pool_topic_label`` stay exclusively in the copy backlog and are not
+        assigned any delight state.
 
         Default 0.55 is calibrated to the discovery rubric:
           0.6+ strong fit, 0.5-0.6 moderate, <0.5 weak fit.
@@ -12489,6 +12547,7 @@ class Database:
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(delight_score, 0.0) = 0.0
                   AND COALESCE(relevance_score, 0.0) >= ?
+                  {_delight_ready_copy_sql()}
                   {guard_sql}
                 ORDER BY relevance_score DESC, discovered_at DESC
                 LIMIT ?
@@ -12507,16 +12566,28 @@ class Database:
                 WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(relevance_score, 0.0) >= ?
+                  {_delight_ready_copy_sql()}
                   AND (
                     COALESCE(delight_score, 0.0) = 0.0
                     OR ABS(
                       COALESCE(delight_score, 0.0) - COALESCE(relevance_score, 0.0)
                     ) > ?
                     OR (
-                      COALESCE(delight_score, 0.0) >= ?
+                      COALESCE(delight_score, 0.0) < ?
                       AND (
-                        COALESCE(delight_reason, '') = ''
-                        OR COALESCE(delight_hook, '') = ''
+                        TRIM(COALESCE(delight_reason, '')) != ''
+                        OR TRIM(COALESCE(delight_hook, '')) != ''
+                      )
+                    )
+                    OR (
+                      COALESCE(delight_score, 0.0) >= ?
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+                      AND (
+                        TRIM(COALESCE(delight_reason, '')) !=
+                            TRIM(COALESCE(pool_expression, ''))
+                        OR TRIM(COALESCE(delight_hook, '')) !=
+                            TRIM(COALESCE(pool_topic_label, ''))
                       )
                     )
                   )
@@ -12530,6 +12601,7 @@ class Database:
                 (
                     effective_min_relevance_score,
                     _DELIGHT_SCORE_SYNC_EPSILON,
+                    min_delight_score_for_reason,
                     min_delight_score_for_reason,
                     *guard_params,
                     limit,

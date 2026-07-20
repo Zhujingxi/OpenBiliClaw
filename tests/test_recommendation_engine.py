@@ -2983,6 +2983,46 @@ async def test_expression_malformed_retry_is_bounded_to_seven_batch_calls() -> N
 
 
 @pytest.mark.asyncio
+async def test_expression_precompute_accepts_pretty_printed_singleton_object() -> None:
+    class _PrettySingletonLLM:
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "bvid": "BV_SINGLE_VALID",
+                        "expression": "这条会把浏览器自动化的 token 成本拆给你看。",
+                        "topic_label": "Agent 浏览器调优",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    item = DiscoveredContent(
+        bvid="BV_SINGLE_VALID",
+        title="浏览器自动化工具",
+        style_key="deep_focus",
+        topic_group="人工智能",
+        relevance_score=0.92,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, [item], precomputed=False)
+        engine = RecommendationEngine(llm=_PrettySingletonLLM(), database=db)
+
+        completed = await engine._precompute_batch_with_split_retry([item], _build_profile())
+
+        row = next(row for row in db.get_cached_content(limit=10) if row["bvid"] == item.bvid)
+    assert completed == 1
+    assert row["pool_expression"] == "这条会把浏览器自动化的 token 成本拆给你看。"
+    assert row["pool_topic_label"] == "Agent 浏览器调优"
+
+
+@pytest.mark.asyncio
 async def test_expression_malformed_singleton_stays_pending_without_single_fallback() -> None:
     class _MalformedLLM:
         def __init__(self) -> None:
@@ -3720,6 +3760,138 @@ async def test_precompute_delight_scores_reuses_evo_result_without_llm_call() ->
 
 
 @pytest.mark.asyncio
+async def test_precompute_delight_waits_for_pool_copy_and_repairs_legacy_eval_reason() -> None:
+    """Delight admission starts only after formal recommendation copy is ready."""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "BV1COPYRACE",
+            title="先完成评估、推荐词仍在生成",
+            source="search",
+            relevance_score=0.91,
+            relevance_reason="评估器判断：该内容与用户近期兴趣高度相关。",
+            style_key="deep_focus",
+            topic_group="复杂系统",
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+
+        assert scored == 0
+        row = db.conn.execute(
+            """
+            SELECT delight_score, delight_reason, delight_hook
+            FROM content_cache
+            WHERE bvid = 'BV1COPYRACE'
+            """
+        ).fetchone()
+        assert row is not None
+        assert float(row["delight_score"]) == 0.0
+        assert row["delight_reason"] == ""
+        assert row["delight_hook"] == ""
+        assert db.get_delight_candidate(min_delight_score=0.70) is None
+        assert "BV1COPYRACE" not in {
+            item["bvid"]
+            for item in db.get_pool_candidates_needing_delight_score(
+                limit=10,
+                min_delight_score_for_reason=0.75,
+            )
+        }
+        assert "BV1COPYRACE" in {
+            item["bvid"] for item in db.get_pool_candidates_needing_copy(limit=10)
+        }
+
+        # The durable writer also rejects the old evaluator-reason path.
+        assert (
+            db.update_delight_score(
+                "BV1COPYRACE",
+                delight_score=0.91,
+                delight_reason="评估器判断：该内容与用户近期兴趣高度相关。",
+                delight_hook="复杂系统",
+            )
+            is False
+        )
+
+        # Seed one legacy row directly to exercise upgrade repair. It remains
+        # outside delight scoring while copy is absent.
+        db.conn.execute(
+            """
+            UPDATE content_cache
+            SET delight_score = 0.91,
+                delight_reason = '评估器判断：该内容与用户近期兴趣高度相关。',
+                delight_hook = '复杂系统'
+            WHERE bvid = 'BV1COPYRACE'
+            """
+        )
+        db.conn.commit()
+        assert await engine.precompute_delight_scores(profile=_build_profile(), limit=10) == 0
+        assert db.get_delight_candidate(min_delight_score=0.70) is None
+
+        db.update_pool_copy(
+            "BV1COPYRACE",
+            expression="这条会接住你最近想拆清复杂系统的那股劲。",
+            topic_label="系统拆解",
+        )
+        assert db.get_delight_candidate(min_delight_score=0.70) is None
+
+        repaired = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+
+        assert repaired == 1
+        candidate = db.get_delight_candidate(min_delight_score=0.70)
+        assert candidate is not None
+        assert candidate["delight_reason"] == "这条会接住你最近想拆清复杂系统的那股劲。"
+        assert candidate["delight_hook"] == "系统拆解"
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_preserves_conservative_profile_threshold_in_feed() -> None:
+    """Raising the profile floor to 0.80 revokes an old 0.75-floor snapshot."""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1CONSERVATIVE",
+            title="正式推荐词已完成但没达到保守惊喜门槛",
+            source="search",
+            relevance_score=0.77,
+            pool_expression="这条可以放在正常推荐里慢慢看。",
+            pool_topic_label="正常推荐",
+            style_key="deep_focus",
+            topic_group="复杂系统",
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        profile = _build_profile()
+        initially_scored = await engine.precompute_delight_scores(profile=profile, limit=10)
+
+        assert initially_scored == 1
+        assert db.get_delight_candidate(min_delight_score=0.75) is not None
+        assert db.get_pool_candidates(limit=10, max_per_topic_group=0) == []
+
+        profile.preferences.exploration_openness = 0.2
+        rescored = await engine.precompute_delight_scores(profile=profile, limit=10)
+
+        assert rescored == 1
+        assert db.get_delight_candidate(min_delight_score=0.80) is None
+        snapshot = db.conn.execute(
+            """
+            SELECT delight_reason, delight_hook
+            FROM content_cache
+            WHERE bvid = 'BV1CONSERVATIVE'
+            """
+        ).fetchone()
+        assert snapshot is not None
+        assert snapshot["delight_reason"] == ""
+        assert snapshot["delight_hook"] == ""
+        rows = db.get_pool_candidates(limit=10, max_per_topic_group=0)
+        assert [row["bvid"] for row in rows] == ["BV1CONSERVATIVE"]
+
+
+@pytest.mark.asyncio
 async def test_precompute_delight_scores_adds_bounded_visual_cover_bonus() -> None:
     """When image embedding is active, an on-style cover lifts delight_score by
     a small bounded bonus — reusing the warmed URL-keyed vector (no re-fetch).
@@ -3757,6 +3929,8 @@ async def test_precompute_delight_scores_adds_bounded_visual_cover_bonus() -> No
             title="纪录片：一件瓷器的百年旅程",
             source="search",
             relevance_score=0.91,
+            pool_expression="这条会沿着一件瓷器，把百年工艺脉络慢慢拆给你看。",
+            pool_topic_label="工艺脉络",
             cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
         )
         emb = _ImageEmb()
@@ -3805,6 +3979,8 @@ async def test_precompute_delight_scores_no_visual_bonus_when_inactive() -> None
             title="纪录片：一件瓷器的百年旅程",
             source="search",
             relevance_score=0.91,
+            pool_expression="这条会沿着一件瓷器，把百年工艺脉络慢慢拆给你看。",
+            pool_topic_label="工艺脉络",
             cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
         )
         engine = RecommendationEngine(

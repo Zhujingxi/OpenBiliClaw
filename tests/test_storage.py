@@ -1982,11 +1982,12 @@ class TestDatabase:
         """Surprise-channel rows never enter the regular feed.
 
         A row is delight-claimed when it was delivered as a surprise
-        (delight_notified=1) or is currently queue-eligible (score above
-        threshold with reason + hook). Sub-threshold delight scores
-        without metadata keep the row servable. count_pool_candidates
-        must agree with get_pool_candidates so the "还有 N 条" display
-        never overstates what serve() can load.
+        (delight_notified=1) or has a score above the threshold with its exact
+        formal-copy snapshot ready. An unsynchronized evaluator reason must
+        not claim the row, and an uncopied high-score row remains available to
+        the expression-copy backlog. Sub-threshold delight scores keep the row
+        servable. count_pool_candidates must agree with get_pool_candidates so
+        the "还有 N 条" display never overstates what serve() can load.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -2028,19 +2029,28 @@ class TestDatabase:
                 relevance_score=0.93,
                 topic_group="组D",
             )
+            _seed_visible(
+                db,
+                "BV1UNSYNC",
+                title="惊喜快照尚未同步",
+                up_name="UPE",
+                source="search",
+                relevance_score=0.92,
+                topic_group="组E",
+            )
             # Currently delight-eligible: in the surprise queue right now.
             db.update_delight_score(
                 "BV1CLAIM",
                 delight_score=0.85,
-                delight_reason="跨域呼应",
-                delight_hook="惊喜钩子",
+                delight_reason="测试推荐文案",
+                delight_hook="测试主题",
             )
             # Delivered as a surprise then read — must stay out of the feed.
             db.update_delight_score(
                 "BV1READ",
                 delight_score=0.9,
-                delight_reason="深度共鸣",
-                delight_hook="惊喜钩子",
+                delight_reason="测试推荐文案",
+                delight_hook="测试主题",
             )
             db.mark_delight_notified("BV1READ")
             # Scored but below threshold and without metadata: not claimed.
@@ -2050,11 +2060,27 @@ class TestDatabase:
                 delight_reason="",
                 delight_hook="",
             )
+            # Above the default score floor, but a stale evaluator snapshot is
+            # not proof that the profile-aware scorer admitted it to delight.
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score = 0.85,
+                    delight_reason = '评估器内部判断',
+                    delight_hook = '高契合'
+                WHERE bvid = 'BV1UNSYNC'
+                """
+            )
+            db.conn.commit()
 
             items = db.get_pool_candidates(limit=10)
 
-            assert {item["bvid"] for item in items} == {"BV1NORMAL", "BV1LOW"}
-            assert db.count_pool_candidates() == 2
+            assert {item["bvid"] for item in items} == {
+                "BV1NORMAL",
+                "BV1LOW",
+                "BV1UNSYNC",
+            }
+            assert db.count_pool_candidates() == 3
 
             db.close()
 
@@ -2699,13 +2725,17 @@ class TestDatabase:
             readiness = db.count_pool_readiness(xhs_self_nickname="Me")
 
             assert readiness["available"] == 1
-            assert readiness["admitted_pending_copy"] == 1
+            # BVCOPY and the legacy BVDELIGHT row both still need formal
+            # recommendation copy. A high delight score plus arbitrary
+            # evaluator reason/hook must not claim the row before that copy
+            # exists, otherwise it can never reach the copy backlog.
+            assert readiness["admitted_pending_copy"] == 2
             assert readiness["evaluated_pending"] == 1
             assert readiness["pending_eval"] == 2
             assert [
                 row["bvid"]
                 for row in db.get_pool_candidates_needing_copy(limit=20, xhs_self_nickname="Me")
-            ] == ["BVCOPY"]
+            ] == ["BVCOPY", "BVDELIGHT"]
             db.close()
 
     def test_count_pool_readiness_includes_pending_discovery_candidates(self) -> None:

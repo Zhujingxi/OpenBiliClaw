@@ -617,6 +617,7 @@ background ─ background admission (default 3) ──────┘
 │             → pool 统计 · 已看身份                     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
+│ 惊喜就绪门：正式推荐词/主题就绪 → 打分并原子快照 → 四端 │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：PoolServeSnapshot → 独立 Serve DB worker → recommendation+shown 短事务 │
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │

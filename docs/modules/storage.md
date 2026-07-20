@@ -35,7 +35,7 @@
 | keyword interest label migration | ✅ | `migrate_keyword_interest_labels()` 根据画像整理产生的重命名 mapping 迁移 `discovery_keywords.source_interest` 和 `discovery_interest_selection_ledger.source_interest`，降低画像标签漂移造成的 coverage / selection cooldown 死桶。 |
 | 最近已看过滤 | ✅ | 可换、raw 和评估路径复用 `source_platform:content_id` 与旧 BVID key，避免已看内容重复入池。 |
 | 统一 admission 分数门 | ✅ | 推荐池读取、raw/headroom 统计、topic/franchise 分布、suppressed 复活、delight 候选和历史推荐读取都会应用统一最低分；初始化会清理旧低分 `content_cache` / `recommendations` 脏数据。 |
-| 惊喜通道占位排除 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` 统一排除被惊喜通道认领的行（`delight_notified=1`，或 delight 分数达动态阈值且 reason/hook 非空即当前惊喜队列候选），普通推荐与惊喜推荐不再重复出同一条内容；`dynamic_delight_threshold()` 以 `0.70` 为默认底线，候选池样本不少于 20 条时抬高到正式池 Top 10% 分数边界；delight backfill 会重新领取旧 `delight_score` 与当前 `relevance_score` 不一致的行，包括 `shown` 历史行。 |
+| 惊喜文案就绪门与通道占位排除 | ✅ | `get_pool_candidates_needing_delight_score()` 只领取 `pool_expression / pool_topic_label` 已同时生成的行；`update_delight_score()` 再以条件写入拒绝未就绪或非正式文案快照，因此推荐词生成前不会形成任何 delight 状态。`get_delight_candidates()` / `count_delight_candidates()` 继续只返回精确同步快照，evaluator 的内部 `relevance_reason` 不能进入惊喜状态或展示出口。`get_pool_candidates()` / `count_pool_candidates()` 统一排除已送达惊喜，或 delight 分数达动态阈值且正式文案快照已同步的行。动态阈值默认底线为 `0.75`，copy-ready 样本不少于 150 条且总体标准差至少 `0.08` 时才按 Top 10% 边界抬高；backfill 会修复旧版 reason/hook 快照。 |
 | serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
@@ -391,6 +391,25 @@ raw_by_source = db.count_pool_raw_material_by_source()
 - `raw` 包含正式池 fresh raw material 和 `discovery_candidates` 中尚未缓存的候选。
 - `pending` 独立计算，不用 `raw - available` 近似，避免 recently viewed 内容被误算为待整理。
 - `pending_eval` 统计 `pending_eval + evaluating`；`evaluated_pending` 统计已评估但尚未 admission 到 `content_cache` 的候选。
+
+### Delight Readiness
+
+```python
+rows = db.get_delight_candidates(min_delight_score=0.75, limit=20)
+count = db.count_delight_candidates(min_delight_score=0.75)
+backlog = db.get_pool_candidates_needing_delight_score(
+    limit=30,
+    min_delight_score_for_reason=0.75,
+)
+```
+
+行为说明：
+
+- `get_delight_candidates()` 与 `count_delight_candidates()` 使用相同的 copy-ready 条件：`pool_expression / pool_topic_label` 必须非空，且 `delight_reason / delight_hook` 必须是它们的同步快照。
+- evaluator 的 `relevance_reason` 只是评估诊断字段；即使旧数据已把它写进 `delight_reason`，快照不一致的行也不会被任何 pending/API/runtime 出口读取。
+- `get_pool_candidates_needing_delight_score()` 只领取正式文案已就绪的行；未生成推荐词的内容不会开始 delight 打分。`update_delight_score()` 返回是否真正写入，并在 SQL 层要求文案非空；带 `reason/hook` 的写入还必须与当前正式快照逐项一致，从查询到写入之间文案发生变化时会整体拒绝。profile floor 或动态阈值升高时，copy-ready 且已低于新门槛、仍带旧 `reason/hook` 的行会被领取并清空。
+- 动态阈值样本只统计 copy-ready 的已打分行，旧版在推荐词生成前留下的分数不再影响 Top 10% 校准。
+- 普通推荐的 delight claim guard 以“已送达，或达阈值且正式文案快照已精确同步”为准。任意非空 evaluator reason 不能占位，尚未生成文案的行仍留给 expression-copy backlog，copy-ready 但尚未同步的行也保留给 profile-aware scorer 作最终门槛判断。
 
 ### Atomic Pool Maintenance
 

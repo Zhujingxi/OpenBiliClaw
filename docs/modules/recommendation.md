@@ -46,7 +46,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确认避雷 / 搁置避雷 / 不是雷点 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
 | M128 CLI delight + probe | ✅ | `openbiliclaw delight` 手动查看惊喜推荐候选；`openbiliclaw probe` 手动列出猜测方向并交互确认/拒绝 |
 | 封面视觉加成（可选，需多模态 embedding） | ✅ | `[llm.embedding].multimodal_enabled` + 支持图像的 embedding 模型开启时，「封面↔画像兴趣锚点」跨模态余弦映射为**有界、只加不减**的加成（`_VISUAL_COVER_BONUS_MAX=0.05`），**两条推荐路径一致消费**:①惊喜推荐 `precompute_delight_scores()` 对已达阈值候选加到 `delight_score`（后台，冷未命中可现抓）；②正常推荐 `serve()` 排序把加成并入 relevance 项(`_ranking_key`/`score_override`/MMR `_relevance` 同步)——`serve()` 是延迟敏感热路径,**只读预热缓存、绝不现抓封面**(`allow_fetch=False`),warm 未命中就当轮不加成。兴趣锚点每次只 embed 一次。默认关闭时两条路径的打分/排序都与旧版**逐字节一致**(加成恒 0、不改变谁入选)。**旧内容处理**:开启多模态时,入池早于开关的老候选没有封面向量——`prewarm_pool_covers`(挂在 `prewarm_pool_mmr_embeddings` 上,refresh+启动触发)按池窗口回填封面向量(幂等、只补未热的);在回填完成前,`serve()` 有**公平门**——当批次里已热封面占比 < `_VISUAL_COVER_MIN_COVERAGE`(0.6)时整批不加成,避免"新内容仅因已预热而系统性压过旧内容"。delight 侧因逐条冷补不受影响。跨模态余弦 floor/ceil 为**保守未标定**初值，换真实多模态模型后按日志观测分布重标（见代码 `_VISUAL_COVER_*` 注释、CLAUDE.md 铁律 3） |
-| M129 惊喜候选自动预热与回填 | ✅ | delight 运行时统一使用动态阈值：默认底线 `0.75`，保守用户底线 `0.80`，正式候选池至少有 150 条已打 `delight_score` 且分布足够分散（总体标准差 ≥ `0.08`）时，才按 delight 分数池内 Top 10% 边界抬高阈值；`precompute_delight_scores()` 直接复用 Evo 写入的 `relevance_score` 生成 `delight_score`，并优先复用面向用户的 `pool_expression` 作为 `delight_reason`（缺失时 fallback 到 `relevance_reason/topic`），不再额外调用单独的 Delight LLM 评分或文案任务；后台启动会自动补齐高分但缺 `reason/hook` 的候选，`suppressed` 高分库存也允许作为惊喜推荐入口 |
+| M129 惊喜候选自动预热与回填 | ✅ | delight 运行时统一使用动态阈值：默认底线 `0.75`，保守用户底线 `0.80`，copy-ready 候选池至少有 150 条已打 `delight_score` 且分布足够分散（总体标准差 ≥ `0.08`）时，才按 delight 分数池内 Top 10% 边界抬高阈值；`precompute_delight_scores()` 只读取 `pool_expression / pool_topic_label` 已同时生成的候选，再复用 Evo 的 `relevance_score` 生成 `delight_score`，不再额外调用 Delight LLM。条件写入会把正式文案原子同步为 `delight_reason / delight_hook`，未生成推荐词的内容不会拥有任何 delight 状态；evaluator 的 `relevance_reason` 或 topic 不能作兜底。后台会补齐新候选并修复旧版提前写入的 evaluator reason；`suppressed` 行可参与 copy-ready 回填，但不会作为 pending delight 发布 |
 | 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`；移动 Web、桌面 Web 与插件统一保留结果提示和完整动作组，只把 like 标为 `aria-pressed="true"` 并禁用重复提交，其它动作继续可用 |
 | 惊喜推送不打断输入（v0.3.157+） | ✅ | 桌面 Web：用户在惊喜卡聊天框互动中（composer 展开 / 输入框有焦点 / 有未发送草稿）时，`delight.candidate` 后台推送只静默入队并更新计数、不切当前卡（此前会 `setActiveDelight` 收起输入框，随后的发送还会把反馈串到换上来的新卡上）；`delight.refreshed` 队列刷新同样只同步数据，当前卡即使已被后端消费也保留引用，发送始终落在用户正对着的卡上；空闲时保持自动切到最新候选的原行为。无惊喜候选时 `renderDelightCover(null)` 只清空旧封面和背景后返回，不读取空候选或打断首页 hydration；有效但无封面的候选仍显示来源平台徽章。移动 Web：输入框聚焦时跳过推送触发的 DOM 重建（textarea 失焦 = 手机键盘收起），草稿本就实时存 state |
 | issue #79 桌面惊喜文字卡收尾 | ✅ | 桌面 Web 惊喜卡保留 `body_text` 并显示最多 5 行正文预览，仅在实际溢出时提供可访问的展开/收起；无封面或封面加载失败时，左侧媒体区以正文和来源徽章渲染毛玻璃文字卡。候选切换与空队列重置折叠态，不改变标题兜底、互动指标、聊天输入保护和反馈语义。 |
@@ -74,7 +74,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | v0.3.91 新兴趣放大保护 | ✅ | 新确认兴趣会生成 amplification key，`PoolCurator` 用最近 24h 推荐历史计算滚动占比，超过 25% 的方向会被降权；最终批量选择还会硬限制同一新方向最多 `max(1, floor(limit * 0.25))` 条，避免刚确认的兴趣短期刷屏 |
 | v0.3.91 推荐读取索引 | ✅ | `recommendations(created_at, id)`、`recommendations(bvid)`、`events(event_type, id)` 与 `content_cache(content_id)` 在数据库初始化时自动创建索引；推荐列表 / activity feed、候选池 `NOT EXISTS` 历史排除和最近已看读取不再退化为全表扫描。 |
 | v0.3.x 统一 admission 分数防线 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` / `/api/recommendations` 历史读取都会过滤低于 `[discovery].admission_min_score` 的内容；旧低分推荐会标记为 `suppressed_low_score`，防止 observed / 插件来源脏数据继续展示。 |
-| v0.3.74 recommendation JSON 容错统一 | ✅ | `RecommendationEngine` 的内容分类、单条表达和批量表达解析都改用 `llm.json_utils`。MiMo / OpenAI-compatible provider 返回 object wrapper、fenced JSON、JSONL、schema echo 或 malformed `{ [ ... ] }` 时会优先提取满足字段 predicate 的真实结果；Delight 预计算当前复用 Evo 结果，不再走独立 batch scorer |
+| v0.3.74 recommendation JSON 容错统一 | ✅ | `RecommendationEngine` 的内容分类、单条表达和批量表达解析都改用 `llm.json_utils`。MiMo / OpenAI-compatible provider 返回 object wrapper、fenced JSON、JSONL、schema echo、pretty-printed singleton object 或 malformed `{ [ ... ] }` 时会优先提取满足字段 predicate 的真实结果；单候选推荐词请求不再因模型返回合法多行 root object 而误判 `ExpressionBatchMalformed`。Delight 预计算当前复用 Evo 结果，不再走独立 batch scorer |
 | v0.3.81 批量结果按内容 ID 绑定 | ✅ | 批量推荐文案和源无关内容分类的 prompt 都带 `bvid/content_id`，解析时优先按返回 ID 写回。模型乱序、漏项或只返回部分条目时不再按数组下标把原因写到错误视频；无 ID 且数量不完整的文案批次会降级单条生成，分类批次会标记失败避免错写 |
 | v0.3.x 批量文案限流保护 | ✅ | `_precompute_batch()` 遇到 LLM provider rate limit / cooldown / quota 时不再进入逐条 `_try_generate_expression()` fallback；本轮预生成计为 0，保留空 `pool_expression/topic_label` 等后续调度重试 |
 | v0.3.x 批量文案错位 / 重复防护 | ✅ | 强化 v0.3.81：**多条**候选缺 `bvid/content_id` 时（不止数量不完整）一律降级逐条生成——位置匹配只对无歧义的单条批次保留，杜绝弱模型乱序导致的文案张冠李戴；新增去重闸，同一句文案被分配给多个不同 bvid 时整组丢弃（宁可不发也不发重复），根治本地小模型上下文截断时「每条理由都一样且对不上视频」 |
@@ -121,7 +121,7 @@ items = await engine.generate_recommendations(
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
 - 每条推荐都会调用 `generate_expression()` 生成 `expression` 和 `topic_label`
 - 推荐表达会先从当前画像、偏好摘要、`disliked_topics` 和近期反馈推断 `ToneProfile`，再生成更贴近用户口味且避开长期雷点的“老B友”式文案；内容 `style_key` 只用于决定从人物、场景、信息点或情绪等角度切入，不再把用户语气动态调轻
-- 推荐表达和推荐池分类 prompt 自身已经包含完整结构化 profile；通过 `LLMService` 执行时会关闭额外 core memory 注入，避免同一画像在请求里出现两次；画像输入按 core / life / interests / style / recent 分层渲染，稳定层在前，便于 provider prompt-cache 复用更长前缀。Delight score 预计算不再单独调用 LLM，直接复用 Evo 的评分，并优先复用 `pool_expression` 作为卡片理由
+- 推荐表达和推荐池分类 prompt 自身已经包含完整结构化 profile；通过 `LLMService` 执行时会关闭额外 core memory 注入，避免同一画像在请求里出现两次；画像输入按 core / life / interests / style / recent 分层渲染，稳定层在前，便于 provider prompt-cache 复用更长前缀。Delight score 预计算不再单独调用 LLM，直接复用 Evo 的评分；卡片理由必须等待 `pool_expression / pool_topic_label` 完整并同步，绝不展示 evaluator 的内部判断 reason
 - CLI 展示后会把对应推荐记录标记为 `presented = 1`
 - `feedback` 命令会把 `feedback_type` / `feedback_note` / `feedback_at` 写回推荐记录
 - 多样性回填会分阶段放宽 `style`、`source`、`topic` 约束，只有候选真的不足时才彻底兜底补满
@@ -208,7 +208,7 @@ count = await engine.precompute_pool_copy(
 
 - 从 discovery pool 中筛出已具备 `style_key / topic_group`、但还缺 `pool_expression / pool_topic_label` 的 fresh 候选
 - 低并发批量调用 `generate_expression()` 的 LLM 主链生成朋友式推荐文案；默认 batch_size=30，默认 2 个 worker 并发处理 batch，避免大 backlog 一次性创建过多 LLM 任务
-- 解析批量 LLM 响应时通过共享 JSON helper 接受 `results/items/data/output` 等 wrapper、fenced JSON、JSONL 和回显 schema 后的最终结果，但仍要求每条结果具备推荐表达所需字段
+- 解析批量 LLM 响应时通过共享 JSON helper 接受 `results/items/data/output` 等 wrapper、fenced JSON、JSONL、pretty-printed singleton object 和回显 schema 后的最终结果，但仍要求每条结果具备推荐表达所需字段
 - 批量 prompt 会把每条候选的 `bvid/content_id` 交给 LLM；如果响应带回 ID，写库时按 ID 匹配，不信任数组顺序。响应没有 ID 且数量不完整时会降级到单条生成，避免把后续视频的文案整体前移
 - 批量调用若命中 provider 限流 / cooldown / quota，不会再逐条调用 LLM；这些候选继续保持文案空值，等待下一轮后台预生成
 - 批量响应解析失败、缺少可验证 ID 或产生跨视频重复文案时，后台 drain 会在当前 worker 内递归拆半重试；只有拆到单条仍失败时才走单条表达兜底，因此默认 30 条 batch 不会因为一次弱模型输出异常直接放大成 30 个并发请求
@@ -217,7 +217,7 @@ count = await engine.precompute_pool_copy(
 - 成功后把结果回写到 `content_cache.pool_expression / content_cache.pool_topic_label`
 - 生成失败时不会写 profile 级统一 fallback，而是保留空值，交给 popup 隐藏
 - runtime refresh 会在补货后自动触发这一步，避免 popup 的“换一批 / 继续追加”现场等待 LLM
-- 即使当前没有普通推荐文案要补，runtime 启动时也会走一次 `limit=0` 的预热路径，把高分 delight backlog 补成可直接推送的候选
+- 即使当前没有普通推荐文案要补，runtime 启动时也会走一次 `limit=0` 的预热路径：delight scorer 只领取正式推荐文案已就绪的候选，并把达到门槛的行同步成可推送候选
 - v0.3.124+（lever 2b）：文案生成逻辑抽到 copy-only 的 `_drain_expression_copy()`（不 spawn classify / delight，避免递归）；`precompute_pool_copy` 复用它（对外行为不变），而 `_safe_classify_pool_backlog`（detached classify 包装）在 classify 出新条目后会**当场 await 一次 `_drain_expression_copy`**——刚分类好的候选在同一周期就补上文案、立刻可服务，不必等下一个 60s 刷新 tick；共享 `_expression_lock` 串行化两条路径，杜绝重复花 token
 
 ### RecommendationEngine.precompute_delight_scores
@@ -231,13 +231,14 @@ count = await engine.precompute_delight_scores(
 
 行为说明：
 
-- 对 fresh / suppressed 池子里还没打分的候选补 `delight_score`
+- 只从 fresh / shown / suppressed 池子里领取 `pool_expression / pool_topic_label` 已同时生成、仍需打分或修复快照的候选；推荐词未完成的行继续只属于 expression-copy backlog，`delight_score / reason / hook` 都保持未进入状态
 - 直接复用 Evo 写入的 `relevance_score` 作为 `delight_score`；历史行如果保留了旧版 `delight_score` 标尺，会被重新纳入 backfill 并同步到当前 `relevance_score`
-- 低于当前 delight 阈值的候选只写分数、不写 `reason/hook`，避免下轮重复处理
-- 高于阈值的候选优先用 `pool_expression` 作为卡片展示的 `delight_reason`，没有预生成推荐文案时才 fallback 到 `relevance_reason` / topic 兜底；`delight_hook` 优先用 `pool_topic_label`、`topic_group`、`topic_key` 或 `style_key` 生成
-- 对已经高分但缺 `delight_reason / delight_hook` 的 backlog 候选按同一 Evo 映射补齐文案，而不是永远卡在“只有分数没有解释”
-- 候选出池阈值与运行时 `pending delight` 查询共用同一套口径：先取 profile 默认底线（默认 `0.75`，探索开放度较低时 `0.80`），正式候选池已打 `delight_score` 样本不少于 150 条且总体标准差不低于 `0.08` 时，再用 `max(profile floor, delight_score Top 10% boundary)` 抬高门槛；样本不足、分布过于同质或初始化阶段回退 profile 默认底线
-- `get_pending_delight()` 只会暴露文案已就绪的候选，避免前端收到空 `reason/hook`
+- 正式文案就绪后，低于当前 delight 阈值的候选只写分数、不写 `reason/hook`，避免下轮重复处理
+- 高于阈值时，存储层只接受与当前 `pool_expression / pool_topic_label` 精确一致的 `delight_reason / delight_hook`，并在同一个条件 UPDATE 中写入分数与快照；文案缺失或读取后发生变化时整次晋级失败、留待下轮
+- evaluator 的 `relevance_reason`、`topic_group`、`topic_key` 和 `style_key` 都不能成为惊喜状态或展示兜底；历史行里提前写入的 evaluator reason 或过期文案会在正式文案就绪后因快照不一致被重新领取并修正
+- profile floor 或池内动态阈值升高后，旧分数已低于新门槛但仍带 `reason/hook` 的行也会重新进入 backlog，由 scorer 清空展示快照并释放普通推荐占位
+- 候选出池阈值与运行时 `pending delight` 查询共用同一套口径：先取 profile 默认底线（默认 `0.75`，探索开放度较低时 `0.80`），copy-ready 候选池已打 `delight_score` 样本不少于 150 条且总体标准差不低于 `0.08` 时，再用 `max(profile floor, delight_score Top 10% boundary)` 抬高门槛；未生成推荐词的旧分数不参与校准，样本不足、分布过于同质或初始化阶段回退 profile 默认底线
+- `get_pending_delight()`、pending batch、手动触发、CLI 与候选计数共用同一发布闸门：正式文案两个字段非空，且 `delight_reason / delight_hook` 分别与它们一致；因此既不会收到空字段，也不会收到旧 evaluator reason
 - **与 `DelightScorer` 的关系（读代码前先看这条）**：`recommendation/delight.py` 里的 `DelightScorer`（embedding 多信号打分器）**当前不在生产链路上**——`src/` 内没有任何实例化点，生产代码只从该模块引用 `effective_delight_threshold` / `DEFAULT_DELIGHT_THRESHOLD` 两个阈值工具。线上 `delight_score` 完全由本函数复用 Evo 的 `relevance_score` 产出（为省一次 LLM 调用的有意决策，见函数 docstring）。因此改动 `DelightScorer` 内部信号（quality / novelty / exploration 等）**不会改变任何当前推荐输出**，只有把 scorer 重新接回线上时才会生效；`DelightScorer` 的单测覆盖也只保证该类自身行为，不构成对线上排序的验证。目录评分（`rating_score` / `rating_count` / `source_rank`）实际是经 `discovery/engine.py` 的 `_prompt_visible_content_fields` 在非零时进入 evaluator prompt，由 LLM 在语境中权衡后体现在 `relevance_score` 上——而不是靠打分公式里的常量
 
 > **delight 分的唯一产出路径（v0.3.174+）**：线上 `delight_score` 只由 `precompute_delight_scores()` 复用 Evo 写入的 `relevance_score` 产出——这是为省掉每条候选一次 LLM 调用的有意决策。目录评分类信号（`rating_score` / `rating_count` / `source_rank`）通过 `discovery.engine._prompt_visible_content_fields` 在非零时进入共享 evaluator prompt，由 LLM 在语境中权衡，**而不是**在推荐层再算一遍加权公式。`recommendation/delight.py` 因此只保留阈值口径（`DEFAULT_DELIGHT_THRESHOLD` / `CONSERVATIVE_DELIGHT_THRESHOLD` / `effective_delight_threshold()`）。该模块历史上还有一个 embedding 多信号打分器 `DelightScorer`（deep_need / insight / likes / novelty / quality / exploration 加权），它从未接进上述链路、生产零调用点，已随本版删除；若将来 delight 真需要独立打分，应接进 `precompute_delight_scores()`，不要再起一条平行打分路径。
@@ -358,7 +359,7 @@ Content-Type: application/json
 
 因此本地 like 成功、`pending-batch` 重灌返回 `state="liked"`，以及 `delight.liked` 实时事件都会收敛到同一 UI：状态文案保留，like 仅阻止重复提交，「看看 / 稍后再看 / 收藏 / 不感兴趣 / 聊一聊」仍可继续操作；like POST 失败则恢复未选中状态供重试。
 
-惊喜与普通推荐互斥：被惊喜通道认领的内容（已作为惊喜送达过，或当前满足惊喜队列条件——delight 分数达动态阈值且 reason/hook 非空）会被 `get_pool_candidates` / `count_pool_candidates` 的 servable 闸门排除，普通推荐 serve 与「还有 N 条」计数都不会再出同一条内容。
+惊喜与普通推荐互斥：被惊喜通道认领的内容（已作为惊喜送达过，或 delight 分数达动态阈值、正式 `pool_expression / pool_topic_label` 已就绪，且 `delight_reason / delight_hook` 已同步为它们的精确快照）会被 `get_pool_candidates` / `count_pool_candidates` 的 servable 闸门排除，普通推荐 serve 与「还有 N 条」计数都不会再出同一条内容。认领不接受可能来自旧版的任意非空 `reason/hook`；尚未生成正式文案或快照尚未同步的行不会被认领，前者仍可进入 expression-copy backlog，后者等待 profile-aware scorer 决定是否进入惊喜。
 
 ### PoolCurator
 
