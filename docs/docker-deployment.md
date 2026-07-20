@@ -100,7 +100,7 @@ cd OpenBiliClaw
 docker compose up -d --build
 ```
 
-同样打开 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查，再运行 `docker exec -it openbiliclaw-backend openbiliclaw init` 完成初始化。更新：`git pull && docker compose up -d --build`（Dockerfile 已做依赖分层，依赖没变时重建只需数秒）。
+源码树已提交 Web TypeScript 对应的运行时 `.js` 产物；Dockerfile 直接复制 `src/`，因此 clean clone 构建后端不需要安装 Node/npm，也不需要手动运行 `npm run build:web`。同样打开 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查，再运行 `docker exec -it openbiliclaw-backend openbiliclaw init` 完成初始化。更新：`git pull && docker compose up -d --build`（Dockerfile 已做依赖分层，依赖没变时重建只需数秒）。
 
 ### 方式 C：一行安装脚本 / AI agent 部署（终端向导 + 自动 init）
 

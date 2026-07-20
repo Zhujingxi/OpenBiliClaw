@@ -439,6 +439,8 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+A clean backend checkout already contains the generated, checked-in Web runtime `.js` assets. `uv sync` / `pip install`, Docker, and desktop installers do not require Node/npm; root npm tooling is only for rebuilding and verifying those assets during frontend development.
+
 #### Manual configuration
 
 ```bash

@@ -1,10 +1,11 @@
 // @ts-check
 /**
  * Compile web TypeScript sources in place: for every .ts under
- * src/openbiliclaw/web/{js,shared,desktop/assets/js}, emit a sibling .js
- * (loose ES module, specifiers unchanged). If no .ts files exist yet
- * (pre-migration), verify the existing .js files are present and exit 0 —
- * this lets CI wire `build:web` before any source is migrated.
+ * src/openbiliclaw/web/{js,shared,desktop/assets/js}, emit a checked-in sibling
+ * .js runtime asset (loose ES module, specifiers unchanged). `--check` compares
+ * those distributable assets without writing. If no .ts files exist yet,
+ * there are no migrated runtime assets to verify, so the command exits 0 —
+ * this lets CI wire the check before any source is migrated.
  *
  * Emission is type-stripping, not bundling/transpiling: esbuild `transform`
  * without a `format` rewrite keeps `export`/`import` declarations inline and
@@ -17,6 +18,13 @@ import { readdirSync, existsSync, statSync, readFileSync, writeFileSync } from "
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const args = process.argv.slice(2);
+const unknownArgs = args.filter((arg) => arg !== "--check");
+if (unknownArgs.length > 0) {
+  console.error(`[build-web] unknown argument(s): ${unknownArgs.join(", ")}`);
+  process.exit(2);
+}
+const checkOnly = args.includes("--check");
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const webRoot = join(repoRoot, "src", "openbiliclaw", "web");
 const roots = [
@@ -48,10 +56,12 @@ if (entryPoints.length === 0) {
   process.exit(0);
 }
 
+const drifted = [];
 for (const entry of entryPoints) {
   const source = readFileSync(entry, "utf8");
   const sourceName = basename(entry);
   const outputName = sourceName.replace(/\.ts$/, ".js");
+  const outputPath = entry.replace(/\.ts$/, ".js");
   const { code, map } = await transform(source, {
     loader: "ts",
     target: "es2022",
@@ -59,7 +69,24 @@ for (const entry of entryPoints) {
     sourcemap: "external",
     sourcefile: sourceName,
   });
-  writeFileSync(entry.replace(/\.ts$/, ".js"), `${code}//# sourceMappingURL=${outputName}.map\n`);
+  const output = `${code}//# sourceMappingURL=${outputName}.map\n`;
+  if (checkOnly) {
+    if (!existsSync(outputPath) || readFileSync(outputPath, "utf8") !== output) {
+      drifted.push(outputPath);
+    }
+    continue;
+  }
+  writeFileSync(outputPath, output);
   writeFileSync(entry.replace(/\.ts$/, ".js.map"), map);
 }
-console.log(`[build-web] emitted ${entryPoints.length} file(s)`);
+if (checkOnly && drifted.length > 0) {
+  console.error("[build-web] checked-in runtime JavaScript is missing or stale:");
+  for (const path of drifted) console.error(`  ${path}`);
+  console.error("[build-web] regenerate with: npm run build:web");
+  process.exit(1);
+}
+console.log(
+  checkOnly
+    ? `[build-web] verified ${entryPoints.length} checked-in runtime file(s)`
+    : `[build-web] emitted ${entryPoints.length} file(s)`,
+);

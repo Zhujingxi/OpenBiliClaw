@@ -443,6 +443,8 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+后端 clean clone 已包含由 TypeScript 生成并提交的 Web 运行时 `.js`，`uv sync` / `pip install`、Docker 与桌面安装包都不要求 Node/npm；根目录 npm 工具只供前端开发时重建和校验这些产物。
+
 #### 手动配置
 
 ```bash

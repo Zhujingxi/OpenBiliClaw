@@ -1,0 +1,10 @@
+# Phase B preserves byte-parity with the pre-migration runtime. Formatting these
+# sources would change esbuild's emitted bytes; typecheck + ESLint own source style,
+# while the build/sync scripts own and verify the checked-in runtime artifacts.
+src/openbiliclaw/web/shared/model-config-render.ts
+src/openbiliclaw/web/shared/model-config-state.ts
+src/openbiliclaw/web/shared/saved-sync-core.ts
+src/openbiliclaw/web/shared/model-config-render.js
+src/openbiliclaw/web/shared/model-config-state.js
+src/openbiliclaw/web/shared/saved-sync-core.js
+extension/popup/popup-model-config-state.js

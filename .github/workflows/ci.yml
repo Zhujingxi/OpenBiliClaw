@@ -204,8 +204,10 @@ jobs:
       - name: Install root dev tooling
         run: npm ci
 
-      - name: Build web assets (emits .js next to migrated .ts; no-op pre-migration)
-        run: npm run build:web
+      - name: Verify checked-in web runtime assets
+        # Python/Docker/desktop installs intentionally have no root Node step.
+        # Fail if a migrated .ts source and its distributable .js sibling drift.
+        run: npm run check:web-build
 
       - name: Run web JS tests
         run: node --test tests/js/
@@ -226,10 +228,10 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Build web assets
+      - name: Verify checked-in web runtime assets
         run: |
           npm ci
-          npm run build:web
+          npm run check:web-build
 
       - name: Set up Python
         uses: actions/setup-python@v6

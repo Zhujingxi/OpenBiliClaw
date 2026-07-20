@@ -2,7 +2,7 @@
 
 > popup 的模型 tab 直接编辑 revisioned Chat / Embedding route；Primary 与 fallback 是同一条最多 10 项的有序列表，Runtime tab 继续承载 Chat 总并发与超时。
 
-模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机 `popup/popup-model-config-state.js` 是 checked-in 运行时 artifact：`extension/scripts/sync-model-config-state.mjs` 从 TypeScript 源 `src/openbiliclaw/web/shared/model-config-state.ts` 经 `npm run build:web` 产生的同名 `.js` 模块逐字节生成它，公共 API 与 Web 端完全一致；漂移由 `tests/js/model-config-parity.test.mjs` 的 byte-for-byte 守卫 + 14 个 web ↔ extension 行为对齐向量钉住。修改必须落在共享 `.ts` 源上，先构建 Web 产物再重新生成副本。
+模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机 `popup/popup-model-config-state.js` 是 checked-in 运行时 artifact：`extension/scripts/sync-model-config-state.mjs` 从 TypeScript 源 `src/openbiliclaw/web/shared/model-config-state.ts` 经 `npm run build:web` 产生的同名 `.js` 模块逐字节生成它，公共 API 与 Web 端完全一致；Web 的同名 `.js` 也作为 checked-in distributable asset 进入所有无 Node 的后端安装包。漂移由 `npm run check:web-build`、`tests/js/model-config-parity.test.mjs` 的 byte-for-byte 守卫 + 14 个 web ↔ extension 行为对齐向量共同钉住。修改必须落在共享 `.ts` 源上，先构建 Web 产物再重新生成副本。
 
 ## 模块范围
 

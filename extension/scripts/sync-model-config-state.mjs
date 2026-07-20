@@ -50,9 +50,9 @@ if (current === generated) {
 
 if (checkOnly) {
   console.error(
-    "popup-model-config-state.js is out of sync with the emitted "
-      + "src/openbiliclaw/web/shared/model-config-state.js.\n"
-      + "Run: npm run build:web && node extension/scripts/sync-model-config-state.mjs",
+    "popup-model-config-state.js is out of sync with the emitted " +
+      "src/openbiliclaw/web/shared/model-config-state.js.\n" +
+      "Run: npm run build:web && node extension/scripts/sync-model-config-state.mjs",
   );
   process.exit(1);
 }
