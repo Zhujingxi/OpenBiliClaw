@@ -146,7 +146,11 @@ import {
   syncSavedItems,
 } from "./popup-api.js";
 
-const state = {
+type UnknownRecord = Record<string, unknown>;
+type ChatTurn = Record<string, any>;
+type ApiResult = Record<string, any>;
+
+const state: Record<string, any> = {
   activeTab: "recommend",
   online: false,
   recommendations: [],
@@ -188,118 +192,118 @@ const state = {
   messages: [],
 };
 
-let backendUpdateStatusRefresh = null;
+let backendUpdateStatusRefresh: (() => void) | null = null;
 
 const RUNTIME_REFRESH_DEBOUNCE_MS = 1000;
-let recommendationsRefreshTimer = null;
+let recommendationsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let recommendationsRefreshInFlight = false;
 let recommendationsRefreshPending = false;
 let manualRefreshInFlight = false;
-let activityFeedRefreshTimer = null;
+let activityFeedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let activityFeedRefreshInFlight = false;
 let activityFeedRefreshPending = false;
 
 const elements = {
-  content: document.querySelector(".content"),
-  statusBadge: document.getElementById("statusBadge"),
-  statusDot: document.getElementById("statusDot"),
-  statusLabel: document.getElementById("statusLabel"),
-  footer: document.getElementById("footerHintBar"),
-  hintText: document.getElementById("hintText"),
-  headlineText: document.getElementById("headlineText"),
-  activityToggleButton: document.getElementById("activityToggleButton"),
-  activityHistory: document.getElementById("activityHistory"),
-  emptyState: document.getElementById("emptyState"),
-  emptyTitle: document.getElementById("emptyTitle"),
-  emptyText: document.getElementById("emptyText"),
-  initPanel: document.getElementById("initPanel"),
-  initSources: document.getElementById("initSources"),
-  initChecklist: document.getElementById("initChecklist"),
-  initProgress: document.getElementById("initProgress"),
-  initProgressBar: document.getElementById("initProgressBar"),
-  initProgressLabel: document.getElementById("initProgressLabel"),
-  initStallHint: document.getElementById("initStallHint"),
-  initCliCommand: document.getElementById("initCliCommand"),
-  initStartBtn: document.getElementById("initStartBtn"),
-  initStartReason: document.getElementById("initStartReason"),
-  list: document.getElementById("recommendationList"),
-  refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
-  poolStatus: document.getElementById("poolStatus"),
-  poolAvailable: document.getElementById("poolAvailable"),
-  poolReplenished: document.getElementById("poolReplenished"),
-  poolTopics: document.getElementById("poolTopics"),
-  delightSlot: document.getElementById("delightSlot"),
-  tabRecommend: document.getElementById("tabRecommend"),
-  tabWatchLater: document.getElementById("tabWatchLater"),
-  tabFavorites: document.getElementById("tabFavorites"),
-  tabProfile: document.getElementById("tabProfile"),
-  tabChat: document.getElementById("tabChat"),
-  viewRecommend: document.getElementById("viewRecommend"),
-  viewWatchLater: document.getElementById("viewWatchLater"),
-  viewFavorites: document.getElementById("viewFavorites"),
-  viewProfile: document.getElementById("viewProfile"),
-  viewChat: document.getElementById("viewChat"),
-  watchLaterList: document.getElementById("watchLaterList"),
-  watchLaterEmpty: document.getElementById("watchLaterEmpty"),
-  favoritesList: document.getElementById("favoritesList"),
-  favoritesEmpty: document.getElementById("favoritesEmpty"),
-  watchLaterSyncAll: document.getElementById("watchLaterSyncAll"),
-  watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus"),
-  favoritesSyncAll: document.getElementById("favoritesSyncAll"),
-  favoritesSyncStatus: document.getElementById("favoritesSyncStatus"),
-  profileEmpty: document.getElementById("profileEmpty"),
-  profileEmptyTitle: document.getElementById("profileEmptyTitle"),
-  profileEmptyText: document.getElementById("profileEmptyText"),
-  profileCard: document.getElementById("profileCard"),
-  profileEditBar: document.getElementById("profileEditBar"),
-  profileEditToggle: document.getElementById("profileEditToggle"),
-  profileEditHint: document.getElementById("profileEditHint"),
-  profileEditPanel: document.getElementById("profileEditPanel"),
-  profilePortrait: document.getElementById("profilePortrait"),
-  profileTraits: document.getElementById("profileTraits"),
-  profileNeeds: document.getElementById("profileNeeds"),
-  profileMBTI: document.getElementById("profileMBTI"),
-  profileValues: document.getElementById("profileValues"),
-  profileMotivationalDrivers: document.getElementById("profileMotivationalDrivers"),
-  profileLikes: document.getElementById("profileLikes"),
-  profileDislikes: document.getElementById("profileDislikes"),
-  profileFavoriteUps: document.getElementById("profileFavoriteUps"),
-  profileLifeStage: document.getElementById("profileLifeStage"),
-  profileCurrentPhase: document.getElementById("profileCurrentPhase"),
-  profileCognitiveStyle: document.getElementById("profileCognitiveStyle"),
-  profileStyle: document.getElementById("profileStyle"),
-  profileContext: document.getElementById("profileContext"),
-  profileExplorationOpenness: document.getElementById("profileExplorationOpenness"),
-  profileSpeculativeInterests: document.getElementById("profileSpeculativeInterests"),
-  profileSpeculativeAvoidances: document.getElementById("profileSpeculativeAvoidances"),
-  profileRecentMemory: document.getElementById("profileRecentMemory"),
-  profileRecentMemoryStatus: document.getElementById("profileRecentMemoryStatus"),
-  profileRecentMemoryMore: document.getElementById("profileRecentMemoryMore"),
-  profileActiveInsights: document.getElementById("profileActiveInsights"),
-  profileRecentAwareness: document.getElementById("profileRecentAwareness"),
-  chatMessages: document.getElementById("chatMessages"),
-  chatForm: document.getElementById("chatForm"),
-  chatInput: document.getElementById("chatInput"),
-  chatSendButton: document.getElementById("chatSendButton"),
-  chatStatus: document.getElementById("chatStatus"),
-  openWebButton: document.getElementById("openWebButton"),
-  starButton: document.getElementById("starButton"),
-  mobileQrButton: document.getElementById("mobileQrButton"),
-  mobileQrOverlay: document.getElementById("mobileQrOverlay"),
-  mobileQrBack: document.getElementById("mobileQrBack"),
-  mobileQrCode: document.getElementById("mobileQrCode"),
-  mobileQrUrl: document.getElementById("mobileQrUrl"),
-  mobileQrHint: document.getElementById("mobileQrHint"),
-  mobileQrCopy: document.getElementById("mobileQrCopy"),
-  mobileQrOpen: document.getElementById("mobileQrOpen"),
-  messagesButton: document.getElementById("messagesButton"),
-  messageBadge: document.getElementById("messageBadge"),
-  messagesOverlay: document.getElementById("messagesOverlay"),
-  messagesBack: document.getElementById("messagesBack"),
-  messagesList: document.getElementById("messagesList"),
+  content: document.querySelector(".content")!,
+  statusBadge: document.getElementById("statusBadge")!,
+  statusDot: document.getElementById("statusDot")!,
+  statusLabel: document.getElementById("statusLabel")!,
+  footer: document.getElementById("footerHintBar")!,
+  hintText: document.getElementById("hintText")!,
+  headlineText: document.getElementById("headlineText")!,
+  activityToggleButton: document.getElementById("activityToggleButton")!,
+  activityHistory: document.getElementById("activityHistory")!,
+  emptyState: document.getElementById("emptyState")!,
+  emptyTitle: document.getElementById("emptyTitle")!,
+  emptyText: document.getElementById("emptyText")!,
+  initPanel: document.getElementById("initPanel")!,
+  initSources: document.getElementById("initSources")!,
+  initChecklist: document.getElementById("initChecklist")!,
+  initProgress: document.getElementById("initProgress")!,
+  initProgressBar: document.getElementById("initProgressBar")!,
+  initProgressLabel: document.getElementById("initProgressLabel")!,
+  initStallHint: document.getElementById("initStallHint")!,
+  initCliCommand: document.getElementById("initCliCommand")!,
+  initStartBtn: document.getElementById("initStartBtn")!,
+  initStartReason: document.getElementById("initStartReason")!,
+  list: document.getElementById("recommendationList")!,
+  refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton")!,
+  poolStatus: document.getElementById("poolStatus")!,
+  poolAvailable: document.getElementById("poolAvailable")!,
+  poolReplenished: document.getElementById("poolReplenished")!,
+  poolTopics: document.getElementById("poolTopics")!,
+  delightSlot: document.getElementById("delightSlot")!,
+  tabRecommend: document.getElementById("tabRecommend")!,
+  tabWatchLater: document.getElementById("tabWatchLater")!,
+  tabFavorites: document.getElementById("tabFavorites")!,
+  tabProfile: document.getElementById("tabProfile")!,
+  tabChat: document.getElementById("tabChat")!,
+  viewRecommend: document.getElementById("viewRecommend")!,
+  viewWatchLater: document.getElementById("viewWatchLater")!,
+  viewFavorites: document.getElementById("viewFavorites")!,
+  viewProfile: document.getElementById("viewProfile")!,
+  viewChat: document.getElementById("viewChat")!,
+  watchLaterList: document.getElementById("watchLaterList")!,
+  watchLaterEmpty: document.getElementById("watchLaterEmpty")!,
+  favoritesList: document.getElementById("favoritesList")!,
+  favoritesEmpty: document.getElementById("favoritesEmpty")!,
+  watchLaterSyncAll: document.getElementById("watchLaterSyncAll")!,
+  watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus")!,
+  favoritesSyncAll: document.getElementById("favoritesSyncAll")!,
+  favoritesSyncStatus: document.getElementById("favoritesSyncStatus")!,
+  profileEmpty: document.getElementById("profileEmpty")!,
+  profileEmptyTitle: document.getElementById("profileEmptyTitle")!,
+  profileEmptyText: document.getElementById("profileEmptyText")!,
+  profileCard: document.getElementById("profileCard")!,
+  profileEditBar: document.getElementById("profileEditBar")!,
+  profileEditToggle: document.getElementById("profileEditToggle")!,
+  profileEditHint: document.getElementById("profileEditHint")!,
+  profileEditPanel: document.getElementById("profileEditPanel")!,
+  profilePortrait: document.getElementById("profilePortrait")!,
+  profileTraits: document.getElementById("profileTraits")!,
+  profileNeeds: document.getElementById("profileNeeds")!,
+  profileMBTI: document.getElementById("profileMBTI")!,
+  profileValues: document.getElementById("profileValues")!,
+  profileMotivationalDrivers: document.getElementById("profileMotivationalDrivers")!,
+  profileLikes: document.getElementById("profileLikes")!,
+  profileDislikes: document.getElementById("profileDislikes")!,
+  profileFavoriteUps: document.getElementById("profileFavoriteUps")!,
+  profileLifeStage: document.getElementById("profileLifeStage")!,
+  profileCurrentPhase: document.getElementById("profileCurrentPhase")!,
+  profileCognitiveStyle: document.getElementById("profileCognitiveStyle")!,
+  profileStyle: document.getElementById("profileStyle")!,
+  profileContext: document.getElementById("profileContext")!,
+  profileExplorationOpenness: document.getElementById("profileExplorationOpenness")!,
+  profileSpeculativeInterests: document.getElementById("profileSpeculativeInterests")!,
+  profileSpeculativeAvoidances: document.getElementById("profileSpeculativeAvoidances")!,
+  profileRecentMemory: document.getElementById("profileRecentMemory")!,
+  profileRecentMemoryStatus: document.getElementById("profileRecentMemoryStatus")!,
+  profileRecentMemoryMore: document.getElementById("profileRecentMemoryMore")!,
+  profileActiveInsights: document.getElementById("profileActiveInsights")!,
+  profileRecentAwareness: document.getElementById("profileRecentAwareness")!,
+  chatMessages: document.getElementById("chatMessages")!,
+  chatForm: document.getElementById("chatForm")!,
+  chatInput: document.getElementById("chatInput")!,
+  chatSendButton: document.getElementById("chatSendButton")!,
+  chatStatus: document.getElementById("chatStatus")!,
+  openWebButton: document.getElementById("openWebButton")!,
+  starButton: document.getElementById("starButton")!,
+  mobileQrButton: document.getElementById("mobileQrButton")!,
+  mobileQrOverlay: document.getElementById("mobileQrOverlay")!,
+  mobileQrBack: document.getElementById("mobileQrBack")!,
+  mobileQrCode: document.getElementById("mobileQrCode")!,
+  mobileQrUrl: document.getElementById("mobileQrUrl")!,
+  mobileQrHint: document.getElementById("mobileQrHint")!,
+  mobileQrCopy: document.getElementById("mobileQrCopy")!,
+  mobileQrOpen: document.getElementById("mobileQrOpen")!,
+  messagesButton: document.getElementById("messagesButton")!,
+  messageBadge: document.getElementById("messageBadge")!,
+  messagesOverlay: document.getElementById("messagesOverlay")!,
+  messagesBack: document.getElementById("messagesBack")!,
+  messagesList: document.getElementById("messagesList")!,
 };
 
-async function setProxyImageSrc(image, coverUrl) {
+async function setProxyImageSrc(image: any, coverUrl: any) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
   const origin = await getBackendOrigin();
@@ -316,14 +320,14 @@ async function setProxyImageSrc(image, coverUrl) {
 // "白一下再出来" flash. Pre-decoding here means the <img> in each card hits a
 // warm cache and paints on the first frame. Resolves on a timeout so one slow
 // cover can't stall the whole batch (the rest keep warming in the background).
-async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
+async function preloadCoverImages(items: any, { timeoutMs = 4000 } = {}) {
   const origin = await getBackendOrigin();
   const token = await readPopupSessionToken();
   const loaders = (Array.isArray(items) ? items : [])
     .map((item) => {
       const path = item?.cover_url ? buildImageProxyPath(item.cover_url) : null;
       if (!path) return null;
-      return new Promise((resolve) => {
+      return new Promise<void>((resolve) => {
         const img = new Image();
         img.decoding = "async";
         img.addEventListener("load", () => resolve(), { once: true });
@@ -335,16 +339,16 @@ async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
     })
     .filter(Boolean);
   if (loaders.length === 0) return;
-  const timeout = new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
   await Promise.race([Promise.allSettled(loaders), timeout]);
 }
 
-let recommendationLoadCheckTimer = null;
+let recommendationLoadCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let recommendationAutoLoadUserArmed = false;
-let recommendationAutoLoadTouchY = null;
+let recommendationAutoLoadTouchY: number | null = null;
 let recommendationAutoLoadIntentInitialized = false;
-let runtimeStreamClient = null;
-let offlineBackendPoller = null;
+let runtimeStreamClient: any = null;
+let offlineBackendPoller: any = null;
 const backendConnectionCoordinator = createBackendConnectionCoordinator({
   checkBackendStatus,
   onStatusChange(status) {
@@ -425,10 +429,10 @@ const CHAT_PLACEHOLDERS = [
   "最近在做：在学一门新技能，想看看有没有靠谱的教程。",
 ];
 let chatPlaceholderIndex = 0;
-let chatPlaceholderTimer = null;
+let chatPlaceholderTimer: ReturnType<typeof setTimeout> | null = null;
 let currentMobileWebUrl = "";
 
-function setRefreshButtonState(loading, message = "") {
+function setRefreshButtonState(loading: any, message = "") {
   state.refreshStatusMessage = message;
   if (elements.refreshRecommendationsButton instanceof HTMLButtonElement) {
     elements.refreshRecommendationsButton.disabled = loading;
@@ -437,7 +441,7 @@ function setRefreshButtonState(loading, message = "") {
   renderPoolStatus(state.runtimeStatus);
 }
 
-function setHint(message, tone = "info") {
+function setHint(message: any, tone = "info") {
   if (state.activityFeed == null) {
     state.activityFeed = normalizeActivityFeed({
       live_summary: message,
@@ -453,7 +457,7 @@ function setHint(message, tone = "info") {
   renderActivityCard();
 }
 
-function setStatus(status) {
+function setStatus(status: any) {
   if (
     !(elements.statusBadge instanceof HTMLElement) ||
     !(elements.statusDot instanceof HTMLElement) ||
@@ -473,17 +477,17 @@ function renderRuntimeToggles(config = state.runtimeConfig) {
   const pauseLlm = scheduler.enabled === false;
   const pauseOnDisconnect = scheduler.pause_on_extension_disconnect === true;
 
-  const schedEnabled = document.getElementById("cfgSchedulerEnabled");
+  const schedEnabled = document.getElementById("cfgSchedulerEnabled")!;
   if (schedEnabled instanceof HTMLInputElement) {
     schedEnabled.checked = pauseLlm;
   }
-  const pauseDisconnect = document.getElementById("cfgPauseOnDisconnect");
+  const pauseDisconnect = document.getElementById("cfgPauseOnDisconnect")!;
   if (pauseDisconnect instanceof HTMLInputElement) {
     pauseDisconnect.checked = pauseOnDisconnect;
   }
 }
 
-function applyRuntimeConfig(config) {
+function applyRuntimeConfig(config: any) {
   if (!config) return;
   state.runtimeConfig = config;
   renderRuntimeToggles(config);
@@ -558,7 +562,7 @@ function initRecommendationAutoLoadIntent() {
   });
 }
 
-function setActiveTab(tabName) {
+function setActiveTab(tabName: any) {
   state.activeTab = tabName;
 
   const tabs = [
@@ -597,7 +601,7 @@ function setActiveTab(tabName) {
   }
 }
 
-function normalizePopupSavedItem(itemOrBvid) {
+function normalizePopupSavedItem(itemOrBvid: any) {
   const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
   return {
     ...item,
@@ -605,7 +609,7 @@ function normalizePopupSavedItem(itemOrBvid) {
   };
 }
 
-async function toggleWatchLaterSaved(itemOrBvid) {
+async function toggleWatchLaterSaved(itemOrBvid: any) {
   const item = normalizePopupSavedItem(itemOrBvid);
   return watchLaterToggles.toggle(item.item_key, {
     add: () => saveItem("watch_later", item),
@@ -613,7 +617,7 @@ async function toggleWatchLaterSaved(itemOrBvid) {
   });
 }
 
-async function toggleFavoriteSaved(itemOrBvid) {
+async function toggleFavoriteSaved(itemOrBvid: any) {
   const item = normalizePopupSavedItem(itemOrBvid);
   return favoriteToggles.toggle(item.item_key, {
     add: () => saveItem("favorite", item),
@@ -621,7 +625,7 @@ async function toggleFavoriteSaved(itemOrBvid) {
   });
 }
 
-async function toggleSavedWithFeedback(label, itemOrBvid, registry, toggle) {
+async function toggleSavedWithFeedback(label: any, itemOrBvid: any, registry: any, toggle: any) {
   const item = normalizePopupSavedItem(itemOrBvid);
   setHint(`正在更新${label}…`, "info");
   try {
@@ -636,22 +640,22 @@ async function toggleSavedWithFeedback(label, itemOrBvid, registry, toggle) {
   }
 }
 
-function bindWatchLaterToggle(button, itemOrBvid, labels = {}) {
+function bindWatchLaterToggle(button: any, itemOrBvid: any, labels = {}) {
   const item = normalizePopupSavedItem(itemOrBvid);
   watchLaterToggles.registerButton(item.item_key, button, labels);
   void watchLaterToggles.hydrateStatus(
     item.item_key,
-    (itemKey) => savedItemStatus("watch_later", itemKey),
+    (itemKey: any) => savedItemStatus("watch_later", itemKey),
   );
   return button;
 }
 
-function bindFavoriteToggle(button, itemOrBvid, labels = {}) {
+function bindFavoriteToggle(button: any, itemOrBvid: any, labels = {}) {
   const item = normalizePopupSavedItem(itemOrBvid);
   favoriteToggles.registerButton(item.item_key, button, labels);
   void favoriteToggles.hydrateStatus(
     item.item_key,
-    (itemKey) => savedItemStatus("favorite", itemKey),
+    (itemKey: any) => savedItemStatus("favorite", itemKey),
   );
   return button;
 }
@@ -661,7 +665,7 @@ const savedListStates = {
   watch_later: createRetainedSavedListState(),
   favorite: createRetainedSavedListState(),
 };
-const savedPendingFocus = { watch_later: null, favorite: null };
+const savedPendingFocus: Record<string, any> = { watch_later: null, favorite: null };
 function createSavedTaskRuntime() {
   const tracker = createSavedSyncTaskTracker({ poll: (taskId) => pollSavedSyncTask(taskId) });
   return {
@@ -673,7 +677,7 @@ function createSavedTaskRuntime() {
     }),
   };
 }
-const savedTaskRuntimes = {
+const savedTaskRuntimes: Record<string, ReturnType<typeof createSavedTaskRuntime>> = {
   watch_later: createSavedTaskRuntime(),
   favorite: createSavedTaskRuntime(),
 };
@@ -686,14 +690,14 @@ window.addEventListener("pagehide", () => {
   for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
 }, { once: true });
 
-function syncEligible(item, listKind = "") {
+function syncEligible(item: any, listKind = "") {
   const runtime = savedTaskRuntimes[listKind];
   return isSavedSyncEligibleStatus(item?.sync_status, item?.error_code, item?.sync_task_id)
     && !runtime?.submissions.has(item?.item_key)
     && !runtime?.coordinator.owns(item?.item_key);
 }
 
-function savedSyncDetail(item) {
+function savedSyncDetail(item: any) {
   return getSavedSyncPresentation(
     item?.sync_status,
     item?.error_code,
@@ -703,7 +707,7 @@ function savedSyncDetail(item) {
   ).detail;
 }
 
-async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
+async function runSavedSync(listKind: any, items: any, button: any, status: any, reload: any, confirmBatch = false) {
   if (button?.disabled) return;
   const runtime = savedTaskRuntimes[listKind];
   const coordinator = runtime.coordinator;
@@ -748,7 +752,7 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
       onPollError: () => {
         if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
       },
-      onTerminal: (terminalTask) => {
+      onTerminal: (terminalTask: any) => {
         if (status) status.removeAttribute("aria-busy");
         if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
         void reload();
@@ -756,7 +760,7 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
     });
     submitted = true;
     if (status) status.textContent = `同步任务已提交 · ${selected.length} 项`;
-  } catch (error) {
+  } catch (error: any) {
     if (status) {
       status.role = "alert";
       status.textContent = error?.message || "同步失败，请稍后重试。";
@@ -773,18 +777,18 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
   }
 }
 
-async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
+async function loadSavedList(listKind: any, { list, empty, syncAll, status, toggles }: Record<string, any>) {
   if (!(list instanceof HTMLElement)) return;
   const focusRoot = list.closest?.(".view") || list;
   const focusToken = captureSavedFocus(focusRoot) || savedPendingFocus[listKind];
-  const retained = savedListStates[listKind];
+  const retained = (savedListStates as Record<string, any>)[listKind];
   const coordinator = savedTaskRuntimes[listKind].coordinator;
   const hadLoadError = Boolean(retained.snapshot().error);
   try {
     const data = await fetchSavedItems(listKind, 100, 0);
     retained.commit({
       items: Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [],
-      total: data?.total,
+      total: (data as any)?.total,
     });
     await coordinator.recover(retained.snapshot().items, {
       onProgress: () => {
@@ -796,7 +800,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
       onPollError: () => {
         if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
       },
-      onTerminal: (task) => {
+      onTerminal: (task: any) => {
         if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步已完成";
         void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
       },
@@ -805,7 +809,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
       status.removeAttribute("role");
       status.replaceChildren();
     }
-  } catch (error) {
+  } catch (error: any) {
     retained.fail(error);
     if (status) {
       status.role = "alert";
@@ -815,7 +819,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
       retry.dataset.savedListAction = "retry";
       retry.textContent = "重试加载";
       retry.addEventListener("click", (event) => {
-        savedPendingFocus[listKind] = captureSavedFocus(focusRoot, event.currentTarget);
+        savedPendingFocus[listKind] = captureSavedFocus(focusRoot, (event.currentTarget as HTMLElement));
         void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
       });
       status.replaceChildren(
@@ -832,7 +836,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
     list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
   if (restoreSavedFocus(focusRoot, focusToken)) savedPendingFocus[listKind] = null;
-  const pendingCount = items.filter((item) => syncEligible(item, listKind)).length;
+  const pendingCount = items.filter((item: any) => syncEligible(item, listKind)).length;
   if (syncAll instanceof HTMLButtonElement) {
     syncAll.textContent = `同步未同步内容（${pendingCount}）`;
     updateSavedBatchButtonState(syncAll, pendingCount);
@@ -861,7 +865,7 @@ async function loadWatchLater() {
 // whenever the DELETE queued behind slow same-origin requests (covers via
 // image-proxy compete for Chrome's 6-connection limit) or failed, clicking
 // looked like it did nothing.
-function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, toggles, list, empty, onRemoved }) {
+function bindSavedCardRemove(card: any, remove: any, { listKind, itemKey, requestRemove, toggles, list, empty, onRemoved }: Record<string, any>) {
   remove.addEventListener("click", async () => {
     if (remove.disabled) return;
     savedPendingFocus[listKind] = captureSavedFocus(list.closest?.(".view") || list, remove);
@@ -875,7 +879,7 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
       await requestRemove(itemKey);
       toggles.setSaved(itemKey, false);
       if (typeof onRemoved === "function") await onRemoved();
-    } catch (error) {
+    } catch (error: any) {
       console.error("saved-card remove failed:", itemKey, error);
       if (list instanceof HTMLElement) {
         list.insertBefore(card, anchor?.parentElement === list ? anchor : null);
@@ -888,7 +892,7 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
   });
 }
 
-function buildSavedCard(listKind, item, { list, empty, toggles }) {
+function buildSavedCard(listKind: any, item: any, { list, empty, toggles }: Record<string, any>) {
   if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
     || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
     item = { ...item, sync_status: "syncing" };
@@ -925,7 +929,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   chip.textContent = presentation.label;
   const target = document.createElement("span");
   target.className = "saved-sync-target";
-  target.textContent = savedSyncDetail(item);
+  target.textContent = savedSyncDetail(item) || null;
   syncLine.append(chip, target);
   copy.append(title, up, syncLine);
   body.append(copy);
@@ -944,7 +948,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   bindSavedCardRemove(card, remove, {
     listKind,
     itemKey: item.item_key,
-    requestRemove: (itemKey) => removeSavedItem(listKind, itemKey),
+    requestRemove: (itemKey: any) => removeSavedItem(listKind, itemKey),
     toggles,
     list,
     empty,
@@ -958,10 +962,10 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     sync.type = "button";
     sync.className = "saved-card-sync";
     sync.dataset.savedAction = "sync";
-    sync.textContent = presentation.actionLabel;
-    sync.disabled = presentation.busy;
+    sync.textContent = presentation.actionLabel || "";
+    sync.disabled = presentation.busy || false;
+    sync.setAttribute("aria-label", (presentation.busy ? `${presentation.label || ""}，请稍候` : presentation.actionLabel || ""));
     sync.setAttribute("aria-disabled", String(presentation.busy));
-    sync.setAttribute("aria-label", presentation.busy ? `${presentation.label}，请稍候` : presentation.actionLabel);
     if (presentation.actionable) {
       sync.addEventListener("click", () => runSavedSync(
         listKind,
@@ -978,7 +982,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   return card;
 }
 
-function buildSavedCardMedia(item) {
+function buildSavedCardMedia(item: any) {
   const media = document.createElement("span");
   media.className = "saved-card-cover";
   if (item.cover_url) {
@@ -1003,7 +1007,7 @@ async function loadFavorites() {
   });
 }
 
-function showRecommendationEmptyState(title, message) {
+function showRecommendationEmptyState(title: any, message: any) {
   if (
     !(elements.emptyState instanceof HTMLElement) ||
     !(elements.emptyTitle instanceof HTMLElement) ||
@@ -1032,7 +1036,7 @@ function hideRecommendationEmptyState() {
 }
 
 // ── Guided init (gui-init F1) ──────────────────────────────────────────────
-let initPollTimer = null;
+let initPollTimer: ReturnType<typeof setTimeout> | null = null;
 const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init";
 
 function clearInitPolling() {
@@ -1042,7 +1046,7 @@ function clearInitPolling() {
   }
 }
 
-function _setInitStartButton(label, enabled) {
+function _setInitStartButton(label: any, enabled: any) {
   if (!(elements.initStartBtn instanceof HTMLButtonElement)) {
     return;
   }
@@ -1056,7 +1060,7 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
-function _setInitReason(text, assertive = true) {
+function _setInitReason(text: any, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
     elements.initStartReason.hidden = !text;
@@ -1068,7 +1072,7 @@ function _setInitReason(text, assertive = true) {
   }
 }
 
-function _renderInitChecklist(status, selected = null) {
+function _renderInitChecklist(status: any, selected = null) {
   // Show the prereq checklist (red ✗ / green ✓ / soft •) — only surfaced AFTER a
   // click whose check failed, so the user sees exactly what to fix.
   if (!(elements.initChecklist instanceof HTMLElement)) {
@@ -1094,8 +1098,8 @@ function _renderInitChecklist(status, selected = null) {
       li.append(hint);
     }
     if (row.key === "embedding" && !row.ok) {
-      const pull = row.pull || {};
-      const repair = row.repair || {};
+      const pull = (row.pull as UnknownRecord) || {};
+      const repair = (row.repair as UnknownRecord) || {};
       if (pull.active) {
         const wrap = document.createElement("div");
         wrap.className = "init-embed-pull";
@@ -1109,7 +1113,7 @@ function _renderInitChecklist(status, selected = null) {
         if (pull.label) {
           const label = document.createElement("p");
           label.className = "init-embed-pull-label";
-          label.textContent = pull.label;
+          label.textContent = String(pull.label || "");
           wrap.append(label);
         }
         li.append(wrap);
@@ -1117,7 +1121,7 @@ function _renderInitChecklist(status, selected = null) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "init-repair-btn";
-        btn.textContent = repair.label || "修复向量模型";
+        btn.textContent = String(repair.label || "修复向量模型");
         btn.addEventListener("click", () =>
           void _handleChecklistEmbeddingRepair(btn, selected),
         );
@@ -1130,7 +1134,7 @@ function _renderInitChecklist(status, selected = null) {
 
 // Start server-side embedding repair and keep the checklist synchronized with
 // the existing init-status progress fields until repair settles.
-async function _handleChecklistEmbeddingRepair(btn, selected = null) {
+async function _handleChecklistEmbeddingRepair(btn: any, selected = null) {
   if (!(btn instanceof HTMLButtonElement)) return;
   btn.disabled = true;
   btn.textContent = "修复中…";
@@ -1144,8 +1148,8 @@ async function _handleChecklistEmbeddingRepair(btn, selected = null) {
           ? "只能在本机操作向量模型修复。"
           : kicked && kicked.status === 404
             ? "当前后端版本不支持向量模型修复，请先升级后端。"
-            : kicked && kicked.detail
-              ? kicked.detail
+            : kicked && (kicked as UnknownRecord).detail
+              ? (kicked as UnknownRecord).detail
               : "向量模型修复未能开始，请稍后重试。";
       setHint(detail, "error");
       return;
@@ -1166,7 +1170,7 @@ async function _handleChecklistEmbeddingRepair(btn, selected = null) {
     }
     if (!status) continue;
     _renderInitChecklist(status, selected);
-    const prereq = status.prerequisites || {};
+    const prereq = (status.prerequisites as UnknownRecord) || {};
     if (prereq.embedding_ready) return;
     const stillPulling =
       Boolean(prereq.embedding_repair_running) ||
@@ -1213,7 +1217,7 @@ function _renderInitSources() {
 function _readSelectedInitSources() {
   const selected = [];
   if (elements.initSources instanceof HTMLElement) {
-    for (const box of elements.initSources.querySelectorAll("input[data-init-source]")) {
+    for (const box of Array.from(elements.initSources.querySelectorAll("input[data-init-source]")) as HTMLInputElement[]) {
       if (box.checked) {
         selected.push(box.value);
       }
@@ -1258,7 +1262,7 @@ function renderInitPanelIdle() {
   _setInitReason("");
 }
 
-function renderInitProgress(status) {
+function renderInitProgress(status: any) {
   if (!(elements.initPanel instanceof HTMLElement)) {
     return;
   }
@@ -1326,7 +1330,7 @@ function renderInitProgress(status) {
   }
 }
 
-function renderCliInitRequired(status) {
+function renderCliInitRequired(status: any) {
   if (!(elements.initPanel instanceof HTMLElement)) return;
   elements.initPanel.hidden = false;
   if (elements.initSources instanceof HTMLElement) elements.initSources.hidden = true;
@@ -1463,9 +1467,9 @@ async function handleStartInitClick() {
   // B 站登录只在勾选了 B 站时才拦截（v0.3.118+：可取消勾选跳过 B 站）。
   if (
     selectedSources.includes("bilibili") &&
-    !status?.prerequisites?.bilibili_logged_in
+    !(status?.prerequisites as UnknownRecord)?.bilibili_logged_in
   ) {
-    _renderInitChecklist(status, selectedSources);
+    _renderInitChecklist(status, (selectedSources as any));
     _setInitStartButton("开始初始化", true);
     _setInitReason("还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。");
     return;
@@ -1473,7 +1477,7 @@ async function handleStartInitClick() {
 
   // Conditions not met → show exactly what failed; do NOT initialize.
   if (!status.can_start) {
-    _renderInitChecklist(status, selectedSources);
+    _renderInitChecklist(status, (selectedSources as any));
     _setInitStartButton("开始初始化", true);
     _setInitReason(
       describeInitStatusReason(status) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
@@ -1486,13 +1490,13 @@ async function handleStartInitClick() {
   // that and let the user retry.
   try {
     await startInit({ force: false, sources: selectedSources });
-  } catch (error) {
+  } catch (error: any) {
     const code = error?.details?.error || error?.details?.reason;
     if (code === "unsupported_runtime") {
       renderCliInitRequired({ ...status, start_mode: "cli_only", reason: code });
       return;
     }
-    _renderInitChecklist(status, selectedSources);
+    _renderInitChecklist(status, (selectedSources as any));
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));
     return;
@@ -1502,7 +1506,7 @@ async function handleStartInitClick() {
   _startInitProgressPoll();
 }
 
-function renderPoolStatus(runtimeStatus) {
+function renderPoolStatus(runtimeStatus: any) {
   if (
     !(elements.poolStatus instanceof HTMLElement) ||
     !(elements.poolAvailable instanceof HTMLElement) ||
@@ -1528,7 +1532,7 @@ function renderPoolStatus(runtimeStatus) {
   elements.poolTopics.textContent = summary.topics;
 }
 
-function runtimeEventCarriesPoolCounts(event) {
+function runtimeEventCarriesPoolCounts(event: any) {
   return (
     event?.type === "refresh.pool_updated" ||
     typeof event?.pool_available_count === "number" ||
@@ -1551,7 +1555,7 @@ function renderReadyRecommendationHint() {
   setHint(hint.message, hint.tone);
 }
 
-function rememberDismissedDelight(bvid) {
+function rememberDismissedDelight(bvid: any) {
   if (!bvid) {
     return;
   }
@@ -1588,11 +1592,11 @@ function syncDelightHead() {
   state.activeDelight = state.activeDelights[state.delightCurrentIndex] ?? null;
 }
 
-function pushDelightCandidate(candidate) {
+function pushDelightCandidate(candidate: any) {
   if (!candidate || !candidate.bvid) return;
   if (state.dismissedDelightBvids.includes(candidate.bvid)) return;
   const existingIdx = state.activeDelights.findIndex(
-    (d) => d?.bvid === candidate.bvid,
+     (d: any) => d?.bvid === candidate.bvid,
   );
   if (existingIdx >= 0) {
     state.activeDelights[existingIdx] = mergeDelightCandidate(
@@ -1642,7 +1646,7 @@ function removeCurrentDelight() {
 // Backwards-compatible name used by some action handlers.
 const shiftDelightQueue = removeCurrentDelight;
 
-function navigateDelight(delta) {
+function navigateDelight(delta: any) {
   if (state.activeDelights.length <= 1) return;
   // Preserve the expand state across navigation: if the user had the
   // current banner expanded, the next one slides in already expanded
@@ -1661,7 +1665,7 @@ function navigateDelight(delta) {
   syncDelightHead();
 }
 
-function updateDelightHead(updates) {
+function updateDelightHead(updates: any) {
   const idx = state.delightCurrentIndex;
   if (state.activeDelights.length === 0) return;
   state.activeDelights[idx] = { ...state.activeDelights[idx], ...updates };
@@ -1676,12 +1680,12 @@ function clearDelightQueue() {
   syncDelightHead();
 }
 
-function mergeIncomingDelight(candidate) {
+function mergeIncomingDelight(candidate: any) {
   pushDelightCandidate(candidate);
   renderDelightSlot();
 }
 
-function getRuntimeEventTone(event) {
+function getRuntimeEventTone(event: any) {
   const type = String(event?.type ?? "");
   if (type === "refresh.failed") {
     return "error";
@@ -1746,11 +1750,11 @@ async function runScheduledActivityFeedRefresh() {
   }
 }
 
-function isAvoidanceProbeType(type) {
+function isAvoidanceProbeType(type: any) {
   return normalizeProbeType(type) === "avoidance.probe";
 }
 
-function probeActionDescriptors(type) {
+function probeActionDescriptors(type: any) {
   return isAvoidanceProbeType(type)
     ? [
         { action: "confirm", label: "确认避雷", className: "is-confirm" },
@@ -1766,7 +1770,7 @@ function probeActionDescriptors(type) {
       ];
 }
 
-function probeResponseMessage(type, responseType, domain) {
+function probeResponseMessage(type: any, responseType: any, domain: any) {
   const isAvoidance = isAvoidanceProbeType(type);
   if (responseType === "defer") {
     return isAvoidance
@@ -1783,12 +1787,12 @@ function probeResponseMessage(type, responseType, domain) {
     : `好，「${domain}」会作为不喜欢处理。`;
 }
 
-function isChallengeProbe(probe) {
+function isChallengeProbe(probe: any) {
   const mode = String(probe?.probe_mode || "").toLowerCase();
   return Boolean(probe?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
 }
 
-function rememberHandledProbe(domain, type = "interest.probe") {
+function rememberHandledProbe(domain: any, type = "interest.probe") {
   const key = probeMessageKey(type, domain);
   if (key) {
     state.handledProbeKeys.add(key);
@@ -1796,14 +1800,14 @@ function rememberHandledProbe(domain, type = "interest.probe") {
   return key;
 }
 
-function forgetHandledProbe(domain, type = "interest.probe") {
+function forgetHandledProbe(domain: any, type = "interest.probe") {
   const key = probeMessageKey(type, domain);
   if (key) {
     state.handledProbeKeys.delete(key);
   }
 }
 
-function applyStaleProbeResponse(domain, type = "interest.probe") {
+function applyStaleProbeResponse(domain: any, type = "interest.probe") {
   const nextState = buildStaleProbeResponseState({
     messages: state.messages,
     pendingProbe: state.pendingProbe,
@@ -1820,12 +1824,12 @@ function applyStaleProbeResponse(domain, type = "interest.probe") {
   updateMessageBadge();
 }
 
-function addProbeMessage(event, type = event?.type) {
+function addProbeMessage(event: any, type = event?.type) {
   if (!event?.domain) return;
   const normalizedType = normalizeProbeType(type);
   const key = probeMessageKey(normalizedType, event.domain);
   if (state.handledProbeKeys.has(key)) return;
-  if (state.messages.some((m) => probeMessageKey(m?.type, m?.domain) === key)) return;
+  if (state.messages.some( (m: any) => probeMessageKey(m?.type, m?.domain) === key)) return;
   state.messages.push({ ...event, type: normalizedType });
   updateMessageBadge();
 }
@@ -1835,7 +1839,7 @@ function connectRuntimeStream() {
   // doesn't leave a zombie WebSocket against the old origin.
   runtimeStreamClient?.disconnect?.();
   const client = createRuntimeStreamClient({
-    onEvent(event) {
+    onEvent(event: any) {
       state.runtimeEvent = event;
       state.runtimeStatus = mergeRuntimeStatusEvent(state.runtimeStatus, event);
       renderPoolStatus(state.runtimeStatus);
@@ -1935,7 +1939,7 @@ function connectRuntimeStream() {
       if (event.type === "delight.liked") {
         const data = event.data || event;
         const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
-        const index = state.activeDelights.findIndex((item) => item?.bvid === bvid);
+        const index = state.activeDelights.findIndex( (item: any) => item?.bvid === bvid);
         if (index >= 0) {
           state.activeDelights[index] = {
             ...state.activeDelights[index],
@@ -1998,7 +2002,7 @@ function connectRuntimeStream() {
   runtimeStreamClient = client;
 }
 
-function renderActivityHistory(items) {
+function renderActivityHistory(items: any) {
   if (!(elements.activityHistory instanceof HTMLElement)) {
     return;
   }
@@ -2126,7 +2130,7 @@ async function loadMoreActivity() {
   }
 }
 
-function renderChipList(container, items, fallback) {
+function renderChipList(container: any, items: any, fallback: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -2141,7 +2145,7 @@ function renderChipList(container, items, fallback) {
   }
 }
 
-function renderExplorationBar(container, openness) {
+function renderExplorationBar(container: any, openness: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -2161,7 +2165,7 @@ function renderExplorationBar(container, openness) {
   }
 }
 
-function renderSpeculativeInterests(container, items, { kind = "interest" } = {}) {
+function renderSpeculativeInterests(container: any, items: any, { kind = "interest" } = {}) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -2200,7 +2204,7 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     domain.textContent = item.domain;
     header.append(domain);
 
-    const statusText = statusLabels[item.status] ?? "";
+    const statusText = (statusLabels as Record<string, string>)[item.status] ?? "";
     if (statusText) {
       const status = document.createElement("span");
       status.className = "spec-status";
@@ -2285,7 +2289,7 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
   }
 }
 
-async function handleSpecResponse(domain, responseType, rowEl, type = "interest.probe") {
+async function handleSpecResponse(domain: any, responseType: any, rowEl: any, type = "interest.probe") {
   if (!domain) return;
   const isAvoidance = isAvoidanceProbeType(type);
   rememberHandledProbe(domain, type);
@@ -2325,7 +2329,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
     setTimeout(() => {
       void loadProfileSummary({ force: true });
     }, 2200);
-  } catch (err) {
+  } catch (err: any) {
     console.error("spec response failed:", err);
     forgetHandledProbe(domain, type);
     if (rowEl instanceof HTMLElement) {
@@ -2397,12 +2401,12 @@ function renderProbeCard() {
   container.prepend(card);
 }
 
-async function handleProbeResponse(responseType) {
+async function handleProbeResponse(responseType: any) {
   const probe = state.pendingProbe;
   if (!probe) return;
 
   const domain = probe.domain;
-  const probeCard = document.querySelector(".probe-card");
+  const probeCard = document.querySelector(".probe-card")!;
 
   if (responseType === "chat") {
     // Expand inline chat directly on the probe card
@@ -2444,7 +2448,7 @@ async function handleProbeResponse(responseType) {
     setTimeout(() => {
       void loadProfileSummary({ force: true });
     }, 2700);
-  } catch (err) {
+  } catch (err: any) {
     console.error("Failed to respond to probe:", err);
     forgetHandledProbe(domain, "interest.probe");
   }
@@ -2488,7 +2492,7 @@ function closeMessagesPanel() {
 
 // ── Mobile QR panel ───────────────────────────────────────────
 
-async function writeClipboardText(text) {
+async function writeClipboardText(text: any) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return true;
@@ -2509,7 +2513,7 @@ async function writeClipboardText(text) {
   return ok;
 }
 
-function openMobileWebUrl(url) {
+function openMobileWebUrl(url: any) {
   if (!url) return;
   try {
     if (globalThis.chrome?.tabs?.create) {
@@ -2565,7 +2569,7 @@ async function renderMobileQrPanel() {
   if (elements.mobileQrCode instanceof HTMLElement) {
     try {
       elements.mobileQrCode.innerHTML = createQrSvgMarkup(view.url);
-    } catch (err) {
+    } catch (err: any) {
       elements.mobileQrCode.textContent = "二维码生成失败";
       console.error("Failed to render mobile QR:", err);
     }
@@ -2648,11 +2652,11 @@ function bindMobileQr() {
 // Bound once on the (persistent) container so it survives the frequent
 // container.replaceChildren() re-renders that used to orphan per-button
 // listeners and silently drop clicks.
-function onMessageActionClick(event) {
+function onMessageActionClick(event: any) {
   const target = event.target;
   if (!(target instanceof Element)) return;
   const btn = target.closest("[data-msg-action]");
-  if (!(btn instanceof HTMLElement) || btn.disabled) return;
+  if (!(btn instanceof HTMLElement) || (btn as HTMLInputElement).disabled) return;
   const card = btn.closest(".message-item");
   if (!(card instanceof HTMLElement)) return;
   const domain = card.dataset.domain || "";
@@ -2698,7 +2702,7 @@ function renderMessagesList() {
   }
 }
 
-function buildMessageCard(probe) {
+function buildMessageCard(probe: any) {
   const type = normalizeProbeType(probe?.type);
   const isAvoidance = isAvoidanceProbeType(type);
   const challenge = !isAvoidance && isChallengeProbe(probe);
@@ -2788,7 +2792,7 @@ function buildMessageCard(probe) {
 // ── Engagement stats ───────────────────────────────────────────
 // Condense a raw count into Chinese-style 万/亿 units. Empty string for
 // non-positive values so callers render nothing.
-function formatCountCn(n) {
+function formatCountCn(n: any) {
   const value = Math.floor(Number(n) || 0);
   if (value <= 0) return "";
   if (value >= 100000000)
@@ -2800,7 +2804,7 @@ function formatCountCn(n) {
 
 // Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
-function recommendationStats(item) {
+function recommendationStats(item: any) {
   const segments = [];
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
@@ -2812,7 +2816,7 @@ function recommendationStats(item) {
 
 // Append a muted stats line to `parent` when the item has any positive
 // engagement count. No-op (renders nothing) otherwise.
-function appendRecommendationStats(parent, item) {
+function appendRecommendationStats(parent: any, item: any) {
   const text = recommendationStats(item);
   if (!text) return;
   const stats = document.createElement("div");
@@ -2821,7 +2825,7 @@ function appendRecommendationStats(parent, item) {
   parent.append(stats);
 }
 
-function appendPublishedTime(parent, item) {
+function appendPublishedTime(parent: any, item: any) {
   const text = formatPublishedTime(item);
   if (!text) return;
   const time = document.createElement("span");
@@ -2835,7 +2839,7 @@ function appendPublishedTime(parent, item) {
 
 // ── Delight (surprise recommendation) card ─────────────────────
 
-function buildDelightCard(delight) {
+function buildDelightCard(delight: any) {
   const item = document.createElement("div");
   item.className = "message-item is-delight";
   item.dataset.bvid = delight.bvid;
@@ -2962,7 +2966,7 @@ function buildDelightCard(delight) {
   return item;
 }
 
-async function handleDelightResponse(delight, responseType) {
+async function handleDelightResponse(delight: any, responseType: any) {
   try {
     await respondToDelight(delight.bvid, responseType, delight.title);
     const item = elements.messagesList?.querySelector(`[data-bvid="${CSS.escape(delight.bvid)}"]`);
@@ -2984,12 +2988,12 @@ async function handleDelightResponse(delight, responseType) {
     if (responseType !== "like") {
       dismissMessageByBvid(delight.bvid, false);
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error("Delight response failed:", err);
   }
 }
 
-function expandDelightChat(itemEl, delight) {
+function expandDelightChat(itemEl: any, delight: any) {
   if (itemEl.querySelector(".message-chat-area")) return;
   const actions = itemEl.querySelector(".message-actions");
   if (actions) actions.hidden = true;
@@ -3023,7 +3027,7 @@ function expandDelightChat(itemEl, delight) {
       });
       const ca = itemEl.querySelector(".message-chat-area");
       if (ca) ca.remove();
-      const showFailure = (nextTurn) => {
+      const showFailure = (nextTurn: any) => {
         thinking.remove();
         const errorEl = document.createElement("div");
         errorEl.className = "message-chat-reply";
@@ -3034,7 +3038,7 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
-      const showReply = (nextTurn) => {
+      const showReply = (nextTurn: any) => {
         thinking.remove();
         const replyEl = document.createElement("div");
         replyEl.className = "message-chat-reply";
@@ -3044,7 +3048,7 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
-      const settleTurn = (nextTurn) => {
+      const settleTurn = (nextTurn: any) => {
         if (nextTurn.status === "failed") {
           showFailure(nextTurn);
           return;
@@ -3055,15 +3059,15 @@ function expandDelightChat(itemEl, delight) {
         settleTurn(turn);
       } else {
         applyTurnToMessage(turn);
-        pollChatTurnUntilSettled(turn.turn_id, {
-          onUpdate(nextTurn) {
+        pollChatTurnUntilSettled(turn.turn_id as string, {
+          onUpdate(nextTurn: ChatTurn) {
             if (nextTurn.status === "completed" || nextTurn.status === "failed") {
               settleTurn(nextTurn);
             }
           },
         });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Delight chat failed:", err);
       thinking.remove();
       sendBtn.disabled = false;
@@ -3084,8 +3088,8 @@ function expandDelightChat(itemEl, delight) {
   input.focus();
 }
 
-function dismissMessageByBvid(bvid, removeFromDom = true) {
-  state.messages = state.messages.filter((m) => m.bvid !== bvid);
+function dismissMessageByBvid(bvid: any, removeFromDom = true) {
+  state.messages = state.messages.filter( (m: any) => m.bvid !== bvid);
   updateMessageBadge();
   // Mirror the dismiss on the backend so the same bvid doesn't
   // re-surface via /api/delight/pending-batch on next popup reload.
@@ -3097,7 +3101,7 @@ function dismissMessageByBvid(bvid, removeFromDom = true) {
   }
 }
 
-function expandInlineChat(itemEl, domain, type = "interest.probe") {
+function expandInlineChat(itemEl: any, domain: any, type = "interest.probe") {
   // Don't add twice
   if (itemEl.querySelector(".message-chat-area")) return;
   const isAvoidance = isAvoidanceProbeType(type);
@@ -3133,7 +3137,7 @@ function expandInlineChat(itemEl, domain, type = "interest.probe") {
 }
 
 
-function createChatThinkingPlaceholder(label) {
+function createChatThinkingPlaceholder(label: any) {
   // Reusable "thinking" indicator for any in-card chat composer.
   // Shows the bouncing-dots animation plus a friendly label so the
   // user knows the request is in flight (default ~30s for delight
@@ -3154,7 +3158,7 @@ function createChatThinkingPlaceholder(label) {
   return wrap;
 }
 
-async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.probe") {
+async function sendInlineChat(itemEl: any, domain: any, input: any, sendBtn: any, type = "interest.probe") {
   const message = input.value.trim();
   if (!message) return;
   const chatArea = input.closest(".message-chat-area");
@@ -3186,7 +3190,7 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
 
     // Completed turns remove the card after showing the reply. Failed turns
     // restore the handled/retry state and keep the card visible.
-    const showFailure = (nextTurn) => {
+    const showFailure = (nextTurn: any) => {
       forgetHandledProbe(domain, type);
       thinking.remove();
       input.disabled = false;
@@ -3199,7 +3203,7 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       input.focus();
     };
 
-    const showReply = (nextTurn) => {
+    const showReply = (nextTurn: any) => {
       thinking.remove();
       chatArea.remove();
       const replyEl = document.createElement("div");
@@ -3215,7 +3219,7 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       }, 4000);
     };
 
-    const settleTurn = (nextTurn) => {
+    const settleTurn = (nextTurn: any) => {
       if (nextTurn.status === "failed") {
         showFailure(nextTurn);
         return;
@@ -3228,14 +3232,14 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
     } else {
       applyTurnToMessage(turn);
       pollChatTurnUntilSettled(turn.turn_id, {
-        onUpdate(nextTurn) {
+        onUpdate(nextTurn: any) {
           if (nextTurn.status === "completed" || nextTurn.status === "failed") {
             settleTurn(nextTurn);
           }
         },
       });
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error("Inline chat failed:", err);
     forgetHandledProbe(domain, type);
     thinking.remove();
@@ -3251,7 +3255,7 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
   }
 }
 
-function dismissMessage(domain, type = "") {
+function dismissMessage(domain: any, type = "") {
   removeMessageFromState(domain, type);
   const selector = type
     ? `[data-domain="${CSS.escape(domain)}"][data-type="${CSS.escape(normalizeProbeType(type))}"]`
@@ -3261,7 +3265,7 @@ function dismissMessage(domain, type = "") {
   renderMessagesEmptyIfNeeded();
 }
 
-async function handleMessageResponse(domain, responseType, type = "interest.probe") {
+async function handleMessageResponse(domain: any, responseType: any, type = "interest.probe") {
   const isAvoidance = isAvoidanceProbeType(type);
   rememberHandledProbe(domain, type);
   try {
@@ -3308,15 +3312,15 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
     setTimeout(() => {
       void loadProfileSummary({ force: true });
     }, 1800);
-  } catch (err) {
+  } catch (err: any) {
     console.error("Failed to respond to message:", err);
     forgetHandledProbe(domain, type);
   }
 }
 
-function removeMessageFromState(domain, type = "") {
+function removeMessageFromState(domain: any, type = "") {
   const normalizedType = type ? normalizeProbeType(type) : "";
-  state.messages = state.messages.filter((m) => {
+  state.messages = state.messages.filter( (m: any) => {
     if (m.domain !== domain) return true;
     return normalizedType && normalizeProbeType(m.type) !== normalizedType;
   });
@@ -3345,7 +3349,7 @@ function bindMessages() {
   }
 }
 
-function renderActiveInsights(container, items) {
+function renderActiveInsights(container: any, items: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3444,7 +3448,7 @@ function renderActiveInsights(container, items) {
   }
 }
 
-async function handleInsightFeedback(hypothesis, signal, row, buttons, statusEl) {
+async function handleInsightFeedback(hypothesis: any, signal: any, row: any, buttons: any, statusEl: any) {
   for (const b of buttons) b.disabled = true;
   try {
     const res = await submitInsightFeedback(hypothesis, signal);
@@ -3467,7 +3471,7 @@ async function handleInsightFeedback(hypothesis, signal, row, buttons, statusEl)
   }
 }
 
-function renderRecentAwareness(container, items) {
+function renderRecentAwareness(container: any, items: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3517,7 +3521,7 @@ function renderRecentAwareness(container, items) {
   }
 }
 
-function renderMBTI(container, mbti) {
+function renderMBTI(container: any, mbti: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3570,7 +3574,7 @@ function renderMBTI(container, mbti) {
   container.append(dims);
 }
 
-function renderInterestTree(container, domains, fallback) {
+function renderInterestTree(container: any, domains: any, fallback: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3616,11 +3620,11 @@ function renderInterestTree(container, domains, fallback) {
 // panel falls back to its "still observing" copy instead of rendering garbage.
 const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
 
-function isUnknownishText(value) {
+function isUnknownishText(value: any) {
   return UNKNOWNISH_TEXT.has(String(value ?? "").trim().toLowerCase());
 }
 
-function renderStylePreference(container, style) {
+function renderStylePreference(container: any, style: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3635,8 +3639,8 @@ function renderStylePreference(container, style) {
   const durationLabels = { short: "短视频", medium: "中等", long: "长视频" };
   const paceLabels = { fast: "快节奏", moderate: "适中", slow: "慢节奏" };
   const textFields = [
-    ["时长偏好", durationLabels[style.preferred_duration] || style.preferred_duration],
-    ["节奏偏好", paceLabels[style.preferred_pace] || style.preferred_pace],
+    ["时长偏好", (durationLabels as Record<string, string>)[style.preferred_duration] || style.preferred_duration],
+    ["节奏偏好", (paceLabels as Record<string, string>)[style.preferred_pace] || style.preferred_pace],
   ];
   let hasAny = false;
   for (const [label, value] of textFields) {
@@ -3686,7 +3690,7 @@ function renderStylePreference(container, style) {
   }
 }
 
-function renderContextMode(container, ctx) {
+function renderContextMode(container: any, ctx: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3727,7 +3731,7 @@ function renderContextMode(container, ctx) {
   }
 }
 
-function renderCognitionCards(container, items, fallback) {
+function renderCognitionCards(container: any, items: any, fallback: any) {
   if (!(container instanceof HTMLElement)) {
     return;
   }
@@ -3848,7 +3852,7 @@ function renderCognitionCards(container, items, fallback) {
   }
 }
 
-function renderCognitionHistoryControls(historyState) {
+function renderCognitionHistoryControls(historyState: any) {
   if (
     !(elements.profileRecentMemoryStatus instanceof HTMLElement) ||
     !(elements.profileRecentMemoryMore instanceof HTMLButtonElement)
@@ -3867,7 +3871,7 @@ function renderCognitionHistoryControls(historyState) {
   elements.profileRecentMemoryMore.textContent = uiState.actionLabel;
 }
 
-function getProfileCognitionItems(summary) {
+function getProfileCognitionItems(summary: any) {
   if (Array.isArray(state.profileCognitionHistory.items) && state.profileCognitionHistory.items.length > 0) {
     return state.profileCognitionHistory.items;
   }
@@ -3884,7 +3888,7 @@ function getProfileCognitionItems(summary) {
 // Heuristic: short portraits render as a single paragraph; only longer
 // ones get sentence-grouped. Target paragraph length scales with total
 // length so we don't over-fragment medium portraits either.
-function splitPortraitToParagraphs(text) {
+function splitPortraitToParagraphs(text: any) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return [];
   const totalLen = trimmed.length;
@@ -3902,8 +3906,8 @@ function splitPortraitToParagraphs(text) {
   // grouping of 180 chars so we never produce <2-sentence stubs.
   const targetLen = Math.max(180, Math.ceil(totalLen / 3));
 
-  const paragraphs = [];
-  let buffer = [];
+  const paragraphs: any[] = [];
+  let buffer: any[] = [];
   let bufferLen = 0;
 
   const flush = () => {
@@ -3927,7 +3931,7 @@ function splitPortraitToParagraphs(text) {
   return paragraphs;
 }
 
-function renderPortraitParagraphs(container, text) {
+function renderPortraitParagraphs(container: any, text: any) {
   if (!(container instanceof HTMLElement)) return;
   container.replaceChildren();
   const paragraphs = splitPortraitToParagraphs(text);
@@ -3939,7 +3943,7 @@ function renderPortraitParagraphs(container, text) {
   }
 }
 
-function renderProfileSummary(summary) {
+function renderProfileSummary(summary: any) {
   if (
     !(elements.profileEmpty instanceof HTMLElement) ||
     !(elements.profileCard instanceof HTMLElement) ||
@@ -4051,13 +4055,13 @@ const EDIT_FIELD_ORDER = [
   "surface.style.depth_preference",
 ];
 
-function setProfileEditingLayout(editing) {
+function setProfileEditingLayout(editing: any) {
   if (elements.viewProfile instanceof HTMLElement) {
     elements.viewProfile.classList.toggle("is-profile-editing", editing);
   }
 }
 
-function syncProfileEditChrome(initialized) {
+function syncProfileEditChrome(initialized: any) {
   setProfileEditingLayout(profileEditing);
   if (elements.profileEditBar instanceof HTMLElement) {
     elements.profileEditBar.hidden = !initialized;
@@ -4078,7 +4082,7 @@ async function refreshEditPanel() {
   try {
     const editState = await fetchEditState();
     renderEditPanel(elements.profileEditPanel, editState);
-  } catch (err) {
+  } catch (err: any) {
     console.error("load edit-state failed:", err);
   }
 }
@@ -4118,7 +4122,7 @@ function bindProfileEditToggle() {
   });
 }
 
-async function applyProfileEdit(payload) {
+async function applyProfileEdit(payload: any) {
   const panel = elements.profileEditPanel;
   if (panel instanceof HTMLElement) {
     panel.querySelectorAll("button, input, textarea").forEach((el) => {
@@ -4134,11 +4138,11 @@ async function applyProfileEdit(payload) {
   try {
     const res = await submitProfileEdit(payload);
     const next =
-      res && res.edit_state && res.edit_state.initialized
+      res && res.edit_state && (res.edit_state as UnknownRecord).initialized
         ? res.edit_state
         : await fetchEditState();
     renderEditPanel(panel, next);
-  } catch (err) {
+  } catch (err: any) {
     console.error("profile edit failed:", err);
     void refreshEditPanel();
   }
@@ -4151,7 +4155,7 @@ function makeEditedBadge() {
   return badge;
 }
 
-function makeResetButton(path) {
+function makeResetButton(path: any) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "edit-reset-btn";
@@ -4160,7 +4164,7 @@ function makeResetButton(path) {
   return btn;
 }
 
-function makeRemovableChip(label, onRemove, chipClass = "") {
+function makeRemovableChip(label: any, onRemove: any, chipClass = "") {
   const chip = document.createElement("span");
   chip.className = "edit-chip";
   if (chipClass) chip.classList.add(chipClass);
@@ -4177,7 +4181,7 @@ function makeRemovableChip(label, onRemove, chipClass = "") {
   return chip;
 }
 
-function makeAddRow(placeholder, onAdd) {
+function makeAddRow(placeholder: any, onAdd: any) {
   const row = document.createElement("div");
   row.className = "edit-add-row";
   const input = document.createElement("input");
@@ -4205,7 +4209,7 @@ function makeAddRow(placeholder, onAdd) {
   return row;
 }
 
-function makeEditFieldBlock(label, edited) {
+function makeEditFieldBlock(label: any, edited: any) {
   const block = document.createElement("div");
   block.className = "edit-field";
   const head = document.createElement("div");
@@ -4219,7 +4223,7 @@ function makeEditFieldBlock(label, edited) {
   return block;
 }
 
-function renderTextEditField(path, label, field) {
+function renderTextEditField(path: any, label: any, field: any) {
   const block = makeEditFieldBlock(label, Boolean(field.pinned));
   const textarea = document.createElement("textarea");
   textarea.className = "chat-input edit-text-input";
@@ -4254,7 +4258,7 @@ function renderTextEditField(path, label, field) {
 // Scalar (0..1) fields render as a percent slider. Like text fields they
 // commit on an explicit 保存 tap (not per-drag); the live label tracks the
 // slider on input so the value is visible while dragging.
-function renderScalarEditField(path, label, field) {
+function renderScalarEditField(path: any, label: any, field: any) {
   const block = makeEditFieldBlock(label, Boolean(field.pinned));
   const pct = Math.round((Number(field.value) || 0) * 100);
 
@@ -4300,7 +4304,7 @@ function renderScalarEditField(path, label, field) {
   return block;
 }
 
-function renderListEditField(path, label, field) {
+function renderListEditField(path: any, label: any, field: any) {
   const items = Array.isArray(field.items) ? field.items : [];
   const added = Array.isArray(field.added) ? field.added : [];
   const removed = Array.isArray(field.removed) ? field.removed : [];
@@ -4321,7 +4325,7 @@ function renderListEditField(path, label, field) {
     chips.append(empty);
   }
   block.append(chips);
-  block.append(makeAddRow("添加一项", (value) => applyProfileEdit({ target: path, op: "add", value })));
+  block.append(makeAddRow("添加一项", (value: any) => applyProfileEdit({ target: path, op: "add", value })));
   if (edited) {
     const actions = document.createElement("div");
     actions.className = "edit-field-actions";
@@ -4331,27 +4335,27 @@ function renderListEditField(path, label, field) {
   return block;
 }
 
-function editSpecificName(item) {
+function editSpecificName(item: any) {
   if (typeof item === "string") return item;
   if (item && typeof item === "object") return item.name || item.label || "";
   return "";
 }
 
-function hasInterestSpecificEdits(field) {
+function hasInterestSpecificEdits(field: any) {
   const edits = field && typeof field === "object" ? field.specific_edits : null;
   if (!edits || typeof edits !== "object") return false;
   return Object.values(edits).some((edit) => {
     if (!edit || typeof edit !== "object") return false;
-    return (edit.add?.length || 0) > 0 || (edit.remove?.length || 0) > 0;
+    return (((edit as UnknownRecord).add as any[])?.length > 0) || (((edit as UnknownRecord).remove as any[])?.length > 0);
   });
 }
 
-function renderInterestEditField(path, label, field) {
+function renderInterestEditField(path: any, label: any, field: any) {
   const domains = Array.isArray(field.domains) ? field.domains : [];
   const removed = Array.isArray(field.removed_domains) ? field.removed_domains : [];
   const edited =
     removed.length > 0 ||
-    domains.some((d) => d && d.user_added) ||
+    domains.some((d: any) => d && d.user_added) ||
     hasInterestSpecificEdits(field);
   const block = makeEditFieldBlock(label, edited);
 
@@ -4395,7 +4399,7 @@ function renderInterestEditField(path, label, field) {
     }
     domain.append(specificList);
 
-    const specificAddRow = makeAddRow("添加二级兴趣", (value) =>
+    const specificAddRow = makeAddRow("添加二级兴趣", (value: any) =>
       applyProfileEdit({ target: path, op: "add", value, parent: dom.domain }),
     );
     specificAddRow.classList.add("edit-specific-add-row");
@@ -4410,7 +4414,7 @@ function renderInterestEditField(path, label, field) {
   }
   block.append(tree);
   const placeholder = path === "dislikes" ? "添加要避开的领域" : "添加感兴趣的领域";
-  block.append(makeAddRow(placeholder, (value) => applyProfileEdit({ target: path, op: "add", value })));
+  block.append(makeAddRow(placeholder, (value: any) => applyProfileEdit({ target: path, op: "add", value })));
   if (edited) {
     const actions = document.createElement("div");
     actions.className = "edit-field-actions";
@@ -4420,7 +4424,7 @@ function renderInterestEditField(path, label, field) {
   return block;
 }
 
-function renderEditPanel(container, editState) {
+function renderEditPanel(container: any, editState: any) {
   if (!(container instanceof HTMLElement)) return;
   container.replaceChildren();
   if (!editState || !editState.initialized || !editState.fields) {
@@ -4441,7 +4445,7 @@ function renderEditPanel(container, editState) {
   for (const path of EDIT_FIELD_ORDER) {
     const field = fields[path];
     if (!field || typeof field !== "object") continue;
-    const label = EDIT_FIELD_LABELS[path] || path;
+    const label = (EDIT_FIELD_LABELS as Record<string, any>)[path] || path;
     let block = null;
     if (field.type === "text") block = renderTextEditField(path, label, field);
     else if (field.type === "scalar") block = renderScalarEditField(path, label, field);
@@ -4462,7 +4466,7 @@ function scrollChatMessagesToBottom() {
   window.requestAnimationFrame(scroll);
 }
 
-function appendChatMessage(role, content, { turnId = "", part = "" } = {}) {
+function appendChatMessage(role: any, content: any, { turnId = "", part = "" } = {}) {
   if (!(elements.chatMessages instanceof HTMLElement)) {
     return null;
   }
@@ -4522,7 +4526,7 @@ function appendChatThinkingPlaceholder(turnId = "") {
 
 // Replace a previously-inserted placeholder with the final assistant
 // reply text in-place, so the visual position stays stable.
-function replaceChatThinkingPlaceholder(placeholder, content) {
+function replaceChatThinkingPlaceholder(placeholder: any, content: any) {
   if (!(placeholder instanceof HTMLElement)) {
     return;
   }
@@ -4548,7 +4552,7 @@ const DELIGHT_PERSIST_FIELDS = [
   "turns",
 ];
 
-function persistDelightLocalState(bvid, updates) {
+function persistDelightLocalState(bvid: any, updates: any) {
   const relevant = Object.fromEntries(
     Object.entries(updates).filter(([k]) => DELIGHT_PERSIST_FIELDS.includes(k)),
   );
@@ -4570,7 +4574,7 @@ function createClientTurnId(prefix = "turn") {
   return `${prefix}-${String(random).replace(/[^a-zA-Z0-9_-]/g, "")}`;
 }
 
-function findChatTurnElement(turnId, part) {
+function findChatTurnElement(turnId: any, part: any) {
   if (!(elements.chatMessages instanceof HTMLElement) || !turnId) {
     return null;
   }
@@ -4579,7 +4583,7 @@ function findChatTurnElement(turnId, part) {
   );
 }
 
-function renderChatTurn(turn) {
+function renderChatTurn(turn: any) {
   if (!turn?.turn_id || !(elements.chatMessages instanceof HTMLElement)) {
     return;
   }
@@ -4621,9 +4625,9 @@ function renderChatTurn(turn) {
   }
 }
 
-function applyTurnToDelight(turn) {
+function applyTurnToDelight(turn: any) {
   if (!turn || turn.scope !== "delight" || !turn.subject_id) return;
-  const idx = state.activeDelights.findIndex((item) => item?.bvid === turn.subject_id);
+  const idx = state.activeDelights.findIndex((item: any) => item?.bvid === turn.subject_id);
   if (idx < 0) return;
 
   // Maintain per-delight turns array
@@ -4636,9 +4640,9 @@ function applyTurnToDelight(turn) {
     status: turn.status || "pending",
     error: turn.error || "",
   };
-  const turnIdx = prevTurns.findIndex((t) => t.turn_id === turn.turn_id);
+  const turnIdx = prevTurns.findIndex((t: any) => t.turn_id === turn.turn_id);
   const updatedTurns = turnIdx >= 0
-    ? prevTurns.map((t, i) => i === turnIdx ? turnEntry : t)
+    ? prevTurns.map((t: any, i: any) => i === turnIdx ? turnEntry : t)
     : [...prevTurns, turnEntry];
 
   const updates = {
@@ -4672,14 +4676,14 @@ function applyTurnToDelight(turn) {
   syncDelightHead();
 }
 
-function applyTurnToMessage(turn) {
+function applyTurnToMessage(turn: any) {
   if (!turn || !turn.subject_id) return;
   const type = turn.scope === "delight"
     ? "delight"
     : turn.scope === "avoidance_probe"
       ? "avoidance.probe"
       : "interest.probe";
-  const idx = state.messages.findIndex((item) => {
+  const idx = state.messages.findIndex((item: any) => {
     const itemType = item?.type || "interest.probe";
     return (
       itemType === type &&
@@ -4695,7 +4699,7 @@ function applyTurnToMessage(turn) {
   };
 }
 
-function pollChatTurnUntilSettled(turnId, { onUpdate, onDone } = {}) {
+function pollChatTurnUntilSettled(turnId: any, { onUpdate, onDone }: { onUpdate?: ((turn: any) => void) | null; onDone?: ((turn: any) => void | Promise<void>) | null } = {}) {
   if (!turnId || activeChatPolls.has(turnId)) return;
   const startedAt = Date.now();
 
@@ -4745,7 +4749,7 @@ async function hydrateChatHistory() {
   try {
     const payload = await fetchChatTurns({ session: CHAT_SESSION, scope: "chat", limit: 50 });
     elements.chatMessages.replaceChildren();
-    for (const turn of payload.items || []) {
+    for (const turn of ((payload as UnknownRecord).items as any[]) || []) {
       renderChatTurn(turn);
       if (turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
@@ -4768,12 +4772,12 @@ async function syncScopedChatTurns() {
       fetchChatTurns({ session: CHAT_SESSION, scope: "probe", limit: 80 }),
       fetchChatTurns({ session: CHAT_SESSION, scope: "avoidance_probe", limit: 80 }),
     ]);
-    for (const turn of delightTurns.items || []) {
+    for (const turn of ((delightTurns as UnknownRecord).items as any[]) || []) {
       applyTurnToDelight(turn);
       applyTurnToMessage(turn);
       if (turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
-          onUpdate(nextTurn) {
+          onUpdate(nextTurn: any) {
             applyTurnToDelight(nextTurn);
             applyTurnToMessage(nextTurn);
             renderDelightSlot();
@@ -4782,22 +4786,22 @@ async function syncScopedChatTurns() {
         });
       }
     }
-    for (const turn of probeTurns.items || []) {
+    for (const turn of ((probeTurns as UnknownRecord).items as any[]) || []) {
       applyTurnToMessage(turn);
       if (turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
-          onUpdate(nextTurn) {
+          onUpdate(nextTurn: any) {
             applyTurnToMessage(nextTurn);
             renderMessagesList();
           },
         });
       }
     }
-    for (const turn of avoidanceProbeTurns.items || []) {
+    for (const turn of ((avoidanceProbeTurns as UnknownRecord).items as any[]) || []) {
       applyTurnToMessage(turn);
       if (turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
-          onUpdate(nextTurn) {
+          onUpdate(nextTurn: any) {
             applyTurnToMessage(nextTurn);
             renderMessagesList();
           },
@@ -4809,19 +4813,19 @@ async function syncScopedChatTurns() {
   }
 }
 
-function setFeedbackStatus(statusLine, message) {
+function setFeedbackStatus(statusLine: any, message: any) {
   statusLine.textContent = message;
   statusLine.hidden = !message;
   statusLine.dataset.tone = "info";
 }
 
-function setFeedbackStatusWithTone(statusLine, message, tone = "info") {
+function setFeedbackStatusWithTone(statusLine: any, message: any, tone = "info") {
   statusLine.textContent = message;
   statusLine.hidden = !message;
   statusLine.dataset.tone = tone;
 }
 
-function setChatStatus(message, tone = "info") {
+function setChatStatus(message: any, tone = "info") {
   if (!(elements.chatStatus instanceof HTMLElement)) {
     return;
   }
@@ -4836,7 +4840,7 @@ function clearActiveFeedbackProgress() {
   state.activeFeedbackProgress = null;
 }
 
-function attachFeedbackRuntimeProgress(statusLine) {
+function attachFeedbackRuntimeProgress(statusLine: any) {
   clearActiveFeedbackProgress();
   const activeFeedbackProgress = {
     timeoutId: window.setTimeout(() => {
@@ -4844,7 +4848,7 @@ function attachFeedbackRuntimeProgress(statusLine) {
         state.activeFeedbackProgress = null;
       }
     }, 12000),
-    handle(event) {
+    handle(event: any) {
       const runtimeState = getRuntimeRefreshSubmissionState(event);
       if (runtimeState == null) {
         return;
@@ -4874,7 +4878,7 @@ function attachFeedbackRuntimeProgress(statusLine) {
  *   source_platform?: string,
  * }} [context]
  */
-async function openRecommendation(bvid, context = {}) {
+async function openRecommendation(bvid: any, context = {}) {
   const url = buildContentUrl(context);
   if (!url) {
     setHint("这条卡片还没挂上链接，稍后再试。", "error");
@@ -4883,14 +4887,14 @@ async function openRecommendation(bvid, context = {}) {
   // Fire-and-forget click report (best effort). Runs in parallel with tab.create.
   void reportRecommendationClick(
     buildRecommendationClickPayload(
-      { ...context, bvid: bvid || context.bvid || context.content_id || "" },
+      { ...context, bvid: bvid || (context as UnknownRecord).bvid || (context as UnknownRecord).content_id || "" },
       url,
     ),
   );
   await chrome.tabs.create({ url });
 }
 
-function createActionButton(label, className, onClick) {
+function createActionButton(label: any, className: any, onClick: any) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = className;
@@ -5121,7 +5125,7 @@ function renderDelightSlot() {
       async () => {
         try {
           await respondToDelight(delight.bvid, "like", delight.title);
-        } catch (err) {
+        } catch (err: any) {
           console.error("Delight like failed:", err);
           setHint("这次喜欢还没记上，可以再试一次。", "error");
           renderDelightSlot();
@@ -5146,7 +5150,7 @@ function renderDelightSlot() {
       async () => {
         try {
           await respondToDelight(delight.bvid, "dislike", delight.title);
-        } catch (err) {
+        } catch (err: any) {
           console.error("Delight dislike failed:", err);
         }
         rememberDismissedDelight(delight.bvid);
@@ -5222,7 +5226,7 @@ function renderDelightSlot() {
       // chat_draft so reopening restores it; a real send is guarded so tapping
       // 发出去 isn't lost (its blur fires before the click in some browsers).
       input.addEventListener("blur", (event) => {
-        if (event.relatedTarget && composer.contains(event.relatedTarget)) return;
+        if ((event.relatedTarget as HTMLElement) && composer.contains((event.relatedTarget as HTMLElement))) return;
         setTimeout(() => {
           if (sendInitiated) return;
           if (composer.contains(document.activeElement)) return;
@@ -5281,12 +5285,12 @@ function renderDelightSlot() {
               setHint("这句记下了，后面的惊喜推荐会继续学。", "success");
             } else if (turn.status === "pending") {
               pollChatTurnUntilSettled(turn.turn_id, {
-                onUpdate(nextTurn) {
+                onUpdate(nextTurn: any) {
                   applyTurnToDelight(nextTurn);
                   applyTurnToMessage(nextTurn);
                   renderDelightSlot();
                 },
-                async onDone(doneTurn) {
+                async onDone(doneTurn: any) {
                   if (doneTurn.status === "completed") {
                     setHint("这句记下了，后面的惊喜推荐会继续学。", "success");
                   }
@@ -5338,9 +5342,9 @@ function renderDelightSlot() {
         if (dismissAll.disabled) return;
         dismissAll.disabled = true;
         dismissAll.textContent = "本地保存中…";
-        const snapshot = state.activeDelights.map((item) => normalizePopupSavedItem(item));
+        const snapshot = state.activeDelights.map((item: any) => normalizePopupSavedItem(item));
         const results = await Promise.allSettled(
-          snapshot.map((item) => saveItem("watch_later", item)),
+          snapshot.map((item: any) => saveItem("watch_later", item)),
         );
         const partition = partitionSavedQueueResults(snapshot, results);
         let syncing = 0;
@@ -5348,7 +5352,7 @@ function renderDelightSlot() {
           if (itemKey) {
             watchLaterToggles.setSaved(itemKey, true);
           }
-          if (value?.sync_task_id && ["pending", "syncing"].includes(value?.sync_status)) {
+          if (value?.sync_task_id && ["pending", "syncing"].includes(String(value?.sync_status))) {
             syncing += 1;
             savedTaskRuntimes.watch_later.coordinator.track({
               task_id: value.sync_task_id,
@@ -5380,7 +5384,7 @@ function renderDelightSlot() {
   favoriteToggles.pruneDetached();
 }
 
-function createCommentComposer(item, statusLine) {
+function createCommentComposer(item: any, statusLine: any) {
   const wrapper = document.createElement("div");
   wrapper.className = "comment-composer";
   wrapper.hidden = true;
@@ -5390,7 +5394,7 @@ function createCommentComposer(item, statusLine) {
   input.rows = 3;
   input.placeholder = "写一句你为什么想看，或者为什么不想看";
 
-  let hideTimer = null;
+  let hideTimer: number | null = null;
 
   function clearHideTimer() {
     if (hideTimer !== null) {
@@ -5399,7 +5403,7 @@ function createCommentComposer(item, statusLine) {
     }
   }
 
-  function applySubmitUiState(stateName) {
+  function applySubmitUiState(stateName: any) {
     const uiState = getCommentSubmitUiState(stateName);
     submit.textContent = uiState.buttonLabel;
     submit.disabled = uiState.disabled;
@@ -5487,7 +5491,7 @@ function createCommentComposer(item, statusLine) {
   return { wrapper, input, resetComposerUi };
 }
 
-function renderRecommendations(items, { append = false } = {}) {
+function renderRecommendations(items: any, { append = false } = {}) {
   if (!(elements.list instanceof HTMLElement)) {
     return;
   }
@@ -5554,7 +5558,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" }[
+      ({ bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" } as Record<string, string>)[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -5732,7 +5736,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
 function getDisplayedRecommendationBvids() {
   return state.recommendations
-    .map((item) => String(item?.bvid ?? "").trim())
+    .map((item: any) => String(item?.bvid ?? "").trim())
     .filter(Boolean);
 }
 
@@ -5800,7 +5804,7 @@ function maybeLoadMoreRecommendations() {
   }
 }
 
-function renderRecommendationState(stateShape) {
+function renderRecommendationState(stateShape: any) {
   if (stateShape.kind === "ready") {
     hideRecommendationEmptyState();
     renderRecommendations(stateShape.items);
@@ -5890,12 +5894,12 @@ async function loadProfileSummary({ force = false } = {}) {
   renderProfileSummary(state.profile);
 }
 
-function hydrateInboxFromProfile(profile) {
+function hydrateInboxFromProfile(profile: any) {
   hydrateInboxFromSpeculations(profile?.speculative_interests, "interest.probe");
   hydrateInboxFromSpeculations(profile?.speculative_avoidances, "avoidance.probe");
 }
 
-function hydrateInboxFromSpeculations(speculations, type = "interest.probe") {
+function hydrateInboxFromSpeculations(speculations: any, type = "interest.probe") {
   if (!Array.isArray(speculations)) return;
   const normalizedType = normalizeProbeType(type);
   const activeItems = speculations.filter((item) =>
@@ -5912,7 +5916,7 @@ function hydrateInboxFromSpeculations(speculations, type = "interest.probe") {
     activeItems.map((item) => probeMessageKey(normalizedType, item.domain)),
   );
   // Drop probe entries of the same type no longer in the active set.
-  state.messages = state.messages.filter((m) => {
+  state.messages = state.messages.filter((m: any) => {
     const itemType = normalizeProbeType(m?.type);
     if (itemType !== normalizedType) return true;
     return activeKeys.has(probeMessageKey(itemType, m?.domain));
@@ -5920,14 +5924,14 @@ function hydrateInboxFromSpeculations(speculations, type = "interest.probe") {
   // Add any current active probes not yet in state.messages.
   const existingKeys = new Set(
     state.messages
-      .filter((m) => normalizeProbeType(m?.type) === normalizedType && m?.domain)
-      .map((m) => probeMessageKey(normalizedType, m.domain)),
+      .filter((m: any) => normalizeProbeType(m?.type) === normalizedType && m?.domain)
+      .map((m: any) => probeMessageKey(normalizedType, m.domain)),
   );
   for (const item of activeItems) {
     const itemKey = probeMessageKey(normalizedType, item.domain);
     if (existingKeys.has(itemKey)) {
       const existing = state.messages.find(
-        (m) => probeMessageKey(m?.type, m?.domain) === itemKey,
+        (m: any) => probeMessageKey(m?.type, m?.domain) === itemKey,
       );
       if (existing) {
         existing.probe_mode = item.probe_mode || "";
@@ -5983,7 +5987,7 @@ async function loadMoreCognitionHistory() {
       motivational_drivers: nextPage.motivational_drivers,
       current_phase: nextPage.current_phase,
       deep_needs: nextPage.deep_needs,
-      top_interests: nextPage.top_interests,
+      top_interests: (nextPage as UnknownRecord).top_interests,
     };
     state.profileCognitionHistory = buildNextCognitionHistoryState(
       state.profileCognitionHistory,
@@ -6004,6 +6008,10 @@ async function refreshProfileSummaryAfterInteraction({
   onProfileStart = null,
   onActivityStart = null,
   onDone = null,
+}: {
+  onProfileStart?: (() => void) | null;
+  onActivityStart?: (() => void) | null;
+  onDone?: (() => void) | null;
 } = {}) {
   if (!state.online) {
     return;
@@ -6260,13 +6268,13 @@ function bindChat() {
   // Start rotating when chat tab is visible; pause when user is typing.
   elements.chatInput.addEventListener("focus", stopPlaceholderRotation);
   elements.chatInput.addEventListener("blur", () => {
-    if (!elements.chatInput.value.trim()) {
+    if (!(elements.chatInput as HTMLInputElement).value.trim()) {
       startPlaceholderRotation();
     }
   });
   startPlaceholderRotation();
 
-  let slowStatusTimer = null;
+  let slowStatusTimer: number | null = null;
 
   function clearSlowStatusTimer() {
     if (slowStatusTimer !== null) {
@@ -6276,7 +6284,7 @@ function bindChat() {
   }
 
   elements.chatInput.addEventListener("input", () => {
-    if (!elements.chatSendButton.disabled) {
+    if (!(elements.chatSendButton as HTMLInputElement).disabled) {
       setChatStatus("");
     }
   });
@@ -6286,12 +6294,12 @@ function bindChat() {
       return;
     }
     event.preventDefault();
-    elements.chatForm.requestSubmit();
+    (elements.chatForm as HTMLFormElement).requestSubmit();
   });
 
   elements.chatForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const message = elements.chatInput.value.trim();
+    const message = (elements.chatInput as HTMLInputElement).value.trim();
     if (!message) {
       setHint("先说一句你的想法、偏好或者最近状态。", "error");
       elements.chatInput.focus();
@@ -6305,13 +6313,13 @@ function bindChat() {
     const turnId = createClientTurnId("chat");
     appendChatMessage("你", message, { turnId, part: "user" });
     const thinkingPlaceholder = appendChatThinkingPlaceholder(turnId);
-    elements.chatInput.value = "";
-    elements.chatSendButton.disabled = true;
+    (elements.chatInput as HTMLInputElement).value = "";
+    (elements.chatSendButton as HTMLInputElement).disabled = true;
     elements.chatSendButton.textContent = "发送中...";
     setChatStatus(getSubmissionProgressMessage("chat", "waiting_reply"), "info");
     clearSlowStatusTimer();
     slowStatusTimer = window.setTimeout(() => {
-      if (elements.chatSendButton.disabled) {
+      if ((elements.chatSendButton as HTMLInputElement).disabled) {
         setChatStatus(getSubmissionProgressMessage("chat", "waiting_slow"), "info");
       }
     }, 2500);
@@ -6331,7 +6339,7 @@ function bindChat() {
       } else {
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate: renderChatTurn,
-          async onDone(doneTurn) {
+          async onDone(doneTurn: any) {
             if (doneTurn.status === "completed") {
               setHint("这句记下了。", "success");
             }
@@ -6354,7 +6362,7 @@ function bindChat() {
       setHint("聊天接口这会儿没接上，先看看本地后端是不是开着。", "error");
     } finally {
       clearSlowStatusTimer();
-      elements.chatSendButton.disabled = false;
+      (elements.chatSendButton as HTMLInputElement).disabled = false;
       elements.chatSendButton.textContent = "发出去";
     }
   });
@@ -6363,19 +6371,19 @@ function bindChat() {
 // ── Settings panel ──────────────────────────────────────────
 
 function bindSettings() {
-  const gearBtn = document.getElementById("settingsGear");
-  const overlay = document.getElementById("settingsOverlay");
-  const backBtn = document.getElementById("settingsBack");
-  const saveBtn = document.getElementById("settingsSave");
-  const toast = document.getElementById("settingsToast");
-  const issuesContainer = document.getElementById("settingsIssues");
-  const generalActions = document.getElementById("settingsGeneralActions");
-  const backendSchemeInput = document.getElementById("cfgBackendScheme");
-  const backendHostInput = document.getElementById("cfgBackendHost");
-  const backendPortInput = document.getElementById("cfgBackendPort");
-  const bannerOffline = document.getElementById("cfgBannerOffline");
-  const bannerDegraded = document.getElementById("cfgBannerDegraded");
-  const bannerNoCache = document.getElementById("cfgBannerNoCache");
+  const gearBtn = document.getElementById("settingsGear")!;
+  const overlay = document.getElementById("settingsOverlay")!;
+  const backBtn = document.getElementById("settingsBack")!;
+  const saveBtn = document.getElementById("settingsSave")!;
+  const toast = document.getElementById("settingsToast")!;
+  const issuesContainer = document.getElementById("settingsIssues")!;
+  const generalActions = document.getElementById("settingsGeneralActions")!;
+  const backendSchemeInput = document.getElementById("cfgBackendScheme")!;
+  const backendHostInput = document.getElementById("cfgBackendHost")!;
+  const backendPortInput = document.getElementById("cfgBackendPort")!;
+  const bannerOffline = document.getElementById("cfgBannerOffline")!;
+  const bannerDegraded = document.getElementById("cfgBannerDegraded")!;
+  const bannerNoCache = document.getElementById("cfgBannerNoCache")!;
 
   if (!gearBtn || !overlay || !backBtn || !saveBtn) return;
 
@@ -6385,35 +6393,35 @@ function bindSettings() {
   // client so it can manage the gate without being able to lock itself out).
   const authControl = initAuthControl(
     {
-      checkbox: document.getElementById("cfgAuthEnabled"),
-      password: document.getElementById("cfgAuthPassword"),
-      saveBtn: document.getElementById("cfgAuthSave"),
-      hint: document.getElementById("cfgAuthHint"),
+      checkbox: document.getElementById("cfgAuthEnabled")! as HTMLInputElement,
+      password: document.getElementById("cfgAuthPassword")! as HTMLInputElement,
+      saveBtn: document.getElementById("cfgAuthSave")!,
+      hint: document.getElementById("cfgAuthHint")!,
     },
     { getBaseUrl: getBackendBaseUrl },
   );
 
   const extLogin = initExtLogin(
-    { deviceKey: document.getElementById("cfgExtDeviceKey"),
-      btn: document.getElementById("cfgExtLoginBtn"),
-      status: document.getElementById("cfgExtLoginStatus") },
+    { deviceKey: document.getElementById("cfgExtDeviceKey")! as HTMLInputElement,
+      btn: document.getElementById("cfgExtLoginBtn")!,
+      status: document.getElementById("cfgExtLoginStatus")! },
     { getBaseUrl: getBackendBaseUrl, onPaired: connectRuntimeStream }
   );
 
   const autostartControl = initAutostartControl(
     {
-      checkbox: document.getElementById("cfgAutostartEnabled"),
-      hint: document.getElementById("cfgAutostartHint"),
+      checkbox: document.getElementById("cfgAutostartEnabled")! as HTMLInputElement,
+      hint: document.getElementById("cfgAutostartHint")!,
     },
     { getBaseUrl: getBackendBaseUrl },
   );
 
   const settingsTabs = [
-    ["models", document.getElementById("settingsTabModels")],
-    ["sources", document.getElementById("settingsTabSources")],
-    ["scheduler", document.getElementById("settingsTabScheduler")],
-    ["general", document.getElementById("settingsTabGeneral")],
-    ["logging", document.getElementById("settingsTabLogging")],
+    ["models", document.getElementById("settingsTabModels")!],
+    ["sources", document.getElementById("settingsTabSources")!],
+    ["scheduler", document.getElementById("settingsTabScheduler")!],
+    ["general", document.getElementById("settingsTabGeneral")!],
+    ["logging", document.getElementById("settingsTabLogging")!],
   ];
 
   function setActiveSettingsPanel(activePanel = "models") {
@@ -6437,7 +6445,7 @@ function bindSettings() {
     if (tab instanceof HTMLButtonElement) {
       tab.addEventListener("click", () => {
         if (name !== "models" && !modelSettings.confirmLeave()) return;
-        setActiveSettingsPanel(name);
+        setActiveSettingsPanel(name as string);
         if (name === "models") void modelSettings.open();
       });
     }
@@ -6447,7 +6455,7 @@ function bindSettings() {
   // intent, even if the final value equals the redacted GET echo (the
   // exact-basename revert case). Programmatic renders via setVal() do not
   // fire "input" events, so this only arms on genuine user edits.
-  const logPathInput = document.getElementById("cfgLogPath");
+  const logPathInput = document.getElementById("cfgLogPath")!;
   if (logPathInput) {
     logPathInput.addEventListener("input", () => markLogPathDirty());
   }
@@ -6469,8 +6477,8 @@ function bindSettings() {
     }
   }
 
-  function setText(id, value) {
-    const el = document.getElementById(id);
+  function setText(id: any, value: any) {
+    const el = document.getElementById(id)!;
     if (el) el.textContent = value || "—";
   }
 
@@ -6500,19 +6508,19 @@ function bindSettings() {
     already_applying: "正在更新中",
   };
 
-  function formatBackendUpdateReason(reason) {
+  function formatBackendUpdateReason(reason: any) {
     const key = reason && reason !== "none" ? String(reason) : "";
     if (!key) return "";
-    return BACKEND_UPDATE_REASON_TEXT[key] || key;
+    return (BACKEND_UPDATE_REASON_TEXT as Record<string, any>)[key] || key;
   }
 
-  function formatBackendUpdateError(backend) {
+  function formatBackendUpdateError(backend: any) {
     const key =
       backend.last_error || (backend.reason && backend.reason !== "none" ? backend.reason : "");
     return formatBackendUpdateReason(key) || "—";
   }
 
-  function renderBackendUpdateStatus(payload) {
+  function renderBackendUpdateStatus(payload: any) {
     const backend = {
       ...(state.backendUpdateStatus || {}),
       ...(payload?.backend || payload || {}),
@@ -6530,7 +6538,7 @@ function bindSettings() {
     const isFrozenInstall = installMode === "frozen";
     const isDockerInstall = installMode === "docker";
     const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
-    const applyBtn = document.getElementById("backendUpdateApply");
+    const applyBtn = document.getElementById("backendUpdateApply")!;
     if (applyBtn instanceof HTMLButtonElement) {
       const canApply =
         isGitInstall &&
@@ -6541,7 +6549,7 @@ function bindSettings() {
       applyBtn.disabled = !canApply;
       applyBtn.dataset.tag = backend.latest_tag || "";
     }
-    const downloadLink = document.getElementById("backendUpdateDownload");
+    const downloadLink = document.getElementById("backendUpdateDownload")!;
     if (downloadLink instanceof HTMLAnchorElement) {
       const showDownload =
         (isFrozenInstall || isDesktopInstallerUpdate) && backend.state === "update_available";
@@ -6553,7 +6561,7 @@ function bindSettings() {
     }
     // Non-git installs never get the apply button; tell the user how their
     // install actually upgrades instead of leaving the card action-less.
-    const modeHint = document.getElementById("backendUpdateModeHint");
+    const modeHint = document.getElementById("backendUpdateModeHint")!;
     if (modeHint instanceof HTMLElement) {
       let hint = "";
       if (isDockerInstall) {
@@ -6592,7 +6600,7 @@ function bindSettings() {
 
   backendUpdateStatusRefresh = loadBackendUpdateStatus;
 
-  function showToast(message, tone = "success") {
+  function showToast(message: any, tone = "success") {
     toast.textContent = message;
     toast.dataset.tone = tone;
     toast.hidden = false;
@@ -6613,28 +6621,28 @@ function bindSettings() {
     }
   }
 
-  function showConfigBanner(banner, message, tone = "warning") {
+  function showConfigBanner(banner: any, message: any, tone = "warning") {
     if (!(banner instanceof HTMLElement)) return;
     banner.textContent = message;
     banner.dataset.tone = tone;
     banner.hidden = false;
   }
 
-  function formatCachedAt(cachedAt) {
+  function formatCachedAt(cachedAt: any) {
     if (!cachedAt) return "未知时间";
     const parsed = new Date(cachedAt);
     if (Number.isNaN(parsed.getTime())) return String(cachedAt);
     return parsed.toLocaleString("zh-CN", { hour12: false });
   }
 
-  function renderDegradedBanner(cfg) {
+  function renderDegradedBanner(cfg: any) {
     if (!cfg?.degraded) {
       if (bannerDegraded instanceof HTMLElement) bannerDegraded.hidden = true;
       return;
     }
     const issues = Array.isArray(cfg.issues) ? cfg.issues : [];
     const issueText = issues
-      .map((issue) => `${issue.field || "config"}: ${issue.message || ""}`.trim())
+      .map((issue: any) => `${issue.field || "config"}: ${issue.message || ""}`.trim())
       .filter(Boolean)
       .slice(0, 3)
       .join("；");
@@ -6646,7 +6654,7 @@ function bindSettings() {
     setSaveButtonMode("degraded");
   }
 
-  function renderIssues(issues) {
+  function renderIssues(issues: any) {
     issuesContainer.innerHTML = "";
     if (!Array.isArray(issues) || issues.length === 0) return;
     for (const issue of issues) {
@@ -6657,7 +6665,7 @@ function bindSettings() {
     }
   }
 
-  function renderStructuredConfigError(err) {
+  function renderStructuredConfigError(err: any) {
     if (!Array.isArray(err.details?.config?.issues)) return false;
     applyRuntimeConfig(err.details.config);
     renderIssues(err.details.config.issues);
@@ -6666,14 +6674,14 @@ function bindSettings() {
     return true;
   }
 
-  const setVal = (id, val) => {
-    const el = document.getElementById(id);
-    if (el) el.value = val ?? "";
+  const setVal = (id: any, val: any) => {
+    const el = document.getElementById(id)!;
+    if (el) (el as HTMLInputElement).value = val ?? "";
   };
 
-  const getVal = (id) => {
-    const el = document.getElementById(id);
-    return el ? el.value : "";
+  const getVal = (id: any) => {
+    const el = document.getElementById(id)!;
+    return el ? (el as HTMLInputElement).value : "";
   };
 
   // Credential fields are write-only (same pattern as the model-settings
@@ -6682,19 +6690,19 @@ function bindSettings() {
   // empty input is omitted from the PUT payload (see collectForm), so saving
   // never overwrites the stored secret. A non-empty masked value means the
   // backend holds a credential; "" means none is saved.
-  function setCredentialInput(id, maskedValue) {
-    const el = document.getElementById(id);
+  function setCredentialInput(id: string, maskedValue: string) {
+    const el = document.getElementById(id)!;
     if (!el) return;
     if (!el.dataset.emptyPlaceholder) {
-      el.dataset.emptyPlaceholder = el.placeholder || "";
+      el.dataset.emptyPlaceholder = (el as HTMLInputElement).placeholder || "";
     }
-    el.value = "";
-    el.placeholder = maskedValue
+    (el as HTMLInputElement).value = "";
+    (el as HTMLInputElement).placeholder = maskedValue
       ? "已保存 Cookie（留空保持不变，粘贴新值覆盖）"
       : `未保存 Cookie${el.dataset.emptyPlaceholder ? ` — ${el.dataset.emptyPlaceholder}` : ""}`;
   }
 
-  function joinLogPath(directory, filename) {
+  function joinLogPath(directory: any, filename: any) {
     const dir = String(directory || "").trim();
     const name = String(filename || "").trim();
     if (!dir) return name;
@@ -6702,12 +6710,12 @@ function bindSettings() {
     return dir.endsWith("/") || dir.endsWith("\\") ? `${dir}${name}` : `${dir}/${name}`;
   }
 
-  function resolveLogPathFromConfig(loggingConfig) {
+  function resolveLogPathFromConfig(loggingConfig: any) {
     if (loggingConfig?.file_path) return loggingConfig.file_path;
     return joinLogPath(loggingConfig?.directory || "logs", loggingConfig?.filename || "openbiliclaw.log");
   }
 
-  function splitLogPath(rawPath, currentLogging) {
+  function splitLogPath(rawPath: any, currentLogging: any) {
     const fallback = { directory: "logs", filename: "openbiliclaw.log" };
     const trimmed = String(rawPath || "").trim();
     if (!trimmed) return fallback;
@@ -6744,7 +6752,7 @@ function bindSettings() {
     logPathDirty = false;
   }
 
-  function isLogPathUnmodified(currentLogging) {
+  function isLogPathUnmodified(currentLogging: any) {
     // The dirty flag is the authoritative intent signal; the string
     // comparison only guards the edge where the flag was never armed
     // (e.g. listener not yet attached) — a pristine echo still counts as
@@ -6753,16 +6761,16 @@ function bindSettings() {
     return getVal("cfgLogPath") === resolveLogPathFromConfig(currentLogging);
   }
 
-  const getInt = (id, fallback) => {
+  const getInt = (id: any, fallback: any) => {
     const raw = getVal(id);
     if (raw === "") return fallback;
     const parsed = parseInt(raw, 10);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
-  const checked = (id, fallback = false) => {
-    const el = document.getElementById(id);
-    return el ? el.checked : fallback;
+  const checked = (id: any, fallback = false) => {
+    const el = document.getElementById(id)!;
+    return el ? (el as HTMLInputElement).checked : fallback;
   };
 
   const ZHIHU_SOURCE_MODE_FIELDS = [
@@ -6773,7 +6781,7 @@ function bindSettings() {
     ["related", "cfgZhihuModeRelated"],
   ];
 
-  function setZhihuSourceModes(rawModes) {
+  function setZhihuSourceModes(rawModes: any) {
     const fallbackModes = ZHIHU_SOURCE_MODE_FIELDS.map(([mode]) => mode);
     const selected = new Set(
       (Array.isArray(rawModes) && rawModes.length > 0 ? rawModes : fallbackModes)
@@ -6781,8 +6789,8 @@ function bindSettings() {
         .filter(Boolean),
     );
     for (const [mode, id] of ZHIHU_SOURCE_MODE_FIELDS) {
-      const el = document.getElementById(id);
-      if (el) el.checked = selected.has(mode);
+      const el = document.getElementById(id)!;
+      if (el) (el as HTMLInputElement).checked = selected.has(mode);
     }
   }
 
@@ -6800,7 +6808,7 @@ function bindSettings() {
     ["related", "cfgRedditModeRelated"],
   ];
 
-  function setRedditSourceModes(rawModes) {
+  function setRedditSourceModes(rawModes: any) {
     const fallbackModes = REDDIT_SOURCE_MODE_FIELDS.map(([mode]) => mode);
     const selected = new Set(
       (Array.isArray(rawModes) && rawModes.length > 0 ? rawModes : fallbackModes)
@@ -6808,8 +6816,8 @@ function bindSettings() {
         .filter(Boolean),
     );
     for (const [mode, id] of REDDIT_SOURCE_MODE_FIELDS) {
-      const el = document.getElementById(id);
-      if (el) el.checked = selected.has(mode);
+      const el = document.getElementById(id)!;
+      if (el) (el as HTMLInputElement).checked = selected.has(mode);
     }
   }
 
@@ -6860,31 +6868,31 @@ function bindSettings() {
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
-    let data = null;
+    let data: UnknownRecord | null = null;
     try {
       data = await fetchSourcesStatus();
     } catch {
       data = null;
     }
     for (const key of SOURCE_STATUS_KEYS) {
-      const row = document.querySelector(`[data-source-status="${key}"]`);
+      const row = document.querySelector(`[data-source-status="${key}"]`)!;
       if (!row) continue;
       const dot = row.querySelector(".src-dot");
       const detail = row.querySelector(".src-detail");
-      const item = data && data[key];
+      const item = (data as UnknownRecord)?.[key] as UnknownRecord | undefined;
       if (!item) {
         if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
-        if (dot) dot.style.color = "#9aa0a6";
-        row.style.opacity = "1";
+        if (dot) (dot as HTMLElement).style.color = "#9aa0a6";
+        (row as HTMLElement).style.opacity = "1";
         continue;
       }
       if (detail) {
-        const label = SOURCE_STATUS_LABEL[item.state] || "";
+        const label = SOURCE_STATUS_LABEL[item.state as keyof typeof SOURCE_STATUS_LABEL] || "";
         const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
         detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
       }
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
-      row.style.opacity = item.enabled ? "1" : "0.6";
+      if (dot) (dot as HTMLElement).style.color = SOURCE_STATUS_DOT[item.state as keyof typeof SOURCE_STATUS_DOT] || "#9aa0a6";
+      (row as HTMLElement).style.opacity = item.enabled ? "1" : "0.6";
     }
   }
 
@@ -6893,51 +6901,51 @@ function bindSettings() {
   // actually visible.
   setInterval(() => {
     if (document.hidden) return;
-    const row = document.querySelector("[data-source-status]");
-    if (!row || row.offsetParent === null) return;
+    const row = document.querySelector("[data-source-status]")!;
+    if (!row || (row as HTMLElement).offsetParent === null) return;
     void renderSourcesStatus();
   }, 30000);
 
-  function populateForm(cfg) {
+  function populateForm(cfg: any) {
     applyRuntimeConfig(cfg);
     // Bilibili
-    const biliAuth = document.getElementById("cfgBiliAuth");
-    if (biliAuth) biliAuth.value = cfg.bilibili?.auth_method || "cookie";
+    const biliAuth = document.getElementById("cfgBiliAuth")!;
+    if (biliAuth) (biliAuth as HTMLInputElement).value = cfg.bilibili?.auth_method || "cookie";
     setCredentialInput("cfgBiliCookie", cfg.bilibili?.cookie);
     setVal("cfgBiliBrowserExecutable", cfg.bilibili?.browser_executable);
-    const biliBrowserHeaded = document.getElementById("cfgBiliBrowserHeaded");
-    if (biliBrowserHeaded) biliBrowserHeaded.checked = cfg.bilibili?.browser_headed === true;
-    const bilibiliEnabled = document.getElementById("cfgBilibiliEnabled");
-    if (bilibiliEnabled) bilibiliEnabled.checked = cfg.sources?.bilibili?.enabled !== false;
+    const biliBrowserHeaded = document.getElementById("cfgBiliBrowserHeaded")!;
+    if (biliBrowserHeaded) (biliBrowserHeaded as HTMLInputElement).checked = cfg.bilibili?.browser_headed === true;
+    const bilibiliEnabled = document.getElementById("cfgBilibiliEnabled")!;
+    if (bilibiliEnabled) (bilibiliEnabled as HTMLInputElement).checked = cfg.sources?.bilibili?.enabled !== false;
 
     // Sources
     setVal("cfgSourcesBrowserCdp", cfg.sources?.browser?.cdp_url);
-    const sourcesBrowserHeaded = document.getElementById("cfgSourcesBrowserHeaded");
+    const sourcesBrowserHeaded = document.getElementById("cfgSourcesBrowserHeaded")!;
     if (sourcesBrowserHeaded) {
-      sourcesBrowserHeaded.checked = cfg.sources?.browser?.headed === true;
+      (sourcesBrowserHeaded as HTMLInputElement).checked = cfg.sources?.browser?.headed === true;
     }
-    const xhsEnabled = document.getElementById("cfgXhsEnabled");
-    if (xhsEnabled) xhsEnabled.checked = cfg.sources?.xiaohongshu?.enabled === true;
+    const xhsEnabled = document.getElementById("cfgXhsEnabled")!;
+    if (xhsEnabled) (xhsEnabled as HTMLInputElement).checked = cfg.sources?.xiaohongshu?.enabled === true;
     setVal("cfgXhsDailySearchBudget", cfg.sources?.xiaohongshu?.daily_search_budget);
     setVal("cfgXhsDailyCreatorBudget", cfg.sources?.xiaohongshu?.daily_creator_budget);
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
-    const douyinEnabled = document.getElementById("cfgDouyinEnabled");
-    if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
+    const douyinEnabled = document.getElementById("cfgDouyinEnabled")!;
+    if (douyinEnabled) (douyinEnabled as HTMLInputElement).checked = cfg.sources?.douyin?.enabled === true;
     setCredentialInput("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
     setVal("cfgDouyinCookieEnv", cfg.sources?.douyin?.cookie_env);
     setVal("cfgDouyinDailySearchBudget", cfg.sources?.douyin?.daily_search_budget);
     setVal("cfgDouyinDailyHotBudget", cfg.sources?.douyin?.daily_hot_budget);
     setVal("cfgDouyinDailyFeedBudget", cfg.sources?.douyin?.daily_feed_budget);
     setVal("cfgDouyinRequestInterval", cfg.sources?.douyin?.request_interval_seconds);
-    const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
-    if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
+    const youtubeEnabled = document.getElementById("cfgYoutubeEnabled")!;
+    if (youtubeEnabled) (youtubeEnabled as HTMLInputElement).checked = cfg.sources?.youtube?.enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
     setVal("cfgYoutubeDailyTrendingBudget", cfg.sources?.youtube?.daily_trending_budget);
     setVal("cfgYoutubeDailyChannelBudget", cfg.sources?.youtube?.daily_channel_budget);
     setVal("cfgYoutubeRequestInterval", cfg.sources?.youtube?.request_interval_seconds);
     setVal("cfgYoutubeMinInterval", cfg.sources?.youtube?.min_interval_minutes);
-    const twitterEnabled = document.getElementById("cfgTwitterEnabled");
-    if (twitterEnabled) twitterEnabled.checked = cfg.sources?.twitter?.enabled === true;
+    const twitterEnabled = document.getElementById("cfgTwitterEnabled")!;
+    if (twitterEnabled) (twitterEnabled as HTMLInputElement).checked = cfg.sources?.twitter?.enabled === true;
     setCredentialInput("cfgTwitterCookie", cfg.sources?.twitter?.cookie);
     setVal("cfgTwitterCookieEnv", cfg.sources?.twitter?.cookie_env);
     setVal("cfgTwitterDailySearchBudget", cfg.sources?.twitter?.daily_search_budget);
@@ -6945,8 +6953,8 @@ function bindSettings() {
     setVal("cfgTwitterDailyCreatorBudget", cfg.sources?.twitter?.daily_creator_budget);
     setVal("cfgTwitterRequestInterval", cfg.sources?.twitter?.request_interval_seconds);
     setVal("cfgTwitterMinInterval", cfg.sources?.twitter?.min_interval_minutes);
-    const zhihuEnabled = document.getElementById("cfgZhihuEnabled");
-    if (zhihuEnabled) zhihuEnabled.checked = cfg.sources?.zhihu?.enabled === true;
+    const zhihuEnabled = document.getElementById("cfgZhihuEnabled")!;
+    if (zhihuEnabled) (zhihuEnabled as HTMLInputElement).checked = cfg.sources?.zhihu?.enabled === true;
     setZhihuSourceModes(cfg.sources?.zhihu?.source_modes);
     setVal("cfgZhihuDailySearchBudget", cfg.sources?.zhihu?.daily_search_budget);
     setVal("cfgZhihuDailyHotBudget", cfg.sources?.zhihu?.daily_hot_budget);
@@ -6955,8 +6963,8 @@ function bindSettings() {
     setVal("cfgZhihuDailyRelatedBudget", cfg.sources?.zhihu?.daily_related_budget);
     setVal("cfgZhihuRequestInterval", cfg.sources?.zhihu?.request_interval_seconds);
     setVal("cfgZhihuMinInterval", cfg.sources?.zhihu?.min_interval_minutes);
-    const redditEnabled = document.getElementById("cfgRedditEnabled");
-    if (redditEnabled) redditEnabled.checked = cfg.sources?.reddit?.enabled === true;
+    const redditEnabled = document.getElementById("cfgRedditEnabled")!;
+    if (redditEnabled) (redditEnabled as HTMLInputElement).checked = cfg.sources?.reddit?.enabled === true;
     setVal("cfgRedditBackend", cfg.sources?.reddit?.backend || "rdt");
     setRedditSourceModes(cfg.sources?.reddit?.source_modes);
     setVal("cfgRedditDailySearchBudget", cfg.sources?.reddit?.daily_search_budget);
@@ -6968,24 +6976,24 @@ function bindSettings() {
     void renderSourcesStatus();
 
     // General
-    const lang = document.getElementById("cfgLanguage");
-    if (lang) lang.value = cfg.language || "zh";
+    const lang = document.getElementById("cfgLanguage")!;
+    if (lang) (lang as HTMLInputElement).value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
     setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
-    const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+    const savedAutoSync = document.getElementById("cfgSavedAutoSync")!;
     if (savedAutoSync instanceof HTMLInputElement) {
       savedAutoSync.checked = cfg.saved_sync?.auto_sync_enabled === true;
       savedAutoSync.dataset.confirmed = savedAutoSync.checked ? "true" : "false";
     }
 
     // Scheduler
-    const schedEnabled = document.getElementById("cfgSchedulerEnabled");
-    if (schedEnabled) schedEnabled.checked = cfg.scheduler?.enabled === false;
-    const pauseOnDisconnect = document.getElementById("cfgPauseOnDisconnect");
+    const schedEnabled = document.getElementById("cfgSchedulerEnabled")!;
+    if (schedEnabled) (schedEnabled as HTMLInputElement).checked = cfg.scheduler?.enabled === false;
+    const pauseOnDisconnect = document.getElementById("cfgPauseOnDisconnect")!;
     if (pauseOnDisconnect) {
-      pauseOnDisconnect.checked = cfg.scheduler?.pause_on_extension_disconnect === true;
+      (pauseOnDisconnect as HTMLInputElement).checked = cfg.scheduler?.pause_on_extension_disconnect === true;
     }
     setVal("cfgExtensionDisconnectGrace", cfg.scheduler?.extension_disconnect_grace_seconds);
     setVal("cfgPoolTarget", cfg.scheduler?.pool_target_count);
@@ -6998,7 +7006,7 @@ function bindSettings() {
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
     setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
-    const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
+    const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled")! as HTMLInputElement | null;
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
     }
@@ -7008,7 +7016,7 @@ function bindSettings() {
     setVal("cfgMultimodalImageTimeout", cfg.discovery?.multimodal_image_timeout_seconds);
     setVal("cfgProactivePushInterval", cfg.scheduler?.proactive_push_interval_seconds);
     setVal("cfgSpeculatorIdleInterval", cfg.scheduler?.speculator_idle_interval_minutes);
-    const autoUpdate = document.getElementById("cfgAutoUpdate");
+    const autoUpdate = document.getElementById("cfgAutoUpdate")! as HTMLInputElement | null;
     if (autoUpdate) autoUpdate.checked = cfg.scheduler?.auto_update_enabled === true;
     setVal("cfgAutoUpdateInterval", cfg.scheduler?.auto_update_check_interval_hours);
     setVal("cfgPoolShareBilibili", cfg.scheduler?.pool_source_shares?.bilibili);
@@ -7027,9 +7035,9 @@ function bindSettings() {
     setVal("cfgSpeculationMaxSecondary", cfg.scheduler?.speculation_max_secondary_interests);
 
     // Logging
-    const logLevel = document.getElementById("cfgLogLevel");
+    const logLevel = document.getElementById("cfgLogLevel")! as HTMLInputElement | null;
     if (logLevel) logLevel.value = cfg.logging?.level || "INFO";
-    const logFileLevel = document.getElementById("cfgLogFileLevel");
+    const logFileLevel = document.getElementById("cfgLogFileLevel")! as HTMLInputElement | null;
     if (logFileLevel) logFileLevel.value = cfg.logging?.file_level || "DEBUG";
     setVal("cfgLogPath", resolveLogPathFromConfig(cfg.logging));
     // Programmatic render of the wire echo means the field is pristine
@@ -7197,19 +7205,19 @@ function bindSettings() {
         // Intentional edit (including to the exact displayed basename):
         // send directory/filename only — the backend applies them directly.
         if (isLogPathUnmodified(state.runtimeConfig?.logging)) {
-          base.file_path = getVal("cfgLogPath");
-          base.directory = logPath.directory;
-          base.filename = logPath.filename;
+          (base as UnknownRecord).file_path = getVal("cfgLogPath");
+          (base as UnknownRecord).directory = logPath.directory;
+          (base as UnknownRecord).filename = logPath.filename;
         } else {
-          base.directory = logPath.directory;
-          base.filename = logPath.filename;
+          (base as UnknownRecord).directory = logPath.directory;
+          (base as UnknownRecord).filename = logPath.filename;
         }
         return base;
       })(),
     };
   }
 
-  function renderProbeResult(statusEl, result) {
+  function renderProbeResult(statusEl: any, result: any) {
     if (!statusEl) return;
     const ok = Boolean(result?.ok);
     const provider = result?.provider ? ` ${result.provider}` : "";
@@ -7222,13 +7230,13 @@ function bindSettings() {
     statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
   }
 
-  function renderProbePending(statusEl, label) {
+  function renderProbePending(statusEl: any, label: any) {
     if (!statusEl) return;
     statusEl.dataset.tone = "pending";
     statusEl.textContent = `${label} 探测中...`;
   }
 
-  async function runNetworkProxyConfigProbe(button, statusEl) {
+  async function runNetworkProxyConfigProbe(button: any, statusEl: any) {
     if (!button) return;
     button.disabled = true;
     renderProbePending(statusEl, "代理");
@@ -7237,26 +7245,26 @@ function bindSettings() {
       const mode = getVal("cfgNetworkProxyMode");
       const result = await probeConfigService("network_proxy", { network: { mode, proxy } });
       renderProbeResult(statusEl, result);
-    } catch (err) {
+    } catch (err: any) {
       renderProbeResult(statusEl, {
         ok: false,
-        error: err?.message || "代理探测失败",
+        error: (err as any)?.message || "代理探测失败",
       });
     } finally {
       button.disabled = false;
     }
   }
 
-  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy");
-  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus");
+  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy")!;
+  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus")!;
   if (probeNetworkProxyBtn instanceof HTMLButtonElement) {
     probeNetworkProxyBtn.addEventListener("click", () => {
       void runNetworkProxyConfigProbe(probeNetworkProxyBtn, probeNetworkProxyStatus);
     });
   }
 
-  const backendCheckBtn = document.getElementById("backendUpdateCheck");
-  const backendApplyBtn = document.getElementById("backendUpdateApply");
+  const backendCheckBtn = document.getElementById("backendUpdateCheck")!;
+  const backendApplyBtn = document.getElementById("backendUpdateApply")!;
   if (backendCheckBtn instanceof HTMLButtonElement) {
     backendCheckBtn.addEventListener("click", async () => {
       backendCheckBtn.disabled = true;
@@ -7279,7 +7287,7 @@ function bindSettings() {
         const payload = await applyBackendUpdate(tag);
         renderBackendUpdateStatus({ state: payload.state, reason: payload.reason, latest_tag: tag });
         showToast("后端更新已开始，稍后会重启", "success");
-      } catch (error) {
+      } catch (error: any) {
         const details = error?.details;
         if (details && typeof details === "object") {
           renderBackendUpdateStatus(details);
@@ -7293,8 +7301,8 @@ function bindSettings() {
     });
   }
 
-  const savedAutoSync = document.getElementById("cfgSavedAutoSync");
-  const savedAutoSyncStatus = document.getElementById("cfgSavedAutoSyncStatus");
+  const savedAutoSync = document.getElementById("cfgSavedAutoSync")!;
+  const savedAutoSyncStatus = document.getElementById("cfgSavedAutoSyncStatus")!;
   if (savedAutoSync instanceof HTMLInputElement) {
     savedAutoSync.addEventListener("change", () => {
       if (!savedAutoSync.checked || savedAutoSync.dataset.confirmed === "true") return;
@@ -7355,10 +7363,10 @@ function bindSettings() {
     overlay.hidden = true;
   });
 
-  const suggestBtn = document.getElementById("cfgSuggestPoolShares");
+  const suggestBtn = document.getElementById("cfgSuggestPoolShares")!;
   if (suggestBtn) {
-    suggestBtn.addEventListener("click", async () => {
-      suggestBtn.disabled = true;
+    suggestBtn.addEventListener("click", async (): Promise<void> => {
+      (suggestBtn as HTMLInputElement).disabled = true;
       toast.hidden = true;
       try {
         const suggestion = await fetchSourceShareSuggestion({
@@ -7381,7 +7389,7 @@ function bindSettings() {
             reddit: getInt("cfgPoolShareReddit", 1),
           },
         });
-        const shares = suggestion?.suggested_shares || {};
+        const shares = (suggestion?.suggested_shares as UnknownRecord) || {};
         if (shares.bilibili !== undefined) setVal("cfgPoolShareBilibili", shares.bilibili);
         if (shares.xiaohongshu !== undefined) setVal("cfgPoolShareXhs", shares.xiaohongshu);
         if (shares.douyin !== undefined) setVal("cfgPoolShareDouyin", shares.douyin);
@@ -7390,16 +7398,16 @@ function bindSettings() {
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
-      } catch (err) {
-        showToast(`生成建议失败: ${err.message}`, "error");
+      } catch (err: any) {
+        showToast(`生成建议失败: ${(err as any).message}`, "error");
       } finally {
-        suggestBtn.disabled = false;
+        (suggestBtn as HTMLInputElement).disabled = false;
       }
     });
   }
 
   saveBtn.addEventListener("click", async () => {
-    saveBtn.disabled = true;
+    (saveBtn as HTMLInputElement).disabled = true;
     saveBtn.textContent = "保存中...";
     toast.hidden = true;
     try {
@@ -7435,7 +7443,7 @@ function bindSettings() {
         const result = await updateConfig(data);
         if (result.config) {
           applyRuntimeConfig(result.config);
-          renderIssues(result.config.issues);
+          renderIssues((result.config as UnknownRecord).issues);
           renderDegradedBanner(result.config);
           // Save succeeded: the submitted values are now canonical, so any
           // armed edit intent has been consumed. Reset the dirty flag so a
@@ -7444,8 +7452,8 @@ function bindSettings() {
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
-      } catch (err) {
-        if (err?.name === "AbortError") {
+      } catch (err: any) {
+        if ((err as any)?.name === "AbortError") {
           showToast(
             "后端处理超时，保存请求可能已写入；热重载可能仍在后台进行。请稍后刷新设置确认。",
             "warning",
@@ -7480,18 +7488,18 @@ function bindSettings() {
           backendConnectionCoordinator.markOffline();
         }
       }
-    } catch (err) {
-      if (err?.message === "https_required") {
+    } catch (err: any) {
+      if ((err as any)?.message === "https_required") {
         showToast("公网后端必须使用 HTTPS。", "error");
-      } else if (err?.message === "backend_permission_denied") {
+      } else if ((err as any)?.message === "backend_permission_denied") {
         showToast("未授予该后端地址的访问权限，地址未保存。", "error");
-      } else if (err?.message === "invalid_backend_scheme") {
+      } else if ((err as any)?.message === "invalid_backend_scheme") {
         showToast("后端协议无效。", "error");
       } else if (!renderStructuredConfigError(err)) {
-        showToast(`保存失败: ${err.message}`, "error");
+        showToast(`保存失败: ${(err as any).message}`, "error");
       }
     } finally {
-      saveBtn.disabled = false;
+      (saveBtn as HTMLInputElement).disabled = false;
       setSaveButtonMode(state.runtimeConfig?.degraded ? "degraded" : "");
     }
   });
@@ -7508,7 +7516,7 @@ const EMBEDDING_BANNER_DISMISS_KEY = "embeddingBannerDismissed";
 const EMBEDDING_REPAIR_POLL_MS = 1_500;
 const EMBEDDING_REPAIR_POLL_LIMIT = Math.ceil((20 * 60 * 1_000) / EMBEDDING_REPAIR_POLL_MS);
 
-function formatRepairProgress(repair) {
+function formatRepairProgress(repair: any) {
   if (repair && repair.total > 0) {
     const pct = Math.min(99, Math.round((repair.completed / repair.total) * 100));
     return `拉取中 ${pct}%`;
@@ -7518,7 +7526,7 @@ function formatRepairProgress(repair) {
 
 // Wait for the server-side pull to finish, mirroring progress onto the
 // button. Returns the final repair state (or null if the backend vanished).
-async function waitForEmbeddingRepair(enableBtn) {
+async function waitForEmbeddingRepair(enableBtn: any) {
   for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
     const repair = await fetchEmbeddingRepairStatus();
@@ -7529,8 +7537,8 @@ async function waitForEmbeddingRepair(enableBtn) {
   return { done: false, ok: false, error: "拉取超时" };
 }
 
-async function enableLocalOllamaEmbedding(enableBtn) {
-  const failBtn = (label) => {
+async function enableLocalOllamaEmbedding(enableBtn: any) {
+  const failBtn = (label: any) => {
     if (enableBtn) {
       enableBtn.disabled = false;
       enableBtn.textContent = label;
@@ -7547,7 +7555,7 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     // Ollama actually serves a vector. Don't claim success on a config
     // write alone.
     let health = await fetchHealth();
-    const banner = document.getElementById("embeddingBanner");
+    const banner = document.getElementById("embeddingBanner")!;
     if (health && health.embedding_ready) {
       if (banner) banner.hidden = true;
       setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
@@ -7555,7 +7563,7 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     }
     // Not ready → let the backend classify the cause and, when the fix is
     // "pull the model", do it server-side with real progress (v0.3.155+).
-    const kicked = await startEmbeddingRepair();
+    const kicked = await startEmbeddingRepair() as ApiResult;
     if (kicked.status === 409 && kicked.error === "not_running") {
       failBtn("重试");
       setHint(kicked.detail || "Ollama 没有在运行，请先启动 Ollama（或运行 `ollama serve`）。", "error");
@@ -7608,17 +7616,18 @@ async function enableLocalOllamaEmbedding(enableBtn) {
       "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
       "error",
     );
-  } catch (error) {
+  } catch (error: any) {
     failBtn("重试");
-    const detail = error?.status === 409
+    const err = error as any;
+    const detail = err.status === 409
       ? "模型配置已在其他位置更新，请打开设置检查后再重试。"
-      : error?.message || "启用失败，请检查后端连接后重试。";
+      : err.message || "启用失败，请检查后端连接后重试。";
     setHint(detail, "error");
   }
 }
 
 async function maybeShowEmbeddingBanner() {
-  const banner = document.getElementById("embeddingBanner");
+  const banner = document.getElementById("embeddingBanner")!;
   if (!banner) return;
   if (sessionStorage.getItem(EMBEDDING_BANNER_DISMISS_KEY) === "1") return;
   const health = await fetchHealth();
@@ -7627,8 +7636,8 @@ async function maybeShowEmbeddingBanner() {
     return;
   }
   banner.hidden = false;
-  const enableBtn = document.getElementById("embeddingBannerEnable");
-  const dismissBtn = document.getElementById("embeddingBannerDismiss");
+  const enableBtn = document.getElementById("embeddingBannerEnable")!;
+  const dismissBtn = document.getElementById("embeddingBannerDismiss")!;
   if (enableBtn && !enableBtn.dataset.bound) {
     enableBtn.dataset.bound = "1";
     enableBtn.addEventListener("click", () => void enableLocalOllamaEmbedding(enableBtn));

@@ -4,11 +4,76 @@ const DEFAULT_PORTRAIT = "画像还在慢慢攒，先多看一阵。";
 const DEFAULT_DELIGHT_TITLE = "这条惊喜推荐还没起好标题";
 const DEFAULT_DELIGHT_REASON = "这条可能会给你一点意外之喜。";
 
-function normalizeText(value) {
+type DataRecord = Record<string, unknown>;
+
+interface StaleProbeOptions {
+  messages?: DataRecord[];
+  pendingProbe?: DataRecord | null;
+  pendingAvoidanceProbe?: DataRecord | null;
+  domain?: unknown;
+  type?: unknown;
+}
+
+interface AutoLoadOptions {
+  activeTab?: string;
+  loadingMore?: boolean;
+  hasMoreRecommendations?: boolean;
+  userArmed?: boolean;
+}
+
+interface ProfileFetchOptions {
+  online: boolean;
+  profileLoaded: boolean;
+  force?: boolean;
+}
+
+interface ManualRefreshHintOptions {
+  itemCount?: number;
+  hadAdvertisedInventory?: boolean;
+  preservedCurrent?: boolean;
+}
+
+interface KeyboardEventLike {
+  key?: string;
+  shiftKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  isComposing?: boolean;
+}
+
+interface ActivityCardOptions {
+  feed?: DataRecord | null;
+  runtimeEvent?: DataRecord | null;
+  expanded?: boolean;
+}
+
+interface PopupStateOptions {
+  online: boolean;
+  items?: DataRecord[];
+  error?: unknown;
+  runtimeStatus?: DataRecord | null;
+}
+
+interface ManualRefreshResult {
+  reason?: string;
+  state?: string;
+}
+
+interface ManualRefreshStatus {
+  manual_refresh_state?: string;
+  manual_refresh_message?: string;
+}
+
+function asDataRecord(value: unknown): DataRecord | null {
+  return typeof value === "object" && value !== null ? value as DataRecord : null;
+}
+
+function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function urlHostMatches(url, hostnames) {
+function urlHostMatches(url: unknown, hostnames: string[]): boolean {
   const text = normalizeText(url);
   if (!text) return false;
   try {
@@ -20,9 +85,9 @@ function urlHostMatches(url, hostnames) {
   }
 }
 
-function normalizeSourcePlatform(value, url = "") {
+function normalizeSourcePlatform(value: unknown, url: unknown = ""): string {
   const key = normalizeText(value).toLowerCase();
-  const aliases = {
+  const aliases: Record<string, string> = {
     bili: "bilibili",
     bilibili: "bilibili",
     xhs: "xiaohongshu",
@@ -53,11 +118,11 @@ function normalizeSourcePlatform(value, url = "") {
   return "";
 }
 
-export function normalizeProbeType(type) {
+export function normalizeProbeType(type: unknown): string {
   return normalizeText(type) === "avoidance.probe" ? "avoidance.probe" : "interest.probe";
 }
 
-export function probeMessageKey(type, domain) {
+export function probeMessageKey(type: unknown, domain: unknown): string {
   const normalizedDomain = normalizeText(domain).toLowerCase();
   if (!normalizedDomain) {
     return "";
@@ -65,11 +130,18 @@ export function probeMessageKey(type, domain) {
   return `${normalizeProbeType(type)}:${normalizedDomain}`;
 }
 
-function hasProbeKey(handledProbeKeys, key) {
+function hasProbeKey(
+  handledProbeKeys: ReadonlySet<string> | null | undefined,
+  key: string,
+): boolean {
   return Boolean(key && handledProbeKeys && typeof handledProbeKeys.has === "function" && handledProbeKeys.has(key));
 }
 
-export function shouldHydrateProbe(item, type = "interest.probe", handledProbeKeys = new Set()) {
+export function shouldHydrateProbe(
+  item: DataRecord | null | undefined,
+  type: unknown = "interest.probe",
+  handledProbeKeys: ReadonlySet<string> = new Set<string>(),
+): boolean {
   const domain = normalizeText(item?.domain);
   if (!domain) {
     return false;
@@ -82,10 +154,10 @@ export function shouldHydrateProbe(item, type = "interest.probe", handledProbeKe
 }
 
 export function shouldDisplayProbeFromWebSocket(
-  event,
-  type = event?.type || "interest.probe",
-  handledProbeKeys = new Set(),
-) {
+  event: DataRecord | null | undefined,
+  type: unknown = event?.type || "interest.probe",
+  handledProbeKeys: ReadonlySet<string> = new Set<string>(),
+): boolean {
   return shouldHydrateProbe(
     { domain: event?.domain, status: "active" },
     normalizeProbeType(type),
@@ -99,7 +171,7 @@ export function buildStaleProbeResponseState({
   pendingAvoidanceProbe = null,
   domain = "",
   type = "interest.probe",
-} = {}) {
+}: StaleProbeOptions = {}) {
   const normalizedType = normalizeProbeType(type);
   const handledKey = probeMessageKey(normalizedType, domain);
   const nextMessages = Array.isArray(messages)
@@ -119,7 +191,7 @@ export function buildStaleProbeResponseState({
   };
 }
 
-function normalizeCoverUrl(value) {
+function normalizeCoverUrl(value: unknown): string {
   const text = normalizeText(value);
   if (!text) {
     return "";
@@ -133,7 +205,7 @@ function normalizeCoverUrl(value) {
   return text;
 }
 
-export function buildImageProxyPath(value) {
+export function buildImageProxyPath(value: unknown): string {
   const src = normalizeCoverUrl(value);
   if (!src) {
     return "";
@@ -146,7 +218,7 @@ export function buildImageProxyPath(value) {
   return `/api/image-proxy?url=${encodeURIComponent(src)}`;
 }
 
-const PLATFORM_DISPLAY_NAMES = {
+const PLATFORM_DISPLAY_NAMES: Record<string, string> = {
   bilibili: "B 站",
   youtube: "YouTube",
   douyin: "抖音",
@@ -158,21 +230,21 @@ const PLATFORM_DISPLAY_NAMES = {
   reddit: "Reddit",
 };
 
-export function platformDisplayName(value) {
+export function platformDisplayName(value: unknown): string {
   const key = normalizeText(value).toLowerCase();
   return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
 }
 
-export function buildVideoUrl(bvid) {
+export function buildVideoUrl(bvid: unknown): string {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
 
-export function buildYouTubeUrl(videoId) {
+export function buildYouTubeUrl(videoId: unknown): string {
   return `https://www.youtube.com/watch?v=${normalizeText(videoId)}`;
 }
 
-export function buildContentUrl(item) {
-  if (item?.content_url) return item.content_url;
+export function buildContentUrl(item: DataRecord | null | undefined): string {
+  if (item?.content_url) return normalizeText(item.content_url);
   const platform = normalizeText(item?.source_platform);
   const vid = normalizeText(item?.content_id || item?.bvid);
   if (!vid) return "";
@@ -181,7 +253,10 @@ export function buildContentUrl(item) {
   return buildVideoUrl(vid);
 }
 
-export function buildRecommendationClickPayload(item, contentUrl = "") {
+export function buildRecommendationClickPayload(
+  item: DataRecord | null | undefined,
+  contentUrl: unknown = "",
+) {
   const bvid = normalizeText(item?.bvid || item?.content_id);
   const contentId = normalizeText(item?.content_id || item?.bvid);
   return {
@@ -196,7 +271,7 @@ export function buildRecommendationClickPayload(item, contentUrl = "") {
   };
 }
 
-export function getTabButtonState(activeTab, tabName) {
+export function getTabButtonState(activeTab: unknown, tabName: unknown) {
   return {
     selected: activeTab === tabName,
     tabIndex: activeTab === tabName ? 0 : -1,
@@ -208,7 +283,7 @@ export function shouldAutoLoadRecommendations({
   loadingMore = false,
   hasMoreRecommendations = false,
   userArmed = false,
-} = {}) {
+}: AutoLoadOptions = {}) {
   return Boolean(
     userArmed &&
       activeTab === "recommend" &&
@@ -217,7 +292,7 @@ export function shouldAutoLoadRecommendations({
   );
 }
 
-export function getConnectionBadgeState(status) {
+export function getConnectionBadgeState(status: unknown) {
   if (status === "online") {
     return {
       tone: "online",
@@ -238,7 +313,7 @@ export function getConnectionBadgeState(status) {
   };
 }
 
-export function getHintBannerState(tone) {
+export function getHintBannerState(tone: unknown) {
   const normalized = normalizeText(tone);
   if (normalized === "success" || normalized === "error") {
     return { tone: normalized };
@@ -246,7 +321,7 @@ export function getHintBannerState(tone) {
   return { tone: "info" };
 }
 
-export function normalizeRecommendation(item) {
+export function normalizeRecommendation(item: DataRecord | null | undefined) {
   const bvid = normalizeText(item?.bvid);
   const sourcePlatform = normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili";
   const contentId = normalizeText(item?.content_id)
@@ -279,7 +354,7 @@ export function normalizeRecommendation(item) {
   };
 }
 
-export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+export function reconcileRecommendationReplacement(currentItems: unknown, incomingItems: unknown) {
   const current = Array.isArray(currentItems) ? currentItems : [];
   const incoming = Array.isArray(incomingItems) ? incomingItems : [];
   const preserved = incoming.length === 0 && current.length > 0;
@@ -289,7 +364,10 @@ export function reconcileRecommendationReplacement(currentItems, incomingItems) 
   };
 }
 
-export function formatPublishedTime(item, now = Date.now()) {
+export function formatPublishedTime(
+  item: DataRecord | null | undefined,
+  now = Date.now(),
+): string {
   const parsed = Date.parse(String(item?.published_at || ""));
   if (Number.isFinite(parsed)) {
     const diff = now - parsed;
@@ -332,7 +410,7 @@ const TEXT_CARD_CONTENT_TYPES = new Set([
  * @param {object} item - A (normalized or raw) recommendation item.
  * @returns {{kind: "text"|"cover", coverUrl: string, text: string}}
  */
-export function getRecommendationCardKind(item) {
+export function getRecommendationCardKind(item: DataRecord | null | undefined) {
   const contentType = normalizeText(item?.content_type).toLowerCase();
   const coverUrl = normalizeCoverUrl(item?.cover_url);
   const isText = TEXT_CARD_CONTENT_TYPES.has(contentType) || !coverUrl;
@@ -346,7 +424,7 @@ export function getRecommendationCardKind(item) {
   return { kind: "cover", coverUrl, text: "" };
 }
 
-export function normalizeSavedItem(item) {
+export function normalizeSavedItem(item: DataRecord | null | undefined) {
   const bvid = normalizeText(item?.bvid || item?.content_id);
   return {
     ...item,
@@ -359,7 +437,7 @@ export function normalizeSavedItem(item) {
   };
 }
 
-export function normalizeDelightCandidate(item) {
+export function normalizeDelightCandidate(item: DataRecord | null | undefined) {
   const normalizedState = normalizeText(item?.state) || "pending";
   return {
     bvid: normalizeText(item?.bvid),
@@ -392,7 +470,11 @@ export function normalizeDelightCandidate(item) {
   };
 }
 
-export function mergeDelightCandidate(current, incoming, dismissedBvids = []) {
+export function mergeDelightCandidate(
+  current: DataRecord | null | undefined,
+  incoming: DataRecord | null | undefined,
+  dismissedBvids: string[] = [],
+) {
   const normalizedIncoming = normalizeDelightCandidate(incoming);
   if (!normalizedIncoming.bvid) {
     return current ?? null;
@@ -426,7 +508,10 @@ export function mergeDelightCandidate(current, incoming, dismissedBvids = []) {
   };
 }
 
-export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
+export function getDelightUiState(
+  delight: DataRecord | null | undefined,
+  { highlightBvid = "" }: { highlightBvid?: string } = {},
+) {
   const normalized = normalizeDelightCandidate(delight);
   if (!normalized.bvid) {
     return {
@@ -509,7 +594,11 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
   return base;
 }
 
-export function buildFeedbackPayload(recommendationId, feedbackType, note = "") {
+export function buildFeedbackPayload(
+  recommendationId: unknown,
+  feedbackType: unknown,
+  note: unknown = "",
+) {
   return {
     recommendation_id: Number(recommendationId),
     feedback_type: normalizeText(feedbackType),
@@ -517,7 +606,9 @@ export function buildFeedbackPayload(recommendationId, feedbackType, note = "") 
   };
 }
 
-export function normalizeCognitionUpdateCard(item) {
+export function normalizeCognitionUpdateCard(
+  item: DataRecord | string | null | undefined,
+) {
   const fallbackContextLine = "基于最近几条相关内容";
   if (typeof item === "string") {
     return {
@@ -559,7 +650,10 @@ export function normalizeCognitionUpdateCard(item) {
   };
 }
 
-export function getNextExpandedCognitionIndex(currentIndex, clickedIndex) {
+export function getNextExpandedCognitionIndex(
+  currentIndex: number | null,
+  clickedIndex: number,
+): number | null {
   return currentIndex === clickedIndex ? null : clickedIndex;
 }
 
@@ -569,7 +663,7 @@ export function getNextExpandedCognitionIndex(currentIndex, clickedIndex) {
  * @param {number} [now=Date.now()] - Current time, injectable for testing.
  * @returns {string} Relative label (e.g. "刚刚", "12 分钟前", "03-14 22:30") or "" if invalid.
  */
-export function formatRelativeTimestamp(isoString, now = Date.now()) {
+export function formatRelativeTimestamp(isoString: unknown, now = Date.now()): string {
   const text = normalizeText(isoString);
   if (!text) {
     return "";
@@ -602,37 +696,43 @@ export function formatRelativeTimestamp(isoString, now = Date.now()) {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
-function normalizeStrList(raw) {
+function normalizeStrList(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
 }
 
-function normalizeMBTI(raw) {
+function normalizeMBTI(raw: DataRecord | null | undefined) {
   if (!raw || !raw.type) return null;
-  const dims = {};
+  const dims: Record<string, { pole: string; strength: number }> = {};
   if (raw.dimensions && typeof raw.dimensions === "object") {
     for (const [k, v] of Object.entries(raw.dimensions)) {
-      dims[k] = { pole: normalizeText(v?.pole), strength: Number(v?.strength ?? 0.5) };
+      const dimension = asDataRecord(v);
+      dims[k] = {
+        pole: normalizeText(dimension?.pole),
+        strength: Number(dimension?.strength ?? 0.5),
+      };
     }
   }
   return { type: normalizeText(raw.type), dimensions: dims, confidence: Number(raw.confidence ?? 0) };
 }
 
-function normalizeInterestDomains(raw) {
+function normalizeInterestDomains(raw: unknown) {
   if (!Array.isArray(raw)) return [];
   return raw
-    .filter((d) => d?.domain)
+    .map(asDataRecord)
+    .filter((d): d is DataRecord => Boolean(d?.domain))
     .map((d) => ({
       domain: normalizeText(d.domain),
       weight: Number(d.weight ?? 0.5),
       specifics: Array.isArray(d.specifics)
         ? d.specifics
-            .filter((s) => s?.name)
+            .map(asDataRecord)
+            .filter((s): s is DataRecord => Boolean(s?.name))
             .map((s) => ({ name: normalizeText(s.name), weight: Number(s.weight ?? 0.5) }))
         : [],
     }));
 }
 
-function normalizeStyle(raw) {
+function normalizeStyle(raw: DataRecord | null | undefined) {
   if (!raw) return null;
   return {
     preferred_duration: normalizeText(raw.preferred_duration),
@@ -643,7 +743,7 @@ function normalizeStyle(raw) {
   };
 }
 
-function normalizeContext(raw) {
+function normalizeContext(raw: DataRecord | null | undefined) {
   if (!raw) return null;
   return {
     weekday_patterns: normalizeText(raw.weekday_patterns),
@@ -653,10 +753,11 @@ function normalizeContext(raw) {
   };
 }
 
-function normalizeSpeculativeItems(items) {
+function normalizeSpeculativeItems(items: unknown) {
   return Array.isArray(items)
     ? items
-        .filter((item) => item?.domain)
+        .map(asDataRecord)
+        .filter((item): item is DataRecord => Boolean(item?.domain))
         .map((item) => {
           const sourceMode = normalizeText(item.source_mode);
           const probeMode = normalizeText(item.probe_mode);
@@ -672,7 +773,8 @@ function normalizeSpeculativeItems(items) {
             status: normalizeText(item.status) || "active",
             specifics: Array.isArray(item.specifics)
               ? item.specifics
-                  .filter((s) => s?.name)
+                  .map(asDataRecord)
+                  .filter((s): s is DataRecord => Boolean(s?.name))
                   .map((s) => ({
                     name: normalizeText(s.name),
                     confirmation_count: Number(s.confirmation_count ?? 0),
@@ -683,14 +785,14 @@ function normalizeSpeculativeItems(items) {
     : [];
 }
 
-export function normalizeProfileSummary(summary) {
+export function normalizeProfileSummary(summary: DataRecord | null | undefined) {
   return {
     initialized: Boolean(summary?.initialized),
     personality_portrait: normalizeText(summary?.personality_portrait) || DEFAULT_PORTRAIT,
     // Core
     core_traits: normalizeStrList(summary?.core_traits),
     deep_needs: normalizeStrList(summary?.deep_needs),
-    mbti: normalizeMBTI(summary?.mbti),
+    mbti: normalizeMBTI(asDataRecord(summary?.mbti)),
     // Values
     values: normalizeStrList(summary?.values),
     motivational_drivers: normalizeStrList(summary?.motivational_drivers),
@@ -703,8 +805,8 @@ export function normalizeProfileSummary(summary) {
     current_phase: normalizeText(summary?.current_phase),
     // Surface
     cognitive_style: normalizeStrList(summary?.cognitive_style),
-    style: normalizeStyle(summary?.style),
-    context: normalizeContext(summary?.context),
+    style: normalizeStyle(asDataRecord(summary?.style)),
+    context: normalizeContext(asDataRecord(summary?.context)),
     exploration_openness: typeof summary?.exploration_openness === "number"
       ? Math.max(0, Math.min(1, summary.exploration_openness))
       : 0.5,
@@ -724,7 +826,7 @@ export function normalizeProfileSummary(summary) {
           .map((item) => ({
             hypothesis: normalizeText(item.hypothesis),
             evidence: Array.isArray(item.evidence)
-              ? item.evidence.map((e) => normalizeText(e)).filter(Boolean)
+              ? item.evidence.map((e: unknown) => normalizeText(e)).filter(Boolean)
               : [],
             confidence: typeof item.confidence === "number"
               ? Math.max(0, Math.min(1, item.confidence))
@@ -746,7 +848,7 @@ export function normalizeProfileSummary(summary) {
   };
 }
 
-function normalizeCognitionHistoryItems(items) {
+function normalizeCognitionHistoryItems(items: unknown) {
   if (!Array.isArray(items)) {
     return [];
   }
@@ -772,7 +874,10 @@ function normalizeCognitionHistoryItems(items) {
     .filter((item) => item.summary);
 }
 
-export function buildNextCognitionHistoryState(currentState, nextSummaryPage) {
+export function buildNextCognitionHistoryState(
+  currentState: DataRecord | null | undefined,
+  nextSummaryPage: DataRecord | null | undefined,
+) {
   const existingItems = normalizeCognitionHistoryItems(
     Array.isArray(currentState?.items)
       ? currentState.items
@@ -789,7 +894,7 @@ export function buildNextCognitionHistoryState(currentState, nextSummaryPage) {
   };
 }
 
-export function getCognitionHistoryUiState(historyState) {
+export function getCognitionHistoryUiState(historyState: DataRecord | null | undefined) {
   if (historyState?.loadingMore) {
     return {
       canLoadMore: false,
@@ -825,7 +930,11 @@ export function getCognitionHistoryUiState(historyState) {
   };
 }
 
-export function shouldFetchProfileSummary({ online, profileLoaded, force = false }) {
+export function shouldFetchProfileSummary({
+  online,
+  profileLoaded,
+  force = false,
+}: ProfileFetchOptions): boolean {
   if (!online) {
     return false;
   }
@@ -835,7 +944,7 @@ export function shouldFetchProfileSummary({ online, profileLoaded, force = false
   return !profileLoaded;
 }
 
-export function normalizeRuntimeStatus(status) {
+export function normalizeRuntimeStatus(status: DataRecord | null | undefined) {
   return {
     initialized: Boolean(status?.initialized),
     recommendation_count: Number(status?.recommendation_count ?? 0),
@@ -865,7 +974,10 @@ export function normalizeRuntimeStatus(status) {
   };
 }
 
-export function mergeRuntimeStatusEvent(status, event) {
+export function mergeRuntimeStatusEvent(
+  status: DataRecord | null | undefined,
+  event: DataRecord | null | undefined,
+) {
   const runtime = normalizeRuntimeStatus(status);
   const next = {
     ...runtime,
@@ -891,7 +1003,7 @@ export function mergeRuntimeStatusEvent(status, event) {
   return next;
 }
 
-export function getPoolStatusSummary(status) {
+export function getPoolStatusSummary(status: DataRecord | null | undefined) {
   const runtime = normalizeRuntimeStatus(status);
   if (!runtime.initialized) {
     return null;
@@ -952,7 +1064,10 @@ export function getPoolStatusSummary(status) {
   };
 }
 
-export function getRealtimePoolStatusSummary(status, event = null) {
+export function getRealtimePoolStatusSummary(
+  status: DataRecord | null | undefined,
+  event: DataRecord | null = null,
+) {
   const summary = getPoolStatusSummary(status);
   if (summary == null) {
     return null;
@@ -967,7 +1082,11 @@ export function getRealtimePoolStatusSummary(status, event = null) {
   };
 }
 
-export function getDisplayedPoolStatusSummary(status, event = null, refreshMessage = "") {
+export function getDisplayedPoolStatusSummary(
+  status: DataRecord | null | undefined,
+  event: DataRecord | null = null,
+  refreshMessage: unknown = "",
+) {
   const summary = getPoolStatusSummary(status);
   if (summary == null) {
     return null;
@@ -982,7 +1101,7 @@ export function getDisplayedPoolStatusSummary(status, event = null, refreshMessa
   };
 }
 
-export function getReadyRecommendationHint(status) {
+export function getReadyRecommendationHint(status: DataRecord | null | undefined) {
   const runtime = normalizeRuntimeStatus(status);
   if (runtime.pool_available_count > 0) {
     return {
@@ -1006,7 +1125,7 @@ export function getManualRefreshResultHint({
   itemCount = 0,
   hadAdvertisedInventory = false,
   preservedCurrent = false,
-} = {}) {
+}: ManualRefreshHintOptions = {}) {
   const count = Number(itemCount || 0);
   if (count > 0) {
     return {
@@ -1032,7 +1151,7 @@ export function getManualRefreshResultHint({
   };
 }
 
-export function validateCommentInput(note) {
+export function validateCommentInput(note: unknown) {
   if (!normalizeText(note)) {
     return {
       valid: false,
@@ -1045,7 +1164,7 @@ export function validateCommentInput(note) {
   };
 }
 
-export function getCommentSubmitUiState(state) {
+export function getCommentSubmitUiState(state: unknown) {
   const normalized = normalizeText(state) || "idle";
   if (normalized === "submitting") {
     return {
@@ -1075,7 +1194,7 @@ export function getCommentSubmitUiState(state) {
   };
 }
 
-export function shouldSubmitChatOnEnter(event) {
+export function shouldSubmitChatOnEnter(event: KeyboardEventLike | null | undefined): boolean {
   return (
     event?.key === "Enter" &&
     !event?.shiftKey &&
@@ -1086,7 +1205,7 @@ export function shouldSubmitChatOnEnter(event) {
   );
 }
 
-export function getSubmissionProgressMessage(scope, stage) {
+export function getSubmissionProgressMessage(scope: unknown, stage: unknown): string {
   const normalizedScope = normalizeText(scope);
   const normalizedStage = normalizeText(stage);
 
@@ -1136,7 +1255,7 @@ export function getSubmissionProgressMessage(scope, stage) {
   return "";
 }
 
-export function getRuntimeRefreshSubmissionState(event) {
+export function getRuntimeRefreshSubmissionState(event: DataRecord | null | undefined) {
   const type = normalizeText(event?.type);
   const message = normalizeText(event?.message);
 
@@ -1167,7 +1286,7 @@ export function getRuntimeRefreshSubmissionState(event) {
   return null;
 }
 
-export function normalizeActivityFeed(payload) {
+export function normalizeActivityFeed(payload: DataRecord | null | undefined) {
   const items = Array.isArray(payload?.items)
     ? payload.items
         .filter((item) => item && typeof item === "object")
@@ -1191,7 +1310,11 @@ export function normalizeActivityFeed(payload) {
   };
 }
 
-export function getActivityCardState({ feed = null, runtimeEvent = null, expanded = false }) {
+export function getActivityCardState({
+  feed = null,
+  runtimeEvent = null,
+  expanded = false,
+}: ActivityCardOptions) {
   const normalizedFeed = normalizeActivityFeed(feed);
   const liveMessage = normalizeText(runtimeEvent?.message) || normalizedFeed.live_summary;
   const headline = normalizedFeed.headline || "最近还没新动静，先多刷一阵。";
@@ -1205,7 +1328,12 @@ export function getActivityCardState({ feed = null, runtimeEvent = null, expande
   };
 }
 
-export function getPopupState({ online, items = [], error = null, runtimeStatus = null }) {
+export function getPopupState({
+  online,
+  items = [],
+  error = null,
+  runtimeStatus = null,
+}: PopupStateOptions) {
   if (!online) {
     return {
       kind: "offline",
@@ -1279,27 +1407,30 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   };
 }
 
-export function getManualRefreshResultMessage(result, finalStatus = null) {
+export function getManualRefreshResultMessage(
+  result: DataRecord | null | undefined,
+  finalStatus: DataRecord | null = null,
+): string {
   if (result?.reason === "not_initialized") {
     return "先执行 openbiliclaw init，再回来刷新。";
   }
 
   if (finalStatus?.manual_refresh_state === "failed") {
-    return finalStatus.manual_refresh_message || "这次补货没跑通，稍后再试。";
+    return normalizeText(finalStatus.manual_refresh_message) || "这次补货没跑通，稍后再试。";
   }
 
   if (
     result?.reason === "already_running" ||
     finalStatus?.manual_refresh_state === "running"
   ) {
-    return finalStatus?.manual_refresh_message || "已经在补货了，稍后会自动更新。";
+    return normalizeText(finalStatus?.manual_refresh_message) || "已经在补货了，稍后会自动更新。";
   }
 
   if (
     result?.state === "running" ||
     finalStatus?.manual_refresh_state === "success"
   ) {
-    return finalStatus?.manual_refresh_message || "刚给你补了一批新的。";
+    return normalizeText(finalStatus?.manual_refresh_message) || "刚给你补了一批新的。";
   }
 
   return "这次没接到补货任务，稍后再试。";

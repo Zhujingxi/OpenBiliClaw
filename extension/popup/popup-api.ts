@@ -5,6 +5,74 @@ import {
   popupAuthenticatedFetch,
 } from "./popup-device-auth.js";
 
+type JsonObject = Record<string, unknown>;
+type SavedListKind = "favorite" | "watch_later";
+
+interface PopupRequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+interface PopupApiError extends Error {
+  status: number;
+  details: unknown;
+}
+
+interface HealthProbe {
+  baseUrl: string;
+  promise: Promise<JsonObject | null>;
+}
+
+interface ChromeStorageAreaCompat {
+  get(key: string, callback: (items: Record<string, unknown>) => void): unknown;
+  set(items: Record<string, unknown>, callback: () => void): unknown;
+}
+
+interface ConfigCacheSnapshot {
+  config: unknown;
+  cached_at: string;
+}
+
+interface SavedItemInput {
+  source_platform?: unknown;
+  platform?: unknown;
+  bvid?: unknown;
+  content_id?: unknown;
+  content_url?: unknown;
+  url?: unknown;
+  content_type?: unknown;
+  title?: unknown;
+  author_name?: unknown;
+  up_name?: unknown;
+  author?: unknown;
+  cover_url?: unknown;
+  note?: unknown;
+}
+
+interface RecommendationClickPayload {
+  bvid: string;
+  content_id?: string;
+  content_url?: string;
+  source_platform?: string;
+  title?: string;
+  recommendation_id?: number | null;
+  topic_label?: string;
+  up_name?: string;
+}
+
+interface StartInitOptions {
+  force?: boolean;
+  sources?: string[];
+}
+
+interface ChatTurnInput {
+  turnId?: string;
+  session?: string;
+  scope?: string;
+  subjectId?: string;
+  subjectTitle?: string;
+  message: string;
+}
+
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
 export const CONFIG_GET_TIMEOUT_MS = 12_000;
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
@@ -17,8 +85,8 @@ const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
 let healthCacheBaseUrl = "";
 let healthCacheCheckedAt = 0;
 let healthCacheHasValue = false;
-let healthCachePayload = null;
-let healthProbeInFlight = null;
+let healthCachePayload: JsonObject | null = null;
+let healthProbeInFlight: HealthProbe | null = null;
 
 function abortError(message = "Request aborted") {
   if (typeof DOMException === "function") {
@@ -29,18 +97,21 @@ function abortError(message = "Request aborted") {
   return error;
 }
 
-function withTimeout(signal, timeoutMs) {
-  const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+function withTimeout(
+  signal: AbortSignal | null | undefined,
+  timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; cleanup: () => void } {
+  const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
   if (!hasTimeout && !signal) {
     return { signal: undefined, cleanup: () => {} };
   }
   if (!hasTimeout) {
-    return { signal, cleanup: () => {} };
+    return { signal: signal || undefined, cleanup: () => {} };
   }
 
   const controller = new AbortController();
   let timeoutId = null;
-  const abortFrom = (reason) => {
+  const abortFrom = (reason?: unknown) => {
     if (!controller.signal.aborted) {
       controller.abort(reason || abortError());
     }
@@ -63,8 +134,8 @@ function withTimeout(signal, timeoutMs) {
   };
 }
 
-function awaitWithAbort(promise, signal) {
-  if (!signal) return promise;
+function awaitWithAbort<T>(promise: PromiseLike<T> | T, signal?: AbortSignal): Promise<T> {
+  if (!signal) return Promise.resolve(promise);
   if (signal.aborted) return Promise.reject(signal.reason || abortError());
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(signal.reason || abortError());
@@ -75,7 +146,7 @@ function awaitWithAbort(promise, signal) {
   });
 }
 
-export async function requestJson(path, options = {}) {
+export async function requestJson<T = JsonObject>(path: string, options: PopupRequestOptions = {}): Promise<T> {
   const { timeoutMs, signal, ...fetchOptions } = options;
   const timeout = withTimeout(signal, timeoutMs);
   try {
@@ -85,7 +156,7 @@ export async function requestJson(path, options = {}) {
       fetchImpl,
       signal: timeout.signal,
     }), timeout.signal);
-    const requestOptions = { ...fetchOptions };
+    const requestOptions: RequestInit = { ...fetchOptions };
     if (timeout.signal) requestOptions.signal = timeout.signal;
     const response = await awaitWithAbort(popupAuthenticatedFetch(
       `${backendUrl}${path}`,
@@ -101,29 +172,35 @@ export async function requestJson(path, options = {}) {
         if (timeout.signal?.aborted) throw error;
         details = null;
       }
-      const error = new Error(`${path} request failed: ${response.status}`);
+      const error = new Error(`${path} request failed: ${response.status}`) as PopupApiError;
       error.status = response.status;
       error.details = details;
       throw error;
     }
-    return await awaitWithAbort(response.json(), timeout.signal);
+    const payload: unknown = await awaitWithAbort(response.json(), timeout.signal);
+    return payload as T;
   } finally {
     timeout.cleanup();
   }
 }
 
-function getChromeStorageLocal() {
-  return globalThis.chrome?.storage?.local || null;
+function getChromeStorageLocal(): ChromeStorageAreaCompat | null {
+  return (globalThis.chrome?.storage?.local as unknown as ChromeStorageAreaCompat | undefined) || null;
 }
 
-function storageGet(key) {
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return typeof value === "object" && value !== null && "then" in value
+    && typeof (value as { then?: unknown }).then === "function";
+}
+
+function storageGet(key: string): Promise<Record<string, unknown> | null> {
   const local = getChromeStorageLocal();
   if (!local?.get) return Promise.resolve(null);
   return new Promise((resolve) => {
     try {
       const maybePromise = local.get(key, (items) => resolve(items || {}));
-      if (maybePromise?.then) {
-        maybePromise.then((items) => resolve(items || {})).catch(() => resolve(null));
+      if (isPromiseLike<Record<string, unknown>>(maybePromise)) {
+        maybePromise.then((items) => resolve(items || {}), () => resolve(null));
       }
     } catch {
       resolve(null);
@@ -131,14 +208,14 @@ function storageGet(key) {
   });
 }
 
-function storageSet(items) {
+function storageSet(items: Record<string, unknown>): Promise<boolean> {
   const local = getChromeStorageLocal();
   if (!local?.set) return Promise.resolve(false);
   return new Promise((resolve) => {
     try {
       const maybePromise = local.set(items, () => resolve(true));
-      if (maybePromise?.then) {
-        maybePromise.then(() => resolve(true)).catch(() => resolve(false));
+      if (isPromiseLike<void>(maybePromise)) {
+        maybePromise.then(() => resolve(true), () => resolve(false));
       }
     } catch {
       resolve(false);
@@ -146,7 +223,7 @@ function storageSet(items) {
   });
 }
 
-export async function cacheConfigSnapshot(config) {
+export async function cacheConfigSnapshot(config: unknown): Promise<ConfigCacheSnapshot | null> {
   if (!config || !getChromeStorageLocal()) return null;
   const snapshot = {
     config,
@@ -159,10 +236,10 @@ export async function cacheConfigSnapshot(config) {
 export async function readCachedConfigSnapshot() {
   const items = await storageGet(CONFIG_CACHE_KEY);
   const snapshot = items?.[CONFIG_CACHE_KEY];
-  if (!snapshot || typeof snapshot !== "object" || !snapshot.config) {
+  if (!snapshot || typeof snapshot !== "object" || !("config" in snapshot) || !snapshot.config) {
     return null;
   }
-  return snapshot;
+  return snapshot as unknown as ConfigCacheSnapshot;
 }
 
 // Liveness probe budget. /api/ping answers in milliseconds when the backend
@@ -328,8 +405,8 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
-export async function startInit({ force = false, sources } = {}) {
-  const payload = { force };
+export async function startInit({ force = false, sources }: StartInitOptions = {}) {
+  const payload: StartInitOptions = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
@@ -366,7 +443,7 @@ export async function applyBackendUpdate(tag = "") {
   });
 }
 
-export async function fetchActivityFeed({ limit, before } = {}) {
+export async function fetchActivityFeed({ limit, before }: { limit?: number; before?: string } = {}) {
   const params = new URLSearchParams();
   if (typeof limit === "number") params.set("limit", String(limit));
   if (before) params.set("before", before);
@@ -396,7 +473,7 @@ export async function fetchPendingDelightBatch(limit = null) {
   return Array.isArray(payload?.items) ? payload.items : [];
 }
 
-export async function markDelightSent(bvid) {
+export async function markDelightSent(bvid: string) {
   return requestJson("/delight/sent", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -404,7 +481,7 @@ export async function markDelightSent(bvid) {
   });
 }
 
-export async function acknowledgeNotificationSent(bvid) {
+export async function acknowledgeNotificationSent(bvid: string) {
   return requestJson("/notifications/sent", {
     method: "POST",
     headers: {
@@ -414,7 +491,7 @@ export async function acknowledgeNotificationSent(bvid) {
   });
 }
 
-export async function fetchProfileSummary({ limit, cursor } = {}) {
+export async function fetchProfileSummary({ limit, cursor }: { limit?: number; cursor?: string } = {}) {
   const params = new URLSearchParams();
   if (typeof limit === "number" && Number.isFinite(limit)) {
     params.set("limit", String(limit));
@@ -430,7 +507,13 @@ export async function fetchEditState() {
   return requestJson("/profile/edit-state", { method: "GET" });
 }
 
-export async function submitProfileEdit({ target, op, value = null, parent = "", weight = null }) {
+export async function submitProfileEdit({
+  target,
+  op,
+  value = null,
+  parent = "",
+  weight = null,
+}: { target: string; op: string; value?: unknown; parent?: string; weight?: number | null }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
@@ -445,7 +528,7 @@ export async function submitProfileEdit({ target, op, value = null, parent = "",
   }
 }
 
-export async function submitFeedback(payload) {
+export async function submitFeedback(payload: unknown) {
   return requestJson("/feedback", {
     method: "POST",
     headers: {
@@ -464,7 +547,7 @@ export async function submitFeedback(payload) {
  * @param {string} hypothesis
  * @param {"confirm" | "reject"} signal
  */
-export async function submitInsightFeedback(hypothesis, signal) {
+export async function submitInsightFeedback(hypothesis: string, signal: "confirm" | "reject") {
   return requestJson("/insights/feedback", {
     method: "POST",
     headers: {
@@ -490,7 +573,7 @@ export async function submitInsightFeedback(hypothesis, signal) {
  * }} payload
  * @returns {Promise<boolean>} true if the click was reported successfully
  */
-export async function reportRecommendationClick(payload) {
+export async function reportRecommendationClick(payload: RecommendationClickPayload) {
   try {
     await requestJson("/recommendation-click", {
       method: "POST",
@@ -506,7 +589,7 @@ export async function reportRecommendationClick(payload) {
   }
 }
 
-export async function sendChatMessage(message) {
+export async function sendChatMessage(message: string) {
   const controller = new AbortController();
   // Bumped from 35s to 150s. Backend's chat dialogue can take ~120s under
   // deepseek reasoning_effort=max; we give a small headroom for HTTP
@@ -531,7 +614,7 @@ export async function startChatTurn({
   subjectId = "",
   subjectTitle = "",
   message,
-}) {
+}: ChatTurnInput) {
   return requestJson("/chat/turns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -546,7 +629,7 @@ export async function startChatTurn({
   });
 }
 
-export async function fetchChatTurn(turnId) {
+export async function fetchChatTurn(turnId: string) {
   return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, { method: "GET" });
 }
 
@@ -560,7 +643,7 @@ export async function fetchChatTurns({ session = "popup", scope = "", limit = 50
   return requestJson(`/chat/turns?${params.toString()}`, { method: "GET" });
 }
 
-export async function respondToInterestProbe(domain, responseType, message = "") {
+export async function respondToInterestProbe(domain: string, responseType: string, message = "") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
@@ -575,7 +658,7 @@ export async function respondToInterestProbe(domain, responseType, message = "")
   }
 }
 
-export async function respondToAvoidanceProbe(domain, responseType, message = "") {
+export async function respondToAvoidanceProbe(domain: string, responseType: string, message = "") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
@@ -590,7 +673,7 @@ export async function respondToAvoidanceProbe(domain, responseType, message = ""
   }
 }
 
-export async function respondToDelight(bvid, responseType, title = "", message = "") {
+export async function respondToDelight(bvid: string, responseType: string, title = "", message = "") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
@@ -624,7 +707,7 @@ export async function fetchModelConnectionTypes(timeoutMs = MODEL_CONFIG_GET_TIM
 }
 
 /** Commit a complete model route against the revision returned by fetchModelConfig. */
-export async function updateModelConfig(data, timeoutMs = MODEL_CONFIG_PUT_TIMEOUT_MS) {
+export async function updateModelConfig(data: unknown, timeoutMs = MODEL_CONFIG_PUT_TIMEOUT_MS) {
   return requestJson("/model-config", {
     method: "PUT",
     timeoutMs,
@@ -634,7 +717,7 @@ export async function updateModelConfig(data, timeoutMs = MODEL_CONFIG_PUT_TIMEO
 }
 
 /** Probe exactly one revision-bound Chat connection or Embedding provider draft. */
-export async function probeModelConnection(data, timeoutMs = MODEL_CONFIG_PROBE_TIMEOUT_MS) {
+export async function probeModelConnection(data: unknown, timeoutMs = MODEL_CONFIG_PROBE_TIMEOUT_MS) {
   return requestJson("/model-config/probe", {
     method: "POST",
     timeoutMs,
@@ -643,7 +726,7 @@ export async function probeModelConnection(data, timeoutMs = MODEL_CONFIG_PROBE_
   });
 }
 
-export async function fetchSourceShareSuggestion(overrides = null) {
+export async function fetchSourceShareSuggestion(overrides: Record<string, unknown> | null = null) {
   if (overrides && typeof overrides === "object") {
     return requestJson("/config/source-share-suggestion", {
       method: "POST",
@@ -656,7 +739,7 @@ export async function fetchSourceShareSuggestion(overrides = null) {
   return requestJson("/config/source-share-suggestion", { method: "GET" });
 }
 
-export async function probeConfigService(kind, config) {
+export async function probeConfigService(kind: string, config: unknown) {
   return requestJson("/config/probe-service", {
     method: "POST",
     timeoutMs: 35_000,
@@ -667,7 +750,7 @@ export async function probeConfigService(kind, config) {
   });
 }
 
-export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
+export async function updateConfig(data: unknown, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
     timeoutMs,
@@ -678,7 +761,7 @@ export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
   });
 }
 
-export async function updateRuntimeToggle(name, value) {
+export async function updateRuntimeToggle(name: string, value: unknown) {
   const enabled = Boolean(value);
   if (name === "pause_llm") {
     return updateConfig({ scheduler: { enabled: !enabled } });
@@ -699,7 +782,7 @@ export async function updateRuntimeToggle(name, value) {
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
 const SAVED_READ_TIMEOUT_MS = 10_000;
 
-function savedListPath(listKind) {
+function savedListPath(listKind: SavedListKind) {
   if (listKind !== "favorite" && listKind !== "watch_later") {
     throw new TypeError(`Unknown saved list: ${listKind}`);
   }
@@ -707,7 +790,7 @@ function savedListPath(listKind) {
 }
 
 /** Keep platform routing on the backend; clients only normalize identity fields. */
-export function normalizeSavedItemInput(item = {}) {
+export function normalizeSavedItemInput(item: SavedItemInput = {}) {
   const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
   const legacyId = String(item.bvid || "").trim();
   const contentId = String(
@@ -727,7 +810,7 @@ export function normalizeSavedItemInput(item = {}) {
   };
 }
 
-export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+export async function saveItem(listKind: SavedListKind, item: SavedItemInput, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(savedListPath(listKind), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -736,7 +819,7 @@ export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOU
   });
 }
 
-export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+export async function removeSavedItem(listKind: SavedListKind, itemKey: unknown, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(`${savedListPath(listKind)}/remove`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -745,7 +828,7 @@ export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTAT
   });
 }
 
-export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+export async function fetchSavedItems(listKind: SavedListKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   const payload = await requestJson(
     `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
     { timeoutMs },
@@ -756,12 +839,12 @@ export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutM
   };
 }
 
-export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+export async function savedItemStatus(listKind: SavedListKind, itemKey: unknown, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
   return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
 }
 
-export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+export async function syncSavedItems(listKind: SavedListKind, itemKeys: unknown[] = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(`${savedListPath(listKind)}/sync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -772,7 +855,7 @@ export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_
   });
 }
 
-export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+export async function pollSavedSyncTask(taskId: unknown, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
     timeoutMs,
   });

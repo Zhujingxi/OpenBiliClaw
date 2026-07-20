@@ -3,7 +3,23 @@ import { readPopupSessionToken } from "./popup-device-auth.js";
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:8420/api";
 
-export function createRuntimeStreamUrl(backendUrl = DEFAULT_BACKEND_URL, token = null) {
+type WebSocketConstructor = new (url: string | URL, protocols?: string | string[]) => WebSocket;
+
+interface RuntimeStreamClientOptions {
+  backendUrl?: string | null;
+  resolveBackendUrl?: () => Promise<string>;
+  resolveSessionToken?: () => Promise<string | null>;
+  WebSocketImpl?: WebSocketConstructor;
+  reconnectDelayMs?: number;
+  onEvent?: (event: unknown) => void;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+}
+
+export function createRuntimeStreamUrl(
+  backendUrl = DEFAULT_BACKEND_URL,
+  token: string | null = null,
+): string {
   const base = backendUrl.replace(/\/$/, "");
   let wsUrl;
   if (base.startsWith("https://")) {
@@ -30,9 +46,9 @@ export function createRuntimeStreamClient({
   onEvent = () => {},
   onConnect = () => {},
   onDisconnect = () => {},
-} = {}) {
-  let socket = null;
-  let reconnectTimer = null;
+}: RuntimeStreamClientOptions = {}) {
+  let socket: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   let stopped = false;
   let wasConnected = false;
 
@@ -46,15 +62,15 @@ export function createRuntimeStreamClient({
     }, reconnectDelayMs);
   }
 
-  function attachSocket(nextSocket) {
+  function attachSocket(nextSocket: WebSocket) {
     socket = nextSocket;
     socket.onopen = () => {
       wasConnected = true;
       onConnect();
     };
-    socket.onmessage = (event) => {
+    socket.onmessage = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data);
+        const payload: unknown = JSON.parse(event.data);
         onEvent(payload);
       } catch {
         // Ignore malformed payloads and keep the stream alive.

@@ -6,6 +6,25 @@ export const BACKEND_CONNECTION_STATUS = Object.freeze({
   OFFLINE: "offline",
 });
 
+export type BackendConnectionStatus =
+  (typeof BACKEND_CONNECTION_STATUS)[keyof typeof BACKEND_CONNECTION_STATUS];
+
+interface BackendConnectionCoordinatorOptions {
+  checkBackendStatus?: () => boolean | Promise<boolean>;
+  onStatusChange?: (status: BackendConnectionStatus) => void;
+}
+
+type TimeoutHandle = ReturnType<typeof globalThis.setTimeout>;
+
+interface OfflineBackendPollerOptions {
+  isOnline?: () => boolean;
+  checkBackendStatus?: () => boolean | Promise<boolean>;
+  onOnline?: () => unknown | Promise<unknown>;
+  setTimeoutImpl?: (handler: () => void, delay: number) => TimeoutHandle;
+  clearTimeoutImpl?: (handle: TimeoutHandle) => void;
+  delayMs?: number;
+}
+
 /**
  * Coordinate HTTP reachability and the runtime WebSocket without letting stale
  * async probes overwrite a newer stream connection.
@@ -13,22 +32,22 @@ export const BACKEND_CONNECTION_STATUS = Object.freeze({
 export function createBackendConnectionCoordinator({
   checkBackendStatus,
   onStatusChange = () => {},
-} = {}) {
+}: BackendConnectionCoordinatorOptions = {}) {
   if (typeof checkBackendStatus !== "function") {
     throw new TypeError("checkBackendStatus must be a function");
   }
 
   let revision = 0;
-  let status = null;
+  let status: BackendConnectionStatus | null = null;
   let hasStreamConnected = false;
 
-  function publish(nextStatus) {
+  function publish(nextStatus: BackendConnectionStatus) {
     if (status === nextStatus) return;
     status = nextStatus;
     onStatusChange(nextStatus);
   }
 
-  function mark(nextStatus) {
+  function mark(nextStatus: BackendConnectionStatus) {
     revision += 1;
     publish(nextStatus);
     return status;
@@ -94,8 +113,8 @@ export function createOfflineBackendPoller({
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
   delayMs = OFFLINE_BACKEND_POLL_INTERVAL_MS,
-} = {}) {
-  let timer = null;
+}: OfflineBackendPollerOptions = {}) {
+  let timer: TimeoutHandle | null = null;
   let inFlight = false;
   let stopped = false;
 
@@ -125,7 +144,7 @@ export function createOfflineBackendPoller({
     inFlight = true;
     let online = false;
     try {
-      online = Boolean(await checkBackendStatus());
+      online = Boolean(await checkBackendStatus?.());
     } catch {
       online = false;
     } finally {

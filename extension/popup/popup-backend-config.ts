@@ -19,7 +19,30 @@ export const DEFAULT_BACKEND_PORT = 8420;
 export const DEFAULT_BACKEND_SCHEME = "http";
 export const BACKEND_ENDPOINT_STORAGE_KEY = "popup_backend_endpoint";
 
-const DEFAULT_ENDPOINT = {
+export interface BackendEndpoint {
+  scheme: "http" | "https";
+  host: string;
+  port: number;
+}
+
+interface PermissionsLike {
+  contains(
+    details: chrome.permissions.Permissions,
+    callback: (granted: boolean) => void,
+  ): void;
+  request(
+    details: chrome.permissions.Permissions,
+    callback: (granted: boolean) => void,
+  ): void;
+}
+
+interface UpdateBackendEndpointOptions {
+  permissionsApi?: PermissionsLike | null;
+}
+
+type EndpointSubscriber = (endpoint: BackendEndpoint) => void;
+
+const DEFAULT_ENDPOINT: BackendEndpoint = {
   scheme: DEFAULT_BACKEND_SCHEME,
   host: DEFAULT_BACKEND_HOST,
   port: DEFAULT_BACKEND_PORT,
@@ -27,11 +50,11 @@ const DEFAULT_ENDPOINT = {
 
 let cached = { ...DEFAULT_ENDPOINT };
 let initialized = false;
-let initPromise = null;
+let initPromise: Promise<BackendEndpoint> | null = null;
 let storageListenerInstalled = false;
-const subscribers = new Set();
+const subscribers = new Set<EndpointSubscriber>();
 
-function getStorageLocal() {
+function getStorageLocal(): chrome.storage.StorageArea | null {
   try {
     return globalThis.chrome?.storage?.local ?? null;
   } catch {
@@ -39,7 +62,7 @@ function getStorageLocal() {
   }
 }
 
-function getStorageOnChanged() {
+function getStorageOnChanged(): typeof chrome.storage.onChanged | null {
   try {
     return globalThis.chrome?.storage?.onChanged ?? null;
   } catch {
@@ -47,7 +70,7 @@ function getStorageOnChanged() {
   }
 }
 
-function parseBackendPort(value) {
+function parseBackendPort(value: unknown): number | null {
   if (typeof value === "number" && Number.isInteger(value)) {
     return value >= 1 && value <= 65535 ? value : null;
   }
@@ -62,27 +85,28 @@ function parseBackendPort(value) {
   return null;
 }
 
-export function isValidBackendPort(value) {
+export function isValidBackendPort(value: unknown): boolean {
   return parseBackendPort(value) !== null;
 }
 
-function coercePort(value) {
+function coercePort(value: unknown): number {
   return parseBackendPort(value) ?? DEFAULT_BACKEND_PORT;
 }
 
-function sanitizeEndpoint(raw) {
+function sanitizeEndpoint(raw: unknown): BackendEndpoint {
   if (typeof raw !== "object" || raw === null) {
     return { ...DEFAULT_ENDPOINT };
   }
-  const hostRaw = typeof raw.host === "string" ? raw.host.trim() : "";
+  const value = raw as Record<string, unknown>;
+  const hostRaw = typeof value.host === "string" ? value.host.trim() : "";
   return {
-    scheme: raw.scheme === "https" ? "https" : "http",
+    scheme: value.scheme === "https" ? "https" : "http",
     host: hostRaw || DEFAULT_BACKEND_HOST,
-    port: coercePort(raw.port),
+    port: coercePort(value.port),
   };
 }
 
-async function loadFromStorage() {
+async function loadFromStorage(): Promise<BackendEndpoint> {
   const storage = getStorageLocal();
   if (typeof storage?.get !== "function") {
     return { ...cached };
@@ -99,7 +123,7 @@ async function loadFromStorage() {
   });
 }
 
-function installStorageChangeListener() {
+function installStorageChangeListener(): void {
   if (storageListenerInstalled) return;
   const onChanged = getStorageOnChanged();
   if (typeof onChanged?.addListener !== "function") return;
@@ -125,7 +149,7 @@ function installStorageChangeListener() {
   }
 }
 
-async function ensureLoaded() {
+async function ensureLoaded(): Promise<BackendEndpoint> {
   if (initialized) return cached;
   if (initPromise) return initPromise;
   initPromise = (async () => {
@@ -138,26 +162,26 @@ async function ensureLoaded() {
   return initPromise;
 }
 
-export async function getBackendEndpointConfig() {
+export async function getBackendEndpointConfig(): Promise<BackendEndpoint> {
   return ensureLoaded();
 }
 
-export async function getBackendOrigin() {
+export async function getBackendOrigin(): Promise<string> {
   const ep = await ensureLoaded();
   return `${ep.scheme}://${ep.host}:${ep.port}`;
 }
 
-export async function getBackendBaseUrl() {
+export async function getBackendBaseUrl(): Promise<string> {
   const ep = await ensureLoaded();
   return `${ep.scheme}://${ep.host}:${ep.port}/api`;
 }
 
-export async function getBackendWsBaseUrl() {
+export async function getBackendWsBaseUrl(): Promise<string> {
   const ep = await ensureLoaded();
   return `${ep.scheme === "https" ? "wss" : "ws"}://${ep.host}:${ep.port}/api`;
 }
 
-export function isPrivateHttpHost(host) {
+export function isPrivateHttpHost(host: unknown): boolean {
   const normalized = String(host || "").trim().toLowerCase();
   if (normalized === "localhost" || normalized.endsWith(".local") || normalized.endsWith(".lan")) {
     return true;
@@ -168,7 +192,7 @@ export function isPrivateHttpHost(host) {
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
-function getPermissionsApi() {
+function getPermissionsApi(): PermissionsLike | null {
   try {
     return globalThis.chrome?.permissions ?? null;
   } catch {
@@ -176,8 +200,12 @@ function getPermissionsApi() {
   }
 }
 
-function invokePermission(api, method, details) {
-  return new Promise((resolve) => {
+function invokePermission(
+  api: PermissionsLike,
+  method: "contains" | "request",
+  details: chrome.permissions.Permissions,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try {
       api[method](details, (granted) => resolve(Boolean(granted)));
     } catch {
@@ -186,7 +214,10 @@ function invokePermission(api, method, details) {
   });
 }
 
-export async function requestBackendPermission(endpoint, permissionsApi = getPermissionsApi()) {
+export async function requestBackendPermission(
+  endpoint: BackendEndpoint,
+  permissionsApi: PermissionsLike | null = getPermissionsApi(),
+): Promise<boolean> {
   // WebExtension match patterns cannot portably scope host permissions by port:
   // Firefox ignores port-qualified patterns. Keep the endpoint itself pinned to
   // its configured port, while requesting the narrowest cross-browser pattern.
@@ -199,7 +230,7 @@ export async function requestBackendPermission(endpoint, permissionsApi = getPer
   return invokePermission(permissionsApi, "request", details);
 }
 
-export function isValidBackendHost(value) {
+export function isValidBackendHost(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const trimmed = value.trim();
   if (trimmed === "" || trimmed === "localhost") return true;
@@ -215,7 +246,12 @@ export function isValidBackendHost(value) {
   return false;
 }
 
-export async function updateBackendEndpoint(scheme, host, port, options = {}) {
+export async function updateBackendEndpoint(
+  scheme: unknown,
+  host: unknown,
+  port: unknown,
+  options: UpdateBackendEndpointOptions = {},
+): Promise<BackendEndpoint> {
   if (scheme !== "http" && scheme !== "https") {
     throw new Error("invalid_backend_scheme");
   }
@@ -230,7 +266,7 @@ export async function updateBackendEndpoint(scheme, host, port, options = {}) {
   if (scheme === "http" && !isPrivateHttpHost(normalizedHost)) {
     throw new Error("https_required");
   }
-  const endpoint = {
+  const endpoint: BackendEndpoint = {
     scheme,
     host: normalizedHost,
     port: coercePort(port),
@@ -259,12 +295,12 @@ export async function updateBackendEndpoint(scheme, host, port, options = {}) {
   return endpoint;
 }
 
-export async function updateBackendPort(value) {
+export async function updateBackendPort(value: unknown): Promise<BackendEndpoint> {
   if (!isValidBackendPort(value)) {
     throw new Error("端口必须是 1-65535 的整数");
   }
   const port = coercePort(value);
-  const endpoint = {
+  const endpoint: BackendEndpoint = {
     scheme: cached.scheme || DEFAULT_BACKEND_SCHEME,
     host: cached.host || DEFAULT_BACKEND_HOST,
     port,
@@ -293,7 +329,7 @@ export async function updateBackendPort(value) {
   return endpoint;
 }
 
-export function onBackendEndpointChange(callback) {
+export function onBackendEndpointChange(callback: EndpointSubscriber): () => void {
   subscribers.add(callback);
   installStorageChangeListener();
   void ensureLoaded();

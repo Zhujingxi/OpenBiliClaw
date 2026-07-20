@@ -5,21 +5,42 @@
  * popup-auth-control.js: API creation plus a duck-typed wiring helper.
  */
 
-export function createAutostartApi({ getBaseUrl, fetchImpl } = {}) {
-  const doFetch = fetchImpl || ((...args) => fetch(...args));
+type FetchLike = typeof fetch;
+
+interface AutostartStatus {
+  reason?: string;
+  manage_ollama?: boolean;
+  registered?: boolean;
+  can_manage?: boolean;
+  enabled?: boolean;
+  [key: string]: unknown;
+}
+
+interface AutostartApiOptions {
+  getBaseUrl: () => Promise<string>;
+  fetchImpl?: FetchLike;
+}
+
+interface AutostartControlElements {
+  checkbox?: Pick<HTMLInputElement, "checked" | "disabled" | "addEventListener">;
+  hint?: Pick<HTMLElement, "textContent">;
+}
+
+export function createAutostartApi({ getBaseUrl, fetchImpl }: AutostartApiOptions) {
+  const doFetch: FetchLike = fetchImpl || fetch.bind(globalThis);
 
   async function status() {
     try {
       const base = await getBaseUrl();
       const res = await doFetch(`${base}/autostart-status`);
       if (!res.ok) return null;
-      return await res.json();
+      return await res.json() as AutostartStatus;
     } catch {
       return null;
     }
   }
 
-  async function apply(enabled) {
+  async function apply(enabled: boolean) {
     const base = await getBaseUrl();
     const res = await doFetch(`${base}/autostart/apply`, {
       method: "POST",
@@ -38,7 +59,7 @@ export function createAutostartApi({ getBaseUrl, fetchImpl } = {}) {
   return { status, apply };
 }
 
-function disabledHint(status) {
+function disabledHint(status: AutostartStatus | null): string {
   const reason = status?.reason || "";
   if (reason === "env_managed") {
     return "检测到环境变量配置，登录会话可能拿不到这些值；请先写入 config.toml。";
@@ -58,7 +79,7 @@ function disabledHint(status) {
   return "当前环境不能在这里修改开机自启动。";
 }
 
-function enabledHint(status) {
+function enabledHint(status: AutostartStatus): string {
   const ollamaCopy = status?.manage_ollama
     ? "；本机 Ollama 配置会在需要时顺带拉起"
     : "";
@@ -68,7 +89,7 @@ function enabledHint(status) {
   return `已开启：下次登录系统会拉起后端，不启停当前进程${ollamaCopy}。`;
 }
 
-function activeHint(status) {
+function activeHint(status: AutostartStatus | null): string {
   if (!status) return "无法读取开机自启动状态。";
   if (!status.can_manage) return disabledHint(status);
   if (status.enabled) return enabledHint(status);
@@ -81,12 +102,15 @@ function activeHint(status) {
  * @param els {checkbox, hint} — duck-typed elements.
  * @param opts {getBaseUrl, fetchImpl}
  */
-export function initAutostartControl(els = {}, opts = {}) {
+export function initAutostartControl(
+  els: AutostartControlElements = {},
+  opts: AutostartApiOptions,
+) {
   const api = createAutostartApi(opts);
-  let current = null;
+  let current: AutostartStatus | null = null;
   let busy = false;
 
-  const setHint = (msg) => {
+  const setHint = (msg: string) => {
     if (els.hint) els.hint.textContent = msg;
   };
 
@@ -105,7 +129,7 @@ export function initAutostartControl(els = {}, opts = {}) {
     return current;
   }
 
-  async function apply(enabled) {
+  async function apply(enabled: boolean) {
     busy = true;
     if (els.checkbox) els.checkbox.disabled = true;
     setHint(enabled ? "正在开启开机自启动…" : "正在关闭开机自启动…");
@@ -137,9 +161,10 @@ export function initAutostartControl(els = {}, opts = {}) {
     await load();
   }
 
-  if (els.checkbox && typeof els.checkbox.addEventListener === "function") {
-    els.checkbox.addEventListener("change", () => {
-      void apply(Boolean(els.checkbox.checked));
+  const checkbox = els.checkbox;
+  if (checkbox && typeof checkbox.addEventListener === "function") {
+    checkbox.addEventListener("change", () => {
+      void apply(Boolean(checkbox.checked));
     });
   }
 

@@ -7,7 +7,75 @@
 
 const STAGE_TOTAL_FALLBACK = 4;
 
-const REASON_TEXT = {
+interface InitPrerequisites {
+  bilibili_logged_in?: boolean;
+  llm_ready?: boolean;
+  embedding_ready?: boolean;
+  embedding_required?: boolean;
+  embedding_detail?: string;
+  embedding_check?: string;
+  embedding_repair_running?: boolean;
+  embedding_repair_completed?: number;
+  embedding_repair_total?: number;
+  embedding_pull_status?: string;
+  ollama_phase?: string;
+  enabled_platforms?: string[];
+  [key: string]: unknown;
+}
+
+interface InitStageProgress {
+  done?: number;
+  total?: number;
+  note?: string;
+}
+
+interface InitStage {
+  n: number;
+  label?: string;
+  status?: string;
+  reason?: string;
+  eta_seconds?: number;
+  progress?: InitStageProgress;
+}
+
+interface InitStatus {
+  reason?: string;
+  detail?: string;
+  last_failure_reason?: string;
+  last_failure_detail?: string;
+  start_mode?: string;
+  prerequisites?: InitPrerequisites;
+  stages?: InitStage[];
+  running?: boolean;
+  initialized?: boolean;
+  partial_success?: boolean;
+  can_start?: boolean;
+  total_stages?: number;
+  current_stage?: number;
+  run_id?: string | number;
+  last_activity?: string;
+  sequence?: string | number;
+  [key: string]: unknown;
+}
+
+interface RunViewState {
+  stageStartMs: Map<number, number>;
+  maxPct: number;
+  lastMark: string | null;
+  lastChangeMs: number;
+}
+
+interface InitStartResult {
+  status?: number;
+  error?: string;
+}
+
+interface InitStartErrorLike {
+  message?: string;
+  details?: { error?: string; reason?: string };
+}
+
+const REASON_TEXT: Record<string, string> = {
   unsupported_runtime: "当前运行环境（例如 Docker）不支持图形化初始化，请用命令行 openbiliclaw init。",
   already_running: "初始化正在进行中。",
   bilibili_not_logged_in: "还没检测到 B 站登录。",
@@ -30,18 +98,18 @@ const REASON_TEXT = {
 };
 
 // Human text for a backend reason / error code. Unknown codes return "".
-export function describeInitReason(reason) {
+export function describeInitReason(reason: unknown): string {
   if (!reason) {
     return "";
   }
-  return REASON_TEXT[reason] || "";
+  return REASON_TEXT[String(reason)] || "";
 }
 
 // Authoritative status explanation for pre-init and partial-success states.
 // Typed backend details carry the concrete cause + recovery action and should
 // win over a short reason-code label. account-sync keeps llm_not_ready while
 // its live probe is red, so recognise its prefixed analysis detail as well.
-export function describeInitStatusReason(status) {
+export function describeInitStatusReason(status: InitStatus | null | undefined): string {
   const reason = String((status && status.reason) || "");
   const detail = String((status && status.detail) || "").trim();
   const detailFirst = [
@@ -56,13 +124,13 @@ export function describeInitStatusReason(status) {
   return describeInitReason(reason) || detail;
 }
 
-export function describeInitLastFailure(status) {
+export function describeInitLastFailure(status: InitStatus | null | undefined): string {
   const reason = String((status && status.last_failure_reason) || "");
   const detail = String((status && status.last_failure_detail) || "").trim();
   return detail || describeInitReason(reason);
 }
 
-export function initStartMode(status) {
+export function initStartMode(status: InitStatus | null | undefined): string {
   if (status && status.start_mode) return String(status.start_mode);
   if (status && status.reason === "unsupported_runtime") return "cli_only";
   if (status && status.reason === "local_only") return "local_only";
@@ -73,7 +141,10 @@ export function initStartMode(status) {
 // backend's stored failure specifics (exception summary / GuidedInitError
 // message, v0.3.156+) — append it so an internal_error is diagnosable from
 // the UI instead of only the generic "请稍后重试" (field report 2026-07-05).
-export function describeInitFailure(status, progress = null) {
+export function describeInitFailure(
+  status: InitStatus | null | undefined,
+  progress: { failedReason?: string } | null = null,
+): string {
   const previousFailure = describeInitLastFailure(status);
   if (previousFailure) {
     return previousFailure;
@@ -98,7 +169,7 @@ export function describeInitFailure(status, progress = null) {
 // Classified embedding-not-ready causes (init-status prerequisites
 // ``embedding_check``, v0.3.155+). The backend's ``embedding_detail``
 // wins when present; these are fallbacks for older backends.
-const EMBEDDING_CHECK_TEXT = {
+const EMBEDDING_CHECK_TEXT: Record<string, string> = {
   repairing: "正在下载向量模型，完成后自动就绪。",
   not_running: "Ollama 没有在运行。启动 Ollama（或运行 `ollama serve`）后再试。",
   model_missing:
@@ -112,7 +183,7 @@ const EMBEDDING_CHECK_TEXT = {
 };
 
 // Actionable hint for the embedding checklist row / banner. "" when ready.
-export function describeEmbeddingHint(prereq) {
+export function describeEmbeddingHint(prereq: InitPrerequisites | null | undefined): string {
   if (!prereq || prereq.embedding_ready) {
     return "";
   }
@@ -121,7 +192,7 @@ export function describeEmbeddingHint(prereq) {
   if (detail) {
     return detail;
   }
-  const byCode = EMBEDDING_CHECK_TEXT[prereq.embedding_check];
+  const byCode = EMBEDDING_CHECK_TEXT[String(prereq.embedding_check || "")];
   if (byCode) {
     return byCode;
   }
@@ -134,7 +205,7 @@ export function describeEmbeddingHint(prereq) {
 
 // Live bge-m3 pull progress from init-status prerequisites. Returns
 // {active, pct, label}; pct remains between 1 and 99 while a repair is active.
-export function embeddingPullProgressView(prereq) {
+export function embeddingPullProgressView(prereq: InitPrerequisites | null | undefined) {
   const p = prereq || {};
   const active =
     Boolean(p.embedding_repair_running) || p.embedding_check === "repairing";
@@ -155,7 +226,7 @@ export function embeddingPullProgressView(prereq) {
 }
 
 // Select the repair action exposed beside an unavailable embedding model.
-export function embeddingRepairAction(prereq) {
+export function embeddingRepairAction(prereq: InitPrerequisites | null | undefined) {
   const p = prereq || {};
   if (p.embedding_ready) {
     return { repairable: false, label: "" };
@@ -175,12 +246,12 @@ export function embeddingRepairAction(prereq) {
 
 // Only successful starts (or an already-running single-flight repair) should
 // enter the long init-status polling loop.
-export function embeddingRepairStartAccepted(result) {
+export function embeddingRepairStartAccepted(result: InitStartResult | null | undefined): boolean {
   const status = Number((result && result.status) || 0);
   return (
     status === 200 ||
     status === 202 ||
-    (status === 409 && result && result.error === "already_running")
+    (status === 409 && Boolean(result && result.error === "already_running"))
   );
 }
 
@@ -189,7 +260,10 @@ export function embeddingRepairStartAccepted(result) {
 // ``selected`` is the current source-checkbox selection: B 站登录 is a hard
 // prerequisite only while bilibili is among the checked sources (v0.3.118+);
 // null (legacy callers) keeps it hard.
-export function buildInitChecklist(status, selected = null) {
+export function buildInitChecklist(
+  status: InitStatus | null | undefined,
+  selected: string[] | null = null,
+) {
   const prereq = (status && status.prerequisites) || {};
   const enabled = getEnabledPlatforms(status);
   const selectedSources = Array.isArray(selected) ? selected : null;
@@ -242,7 +316,7 @@ export function buildInitChecklist(status, selected = null) {
   ];
 }
 
-export function getEnabledPlatforms(status) {
+export function getEnabledPlatforms(status: InitStatus | null | undefined): string[] {
   const prereq = (status && status.prerequisites) || {};
   return Array.isArray(prereq.enabled_platforms) ? prereq.enabled_platforms.slice() : [];
 }
@@ -266,20 +340,28 @@ export const INIT_SOURCE_LOGIN_HINT =
   "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号——否则这个来源拿不到你的数据。勾选会同时开启该来源。";
 
 // Human labels for a list of platform keys (unknown keys pass through).
-export function initSourceLabels(keys) {
+export function initSourceLabels(keys: unknown): string[] {
   const byKey = new Map(INIT_SOURCE_OPTIONS.map((o) => [o.key, o.label]));
   return (Array.isArray(keys) ? keys : []).map((k) => byKey.get(k) || k);
 }
 
 // Compatibility helper for older callers/tests. A checked source is now an
 // explicit guided-init opt-in, so the UI no longer blocks on prior settings.
-export function initSelectedSourcesNeedingEnable(selected, status) {
+export function initSelectedSourcesNeedingEnable(
+  selected: unknown,
+  status: InitStatus | null | undefined,
+): string[] {
+  void selected;
+  void status;
   return [];
 }
 
 // True only when every HARD prerequisite is satisfied (B 站登录 counts only
 // while bilibili is selected — see buildInitChecklist).
-export function hardPrereqsSatisfied(status, selected = null) {
+export function hardPrereqsSatisfied(
+  status: InitStatus | null | undefined,
+  selected: string[] | null = null,
+): boolean {
   return buildInitChecklist(status, selected)
     .filter((row) => row.hard)
     .every((row) => row.ok);
@@ -290,7 +372,10 @@ export function hardPrereqsSatisfied(status, selected = null) {
 // gracefully when the status hasn't loaded yet. ``selected`` adds the
 // client-side gates the server can't know at status time: at least one
 // source checked, and B 站登录 when bilibili is among them.
-export function initStartButtonState(status, selected = null) {
+export function initStartButtonState(
+  status: InitStatus | null | undefined,
+  selected: string[] | null = null,
+) {
   if (!status) {
     return { enabled: false, label: "开始初始化", reason: "正在检查前置条件…" };
   }
@@ -328,7 +413,7 @@ export function initStartButtonState(status, selected = null) {
   return { enabled: false, label: "开始初始化", reason };
 }
 
-function stageList(status) {
+function stageList(status: InitStatus | null | undefined): InitStage[] {
   return status && Array.isArray(status.stages) ? status.stages : [];
 }
 
@@ -358,16 +443,16 @@ export const INIT_EXPECTATION_HINT =
 // client observation of each running stage) + the monotonic pct clamp + the
 // staleness change marker. Keyed by run_id; bounded so long sessions can't
 // accumulate stale runs.
-const _runViewState = new Map();
+const _runViewState = new Map<string, RunViewState>();
 
-function _viewState(runId) {
+function _viewState(runId: string): RunViewState {
   let st = _runViewState.get(runId);
   if (!st) {
     st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
     _runViewState.set(runId, st);
     if (_runViewState.size > 8) {
       const oldest = _runViewState.keys().next().value;
-      if (oldest !== runId) {
+      if (oldest !== undefined && oldest !== runId) {
         _runViewState.delete(oldest);
       }
     }
@@ -385,15 +470,19 @@ export function resetInitProgressViewState() {
 // at the first client observation of the stage running; otherwise the legacy
 // half-step. ``st`` is null when the status carries no run_id (legacy) — then
 // only the stateless paths apply.
-function _runningStageFraction(stage, st, nowMs) {
+function _runningStageFraction(
+  stage: InitStage | undefined,
+  st: RunViewState | null,
+  nowMs: number,
+): number {
   const prog = stage && stage.progress;
   const progTotal = prog ? Number(prog.total || 0) : 0;
   if (progTotal > 0) {
-    const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
+    const done = Math.max(0, Math.min(Number(prog?.done || 0), progTotal));
     return Math.min(STAGE_FRACTION_CAP, done / progTotal);
   }
   const eta = Number((stage && stage.eta_seconds) || 0);
-  if (eta > 0 && st) {
+  if (eta > 0 && st && stage) {
     let startMs = st.stageStartMs.get(stage.n);
     if (startMs === undefined) {
       startMs = nowMs;
@@ -407,7 +496,7 @@ function _runningStageFraction(stage, st, nowMs) {
 
 // "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise).
 // X rounds UP to the nearest half minute so the copy never under-promises.
-export function stageEtaText(stage) {
+export function stageEtaText(stage: InitStage | undefined): string {
   const eta = Number((stage && stage.eta_seconds) || 0);
   if (eta <= 0) {
     return "";
@@ -422,7 +511,10 @@ export function stageEtaText(stage) {
 // changed — immune to client/server clock skew. Old backends without
 // last_activity get no stall detection (they also have no heartbeat, so a
 // silent-but-healthy stage 2 would false-alarm).
-export function stalenessView(status, nowMs = Date.now()) {
+export function stalenessView(
+  status: InitStatus | null | undefined,
+  nowMs = Date.now(),
+) {
   if (!status || !status.running) {
     return { fresh: true, staleSeconds: 0, text: "" };
   }
@@ -453,7 +545,10 @@ export function stalenessView(status, nowMs = Date.now()) {
 // fraction — real sub-progress when available, elapsed/eta pseudo-progress
 // otherwise, legacy half-step for old backends. Rendered pct is monotonic per
 // run_id (stale/regressed polls can't move the bar backwards).
-export function initProgressView(status, nowMs = Date.now()) {
+export function initProgressView(
+  status: InitStatus | null | undefined,
+  nowMs = Date.now(),
+) {
   const total = (status && status.total_stages) || STAGE_TOTAL_FALLBACK;
   const stages = stageList(status);
   const doneCount = stages.filter((s) => s.status === "ok").length;
@@ -500,7 +595,7 @@ export function initProgressView(status, nowMs = Date.now()) {
 
 // Whether a run has reached a terminal state (so the UI can stop polling /
 // streaming and reload recommendations). Idle (never started) is not terminal.
-export function isInitTerminal(status) {
+export function isInitTerminal(status: InitStatus | null | undefined): boolean {
   if (!status || status.running) {
     return false;
   }
@@ -511,7 +606,9 @@ export function isInitTerminal(status) {
 // painting the idle panel. True only when a run is live (started elsewhere, or
 // the page was reopened / refreshed mid-init, so no click or SSE frame kicked
 // the poll on this instance). Tolerant of missing / legacy status objects.
-export function shouldAttachRunningInitProgress(status) {
+export function shouldAttachRunningInitProgress(
+  status: InitStatus | null | undefined,
+): boolean {
   return Boolean(
     status &&
       (status.running ||
@@ -523,7 +620,7 @@ export function shouldAttachRunningInitProgress(status) {
 
 // Map an error thrown by startInit() (requestJson attaches .status/.details)
 // onto human text. 409 carries a machine reason in details.error.
-export function describeInitStartError(error) {
+export function describeInitStartError(error: InitStartErrorLike | null | undefined): string {
   const details = error && error.details;
   const code = details && (details.error || details.reason);
   return (

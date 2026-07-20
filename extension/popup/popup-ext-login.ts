@@ -12,15 +12,29 @@ const AUTH_ERRORS = {
   backend_unreachable: "无法连接后端",
 };
 
-export function initExtLogin(els = {}, opts = {}) {
+type FetchLike = typeof fetch;
+
+interface ExtLoginElements {
+  status?: Pick<HTMLElement, "textContent" | "style">;
+  deviceKey?: Pick<HTMLInputElement, "value" | "hidden" | "addEventListener">;
+  btn?: Pick<HTMLElement, "hidden" | "addEventListener">;
+}
+
+interface ExtLoginOptions {
+  getBaseUrl: () => Promise<string>;
+  fetchImpl?: FetchLike;
+  onPaired?: () => void;
+}
+
+export function initExtLogin(els: ExtLoginElements = {}, opts: ExtLoginOptions) {
   const getBaseUrl = opts.getBaseUrl;
-  const doFetch = opts.fetchImpl || ((...args) => fetch(...args));
-  const setStatus = (msg, ok = null) => {
+  const doFetch: FetchLike = opts.fetchImpl || fetch.bind(globalThis);
+  const setStatus = (msg: string, ok: boolean | null = null) => {
     if (!els.status) return;
     els.status.textContent = msg;
     els.status.style.color = ok === true ? "#30b980" : ok === false ? "#ef7a86" : "";
   };
-  const showFields = (visible) => {
+  const showFields = (visible: boolean) => {
     if (els.deviceKey) els.deviceKey.hidden = !visible;
     if (els.btn) els.btn.hidden = !visible;
   };
@@ -30,7 +44,10 @@ export function initExtLogin(els = {}, opts = {}) {
       const base = await getBaseUrl();
       const response = await popupAuthenticatedFetch(`${base}/auth/status`, {}, doFetch);
       if (!response.ok) throw new Error("unreachable");
-      const data = await response.json();
+      const data = await response.json() as {
+        enabled?: boolean;
+        authenticated?: boolean;
+      };
       if (!data.enabled) {
         setStatus("后端未开启访问控制，无需配对", true);
         showFields(false);
@@ -60,14 +77,15 @@ export function initExtLogin(els = {}, opts = {}) {
       setStatus("配对成功，正在重新连接…", true);
       showFields(false);
       opts.onPaired?.();
-    } catch (error) {
-      setStatus(AUTH_ERRORS[error?.message] || "设备配对失败", false);
+    } catch (error: unknown) {
+      const code = error instanceof Error ? error.message : "";
+      setStatus(AUTH_ERRORS[code as keyof typeof AUTH_ERRORS] || "设备配对失败", false);
     }
   }
 
   if (els.btn) els.btn.addEventListener("click", handleLogin);
   if (els.deviceKey) {
-    els.deviceKey.addEventListener("keydown", (event) => {
+    els.deviceKey.addEventListener("keydown", (event: KeyboardEvent) => {
       if (event.key === "Enter") void handleLogin();
     });
   }

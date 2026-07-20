@@ -6,6 +6,19 @@ const QR_EC_LEVEL_L = 1;
 const QR_MASK_PATTERN = 0;
 const QR_PAD_BYTES = [0xec, 0x11];
 
+type Bit = number;
+type QrMatrix = boolean[][];
+
+interface MobileEndpoint {
+  host?: unknown;
+  port?: unknown;
+}
+
+interface QrMarkupOptions {
+  moduleSize?: number;
+  quietZone?: number;
+}
+
 const GF_EXP = new Array(512).fill(0);
 const GF_LOG = new Array(256).fill(0);
 
@@ -22,18 +35,18 @@ const GF_LOG = new Array(256).fill(0);
   }
 }
 
-export function buildMobileWebUrl({ host, port } = {}) {
+export function buildMobileWebUrl({ host, port }: MobileEndpoint = {}): string {
   const safeHost = String(host || "127.0.0.1").trim() || "127.0.0.1";
   const safePort = Number.isInteger(Number(port)) ? Number(port) : 8420;
   return `http://${safeHost}:${safePort}/m/`;
 }
 
-export function isLoopbackMobileHost(host) {
+export function isLoopbackMobileHost(host: unknown): boolean {
   const value = String(host || "").trim().toLowerCase();
   return value === "" || value === "localhost" || value === "::1" || value.startsWith("127.");
 }
 
-export function getMobileQrViewState(endpoint = {}) {
+export function getMobileQrViewState(endpoint: MobileEndpoint = {}) {
   const url = buildMobileWebUrl(endpoint);
   const loopback = isLoopbackMobileHost(endpoint.host);
   return {
@@ -45,7 +58,10 @@ export function getMobileQrViewState(endpoint = {}) {
   };
 }
 
-export function createQrSvgMarkup(text, { moduleSize = 5, quietZone = 4 } = {}) {
+export function createQrSvgMarkup(
+  text: unknown,
+  { moduleSize = 5, quietZone = 4 }: QrMarkupOptions = {},
+): string {
   const matrix = createQrMatrix(String(text || ""));
   const totalModules = QR_SIZE + quietZone * 2;
   const pixelSize = totalModules * moduleSize;
@@ -58,7 +74,7 @@ export function createQrSvgMarkup(text, { moduleSize = 5, quietZone = 4 } = {}) 
   ].join("");
 }
 
-function createQrMatrix(text) {
+function createQrMatrix(text: string): QrMatrix {
   const data = encodeDataCodewords(text);
   const ecc = reedSolomonRemainder(data, QR_ECC_CODEWORDS);
   const codewords = data.concat(ecc);
@@ -71,14 +87,14 @@ function createQrMatrix(text) {
   return modules;
 }
 
-function encodeDataCodewords(text) {
+function encodeDataCodewords(text: string): number[] {
   const bytes = Array.from(new TextEncoder().encode(text));
   const maxBytes = Math.floor((QR_DATA_CODEWORDS * 8 - 4 - 8) / 8);
   if (bytes.length > maxBytes) {
     throw new Error(`mobile web URL is too long for QR code: ${bytes.length} bytes`);
   }
 
-  const bits = [];
+  const bits: Bit[] = [];
   appendBits(bits, 0b0100, 4);
   appendBits(bits, bytes.length, 8);
   for (const byte of bytes) appendBits(bits, byte, 8);
@@ -87,7 +103,7 @@ function encodeDataCodewords(text) {
   appendBits(bits, 0, Math.min(4, capacityBits - bits.length));
   while (bits.length % 8 !== 0) bits.push(0);
 
-  const data = [];
+  const data: number[] = [];
   for (let i = 0; i < bits.length; i += 8) {
     let value = 0;
     for (let j = 0; j < 8; j += 1) value = (value << 1) | bits[i + j];
@@ -99,13 +115,13 @@ function encodeDataCodewords(text) {
   return data;
 }
 
-function appendBits(bits, value, length) {
+function appendBits(bits: Bit[], value: number, length: number): void {
   for (let i = length - 1; i >= 0; i -= 1) {
     bits.push((value >>> i) & 1);
   }
 }
 
-function drawFunctionPatterns(modules, reserved) {
+function drawFunctionPatterns(modules: QrMatrix, reserved: QrMatrix): void {
   drawFinder(modules, reserved, 0, 0);
   drawFinder(modules, reserved, QR_SIZE - 7, 0);
   drawFinder(modules, reserved, 0, QR_SIZE - 7);
@@ -120,7 +136,12 @@ function drawFunctionPatterns(modules, reserved) {
   drawFormatBits(modules, reserved);
 }
 
-function drawFinder(modules, reserved, left, top) {
+function drawFinder(
+  modules: QrMatrix,
+  reserved: QrMatrix,
+  left: number,
+  top: number,
+): void {
   for (let dy = -1; dy <= 7; dy += 1) {
     for (let dx = -1; dx <= 7; dx += 1) {
       const x = left + dx;
@@ -134,7 +155,12 @@ function drawFinder(modules, reserved, left, top) {
   }
 }
 
-function drawAlignment(modules, reserved, centerX, centerY) {
+function drawAlignment(
+  modules: QrMatrix,
+  reserved: QrMatrix,
+  centerX: number,
+  centerY: number,
+): void {
   for (let dy = -2; dy <= 2; dy += 1) {
     for (let dx = -2; dx <= 2; dx += 1) {
       const distance = Math.max(Math.abs(dx), Math.abs(dy));
@@ -143,8 +169,8 @@ function drawAlignment(modules, reserved, centerX, centerY) {
   }
 }
 
-function drawCodewords(modules, reserved, codewords) {
-  const bits = [];
+function drawCodewords(modules: QrMatrix, reserved: QrMatrix, codewords: number[]): void {
+  const bits: Bit[] = [];
   for (const codeword of codewords) appendBits(bits, codeword, 8);
 
   let bitIndex = 0;
@@ -165,11 +191,11 @@ function drawCodewords(modules, reserved, codewords) {
   }
 }
 
-function shouldApplyMask(x, y) {
+function shouldApplyMask(x: number, y: number): boolean {
   return (x + y) % 2 === QR_MASK_PATTERN;
 }
 
-function drawFormatBits(modules, reserved) {
+function drawFormatBits(modules: QrMatrix, reserved: QrMatrix): void {
   const bits = getFormatBits(QR_EC_LEVEL_L, QR_MASK_PATTERN);
   for (let i = 0; i <= 5; i += 1) setFunctionModule(modules, reserved, 8, i, getBit(bits, i));
   setFunctionModule(modules, reserved, 8, 7, getBit(bits, 6));
@@ -182,7 +208,7 @@ function drawFormatBits(modules, reserved) {
   setFunctionModule(modules, reserved, 8, QR_SIZE - 8, true);
 }
 
-function getFormatBits(ecLevel, maskPattern) {
+function getFormatBits(ecLevel: number, maskPattern: number): number {
   const data = (ecLevel << 3) | maskPattern;
   let bits = data << 10;
   for (let i = 14; i >= 10; i -= 1) {
@@ -191,21 +217,27 @@ function getFormatBits(ecLevel, maskPattern) {
   return ((data << 10) | bits) ^ 0x5412;
 }
 
-function getBit(value, index) {
+function getBit(value: number, index: number): boolean {
   return ((value >>> index) & 1) !== 0;
 }
 
-function setFunctionModule(modules, reserved, x, y, dark) {
+function setFunctionModule(
+  modules: QrMatrix,
+  reserved: QrMatrix,
+  x: number,
+  y: number,
+  dark: boolean,
+): void {
   modules[y][x] = dark;
   reserved[y][x] = true;
 }
 
-function gfMul(a, b) {
+function gfMul(a: number, b: number): number {
   if (a === 0 || b === 0) return 0;
   return GF_EXP[GF_LOG[a] + GF_LOG[b]];
 }
 
-function reedSolomonGenerator(degree) {
+function reedSolomonGenerator(degree: number): number[] {
   let result = [1];
   for (let i = 0; i < degree; i += 1) {
     const next = new Array(result.length + 1).fill(0);
@@ -218,7 +250,7 @@ function reedSolomonGenerator(degree) {
   return result.slice(1);
 }
 
-function reedSolomonRemainder(data, degree) {
+function reedSolomonRemainder(data: number[], degree: number): number[] {
   const generator = reedSolomonGenerator(degree);
   const result = new Array(degree).fill(0);
   for (const byte of data) {
@@ -231,7 +263,7 @@ function reedSolomonRemainder(data, degree) {
   return result;
 }
 
-function matrixToPath(matrix, quietZone) {
+function matrixToPath(matrix: QrMatrix, quietZone: number): string {
   const commands = [];
   for (let y = 0; y < matrix.length; y += 1) {
     for (let x = 0; x < matrix[y].length; x += 1) {

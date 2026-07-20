@@ -1,12 +1,10 @@
 import { execSync } from "node:child_process";
-import { readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
-import {
-  makeExtensionArchiveName,
-  normalizeReleaseVersion,
-} from "./release-utils.mjs";
+import { makeExtensionArchiveName, normalizeReleaseVersion } from "./release-utils.mjs";
 
 /**
  * Package the extension into a .zip for Chrome Web Store or sideloading.
@@ -19,8 +17,7 @@ import {
 const root = resolve(import.meta.dirname, "..");
 const skipBuild = process.argv.includes("--no-build");
 const archiveVersionFlag = process.argv.indexOf("--archive-version");
-const archiveVersionInput =
-  archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
+const archiveVersionInput = archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
 
 if (archiveVersionFlag !== -1 && !archiveVersionInput) {
   throw new Error("--archive-version requires a value");
@@ -33,9 +30,7 @@ if (!skipBuild) {
 }
 
 // --- 2. Read version from manifest ------------------------------------
-const manifest = JSON.parse(
-  await readFile(resolve(root, "manifest.json"), "utf-8"),
-);
+const manifest = JSON.parse(await readFile(resolve(root, "manifest.json"), "utf-8"));
 const version = normalizeReleaseVersion(archiveVersionInput ?? manifest.version);
 const outName = makeExtensionArchiveName(version);
 const outPath = resolve(root, outName);
@@ -46,16 +41,13 @@ const includes = ["manifest.json", "dist", "icons", "popup"];
 
 console.log(`\nPackaging ${outName}...`);
 await rm(outPath, { force: true });
-// Exclude popup TS sources and build intermediates from the zip; overlay
-// popup-built/ (compiled JS) when the popup has been migrated to TS.
+// Exclude popup TS sources from the zip; compiled JS already lives in
+// popup/ (emitted directly by build-popup.mjs).
 const zipExcludes = ["popup/*.ts", "popup/types/*"];
 execSync(`zip -r -9 "${outPath}" ${includes.join(" ")} -x ${zipExcludes.join(" ")}`, {
   cwd: root,
   stdio: "inherit",
 });
-if (existsSync(resolve(root, "popup-built"))) {
-  execSync(`cd popup-built && zip -r -9 "${outPath}" .`, { cwd: root, stdio: "inherit" });
-}
 
 // --- 4. Report --------------------------------------------------------
 const stats = await stat(outPath);

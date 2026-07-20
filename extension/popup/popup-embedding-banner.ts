@@ -19,8 +19,10 @@
  * @param {{ embedding_ready?: boolean } | null | undefined} health
  * @returns {boolean}
  */
-export function shouldShowEmbeddingBanner(health) {
-  return Boolean(health) && health.embedding_ready === false;
+export function shouldShowEmbeddingBanner(
+  health: { embedding_ready?: boolean } | null | undefined,
+): boolean {
+  return health?.embedding_ready === false;
 }
 
 /**
@@ -36,7 +38,10 @@ export function shouldShowEmbeddingBanner(health) {
  * @param {{ doc?: typeof document, win?: typeof window }} [deps]
  * @returns {() => void} teardown that removes the listeners
  */
-export function installEmbeddingBannerAutoRefresh(recheck, { doc = document, win = window } = {}) {
+export function installEmbeddingBannerAutoRefresh(
+  recheck: () => unknown,
+  { doc = document, win = window }: { doc?: Document; win?: Window } = {},
+): () => void {
   const onMaybeVisible = () => {
     // Skip work while the panel is hidden; "visible"/undefined both count
     // as on-screen so a plain `focus` (no visibilityState change) still fires.
