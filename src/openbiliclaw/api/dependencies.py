@@ -10,10 +10,10 @@ extracted — no router may reach through to ``deps.services.<any-engine>``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass(frozen=True)
@@ -29,4 +29,30 @@ class SystemRouteDeps:
     get_lan_ip: Callable[[], str | None]
 
 
-__all__ = ["SystemRouteDeps"]
+@dataclass(frozen=True)
+class HealthRouteDeps:
+    """Narrow dependencies for the health / init-status router.
+
+    Every field is a closure or state getter bundled by ``create_app()``.
+    No broad ``ApiServices`` container — only the closures the two handlers
+    actually reference: LAN-IP lookup, embedding-ready probe, profile-ready
+    probe, degraded state, and init-status request state.
+    """
+
+    get_lan_ip: Callable[[], str | None]
+    health_profile_ready: Callable[[], bool | None]
+    health_embedding_ready: Callable[..., Awaitable[bool]]
+    embedding_required_for_init: Callable[[], bool]
+    diagnose_embedding: Callable[..., Awaitable[tuple[str, str]]]
+    embedding_pull_progress_view: Callable[[], dict[str, object]]
+    progress_int: Callable[[object], int]
+    degraded_issues_payload: Callable[[], list[dict[str, str]]]
+    get_auth_gate: Callable[[], Any]
+    get_init_coordinator: Callable[[], Any]
+    get_init_prereqs: Callable[[], Any]
+    get_account_sync_service: Callable[[], Any]
+    degraded: Callable[[], bool]
+    degraded_reason: Callable[[], str]
+
+
+__all__ = ["SystemRouteDeps", "HealthRouteDeps"]
