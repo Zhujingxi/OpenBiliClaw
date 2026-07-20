@@ -29,7 +29,7 @@ def build_system_router(deps: SystemRouteDeps) -> APIRouter:
     - ``GET /api/qr-info`` — mobile QR-code helper returning the LAN IP.
 
     Both handlers are intentionally trivial; ``/api/health`` and richer
-    readiness logic remain in ``api/app.py`` for now (Phase 1 follow-up).
+    readiness logic now live in ``api/routes/health.py`` (Phase 1 pilot 2).
     """
     router = APIRouter()
 
