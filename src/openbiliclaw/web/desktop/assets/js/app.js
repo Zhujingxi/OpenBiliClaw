@@ -5844,6 +5844,9 @@ ${cardFeedbackBarHtml()}`;
         last_account_sync_at: String(merged.last_account_sync_at ?? ""),
         last_account_sync_error: String(merged.last_account_sync_error ?? ""),
         last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
+        last_account_sync_issues: Array.isArray(merged.last_account_sync_issues)
+          ? merged.last_account_sync_issues
+          : [],
         // This is an explicit-key whitelist: a field missing here is dropped
         // silently, which is how the backend copy stopped reaching the chip.
         last_account_sync_message: String(merged.last_account_sync_message ?? ""),
@@ -5956,9 +5959,12 @@ ${cardFeedbackBarHtml()}`;
       if (!el) return;
       const kind = String(runtime?.last_account_sync_error_kind || "");
       const error = String(runtime?.last_account_sync_error || "");
+      const issues = Array.isArray(runtime?.last_account_sync_issues)
+        ? runtime.last_account_sync_issues
+        : [];
       const severity = String(runtime?.last_account_sync_severity || "");
       // Healthy installs (no error) show nothing — zero visual change.
-      if (!error && !kind) {
+      if (!error && !kind && !issues.length) {
         el.hidden = true;
         el.textContent = "";
         el.classList.remove("is-auth-expired", "is-warning", "is-error");
@@ -5978,7 +5984,7 @@ ${cardFeedbackBarHtml()}`;
       el.classList.toggle("is-error", severity !== "warning");
       el.classList.remove("is-auth-expired");
       const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
-      const detail = message || "账号同步出错";
+      const detail = message || "账号同步遇到未分类异常，暂时无法确定具体环节";
       el.textContent = when ? `${detail}（上次同步 ${when}）` : detail;
     }
 

@@ -15,6 +15,7 @@ def test_desktop_normalizes_account_sync_error_fields() -> None:
     body = normalize.group("body")
     assert "last_account_sync_error" in body
     assert "last_account_sync_error_kind" in body
+    assert "last_account_sync_issues" in body
 
 
 def test_desktop_renders_account_sync_error_chip() -> None:
@@ -44,9 +45,12 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     # error stays available for diagnostics even though it is no longer shown.
     assert "last_account_sync_error" in render_body
     assert "last_account_sync_at" in render_body
+    assert "last_account_sync_issues" in render_body
     assert "last_account_sync_severity" in render_body
     assert 'classList.toggle("is-warning"' in render_body
     assert "（上次同步 ${when}）" in render_body
+    assert "账号同步出错" not in render_body
+    assert "未分类异常" in render_body
     # Timestamps go through the shared local-time formatter, not raw ISO.
     assert "formatLocalTime(" in render_body
 
@@ -62,6 +66,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     assert normalize is not None, "desktop normalizeRuntimeStatus not found"
     for field in (
         "last_account_sync_error_kind",
+        "last_account_sync_issues",
         "last_account_sync_message",
         "last_account_sync_severity",
     ):

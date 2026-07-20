@@ -370,6 +370,7 @@ class RuntimeStatusResponse(BaseModel):
     last_account_sync_at: str = ""
     last_account_sync_error: str = ""
     last_account_sync_error_kind: str = ""
+    last_account_sync_issues: list[dict[str, str]] = Field(default_factory=list)
     last_account_sync_message: str = ""
     last_account_sync_severity: str = ""
     auto_update_enabled: bool = False

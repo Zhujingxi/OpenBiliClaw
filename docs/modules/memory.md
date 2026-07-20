@@ -105,7 +105,7 @@
 | 对话学习状态 | ✅ | `dialogue` 事件 + `insight_candidates.json`，支撑聊天信号的受控学习 |
 | 持续刷新状态 | ✅ | `discovery_runtime.json` 记录候选池刷新、通知游标、最近处理事件位置、正向/负向 probe 冷却、probe distance 历史和短期探索 buffer |
 | 认知变化状态 | ✅ | `cognition_updates.json` 记录关键认知变化、通知状态和来源 |
-| 账户同步状态 | ✅ | `account_sync_state.json` 记录历史/收藏/关注同步游标、已见 ID 集合、签名和最近错误 |
+| 账户同步状态 | ✅ | `account_sync_state.json` 记录历史/收藏/关注同步游标、已见 ID 集合、签名、最近错误，以及最多 8 个去重后的 `{stage,kind}` 结构化同步问题 |
 | 多源 bootstrap 去重状态 | ✅ | `source_bootstrap_state.json` 记录 XHS / 抖音 / YouTube 已进入事件路径的 bootstrap identity key，避免跨任务重放旧画像信号 |
 | 用户画像覆盖层 | ✅ | `profile_overrides.json` 存用户对画像的手动编辑（文本/标量固定 + 列表/兴趣树增删）；`load/save_profile_overrides` 读写，`sync_profile_files` 渲染人类可读镜像前叠加覆盖层，确保编辑在画像重建后仍反映在 `soul_profile.md/.json` |
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
@@ -256,10 +256,14 @@ account_sync_state = memory.load_account_sync_state()
 #   "last_account_sync_at": "2026-03-14T12:05:00+00:00",
 #   "last_sync_error": "",
 #   "last_sync_error_kind": "",  # "auth_expired" 驱动三端的“需重新登录”呈现
+#   "last_sync_issues": [
+#       {"stage": "bilibili_favorites", "kind": "timeout"},
+#   ],
 # }
 #
 # 读写两侧都是显式 key 白名单：新增字段必须同时加进 load / save 和默认状态，
-# 否则会被静默丢弃 —— last_sync_error_kind 就这样丢了整整一个版本周期。
+# 否则会被静默丢弃。last_sync_issues 只接受字符串 stage/kind，最多保留 8 条并去重；
+# runtime 边界还会把未知 stage 收敛为 unknown，避免任意持久化内容进入展示。
 
 source_bootstrap_state = memory.load_source_bootstrap_state()
 # {
@@ -410,7 +414,7 @@ data/memory/
 | 文件 | 用途 | 主要消费者 |
 |------|------|-----------|
 | `feedback_state.json` | 记录反馈处理到了哪一条，避免重复分析 | SoulEngine |
-| `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合和签名 | AccountSyncService |
+| `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合、签名，以及有界的分阶段错误诊断 | AccountSyncService |
 | `source_bootstrap_state.json` | XHS / 抖音 / YouTube bootstrap 已传播 identity key，避免跨任务重复写入同一批画像信号 | FastAPI source task endpoints |
 | `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题、近期 probe domain / axis / distance 历史、显式 probe feedback 历史、短期探索 buffer | RefreshController / OpenClaw / FastAPI |
 | `avoidance_state.json` | 不喜欢领域探针的 active/cooldown 列表和生命周期状态 | AvoidanceSpeculator / FastAPI |
@@ -474,5 +478,5 @@ data_dir = "data"  # 记忆 JSON 文件存储在 data/memory/ 下
 11. **插件聊天回合独立持久化**：`chat_turns` 只保存 side panel durable turn 的请求、回复和状态，解决 Chrome side panel reload / discard 时 DOM 和 JS 内存丢失的问题；它不替代事件层学习，完成后的 dialogue/cognition 仍按后端流程受控进入画像链路
 12. **候选池运行状态分层**：`discovery_runtime.json` 只负责刷新与通知游标，不与 `feedback_state.json`、`insight_candidates.json` 或画像数据混存
 13. **认知变化单独留痕**：`cognition_updates.json` 保存系统最近形成的关键理解变化，既供插件通知使用，也让画像页能回显”最近记住了什么”
-14. **账户同步状态单独持久化**：`account_sync_state.json` 记录 history / favorites / following 的增量游标、已见 ID 集合和稳定签名，避免每轮全量重灌事件层，也避免收藏夹顺序变化或同秒历史游标导致重复画像分析
+14. **账户同步状态单独持久化**：`account_sync_state.json` 记录 history / favorites / following 的增量游标、已见 ID 集合、稳定签名与有界的 `{stage,kind}` 错误清单，既避免每轮全量重灌事件层和同秒历史游标导致重复画像分析，也让 runtime-status 无需解析原始异常文本即可定位失败环节
 15. **多源 bootstrap 去重状态独立持久化**：`source_bootstrap_state.json` 只保存 XHS / 抖音 / YouTube 已见 bootstrap identity key，不塞进画像 JSON；task-result 仍保留完整原始结果用于调试，但进入 memory / profile pipeline 前会过滤旧 key

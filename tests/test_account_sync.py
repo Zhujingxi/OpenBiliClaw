@@ -6,9 +6,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from openbiliclaw.bilibili.api import FavoriteFolder, FavoriteFolderWithItems, FollowingUser
+from openbiliclaw.bilibili.api import (
+    BilibiliAPIError,
+    FavoriteFolder,
+    FavoriteFolderWithItems,
+    FollowingUser,
+)
+from openbiliclaw.llm.base import LLMProviderError, LLMResponseError
 
 
 class _FakeMemoryManager:
@@ -383,6 +390,13 @@ async def test_account_sync_returns_partial_success_when_one_source_fails() -> N
     assert result["synced"] is True
     assert result["new_event_count"] == 2
     assert "favorites boom" in str(memory.state["last_sync_error"])
+    assert memory.state["last_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "unexpected_error"}
+    ]
+    status = service.get_runtime_status()
+    assert "B 站收藏夹未同步" in str(status["last_account_sync_message"])
+    assert "未分类异常" in str(status["last_account_sync_message"])
+    assert "已成功的环节已保留" in str(status["last_account_sync_message"])
     assert {event["event_type"] for event in memory.events} == {"view", "follow"}
 
 
@@ -501,6 +515,134 @@ async def test_account_sync_bounds_hung_profile_analysis_and_records_reason() ->
     assert "模型名" in str(memory.state["last_sync_error"])
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
+    assert memory.state["last_sync_error_kind"] == "profile_analysis_timeout"
+    assert memory.state["last_sync_issues"] == [{"stage": "profile_analysis", "kind": "timeout"}]
+    status = service.get_runtime_status()
+    assert "AI 画像分析超过 6 分钟" in str(status["last_account_sync_message"])
+    assert "模型设置" in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "status_kind", "issue_kind", "message_fragment"),
+    [
+        (
+            RuntimeError("401 Unauthorized"),
+            "llm_auth_failed",
+            "auth_failed",
+            "AI 服务鉴权失败",
+        ),
+        (
+            RuntimeError("connection refused"),
+            "llm_connection",
+            "connection",
+            "无法连接 AI 服务",
+        ),
+        (
+            LLMProviderError("upstream error: insufficient_quota"),
+            "llm_quota_exhausted",
+            "quota_exhausted",
+            "额度不足或已用尽",
+        ),
+        (
+            LLMProviderError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            "llm_ssl",
+            "ssl",
+            "SSL 证书验证失败",
+        ),
+        (
+            RuntimeError("HTTP 503"),
+            "llm_server_error",
+            "server_error",
+            "AI 服务返回服务器错误",
+        ),
+        (
+            LLMResponseError("empty response"),
+            "llm_invalid_response",
+            "invalid_response",
+            "空内容或无法解析",
+        ),
+        (
+            LLMProviderError(
+                "Error code: 500 - 根据相关法律法规，无法提供关于该内容的答案 (10013)"
+            ),
+            "llm_moderation",
+            "moderation",
+            "内容合规策略拒绝",
+        ),
+        (
+            RuntimeError("opaque provider failure"),
+            "profile_analysis_error",
+            "unexpected_error",
+            "画像分析遇到未分类异常",
+        ),
+    ],
+)
+async def test_account_sync_classifies_profile_analysis_failure(
+    exc: Exception,
+    status_kind: str,
+    issue_kind: str,
+    message_fragment: str,
+) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise exc
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(
+            history_items=[_history_item("BVPROFILEFAIL", 101)],
+            favorites=[],
+            following=[],
+        ),
+        soul_engine=_FailingAnalyzeSoul(ready=False),
+    )
+
+    with pytest.raises(type(exc)):
+        await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_error_kind"] == status_kind
+    assert status["last_account_sync_issues"] == [{"stage": "profile_analysis", "kind": issue_kind}]
+    assert message_fragment in str(status["last_account_sync_message"])
+    assert status["last_account_sync_severity"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_profile_failure_preserves_source_stage_issues_from_same_cycle() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise RuntimeError("HTTP 503")
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(
+            history_items=[_history_item("BVMIXEDFAIL", 101)],
+            favorites_exc=BilibiliAPIError("upstream failed", code=-500),
+        ),
+        soul_engine=_FailingAnalyzeSoul(ready=False),
+    )
+
+    with pytest.raises(RuntimeError):
+        await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "api_error"},
+        {"stage": "profile_analysis", "kind": "server_error"},
+    ]
+    message = str(status["last_account_sync_message"])
+    assert "B 站收藏夹" in message
+    assert "AI 服务返回服务器错误" in message
+    assert "2 类问题" in message
 
 
 @dataclass
@@ -1276,6 +1418,98 @@ async def test_account_sync_records_generic_error_kind() -> None:
     await service.sync_now()
 
     assert memory.state["last_sync_error_kind"] == "error"
+    assert memory.state["last_sync_issues"] == [
+        {"stage": "bilibili_history", "kind": "unexpected_error"}
+    ]
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == memory.state["last_sync_issues"]
+    assert "B 站观看历史未同步" in str(status["last_account_sync_message"])
+    assert "未分类异常" in str(status["last_account_sync_message"])
+    assert "账号同步出错" not in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "issue_kind", "message_fragment", "severity"),
+    [
+        (
+            BilibiliAPIError("rate limited", code=-429),
+            "rate_limited",
+            "B 站接口限流",
+            "warning",
+        ),
+        (
+            BilibiliAPIError("upstream failed", code=-500),
+            "api_error",
+            "B 站接口返回异常",
+            "error",
+        ),
+        (
+            httpx.ConnectError("connection refused"),
+            "network",
+            "无法连接 B 站",
+            "error",
+        ),
+        (
+            TimeoutError("request timed out"),
+            "timeout",
+            "请求超时",
+            "error",
+        ),
+    ],
+)
+async def test_account_sync_classifies_bilibili_failure_reason(
+    exc: Exception,
+    issue_kind: str,
+    message_fragment: str,
+    severity: str,
+) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(favorites_exc=exc),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": issue_kind}
+    ]
+    assert message_fragment in str(status["last_account_sync_message"])
+    assert status["last_account_sync_severity"] == severity
+
+
+@pytest.mark.asyncio
+async def test_account_sync_message_lists_multiple_failed_stages() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(
+            favorites_exc=RuntimeError("favorites boom"),
+            following_exc=TimeoutError("following timed out"),
+        ),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "unexpected_error"},
+        {"stage": "bilibili_following", "kind": "timeout"},
+    ]
+    message = str(status["last_account_sync_message"])
+    assert "2 类问题" in message
+    assert "收藏夹" in message
+    assert "关注列表" in message
+    assert "未分类异常" in message
+    assert "请求超时" in message
 
 
 @pytest.mark.asyncio
@@ -1302,7 +1536,13 @@ async def test_account_sync_auth_expired_kind_wins_over_generic() -> None:
 async def test_account_sync_clean_sync_clears_error_kind() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
-    memory = _FakeMemoryManager({**_FakeMemoryManager().state, "last_sync_error_kind": "error"})
+    memory = _FakeMemoryManager(
+        {
+            **_FakeMemoryManager().state,
+            "last_sync_error_kind": "error",
+            "last_sync_issues": [{"stage": "bilibili_history", "kind": "unexpected_error"}],
+        }
+    )
     service = AccountSyncService(
         memory_manager=memory,
         bilibili_client=_KindClient(history_items=[_history_item("BVOK", 100)]),
@@ -1312,6 +1552,7 @@ async def test_account_sync_clean_sync_clears_error_kind() -> None:
     await service.sync_now()
 
     assert memory.state["last_sync_error_kind"] == ""
+    assert memory.state["last_sync_issues"] == []
 
 
 @pytest.mark.asyncio
@@ -1926,6 +2167,39 @@ def test_user_facing_sync_message_empty_when_healthy() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
     assert AccountSyncService._user_facing_sync_message("", "") == ""
+
+
+def test_user_facing_sync_message_labels_legacy_unclassified_state_honestly() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    message = AccountSyncService._user_facing_sync_message("error", "opaque legacy detail")
+
+    assert "旧版或未分类异常" in message
+    assert "无法确定具体环节" in message
+    assert "账号同步出错" not in message
+
+
+def test_runtime_status_normalizes_unknown_persisted_issue_codes() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager(
+        {
+            **_FakeMemoryManager().state,
+            "last_sync_error": "legacy detail",
+            "last_sync_error_kind": "error",
+            "last_sync_issues": [{"stage": "future_stage", "kind": "future_kind"}],
+        }
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    status = service.get_runtime_status()
+
+    assert status["last_account_sync_issues"] == [{"stage": "unknown", "kind": "unexpected_error"}]
+    assert "未分类异常" in str(status["last_account_sync_message"])
 
 
 def test_user_facing_sync_message_actionable_for_llm_unavailability() -> None:

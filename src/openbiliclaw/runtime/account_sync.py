@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,8 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
-from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
-from openbiliclaw.llm.base import classify_llm_unavailability, safe_llm_failure_message
+import httpx
+
+from openbiliclaw.bilibili.api import BilibiliAPIError, BilibiliAuthExpiredError
+from openbiliclaw.llm.base import (
+    classify_llm_failure_kind,
+    classify_llm_unavailability,
+    safe_llm_failure_message,
+)
 
 # Cross-source identity-key helpers live in the shared ``sources.identity_keys``
 # module (promoted in event-capture-completion Phase 0 so retraction discounting
@@ -51,6 +58,70 @@ _X_ID_CAP = 2000
 # First-sync seeding reads *all* persisted X events (init may be months old), so
 # the lookback is effectively unwindowed rather than the 48h dedup window.
 _X_SEED_WINDOW_HOURS = 24 * 365 * 10
+
+# Stable stage codes persisted in ``account_sync_state.json`` and exposed by
+# ``/api/runtime-status``. They deliberately contain no provider detail or
+# credentials: support can identify the failed subsystem without displaying a
+# raw exception to the user.
+_SYNC_STAGE_LABELS = {
+    "bilibili_history": "观看历史",
+    "bilibili_favorites": "收藏夹",
+    "bilibili_following": "关注列表",
+    "x_preferences": "点赞与书签",
+    "x_likes": "点赞",
+    "x_bookmarks": "书签",
+    "profile_analysis": "画像分析",
+}
+_MAX_SYNC_ISSUES = 8
+_SYNC_ISSUE_KINDS = frozenset(
+    {
+        "api_error",
+        "auth_expired",
+        "auth_failed",
+        "connection",
+        "invalid_response",
+        "model_not_found",
+        "moderation",
+        "network",
+        "no_provider",
+        "quota_exhausted",
+        "rate_limited",
+        "server_error",
+        "ssl",
+        "timeout",
+        "unexpected_error",
+        "x_auth_expired",
+        "x_blocked",
+        "x_rate_limited",
+    }
+)
+
+# Issue kinds that describe a normal lifecycle/backoff state rather than an
+# unexpected failure. A mixed cycle is an error as soon as one issue falls
+# outside this set.
+_WARNING_SYNC_ISSUE_KINDS = frozenset(
+    {
+        "auth_expired",
+        "rate_limited",
+        "x_auth_expired",
+        "x_rate_limited",
+    }
+)
+
+_PROFILE_STATUS_KIND_BY_ISSUE = {
+    "no_provider": "no_provider",
+    "model_not_found": "model_not_found",
+    "quota_exhausted": "llm_quota_exhausted",
+    "rate_limited": "rate_limited",
+    "auth_failed": "llm_auth_failed",
+    "timeout": "profile_analysis_timeout",
+    "connection": "llm_connection",
+    "ssl": "llm_ssl",
+    "server_error": "llm_server_error",
+    "invalid_response": "llm_invalid_response",
+    "moderation": "llm_moderation",
+    "unexpected_error": "profile_analysis_error",
+}
 
 
 class SupportsRecentEventUrls(Protocol):
@@ -263,6 +334,7 @@ class AccountSyncService:
         state = self.memory_manager.load_account_sync_state()
         events: list[dict[str, Any]] = []
         errors: list[str] = []
+        issues: list[dict[str, str]] = []
         error_kind = ""
 
         try:
@@ -290,7 +362,12 @@ class AccountSyncService:
             )
         except Exception as exc:
             errors.append(str(exc))
-            error_kind = self._record_stage_error("history", exc, error_kind)
+            error_kind = self._record_stage_error(
+                "bilibili_history",
+                exc,
+                error_kind,
+                issues,
+            )
 
         try:
             favorites = await self.bilibili_client.get_all_favorites(
@@ -311,7 +388,12 @@ class AccountSyncService:
                 state["favorite_bvids"] = self._favorite_bvids(favorites)
         except Exception as exc:
             errors.append(str(exc))
-            error_kind = self._record_stage_error("favorites", exc, error_kind)
+            error_kind = self._record_stage_error(
+                "bilibili_favorites",
+                exc,
+                error_kind,
+                issues,
+            )
 
         # Following is paginated (page_size=100, hard cap following_max_pages)
         # so follows past position 100 finally sync. On a mid-loop page failure
@@ -331,10 +413,15 @@ class AccountSyncService:
             state["following_mids"] = self._following_mids(following)
         if following_error is not None:
             errors.append(str(following_error))
-            error_kind = self._record_stage_error("following", following_error, error_kind)
+            error_kind = self._record_stage_error(
+                "bilibili_following",
+                following_error,
+                error_kind,
+                issues,
+            )
 
         if self.x_client is not None:
-            error_kind = await self._sync_x(state, events, errors, error_kind)
+            error_kind = await self._sync_x(state, events, errors, issues, error_kind)
 
         if events:
             events = self._dedup_cross_source(events)
@@ -356,7 +443,12 @@ class AccountSyncService:
                     "Profile analysis timed out during account sync after %.1fs",
                     self.profile_analysis_timeout_seconds,
                 )
-                self._persist_profile_analysis_error(str(timeout_error))
+                self._persist_profile_analysis_error(
+                    str(timeout_error),
+                    kind="profile_analysis_timeout",
+                    issues=issues,
+                    issue_kind="timeout",
+                )
                 raise timeout_error from exc
             except Exception as exc:
                 # A profile-analysis failure here is almost always the chat
@@ -375,15 +467,26 @@ class AccountSyncService:
                 logger.warning(
                     "Profile analysis failed during account sync: %s", exc, exc_info=True
                 )
+                safe_message = safe_llm_failure_message(exc)
+                profile_issue_kind = self._classify_profile_issue_kind(
+                    exc,
+                    safe_message,
+                )
                 self._persist_profile_analysis_error(
-                    safe_llm_failure_message(exc),
-                    kind=classify_llm_unavailability(exc) or "",
+                    safe_message,
+                    kind=_PROFILE_STATUS_KIND_BY_ISSUE.get(
+                        profile_issue_kind,
+                        "profile_analysis_error",
+                    ),
+                    issues=issues,
+                    issue_kind=profile_issue_kind,
                 )
                 raise
 
         state["last_account_sync_at"] = self._now().isoformat()
         state["last_sync_error"] = self._merge_stage_errors(errors)
         state["last_sync_error_kind"] = error_kind
+        state["last_sync_issues"] = issues
         self.memory_manager.save_account_sync_state(state)
         return {
             "synced": bool(events),
@@ -407,8 +510,14 @@ class AccountSyncService:
                 merged.append(message)
         return " | ".join(merged)
 
-    @staticmethod
-    def _record_stage_error(stage: str, exc: Exception, current_kind: str) -> str:
+    @classmethod
+    def _record_stage_error(
+        cls,
+        stage: str,
+        exc: Exception,
+        current_kind: str,
+        issues: list[dict[str, str]] | None = None,
+    ) -> str:
         """Log a swallowed fetch-stage error and classify it.
 
         Expected X failures keep their platform identity instead of collapsing
@@ -417,18 +526,119 @@ class AccountSyncService:
         Bilibili account sync. Higher-priority actionable states still win when
         more than one stage fails in the same cycle.
         """
-        logger.warning("account_sync: %s fetch failed: %s", stage, exc)
+        logger.warning("account_sync: %s fetch failed: %s", stage.replace("_", " "), exc)
+        issue_kind = cls._classify_stage_issue(stage, exc)
+        if issues is not None:
+            cls._append_sync_issue(issues, stage=stage, kind=issue_kind)
+        candidate = (
+            issue_kind
+            if issue_kind in {"auth_expired", "x_auth_expired", "x_blocked", "x_rate_limited"}
+            else "error"
+        )
+        return cls._prefer_error_kind(current_kind, candidate)
+
+    @classmethod
+    def _classify_stage_issue(cls, stage: str, exc: BaseException) -> str:
+        """Return a safe reason code for one source-fetch failure."""
         if isinstance(exc, BilibiliAuthExpiredError):
-            candidate = "auth_expired"
-        elif isinstance(exc, (XMissingCookieError, XAuthError)):
-            candidate = "x_auth_expired"
-        elif isinstance(exc, XBlockedError):
-            candidate = "x_blocked"
-        elif isinstance(exc, (XRateLimitError, XClientError)):
-            candidate = "x_rate_limited"
-        else:
-            candidate = "error"
-        return AccountSyncService._prefer_error_kind(current_kind, candidate)
+            return "auth_expired"
+        if isinstance(exc, (XMissingCookieError, XAuthError)):
+            return "x_auth_expired"
+        if isinstance(exc, XBlockedError):
+            return "x_blocked"
+        if isinstance(exc, (XRateLimitError, XClientError)):
+            return "x_rate_limited"
+
+        chain = cls._exception_chain(exc)
+        if any(
+            isinstance(item, (TimeoutError, httpx.TimeoutException))
+            or (
+                isinstance(item, OSError)
+                and item.errno
+                in {
+                    errno.ETIMEDOUT,
+                }
+            )
+            for item in chain
+        ):
+            return "timeout"
+        if any(
+            isinstance(item, (ConnectionError, httpx.NetworkError))
+            or (
+                isinstance(item, OSError)
+                and item.errno
+                in {
+                    errno.ECONNABORTED,
+                    errno.ECONNREFUSED,
+                    errno.ECONNRESET,
+                    errno.ENETDOWN,
+                    errno.ENETUNREACH,
+                    errno.EHOSTDOWN,
+                    errno.EHOSTUNREACH,
+                }
+            )
+            for item in chain
+        ):
+            return "network"
+        if stage.startswith("bilibili_"):
+            bili_error = next(
+                (item for item in chain if isinstance(item, BilibiliAPIError)),
+                None,
+            )
+            if bili_error is not None:
+                code = getattr(bili_error, "code", None)
+                if isinstance(code, int) and abs(code) in {412, 429}:
+                    return "rate_limited"
+                if "rate limit" in str(bili_error).lower():
+                    return "rate_limited"
+                return "api_error"
+        return "unexpected_error"
+
+    @staticmethod
+    def _exception_chain(exc: BaseException) -> list[BaseException]:
+        """Return an exception chain without following cycles."""
+        chain: list[BaseException] = []
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            chain.append(current)
+            current = current.__cause__ or current.__context__
+        return chain
+
+    @classmethod
+    def _append_sync_issue(
+        cls,
+        issues: list[dict[str, str]],
+        *,
+        stage: str,
+        kind: str,
+    ) -> None:
+        """Append one bounded, de-duplicated machine-readable sync issue."""
+        if len(issues) >= _MAX_SYNC_ISSUES:
+            return
+        normalized_stage = stage if stage in _SYNC_STAGE_LABELS else "unknown"
+        normalized_kind = kind if kind in _SYNC_ISSUE_KINDS else "unexpected_error"
+        issue = {"stage": normalized_stage, "kind": normalized_kind}
+        if issue not in issues:
+            issues.append(issue)
+
+    @staticmethod
+    def _classify_profile_issue_kind(exc: BaseException, safe_message: str) -> str:
+        """Preserve actionable distinctions absent from the broad classifier."""
+        if "内容合规策略拒绝" in safe_message:
+            return "moderation"
+        if "SSL 证书验证失败" in safe_message:
+            return "ssl"
+        chain_text = " ".join(
+            str(item).lower() for item in AccountSyncService._exception_chain(exc)
+        )
+        if any(
+            marker in chain_text
+            for marker in ("insufficient_quota", "insufficient quota", "quota exhausted")
+        ):
+            return "quota_exhausted"
+        return classify_llm_failure_kind(exc) or "unexpected_error"
 
     @staticmethod
     def _prefer_error_kind(current_kind: str, candidate: str) -> str:
@@ -577,6 +787,7 @@ class AccountSyncService:
         state: dict[str, Any],
         events: list[dict[str, Any]],
         errors: list[str],
+        issues: list[dict[str, str]],
         error_kind: str,
     ) -> str:
         """Fetch X likes/bookmarks server-side and append incremental events.
@@ -594,6 +805,7 @@ class AccountSyncService:
         if blocked_state:
             message, kind = self._x_health_skip(blocked_state)
             errors.append(message)
+            self._append_sync_issue(issues, stage="x_preferences", kind=kind)
             logger.info("account_sync: X likes/bookmarks skipped: source health=%s", blocked_state)
             return self._prefer_error_kind(error_kind, kind)
 
@@ -613,7 +825,7 @@ class AccountSyncService:
         except Exception as exc:
             errors.append(str(exc))
             self._record_x_health_error(exc, "likes")
-            error_kind = self._record_stage_error("x likes", exc, error_kind)
+            error_kind = self._record_stage_error("x_likes", exc, error_kind, issues)
 
         # A typed failure above may just have opened the shared source cooldown.
         # Do not immediately spend a second request on bookmarks and defeat the
@@ -632,7 +844,7 @@ class AccountSyncService:
         except Exception as exc:
             errors.append(str(exc))
             self._record_x_health_error(exc, "bookmarks")
-            error_kind = self._record_stage_error("x bookmarks", exc, error_kind)
+            error_kind = self._record_stage_error("x_bookmarks", exc, error_kind, issues)
 
         return error_kind
 
@@ -788,7 +1000,14 @@ class AccountSyncService:
             return []
         return [item for raw in value if (item := str(raw).strip())]
 
-    def _persist_profile_analysis_error(self, message: str, *, kind: str = "") -> None:
+    def _persist_profile_analysis_error(
+        self,
+        message: str,
+        *,
+        kind: str,
+        issues: list[dict[str, str]],
+        issue_kind: str,
+    ) -> None:
         """Record a profile-analysis failure without advancing any sync cursor.
 
         Loads a FRESH state so the failing tick's in-flight cursor bumps
@@ -798,17 +1017,23 @@ class AccountSyncService:
         surface. ``last_account_sync_at`` is deliberately left untouched so the
         throttle does not lock the retry out for ``sync_interval_hours``.
 
-        ``kind`` carries the :func:`classify_llm_unavailability` verdict
-        (``no_provider`` / ``model_not_found`` / ``rate_limited``) so the
-        status surface can show an actionable sentence instead of the generic
-        "稍后会自动重试" — which is a false promise when the real fix is a
-        config change. Always written (even empty) so a stale kind from a
-        previous failure never mislabels this one.
+        ``kind`` carries the status-level classification, while ``issues``
+        preserves every source stage that already failed in this same tick and
+        adds a machine-readable ``profile_analysis`` reason. This lets the UI
+        explain a timeout, provider auth failure, connection failure, or invalid
+        response without showing raw provider text.
         """
         try:
             state = self.memory_manager.load_account_sync_state()
+            current_issues = list(issues)
+            self._append_sync_issue(
+                current_issues,
+                stage="profile_analysis",
+                kind=issue_kind,
+            )
             state["last_sync_error"] = f"画像分析失败：{message}"
             state["last_sync_error_kind"] = kind
+            state["last_sync_issues"] = current_issues
             self.memory_manager.save_account_sync_state(state)
         except Exception:
             logger.debug("Failed to persist profile-analysis error", exc_info=True)
@@ -818,21 +1043,68 @@ class AccountSyncService:
         state = self.memory_manager.load_account_sync_state()
         kind = str(state.get("last_sync_error_kind", ""))
         detail = str(state.get("last_sync_error", ""))
+        issues = self._normalize_sync_issues(state.get("last_sync_issues", []))
         return {
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             # Raw provider text — diagnostics only, never the display string.
             "last_account_sync_error": detail,
             "last_account_sync_error_kind": kind,
-            # Display copy lives here so all four surfaces render the same
-            # sentence instead of each formatting the raw error themselves.
-            "last_account_sync_message": self._user_facing_sync_message(kind, detail),
-            "last_account_sync_severity": "warning"
-            if kind in ("auth_expired", "rate_limited", "x_auth_expired", "x_rate_limited")
-            else ("error" if detail else ""),
+            # Stable stage/reason pairs let support identify the failed
+            # subsystem without parsing or exposing the raw exception.
+            "last_account_sync_issues": issues,
+            # Display copy lives here so every consuming surface can reuse the
+            # same sentence instead of formatting the raw error itself.
+            "last_account_sync_message": self._user_facing_sync_message(
+                kind,
+                detail,
+                issues,
+            ),
+            "last_account_sync_severity": self._sync_issue_severity(
+                kind,
+                detail,
+                issues,
+            ),
         }
 
+    @classmethod
+    def _normalize_sync_issues(cls, value: object) -> list[dict[str, str]]:
+        """Validate persisted issue rows at the runtime boundary."""
+        if not isinstance(value, list):
+            return []
+        issues: list[dict[str, str]] = []
+        for raw in value[:_MAX_SYNC_ISSUES]:
+            if not isinstance(raw, dict):
+                continue
+            stage = raw.get("stage")
+            kind = raw.get("kind")
+            if not isinstance(stage, str) or not isinstance(kind, str):
+                continue
+            cls._append_sync_issue(issues, stage=stage, kind=kind)
+        return issues
+
     @staticmethod
-    def _user_facing_sync_message(kind: str, detail: str) -> str:
+    def _sync_issue_severity(
+        kind: str,
+        detail: str,
+        issues: list[dict[str, str]],
+    ) -> str:
+        if issues:
+            return (
+                "warning"
+                if all(issue["kind"] in _WARNING_SYNC_ISSUE_KINDS for issue in issues)
+                else "error"
+            )
+        if kind in ("auth_expired", "rate_limited", "x_auth_expired", "x_rate_limited"):
+            return "warning"
+        return "error" if detail else ""
+
+    @classmethod
+    def _user_facing_sync_message(
+        cls,
+        kind: str,
+        detail: str,
+        issues: list[dict[str, str]] | None = None,
+    ) -> str:
         """Render the user-visible sentence for a sync error.
 
         An expired cookie is a normal lifecycle event, not a fault, so it gets
@@ -841,6 +1113,9 @@ class AccountSyncService:
         would be a false promise for ``no_provider`` / ``model_not_found`` —
         nothing recovers until the user fixes the model configuration.
         """
+        normalized_issues = cls._normalize_sync_issues(issues or [])
+        if normalized_issues:
+            return cls._render_sync_issue_message(normalized_issues)
         if kind == "auth_expired":
             return (
                 "B 站登录已失效，账号同步已停止。"
@@ -858,6 +1133,11 @@ class AccountSyncService:
             )
         if kind == "rate_limited":
             return "AI 服务限流中，账号同步稍后会自动重试。"
+        if kind == "llm_quota_exhausted":
+            return (
+                "账号数据已读取，但 AI 服务额度不足或已用尽，画像未更新。"
+                "请检查余额或套餐，补充额度后会自动重试。"
+            )
         if kind == "x_rate_limited":
             return (
                 "X 暂时限流，已跳过本轮 X 喜好同步；B 站等其他来源不受影响。"
@@ -873,9 +1153,218 @@ class AccountSyncService:
                 "X 拒绝了账号读取请求，已跳过 X 喜好同步；"
                 "请在来源设置中查看 X 状态并测试连接。B 站等其他来源不受影响。"
             )
+        if kind == "profile_analysis_timeout":
+            return (
+                "账号数据已读取，但 AI 画像分析超过 6 分钟仍未完成。"
+                "请在模型设置中测试服务地址、模型名与网络，修复后会自动重试。"
+            )
+        if kind == "llm_auth_failed":
+            return (
+                "账号数据已读取，但 AI 服务鉴权失败，画像未更新。"
+                "请在模型设置中检查 API Key，修复后会自动重试。"
+            )
+        if kind == "llm_connection":
+            return (
+                "账号数据已读取，但无法连接 AI 服务，画像未更新。"
+                "请在模型设置中测试服务地址、网络与代理，修复后会自动重试。"
+            )
+        if kind == "llm_ssl":
+            return (
+                "账号数据已读取，但 AI 服务的 SSL 证书验证失败，画像未更新。"
+                "请检查代理、防火墙或自签证书配置，修复后会自动重试。"
+            )
+        if kind == "llm_server_error":
+            return (
+                "账号数据已读取，但 AI 服务返回服务器错误，画像未更新。"
+                "请稍后重试；若持续出现，请在模型设置中测试服务。"
+            )
+        if kind == "llm_invalid_response":
+            return (
+                "账号数据已读取，但 AI 服务返回空内容或无法解析的结果，画像未更新。"
+                "请更换模型或在模型设置中测试服务。"
+            )
+        if kind == "llm_moderation":
+            return (
+                "账号数据已读取，但 AI 服务因内容合规策略拒绝了画像分析。"
+                "请更换模型或服务商，修复后会自动重试。"
+            )
+        if kind == "profile_analysis_error":
+            return (
+                "账号数据已读取，但 AI 画像分析遇到未分类异常，画像未更新。"
+                "请在模型设置中测试服务；若持续出现，请反馈诊断信息。"
+            )
         if detail:
-            return "账号同步出错，稍后会自动重试。"
+            return (
+                "账号同步遇到旧版或未分类异常，暂时无法确定具体环节。"
+                "已成功的数据已保留；系统会在下一轮重试。"
+            )
         return ""
+
+    @classmethod
+    def _render_sync_issue_message(cls, issues: list[dict[str, str]]) -> str:
+        """Build concise, actionable Chinese copy from structured issues."""
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for issue in issues:
+            stage = issue["stage"]
+            reason = issue["kind"]
+            if stage.startswith("bilibili_"):
+                domain = "bilibili"
+            elif stage.startswith("x_"):
+                domain = "x"
+            elif stage == "profile_analysis":
+                domain = "profile"
+            else:
+                domain = "unknown"
+            grouped.setdefault((domain, reason), []).append(stage)
+
+        phrases: list[str] = []
+        actions: list[str] = []
+        domains = {domain for domain, _reason in grouped}
+        has_retryable_issue = False
+
+        for (domain, reason), stages in grouped.items():
+            stage_labels = cls._join_stage_labels(stages)
+            if domain == "bilibili":
+                if reason == "auth_expired":
+                    phrase = f"B 站登录已失效，{stage_labels}无法读取"
+                    action = "请在浏览器重新登录 B 站，或保持扩展在线同步新的 Cookie。"
+                else:
+                    reason_label = {
+                        "rate_limited": "B 站接口限流",
+                        "timeout": "请求超时",
+                        "network": "无法连接 B 站",
+                        "api_error": "B 站接口返回异常",
+                        "unexpected_error": "未分类异常",
+                    }.get(reason, "未分类异常")
+                    phrase = f"B 站{stage_labels}未同步（{reason_label}）"
+                    action = ""
+                    has_retryable_issue = True
+            elif domain == "x":
+                if reason == "x_rate_limited":
+                    phrase = f"X 暂时限流，{stage_labels}本轮未同步"
+                    action = ""
+                    has_retryable_issue = True
+                elif reason == "x_auth_expired":
+                    phrase = f"X 登录凭据缺失或已失效，{stage_labels}同步已暂停"
+                    action = "请在浏览器重新登录 X 并保持扩展在线。"
+                elif reason == "x_blocked":
+                    phrase = f"X 拒绝了{stage_labels}读取请求"
+                    action = "请在来源设置中查看 X 状态并测试连接。"
+                else:
+                    reason_label = {
+                        "timeout": "请求超时",
+                        "network": "网络连接失败",
+                        "unexpected_error": "未分类异常",
+                    }.get(reason, "未分类异常")
+                    phrase = f"X {stage_labels}未同步（{reason_label}）"
+                    action = ""
+                    has_retryable_issue = True
+            elif domain == "profile":
+                phrase, action, retryable = cls._profile_issue_copy(reason)
+                has_retryable_issue = has_retryable_issue or retryable
+            else:
+                phrase = "账号同步遇到未分类异常"
+                action = ""
+                has_retryable_issue = True
+            if phrase not in phrases:
+                phrases.append(phrase)
+            if action and action not in actions:
+                actions.append(action)
+
+        if not phrases:
+            return ""
+        if len(phrases) == 1:
+            message = f"本轮账号同步：{phrases[0]}。"
+        else:
+            message = f"本轮账号同步发现 {len(phrases)} 类问题：{'；'.join(phrases)}。"
+        if domains == {"x"}:
+            message += "B 站等其他来源不受影响。"
+        if actions:
+            message += "".join(actions)
+        if has_retryable_issue:
+            if domains == {"x"} and all(issue["kind"] == "x_rate_limited" for issue in issues):
+                message += "冷却结束后会自动重试，无需操作。"
+            else:
+                message += "已成功的环节已保留；系统会在下一轮自动重试。"
+        elif actions:
+            message += "修复后会自动重试。"
+        return message
+
+    @staticmethod
+    def _join_stage_labels(stages: list[str]) -> str:
+        labels: list[str] = []
+        for stage in stages:
+            label = _SYNC_STAGE_LABELS.get(stage, "未知环节")
+            if label not in labels:
+                labels.append(label)
+        return "、".join(labels)
+
+    @staticmethod
+    def _profile_issue_copy(reason: str) -> tuple[str, str, bool]:
+        """Return ``(problem, action, retryable_without_user_action)``."""
+        if reason == "no_provider":
+            return (
+                "AI 模型未配置或不可用，画像未更新",
+                "请在模型设置中配置可用服务。",
+                False,
+            )
+        if reason == "model_not_found":
+            return (
+                "配置的 AI 模型不存在，画像未更新",
+                "请在模型设置中修正模型名；本地模型需先拉取。",
+                False,
+            )
+        if reason == "rate_limited":
+            return ("AI 服务限流，画像本轮未更新", "", True)
+        if reason == "quota_exhausted":
+            return (
+                "AI 服务额度不足或已用尽，画像未更新",
+                "请检查 AI 服务余额或套餐。",
+                False,
+            )
+        if reason == "auth_failed":
+            return (
+                "AI 服务鉴权失败，画像未更新",
+                "请在模型设置中检查 API Key。",
+                False,
+            )
+        if reason == "timeout":
+            return (
+                "账号数据已读取，但 AI 画像分析超过 6 分钟仍未完成",
+                "请在模型设置中测试服务地址、模型名与网络。",
+                False,
+            )
+        if reason == "connection":
+            return (
+                "账号数据已读取，但无法连接 AI 服务，画像未更新",
+                "请在模型设置中测试服务地址、网络与代理。",
+                False,
+            )
+        if reason == "ssl":
+            return (
+                "AI 服务的 SSL 证书验证失败，画像未更新",
+                "请检查代理、防火墙或自签证书配置。",
+                False,
+            )
+        if reason == "server_error":
+            return ("AI 服务返回服务器错误，画像未更新", "", True)
+        if reason == "invalid_response":
+            return (
+                "AI 服务返回空内容或无法解析的结果，画像未更新",
+                "请更换模型或在模型设置中测试服务。",
+                False,
+            )
+        if reason == "moderation":
+            return (
+                "AI 服务因内容合规策略拒绝了画像分析",
+                "请更换模型或服务商。",
+                False,
+            )
+        return (
+            "AI 画像分析遇到未分类异常，画像未更新",
+            "请在模型设置中测试服务；若持续出现，请反馈诊断信息。",
+            False,
+        )
 
     async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
         """Build the first soul profile after account sync learns preferences.

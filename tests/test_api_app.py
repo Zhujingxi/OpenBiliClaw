@@ -4894,6 +4894,7 @@ class TestBackendAPI:
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
             "last_account_sync_error_kind": "",
+            "last_account_sync_issues": [],
             # Display copy is rendered backend-side so every surface shows the
             # same sentence; the raw error above stays for diagnostics.
             "last_account_sync_message": "",
@@ -4928,6 +4929,9 @@ class TestBackendAPI:
                     "last_account_sync_at": "2026-03-14T18:00:00+00:00",
                     "last_account_sync_error": "logged out",
                     "last_account_sync_error_kind": "auth_expired",
+                    "last_account_sync_issues": [
+                        {"stage": "bilibili_history", "kind": "auth_expired"}
+                    ],
                     "last_account_sync_message": "B 站登录已失效，请重新登录。",
                     "last_account_sync_severity": "warning",
                 }
@@ -4946,6 +4950,9 @@ class TestBackendAPI:
         assert response.status_code == 200
         payload = response.json()
         assert payload["last_account_sync_error_kind"] == "auth_expired"
+        assert payload["last_account_sync_issues"] == [
+            {"stage": "bilibili_history", "kind": "auth_expired"}
+        ]
         # Surfaces render this instead of the provider's raw English error.
         assert payload["last_account_sync_message"] == "B 站登录已失效，请重新登录。"
         assert payload["last_account_sync_severity"] == "warning"
