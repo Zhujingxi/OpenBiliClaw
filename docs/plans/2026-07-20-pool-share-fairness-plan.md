@@ -156,6 +156,24 @@
 - Numeric gate:D8 复现场景单 tick `demote_calls == [("bilibili", 3)]`;strategy-name 变体同样 `[("bilibili", 3)]`;既有 `test_rebalance_*`(reddit 超额场景)结果不变。
 - 既有断言更新:无(新增候选族只增不减；仅在册来源的既有场景候选族不变,选择结果一致)。
 
+### Task 9: 评估端份额感知(真实 E2E 发现,链路最后一环,见 spec D9 / Phase 8）
+
+**Files:** modify `src/openbiliclaw/storage/database.py`（新增 `count_admission_waiting_discovery_candidates_by_source`、`claim_discovery_candidates_for_eval` 加 `preferred_source_platforms`）、`src/openbiliclaw/runtime/refresh.py`（`_evaluated_waiting_by_family`→`_waiting_supply_by_family`、fillable 用它）、`src/openbiliclaw/discovery/candidate_pipeline.py`（`claim_batch` 传 `_under_share_platforms()`）；add tests（`tests/test_refresh_source_deficit.py`、`tests/test_candidate_pipeline_admission.py`）。
+
+**Interfaces:** Consumes: `discovery_candidates` 各 status、`_under_share_platforms`。Produces: fillable 认 pending/evaluating 供给;claim 份额优先。
+
+**Steps:**
+
+- [x] 先写失败测试:①fillable 含 pending_eval（fake `pending_by_family`）→ 退 bilibili 3；②DB `count_admission_waiting_*` 计 pending+evaluating+evaluated；③claim 优先（真 DB，preferred=["bangumi"]）→ bangumi 3;④claim 无 preferred → 旧 round-robin `[reddit,bangumi,reddit]`;⑤pipeline `claim_batch` 注入份额 → bangumi 3;⑥无策略 → 旧序;⑦集成:hook 退坑(pending fillable)+ claim 优先。
+- [x] 确认 FAIL。
+- [x] 实现:DB 宽计数 + claim preferred 两层 round-robin(缺省单层==旧);controller `_waiting_supply_by_family`;pipeline `claim_batch` 传 preferred。
+- [x] 确认 PASS;全量 pytest + ruff + mypy。
+
+**Acceptance:**
+
+- Numeric gate:fillable-pending 场景 `demote_calls==[("bilibili",3)]`;`count_admission_waiting`=4 vs `count_evaluated`=1;claim preferred=`["bangumi",×3]`,无 preferred=`["reddit","bangumi","reddit"]`;集成 stale=3 且 claim=`["bangumi"×3]`。
+- 既有断言更新:无（`claim_*` 新增可选参默认 None、走 `except TypeError` 或空 preferred 单层 round-robin,既有 claim 测试逐字节不变；`_FakeRebalanceDB` 加 `pending_by_family`(默认 {}) 与 `count_admission_waiting_*` 方法,既有 rebalance 场景 `pending` 默认空 → 等于原 evaluated-only,结果不变）。
+
 ## Verification after merge
 
 验收人(主会话)在隔离项目根执行真实 E2E:拷贝本机真实 DB(reddit 169 超份额饿死态)→ 启用 bangumi(真实 bgm.tv 匿名 API,走 custom 代理)+ 商汤 LLM → 起真实 serve-api → 观察 ≥3 个 drain tick:①`bangumi_discovery_runs` 出现新行;②池组成收敛(reddit 净减、bangumi 净增);③全局池恒 ≤300;④日志出现每源缺口摘要与退坑记录。回滚触发条件:全局池超发、退坑波及非超份额来源、或全量测试回归失败——revert 整个 feature 分支。
