@@ -50,6 +50,22 @@ drain/admission 每 60s 一次(`refresh.py:1421` 附近 loop 注释),而 bangumi
 
 `refresh.py:2097` 起:池 ≥ 目标时 trending/explore/signal 计划照常生成,产出进 raw/evaluated 积压。这是刻意的新鲜度维护;修复后其危害被入池份额闸约束(积压不能再越份额占坑),故不改动。
 
+### D6. Producer 内部还有一道全局 pool_full 闸(confirmed by real E2E,Phase 1–3 解不开)
+
+真实 serve-api 日志:`bangumi producer skip: reason=pool_full`。tick 层 deficit 修复已生效(producer 被调度),但每个 producer 的 `produce_if_due` 内部还有一道**全局** pool 闸 `_candidate_pool_full()`(`bangumi_producer.py:94` 附近,调 `candidate_pipeline.pool_full()` = 全局可见池是否达标)。这形成鸡生蛋死结:bangumi 因全局池满不能生产 → 永远没有 bangumi 的 `evaluated` 供给 → Phase 3 rebalance 的触发条件「欠份额来源有 `evaluated` 供给等待」不满足 → 不退坑 → 池永远 300/300 → bangumi 永远 pool_full。波及 `bilibili/reddit/zhihu/youtube/bangumi/douyin` 六个 producer(其中 reddit 的旧闸引用了不存在的 `is_candidate_pool_full`,实际已是 no-op;`xhs`/`x` 为 fetch-only,自查确认无此内部闸)。
+
+### D7. Phase 3/4 挂载点在生产装配下是死代码(confirmed by real E2E)
+
+`_rebalance_pool_shares()` 与 `_log_source_deficit_summary()` 挂在 `_drain_discovery_candidates_and_precompute`(经 `_loop_candidate_eval` 驱动)。但生产 serve-api 装配(`api/runtime_context.py:1144` 起)注入 `CandidateEvalCoordinator`,`refresh.py:1455-1459` 用 `coordinator.run_forever()` **替换** `_loop_candidate_eval()`,于是那个方法永远不被调用——Phase 3/4 在生产装配下是死代码。E2E 实机佐证:bangumi 已真实拉取 29 条入原料池(Task 1/6 生效)、xiaohongshu 有 4 条 evaluated 等待且欠份额(7/25)、池 300/300 顶满——完全满足退坑条件,却零退坑、零份额摘要日志。修复须把再平衡与摘要移到**两种装配都必经的收敛点**;两装配互斥(`coordinator.run_forever()` XOR `_loop_candidate_eval()`,且 `drain_discovery_candidates_once` 与 refresh 内联 drain 在 coordinator 存在时都提前 notify 返回),故单轮至多一次再平衡。
+
+### D8. 无份额来源的存量行永久挤占份额(confirmed by final E2E)
+
+`_rebalance_pool_shares` 挑超额来源时只遍历 `target_counts.items()`。本机 E2E:配置只有 bangumi+reddit 参与份额(各 150 目标),但池里躺着 bilibili 141 行、xiaohongshu 7 行——这两个来源已被用户禁用、不在 `target_counts` 里,于是这 148 行「无主占坑者」永远不被选为超额来源、永远不可回收;reddit 超额仅 2,bangumi 的 150 缺口无坑可腾。真实后果:用户禁用某来源后,其存量行会永久挤占其他来源的份额。修复:挑超额来源时把「出现在 `available_by_source` 但不在 `target_counts` 的来源族」按 target=0 处理(全额计为超额、可退);available key 先经 `source_family` 归族(禁用 bilibili 可能以四策略名出现),再算超额。排序与「挑超额最多的单一来源、每 tick ≤3、最低分最老先退」等不变量全部保持。
+
+### D9. 评估端不感知份额 → 第三层鸡生蛋 + token 浪费(confirmed by final E2E)
+
+即便前八步都对,还有两处评估端缺陷让环闭不上:**(a) rebalance 的 fillable 口径太窄**——池被占坑者钉在 300/300,coordinator `run_forever` 里 `_projected_inventory(snapshot) >= snapshot.target` 直接 idle、零评估(bangumi 49 条 pending_eval 半小时纹丝不动、`evaluated_at` 无新行)→ bangumi 永远没有 `evaluated` 等待供给 → rebalance 的 `fillable=0` → 不退坑 → 池永远满。第三层鸡生蛋。**(b) claim 队列不分份额**——`claim_discovery_candidates_for_eval` 的窥探窗口按 `last_seen_at` FIFO + 跨 `source_platform` round-robin,reddit 242 条 pending 积压会先被 claim、烧 LLM 评估那些注定入不了池的超份额行(纯 token 浪费),bangumi 的 49 条排不上队;而两轮 admission 的第二轮兜底还会把评估完的 reddit 行填回坑,净效果=占坑者从 bilibili 换成 reddit,bangumi 依旧饿死。修复两处缺一不可:(a) fillable 的「等待供给」从「仅 `evaluated`」放宽到「`pending_eval` + `evaluating` + `evaluated`」(demote 后即使该行评估失败,第二轮兜底 admission 也会补回坑,全局 ≤target 不破,质量损失有界——退的本就是超份额最低分行);(b) claim 复用 Task 2 的 `preferred_source_platforms` 模式,欠份额在册来源的 pending 行优先 claim(同优先级内保持原 round-robin 顺序),未注入份额策略时逐字节不变。
+
 ## Priority classification
 
 | Phase | Content | Tier | Why |
@@ -99,6 +115,32 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 2. rebalance 每次退坑打 INFO:来源、行数、腾给了谁。
 3. admission 第一轮跳过的超份额行数进 debug 日志。
 
+### Phase 5 — Producer 内部 pool_full 闸份额感知(E2E 发现,见 D6)
+
+`candidate_pipeline` 新增 `pool_full_for_source(source_family)`:注入份额策略且该源低于自身份额 → 返回 `False`(即使全局满,两轮 admission + rebalance 会腾坑);该源已达/超份额或未传 family → 沿用全局 `pool_full()`;未注入策略 → 完全等同 `pool_full()`(不变量 5)。六个 producer 的内部闸 `_candidate_pool_full()` 改经共享助手 `runtime/pool_gate.candidate_pool_full_for_source(pipeline, family, …)` 调用它,并传入各自的 `_pool_source_family` 口径 family(bilibili 族归并);pipeline 缺该方法时保守回退全局 `pool_full()`,再退 `False`。这打破 D6 死结:bangumi 欠份额时即使全局满也能生产,产出 `evaluated` 供给,rebalance 才有触发条件。
+
+测试:全局满 + 欠份额 → `pool_full_for_source` False、`produce_if_due` 不再 skip pool_full;全局满 + 已达份额 → True;未注入策略 → 等同 `pool_full()`;全局未满 → 恒 False。
+
+### Phase 6 — 再平衡/摘要挂到两装配共同的收敛点(修 D7)
+
+新增 controller 入口 `run_pool_share_maintenance()`(顺序调 `_rebalance_pool_shares()` + `_log_source_deficit_summary()`,吞异常不打断 eval loop)。legacy drain 的两处 `with suppress` 合并为调它一次;`CandidateEvalCoordinator` 新增 `pre_admit_hook` 参数,`run_forever` 每 tick 在 `_admit_evaluated` 之前调一次;`runtime_context` 以 `getattr` 守卫把 `controller.run_pool_share_maintenance` 注入 hook(测试替身缺该方法时不注入)。两装配互斥 → 单轮至多一次再平衡;hook 在 admission 前跑 → 退坑腾的坑同 tick 被欠份额供给填上。语义(触发条件、每 tick ≤3、只动最超份额来源最低分最老行、INFO 日志)与 Phase 3/4 完全一致。
+
+测试:coordinator 每 tick 在 admission 前调 hook(顺序断言);`run_pool_share_maintenance` 顺序调 rebalance→summary;legacy(无 coordinator)路径回归不变。
+
+### Phase 7 — 无份额来源存量行可回收(修 D8)
+
+`_rebalance_pool_shares` 挑超额来源的候选集从「`target_counts` 的族」扩为「`target_counts` 的族 ∪ `available_by_source` 各 key 经 `source_family` 归族后的族」;缺席 `target_counts` 的族按 target=0 计算超额(全额可退)。选择仍是「超额最多的单一来源」,`min(3, overage, fillable)`、最低分最老先退、INFO 日志、`fillable` 仍只按在册欠份额来源的 evaluated 等待量计——全部不变。
+
+测试:available={bilibili:141, reddit:152, xiaohongshu:7}、targets={bangumi:150, reddit:150}、bangumi evaluated≥3 → 单 tick 退 bilibili(超额最大)3 行;bilibili 以四策略名出现时归族后同样命中;既有(仅在册来源)场景不变。
+
+### Phase 8 — 评估端份额感知(修 D9)
+
+**(a) fillable 放宽**:新增 DB `count_admission_waiting_discovery_candidates_by_source()`(`status IN ('pending_eval','evaluating','evaluated')` 归族计数);controller `_evaluated_waiting_by_family` 更名 `_waiting_supply_by_family`,改调新方法(getattr 回退旧的 evaluated-only);`_rebalance_pool_shares` 的 `fillable` 用它——欠份额来源即使供给只在 pending_eval 也能触发退坑。其它口径不变。
+
+**(b) claim 份额感知**:`claim_discovery_candidates_for_eval` 加可选 `preferred_source_platforms`——窥探窗口 ORDER BY 前置 `CASE WHEN source_platform IN (…) THEN 0 ELSE 1 END`(把欠份额行拉进窗口),选择改两层 round-robin(先抽干 preferred 来源,再抽其余);缺省不传时单层 round-robin == 旧行为逐字节。pipeline `claim_batch` 传 `_under_share_platforms()`(pipeline 已持有份额策略,内部自算,coordinator 无需改)。这同时修 token 浪费:评估注定入不了池的超份额行是纯浪费。
+
+测试:①fillable 含 pending_eval(池满+bilibili 占坑+bangumi 仅 pending → 退 bilibili 3);②claim 优先(pending [reddit×5 旧, bangumi×3 新] + bangumi 欠份额 → claim 先出 bangumi 3);③无策略 → claim 顺序不变;④(集成,真 DB)pre-admit hook 退坑(pending fillable)→ 腾坑 → claim 优先 bangumi。
+
 ## Expected impact
 
 | Lever | Measured effect |
@@ -107,6 +149,10 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 | Phase 2 | 坑位释放后欠份额行优先入池;超份额来源停止净增长 |
 | Phase 3 | 本机 reddit 169→25 的收敛从"数周自然消耗"变为 ≤3 行/分钟的可控速率(理论 <1 小时,实际受欠份额供给节奏限制) |
 | Phase 4 | 下次同类问题可从日志直接读出每源缺口,免于本次的三层静默排查 |
+| Phase 5 | 解除 producer 内部全局闸死结:欠份额来源即使全局满也能生产 `evaluated` 供给,Phase 3 rebalance 得以触发,`reason=pool_full` 不再冤枉欠份额来源 |
+| Phase 6 | Phase 3/4 不再是生产装配下的死代码:coordinator 每 tick 触发退坑与份额摘要,E2E 中 300/300 顶满 + xhs 7/25 欠份额 + evaluated 等待的场景真正退坑 |
+| Phase 7 | 禁用来源的存量行(不在份额表里)不再永久占坑:按 target=0 计为超额可退,bangumi 等欠份额来源终于有坑可腾 |
+| Phase 8 | 评估端闭环:fillable 认 pending_eval 供给(池满也能退坑)+ claim 优先欠份额来源(评估算力不再烧在入不了池的超份额积压上),bangumi 从 pending → 评估 → 入池全链路打通 |
 
 ## Documentation obligations
 

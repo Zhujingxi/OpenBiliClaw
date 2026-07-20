@@ -1154,6 +1154,12 @@ class RuntimeContext:
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
             ),
+            # Pool-share fairness (spec 2026-07-20, D7): run the controller's
+            # share rebalance + deficit summary each coordinator tick before
+            # admission. The coordinator assembly replaces _loop_candidate_eval,
+            # so without this the Phase 3/4 hooks are dead code in production.
+            # Guarded for controllers/test doubles lacking the helper.
+            pre_admit_hook=getattr(new_runtime_controller, "run_pool_share_maintenance", None),
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
@@ -1162,6 +1168,16 @@ class RuntimeContext:
         new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
             new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
         )
+        # Pool-share fairness (spec 2026-07-20, Phase 2): let admission see the
+        # per-family visible-pool targets so under-share sources win freed slots
+        # ahead of an over-supplied source's backlog. Bound after controller
+        # construction so the pipeline reuses the controller's canonical
+        # ``_source_target_counts`` (family-keyed) share口径. Guarded so test
+        # doubles / alternate controllers without the helper keep legacy (None)
+        # admission instead of raising at bootstrap.
+        _source_target_counts = getattr(new_runtime_controller, "_source_target_counts", None)
+        if callable(_source_target_counts):
+            new_candidate_pipeline.source_share_targets = _source_target_counts
         for producer in (
             new_douyin_producer,
             new_youtube_producer,

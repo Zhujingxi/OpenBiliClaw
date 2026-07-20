@@ -3037,24 +3037,46 @@ class Database:
         *,
         limit: int,
         claim_token: str | None = None,
+        preferred_source_platforms: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Claim a mixed-source batch of pending candidates for evaluation."""
+        """Claim a mixed-source batch of pending candidates for evaluation.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): when
+        ``preferred_source_platforms`` is given (under-share sources), those
+        rows are pulled into the peek window ahead of the FIFO order AND drained
+        first in the round-robin, so an over-supplied backlog cannot burn the
+        evaluator on rows that share-aware admission won't even seat. Omitting it
+        keeps the legacy round-robin over the FIFO window byte-for-byte.
+        """
 
         claim_limit = max(0, int(limit))
         if claim_limit <= 0:
             return []
         self._ensure_fresh_read()
+        platforms = [
+            str(platform).strip()
+            for platform in (preferred_source_platforms or [])
+            if str(platform).strip()
+        ]
+        window_limit = max(claim_limit * 4, claim_limit)
         # Peek a bounded window and round-robin in Python so one noisy source
         # cannot monopolize a mixed evaluator batch.
+        if platforms:
+            placeholders = ", ".join("?" for _ in platforms)
+            order_prefix = f"CASE WHEN source_platform IN ({placeholders}) THEN 0 ELSE 1 END, "
+            window_params: tuple[Any, ...] = (*platforms, window_limit)
+        else:
+            order_prefix = ""
+            window_params = (window_limit,)
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT *
             FROM discovery_candidates
             WHERE status = 'pending_eval'
-            ORDER BY last_seen_at ASC, id ASC
+            ORDER BY {order_prefix}last_seen_at ASC, id ASC
             LIMIT ?
             """,
-            (max(claim_limit * 4, claim_limit),),
+            window_params,
         )
         pending = [dict(row) for row in cursor.fetchall()]
         if not pending:
@@ -3069,18 +3091,28 @@ class Database:
                 by_source[source] = []
             by_source[source].append(row)
 
+        # Two-tier round-robin: drain preferred (under-share) sources first, then
+        # the rest. With no preferred list this is a single tier == legacy order.
+        preferred_set = set(platforms)
+        tiers = (
+            [source for source in source_order if source in preferred_set],
+            [source for source in source_order if source not in preferred_set],
+        )
         selected: list[dict[str, Any]] = []
-        while len(selected) < claim_limit:
-            added = False
-            for source in source_order:
-                rows = by_source[source]
-                if not rows:
-                    continue
-                selected.append(rows.pop(0))
-                added = True
-                if len(selected) >= claim_limit:
+        for tier in tiers:
+            while len(selected) < claim_limit:
+                added = False
+                for source in tier:
+                    rows = by_source[source]
+                    if not rows:
+                        continue
+                    selected.append(rows.pop(0))
+                    added = True
+                    if len(selected) >= claim_limit:
+                        break
+                if not added:
                     break
-            if not added:
+            if len(selected) >= claim_limit:
                 break
 
         ids = [int(row["id"]) for row in selected]
@@ -3117,22 +3149,42 @@ class Database:
         self,
         *,
         limit: int,
+        preferred_source_platforms: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return evaluated candidates still waiting for content-cache admission."""
+        """Return evaluated candidates still waiting for content-cache admission.
+
+        Pool-share fairness (spec 2026-07-20, Phase 2): when
+        ``preferred_source_platforms`` is given, under-share sources sort ahead
+        of the FIFO order so a fixed admission window is not monopolized by an
+        over-supplied source's backlog. Omitting it keeps the legacy
+        ``evaluated_at ASC`` ordering byte-for-byte (invariant 5).
+        """
 
         admission_limit = max(0, int(limit))
         if admission_limit <= 0:
             return []
         self._ensure_fresh_read()
+        platforms = [
+            str(platform).strip()
+            for platform in (preferred_source_platforms or [])
+            if str(platform).strip()
+        ]
+        if platforms:
+            placeholders = ", ".join("?" for _ in platforms)
+            order_prefix = f"CASE WHEN source_platform IN ({placeholders}) THEN 0 ELSE 1 END, "
+            params: tuple[Any, ...] = (*platforms, admission_limit)
+        else:
+            order_prefix = ""
+            params = (admission_limit,)
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT *
             FROM discovery_candidates
             WHERE status = 'evaluated'
-            ORDER BY evaluated_at ASC, last_seen_at ASC, id ASC
+            ORDER BY {order_prefix}evaluated_at ASC, last_seen_at ASC, id ASC
             LIMIT ?
             """,
-            (admission_limit,),
+            params,
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -4260,6 +4312,112 @@ class Database:
             source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
             counts[source_family] += int(row["count"])
         return dict(counts)
+
+    def count_evaluated_discovery_candidates_by_source(self) -> dict[str, int]:
+        """Return ``evaluated`` (admission-waiting) candidates grouped by family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): the rebalancer only
+        evicts over-share rows when an under-share source actually has supply
+        sitting in ``evaluated`` ready to take the freed slot.
+        """
+        self._ensure_fresh_read()
+        counts: dict[str, int] = defaultdict(int)
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status = 'evaluated'
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
+        return dict(counts)
+
+    def count_admission_waiting_discovery_candidates_by_source(self) -> dict[str, int]:
+        """Return admission-waiting candidates (any non-terminal stage) per family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): the rebalancer's
+        "does an under-share source have supply waiting?" test must count
+        ``pending_eval`` and ``evaluating`` too, not only ``evaluated`` —
+        otherwise an orphan occupier pins the pool full, the under-share source
+        never gets evaluated (coordinator idles at target), so its supply never
+        reaches ``evaluated`` and eviction never fires (third chicken-and-egg).
+        Counting the earlier stages breaks the loop; the second-round admission
+        backfill keeps the global cap intact if a demoted row later fails eval.
+        """
+        self._ensure_fresh_read()
+        counts: dict[str, int] = defaultdict(int)
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
+        return dict(counts)
+
+    def demote_lowest_ranked_pool_rows(self, *, source_family: str, limit: int) -> int:
+        """Mark the *limit* lowest-ranked fresh visible rows of one family stale.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): a gentle, per-tick
+        rebalance frees a few slots held by an over-supplied source so an
+        under-share source can be seated. Selection is the lowest
+        ``relevance_score`` then oldest ``last_scored_at`` (quality never
+        regresses — the best rows stay). Only ``fresh``, non-disliked,
+        not-yet-recommended rows are touched, and they are set to the existing
+        ``'stale'`` status (no new enum). Returns the number of rows demoted.
+        """
+        demote_limit = max(0, int(limit))
+        family = str(source_family or "").strip()
+        if demote_limit <= 0 or not family:
+            return 0
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT bvid, source, source_platform, relevance_score, last_scored_at
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND NOT EXISTS (
+                SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+              )
+            """
+        )
+        candidates: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            bvid = str(row_dict.get("bvid", "")).strip()
+            if not bvid:
+                continue
+            if _pool_source_family(row_dict["source"], row_dict["source_platform"]) != family:
+                continue
+            candidates.append(row_dict)
+        candidates.sort(
+            key=lambda r: (
+                float(r.get("relevance_score") or 0.0),
+                str(r.get("last_scored_at") or ""),
+            )
+        )
+        victims = [str(r["bvid"]) for r in candidates[:demote_limit]]
+        if not victims:
+            return 0
+        placeholders = ", ".join("?" for _ in victims)
+        result = self._execute_write(
+            f"""
+            UPDATE content_cache
+            SET pool_status = 'stale'
+            WHERE bvid IN ({placeholders})
+              AND COALESCE(pool_status, 'fresh') = 'fresh'
+            """,
+            victims,
+        )
+        return result.rowcount
 
     def count_pool_readiness(
         self,

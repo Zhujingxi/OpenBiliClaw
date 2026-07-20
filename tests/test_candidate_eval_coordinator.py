@@ -392,6 +392,50 @@ async def test_admits_evaluated_rows_before_projected_target_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_coordinator_runs_pre_admit_hook_before_admission_each_tick() -> None:
+    # Pool-share fairness (spec 2026-07-20, Phase 3/4 via D7): the share
+    # rebalance + deficit summary hooks live on the controller but the
+    # production assembly replaces _loop_candidate_eval with the coordinator,
+    # so they were dead code. The coordinator must invoke a pre-admit hook each
+    # tick BEFORE admitting evaluated rows, so a freed slot is admitted the same
+    # tick.
+    pipeline = _FakeStagedPipeline(candidate_count=0)
+    pipeline.evaluated_pending_admission = 5
+    events: list[str] = []
+    original_admit = pipeline.admit_evaluated
+
+    def _spy_admit(*, limit: int) -> dict[str, int]:
+        events.append("admit")
+        return original_admit(limit=limit)
+
+    pipeline.admit_evaluated = _spy_admit  # type: ignore[method-assign]
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,  # type: ignore[arg-type]
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=300,
+            pending_eval=pipeline.pending_eval,
+            evaluating=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
+        ),
+        profile_provider=lambda: object(),
+        pre_admit_hook=lambda: events.append("hook"),
+        safety_wake_seconds=60.0,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    async with asyncio.timeout(2):
+        while "admit" not in events:
+            await asyncio.sleep(0)
+    await coordinator.stop()
+    await task
+
+    assert events[0] == "hook"
+    assert events[:2] == ["hook", "admit"]
+
+
+@pytest.mark.asyncio
 async def test_serial_worker_commits_use_remaining_copy_aware_headroom() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=90)
     admitted: list[int] = []
