@@ -232,6 +232,51 @@ def test_rebalance_skipped_when_global_pool_below_target() -> None:
     assert db.demote_calls == []
 
 
+def test_rebalance_reclaims_disabled_source_rows_absent_from_targets() -> None:
+    # Task 8 (D8): only bangumi+reddit are configured (150 each), but the pool
+    # still holds bilibili 141 + xiaohongshu 7 rows from now-disabled sources
+    # that are absent from target_counts. Those "orphan" occupiers must count
+    # as fully over-share (target 0) and be reclaimable — otherwise bangumi's
+    # 150-slot deficit can never be freed (reddit is only 2 over). The single
+    # most over-share source (bilibili, 141) is demoted, ≤3 per tick.
+    db = _FakeRebalanceDB(
+        pool_count=300,
+        available_by_family={"bilibili": 141, "reddit": 152, "xiaohongshu": 7},
+        evaluated_by_family={"bangumi": 5},
+    )
+    controller = _controller(
+        database=db,
+        pool_target_count=300,
+        pool_source_shares={"bangumi": 1, "reddit": 1},
+    )
+
+    demoted = controller._rebalance_pool_shares()
+
+    assert demoted == 3
+    assert db.demote_calls == [("bilibili", 3)]
+
+
+def test_rebalance_merges_bilibili_strategy_keys_when_reclaiming_orphan() -> None:
+    # Note #2: a disabled bilibili source may surface under its four strategy
+    # names rather than the "bilibili" family key. They must merge to one
+    # family before computing overage.
+    db = _FakeRebalanceDB(
+        pool_count=300,
+        available_by_family={"search": 100, "explore": 41, "reddit": 152},
+        evaluated_by_family={"bangumi": 5},
+    )
+    controller = _controller(
+        database=db,
+        pool_target_count=300,
+        pool_source_shares={"bangumi": 1, "reddit": 1},
+    )
+
+    demoted = controller._rebalance_pool_shares()
+
+    assert demoted == 3
+    assert db.demote_calls == [("bilibili", 3)]
+
+
 def test_demote_lowest_ranked_pool_rows_evicts_lowest_score_first(tmp_path: Path) -> None:
     db = Database(tmp_path / "test.db")
     db.initialize()

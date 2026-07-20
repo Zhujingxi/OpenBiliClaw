@@ -32,6 +32,7 @@ from openbiliclaw.soul.speculator import (
     build_probe_axis,
     choose_next_probe_candidate,
 )
+from openbiliclaw.sources.platforms import source_family as _source_family
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -3134,10 +3135,22 @@ class ContinuousRefreshController:
         if fillable <= 0:
             return 0
 
-        # Pick the single most over-share source.
+        # Pick the single most over-share source. Candidate families are the
+        # configured targets PLUS any family actually holding visible slots but
+        # absent from target_counts — a source the user disabled leaves stranded
+        # rows that must count as fully over-share (target 0), else those rows
+        # permanently squat the pool and an under-share source's deficit can
+        # never be freed (spec D8). Available keys are normalized to families
+        # first so a disabled bilibili surfacing under its four strategy names
+        # merges to one "bilibili" overage (note: _pool_source_family口径).
+        candidate_families: set[str] = set(target_counts)
+        for source_key in available_by_source:
+            candidate_families.add(_source_family(source_key, source_key))
         over_share: list[tuple[int, str]] = []
-        for family, target in target_counts.items():
-            overage = self._platform_source_count(available_by_source, family) - int(target)
+        for family in candidate_families:
+            overage = self._platform_source_count(available_by_source, family) - int(
+                target_counts.get(family, 0)
+            )
             if overage > 0:
                 over_share.append((overage, family))
         if not over_share:
