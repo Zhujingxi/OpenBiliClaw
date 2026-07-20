@@ -12,11 +12,12 @@ visible behavior.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import pytest
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
@@ -107,6 +108,161 @@ def test_health_exact_response(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+async def _mock_embedding_ready(*, strict: bool = False) -> bool:
+    return False
+
+
+async def _mock_diagnose(*args: object, **kwargs: object) -> tuple[str, str]:
+    return ("disabled", "")
+
+
+def _mock_auth_gate() -> Any:
+    """Return an object whose ``is_trusted_local`` matches local-only path."""
+    return type(
+        "_MockAuthGate",
+        (),
+        {"is_trusted_local": lambda self, request: False},
+    )()
+
+
+def _test_health_app(
+    *,
+    degraded: bool = True,
+    lan_ip: str | None = "192.168.1.100",
+    profile_ready: bool | None = None,
+) -> TestClient:
+    """Build a minimal FastAPI app with the health router and mock deps.
+
+    All deps not consumed by the ``/api/health`` handler are stubbed with
+    innocuous defaults so ``HealthRouteDeps`` construction succeeds.
+    """
+    from openbiliclaw.api.dependencies import HealthRouteDeps
+    from openbiliclaw.api.routes.health import build_health_router
+
+    app = FastAPI()
+    app.include_router(
+        build_health_router(
+            HealthRouteDeps(
+                get_lan_ip=lambda: lan_ip,
+                health_profile_ready=lambda: profile_ready,
+                health_embedding_ready=_mock_embedding_ready,
+                embedding_required_for_init=lambda: False,
+                diagnose_embedding=_mock_diagnose,
+                embedding_pull_progress_view=lambda: {"running": False},
+                progress_int=lambda v: 0,
+                degraded_issues_payload=lambda: [
+                    {
+                        "field": "llm",
+                        "message": "Mock LLM error",
+                        "severity": "blocking",
+                    }
+                ],
+                get_auth_gate=_mock_auth_gate,
+                get_init_coordinator=lambda: type(
+                    "_MockCoord",
+                    (),
+                    {"get_status": lambda self: {}},
+                )(),
+                get_init_prereqs=lambda: type(
+                    "_MockPrereqs",
+                    (),
+                    {
+                        "peek_bilibili": lambda self: "failed",
+                        "peek_bilibili_detail": lambda self: "",
+                        "peek_chat": lambda self: False,
+                    },
+                )(),
+                get_account_sync_service=lambda: None,
+                degraded=lambda: degraded,
+                degraded_reason=lambda: "llm_registry_unavailable",
+            )
+        )
+    )
+    return TestClient(app)
+
+
+def test_degraded_health_exact_response_with_lan_ip() -> None:
+    """Degraded ``/api/health`` — ``lan_ip`` present, ``profile_ready`` omitted."""
+    client = _test_health_app(degraded=True, lan_ip="192.168.1.100", profile_ready=None)
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
+
+    data = response.json()
+    assert data == {
+        "status": "degraded",
+        "service": "openbiliclaw-api",
+        "reason": "llm_registry_unavailable",
+        "issues": [{"field": "llm", "message": "Mock LLM error", "severity": "blocking"}],
+        "embedding_ready": False,
+        "lan_ip": "192.168.1.100",
+    }
+
+    assert response.content == (
+        b'{"status":"degraded","service":"openbiliclaw-api",'
+        b'"reason":"llm_registry_unavailable",'
+        b'"issues":[{"field":"llm","message":"Mock LLM error","severity":"blocking"}],'
+        b'"embedding_ready":false,'
+        b'"lan_ip":"192.168.1.100"}'
+    )
+
+
+def test_degraded_health_exact_response_without_lan_ip() -> None:
+    """Degraded ``/api/health`` — ``lan_ip`` omitted, ``profile_ready`` present."""
+    client = _test_health_app(degraded=True, lan_ip=None, profile_ready=True)
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
+
+    data = response.json()
+    assert data == {
+        "status": "degraded",
+        "service": "openbiliclaw-api",
+        "reason": "llm_registry_unavailable",
+        "issues": [{"field": "llm", "message": "Mock LLM error", "severity": "blocking"}],
+        "embedding_ready": False,
+        "profile_ready": True,
+    }
+
+    assert response.content == (
+        b'{"status":"degraded","service":"openbiliclaw-api",'
+        b'"reason":"llm_registry_unavailable",'
+        b'"issues":[{"field":"llm","message":"Mock LLM error","severity":"blocking"}],'
+        b'"embedding_ready":false,'
+        b'"profile_ready":true}'
+    )
+
+
+def test_healthy_health_via_degraded_infra() -> None:
+    """When ``degraded`` is False the handler returns ``HealthResponse``.
+
+    This tests the non-degraded path through the same mock infrastructure,
+    confirming the router factory works correctly for both paths.
+    """
+    client = _test_health_app(degraded=False, lan_ip="10.0.0.1", profile_ready=True)
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == _JSON_CONTENT_TYPE
+
+    data = response.json()
+    assert data == {
+        "status": "ok",
+        "service": "openbiliclaw-api",
+        "profile_ready": True,
+        "lan_ip": "10.0.0.1",
+        "embedding_ready": False,
+    }
+
+    assert response.content == (
+        b'{"status":"ok","service":"openbiliclaw-api",'
+        b'"profile_ready":true,"lan_ip":"10.0.0.1",'
+        b'"embedding_ready":false}'
+    )
+
+
 # pylint: disable=too-many-statements
 def test_init_status_exact_response(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
@@ -114,6 +270,7 @@ def test_init_status_exact_response(  # noqa: PLR0915
     from openbiliclaw.api import app as app_module
 
     monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.100")
+    monkeypatch.setattr("openbiliclaw.docker_runtime.is_running_in_container", lambda: False)
 
     class _MockDB:
         def get_latest_init_run(self) -> None:
@@ -203,7 +360,7 @@ def test_init_status_exact_response(  # noqa: PLR0915
         b'"bilibili_logged_in":false,'
         b'"bilibili_check":"failed",'
         b'"bilibili_detail":"'
-        b'\xe5\x90\x8e\xe7\xab\xaf\xe8\xbf\x98\xe6\xb2\xa1\xe6\x9c\x89'
+        b"\xe5\x90\x8e\xe7\xab\xaf\xe8\xbf\x98\xe6\xb2\xa1\xe6\x9c\x89"
         b'\xe6\x94\xb6\xe5\x88\xb0 B\xe7\xab\x99 Cookie\xe3\x80\x82",'
         b'"llm_ready":false,'
         b'"embedding_ready":false,'
@@ -219,7 +376,7 @@ def test_init_status_exact_response(  # noqa: PLR0915
         b"},"
         b'"reason":"local_only",'
         b'"detail":"'
-        b'\xe5\x8f\xaa\xe8\x83\xbd\xe5\x9c\xa8\xe6\x9c\xac\xe6\x9c\xba'
+        b"\xe5\x8f\xaa\xe8\x83\xbd\xe5\x9c\xa8\xe6\x9c\xac\xe6\x9c\xba"
         b'\xe5\x8f\x91\xe8\xb5\xb7\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96",'
         b'"last_failure_reason":"",'
         b'"last_failure_detail":"",'
