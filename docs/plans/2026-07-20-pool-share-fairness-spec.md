@@ -58,6 +58,10 @@ drain/admission 每 60s 一次(`refresh.py:1421` 附近 loop 注释),而 bangumi
 
 `_rebalance_pool_shares()` 与 `_log_source_deficit_summary()` 挂在 `_drain_discovery_candidates_and_precompute`(经 `_loop_candidate_eval` 驱动)。但生产 serve-api 装配(`api/runtime_context.py:1144` 起)注入 `CandidateEvalCoordinator`,`refresh.py:1455-1459` 用 `coordinator.run_forever()` **替换** `_loop_candidate_eval()`,于是那个方法永远不被调用——Phase 3/4 在生产装配下是死代码。E2E 实机佐证:bangumi 已真实拉取 29 条入原料池(Task 1/6 生效)、xiaohongshu 有 4 条 evaluated 等待且欠份额(7/25)、池 300/300 顶满——完全满足退坑条件,却零退坑、零份额摘要日志。修复须把再平衡与摘要移到**两种装配都必经的收敛点**;两装配互斥(`coordinator.run_forever()` XOR `_loop_candidate_eval()`,且 `drain_discovery_candidates_once` 与 refresh 内联 drain 在 coordinator 存在时都提前 notify 返回),故单轮至多一次再平衡。
 
+### D8. 无份额来源的存量行永久挤占份额(confirmed by final E2E)
+
+`_rebalance_pool_shares` 挑超额来源时只遍历 `target_counts.items()`。本机 E2E:配置只有 bangumi+reddit 参与份额(各 150 目标),但池里躺着 bilibili 141 行、xiaohongshu 7 行——这两个来源已被用户禁用、不在 `target_counts` 里,于是这 148 行「无主占坑者」永远不被选为超额来源、永远不可回收;reddit 超额仅 2,bangumi 的 150 缺口无坑可腾。真实后果:用户禁用某来源后,其存量行会永久挤占其他来源的份额。修复:挑超额来源时把「出现在 `available_by_source` 但不在 `target_counts` 的来源族」按 target=0 处理(全额计为超额、可退);available key 先经 `source_family` 归族(禁用 bilibili 可能以四策略名出现),再算超额。排序与「挑超额最多的单一来源、每 tick ≤3、最低分最老先退」等不变量全部保持。
+
 ## Priority classification
 
 | Phase | Content | Tier | Why |
@@ -119,6 +123,12 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 
 测试:coordinator 每 tick 在 admission 前调 hook(顺序断言);`run_pool_share_maintenance` 顺序调 rebalance→summary;legacy(无 coordinator)路径回归不变。
 
+### Phase 7 — 无份额来源存量行可回收(修 D8)
+
+`_rebalance_pool_shares` 挑超额来源的候选集从「`target_counts` 的族」扩为「`target_counts` 的族 ∪ `available_by_source` 各 key 经 `source_family` 归族后的族」;缺席 `target_counts` 的族按 target=0 计算超额(全额可退)。选择仍是「超额最多的单一来源」,`min(3, overage, fillable)`、最低分最老先退、INFO 日志、`fillable` 仍只按在册欠份额来源的 evaluated 等待量计——全部不变。
+
+测试:available={bilibili:141, reddit:152, xiaohongshu:7}、targets={bangumi:150, reddit:150}、bangumi evaluated≥3 → 单 tick 退 bilibili(超额最大)3 行;bilibili 以四策略名出现时归族后同样命中;既有(仅在册来源)场景不变。
+
 ## Expected impact
 
 | Lever | Measured effect |
@@ -129,6 +139,7 @@ drain tick 内、admission 之前新增 `_rebalance_pool_shares()`:条件 =(全�
 | Phase 4 | 下次同类问题可从日志直接读出每源缺口,免于本次的三层静默排查 |
 | Phase 5 | 解除 producer 内部全局闸死结:欠份额来源即使全局满也能生产 `evaluated` 供给,Phase 3 rebalance 得以触发,`reason=pool_full` 不再冤枉欠份额来源 |
 | Phase 6 | Phase 3/4 不再是生产装配下的死代码:coordinator 每 tick 触发退坑与份额摘要,E2E 中 300/300 顶满 + xhs 7/25 欠份额 + evaluated 等待的场景真正退坑 |
+| Phase 7 | 禁用来源的存量行(不在份额表里)不再永久占坑:按 target=0 计为超额可退,bangumi 等欠份额来源终于有坑可腾 |
 
 ## Documentation obligations
 

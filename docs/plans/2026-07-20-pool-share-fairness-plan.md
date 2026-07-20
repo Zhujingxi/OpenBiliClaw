@@ -138,6 +138,24 @@
 - Numeric gate:coordinator 一轮的事件序列首二项 == `["hook","admit"]`;`run_pool_share_maintenance` 调用序列 == `["rebalance","summary"]`；六个 producer 与既有 coordinator 回归全绿。
 - 既有断言更新:无（新增参数带默认值 `None`,既有 coordinator 构造/用例不受影响；bootstrap 装配测试的 `FakeRuntimeController` 缺 `run_pool_share_maintenance`,经 `getattr` 守卫回退为不注入 hook）。
 
+### Task 8: 无份额来源存量行可回收(真实 E2E 发现,见 spec D8 / Phase 7)
+
+**Files:** modify `src/openbiliclaw/runtime/refresh.py`(`_rebalance_pool_shares` 超额候选集 + `source_family` 归族 import）；add tests（`tests/test_refresh_source_deficit.py`）。
+
+**Interfaces:** Consumes: `available_by_source`、`target_counts`、`_platform_source_count`、`source_family`。Produces: 退坑候选集含缺席 `target_counts` 的族(target=0)。
+
+**Steps:**
+
+- [x] 先写失败测试:①available={bilibili:141, reddit:152, xiaohongshu:7}、targets={bangumi:150, reddit:150}、bangumi evaluated≥3 → 退 bilibili 3 行(不是 reddit 2 行)；②bilibili 以 {search:100, explore:41} 出现时归族后仍退 "bilibili" 3 行。
+- [x] 确认 FAIL（旧逻辑只挑 reddit、退 2 行）。
+- [x] 实现:候选族 = `set(target_counts)` ∪ {`source_family(k,k)` for k in available_by_source}；缺席 target 的族 target=0 计超额;排序/上限/最低分口径不变。
+- [x] 确认 PASS;既有 rebalance 测试(仅在册来源)全绿；全量 pytest + ruff + mypy。
+
+**Acceptance:**
+
+- Numeric gate:D8 复现场景单 tick `demote_calls == [("bilibili", 3)]`;strategy-name 变体同样 `[("bilibili", 3)]`;既有 `test_rebalance_*`(reddit 超额场景)结果不变。
+- 既有断言更新:无(新增候选族只增不减；仅在册来源的既有场景候选族不变,选择结果一致)。
+
 ## Verification after merge
 
 验收人(主会话)在隔离项目根执行真实 E2E:拷贝本机真实 DB(reddit 169 超份额饿死态)→ 启用 bangumi(真实 bgm.tv 匿名 API,走 custom 代理)+ 商汤 LLM → 起真实 serve-api → 观察 ≥3 个 drain tick:①`bangumi_discovery_runs` 出现新行;②池组成收敛(reddit 净减、bangumi 净增);③全局池恒 ≤300;④日志出现每源缺口摘要与退坑记录。回滚触发条件:全局池超发、退坑波及非超份额来源、或全量测试回归失败——revert 整个 feature 分支。
