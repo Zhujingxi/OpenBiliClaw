@@ -414,19 +414,22 @@ def test_desktop_append_more_renders_before_cover_decode() -> None:
     assert "void warmCoverImages(freshItems" in body
 
 
-def test_desktop_reshuffle_swaps_before_background_dismiss() -> None:
+def test_desktop_reshuffle_always_excludes_current_cards_without_bulk_dismiss() -> None:
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     start = app_js.index("async function reshuffle()")
     end = app_js.index("\n    async function appendMore()", start)
     body = app_js[start:end]
 
     assert "visibleForExclusion" in body
     assert "excluded_bvids" in body
-    assert "state.dismissOnReshuffle" in body
-    assert "await dismissVisibleRecommendationsBeforeReshuffle" not in body
-    swap_index = body.index("state.videos = requestPlatform")
-    dismiss_index = body.index("dismissVisibleRecommendationsBeforeReshuffle(")
-    assert swap_index < dismiss_index
+    assert "state.dismissOnReshuffle" not in app_js
+    assert "dismissToggle" not in app_js
+    assert "dismissVisibleRecommendationsBeforeReshuffle" not in app_js
+    assert "renderReshuffleToggle" not in app_js
+    assert "换一批时忽略当前" not in index_html
+    assert 'id="reshuffleBtn"' in index_html
+    assert 'aria-label="换一批"' in index_html
 
 
 def test_desktop_platform_availability_endpoint_and_snapshot_state() -> None:

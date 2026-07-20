@@ -299,11 +299,16 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
     };
   };
 
-  const result = await reshuffleRecommendations();
+  const result = await reshuffleRecommendations(["BV1CURRENT", "BV2CURRENT"]);
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "http://127.0.0.1:8420/api/recommendations/reshuffle");
   assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.equal(
+    calls[0].options.body,
+    JSON.stringify({ excluded_bvids: ["BV1CURRENT", "BV2CURRENT"] }),
+  );
   assert.deepEqual(result, {
     items: [
       {

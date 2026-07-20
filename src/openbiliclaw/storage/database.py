@@ -181,7 +181,7 @@ class PoolServeSnapshot:
     candidate_rows: tuple[dict[str, Any], ...]
     loaded_count: int
     platform_topups: tuple[tuple[str, int], ...]
-    recent_viewed_bvids: frozenset[str]
+    seen_bvids: frozenset[str]
     curator_signals: tuple[dict[str, Any], ...]
     feedback_signals: tuple[dict[str, Any], ...]
 
@@ -787,6 +787,27 @@ CREATE TABLE IF NOT EXISTS events (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Durable source-aware identities extracted from every view event. This is
+-- the recommendation/discovery hard-dedup source of truth; unlike the legacy
+-- event scan it has no "latest N events" window.
+CREATE TABLE IF NOT EXISTS seen_items (
+    item_key        TEXT PRIMARY KEY,
+    source_platform TEXT NOT NULL,
+    content_id      TEXT NOT NULL,
+    first_event_id  INTEGER NOT NULL,
+    last_event_id   INTEGER NOT NULL,
+    first_seen_at   TIMESTAMP NOT NULL,
+    last_seen_at    TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seen_items_platform_content
+    ON seen_items(source_platform, content_id);
+CREATE TABLE IF NOT EXISTS seen_items_backfill_state (
+    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_scanned_event_id INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO seen_items_backfill_state (singleton, last_scanned_event_id)
+VALUES (1, 0);
+
 -- Content cache (discovered/evaluated content)
 CREATE TABLE IF NOT EXISTS content_cache (
     bvid        TEXT PRIMARY KEY,
@@ -1215,13 +1236,12 @@ class Database:
         self._worker_init_lock = threading.Lock()
         self._maintenance_executor: ThreadPoolExecutor | None = None
         self._serve_executor: ThreadPoolExecutor | None = None
-        # Recent-view identity extraction parses up to 2,000 event payloads.
-        # Cache immutable snapshots by latest view-event id and share the cache
-        # with isolated worker wrappers; one cheap MAX(id) query keeps external
-        # writers visible without repeating JSON/URL parsing on every request.
-        self._recent_view_state_lock = threading.Lock()
-        self._recent_view_state_cache: dict[
-            tuple[int, int],
+        # The durable seen-item ledger avoids reparsing arbitrary event-history
+        # windows on recommendation reads. Cache immutable identity snapshots by
+        # the newest ledger event id and share them with isolated workers.
+        self._seen_state_lock = threading.Lock()
+        self._seen_state_cache: dict[
+            int,
             tuple[frozenset[str], frozenset[str]],
         ] = {}
 
@@ -1246,6 +1266,7 @@ class Database:
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
         self._ensure_content_identity_columns()
+        self._ensure_seen_items_ledger()
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
@@ -1416,8 +1437,8 @@ class Database:
         isolated = Database(self._db_path)
         isolated._conn = conn
         isolated._admission_min_score = self._admission_min_score
-        isolated._recent_view_state_lock = self._recent_view_state_lock
-        isolated._recent_view_state_cache = self._recent_view_state_cache
+        isolated._seen_state_lock = self._seen_state_lock
+        isolated._seen_state_cache = self._seen_state_cache
         return isolated
 
     def load_pool_serve_snapshot(
@@ -1443,13 +1464,9 @@ class Database:
         isolated._preserve_read_transaction = True
         try:
             isolated.conn.execute("BEGIN")
-            # View history is the most CPU-heavy part of a pool read: extracting
-            # source-aware identities parses up to 2,000 JSON events and URLs.
-            # Every helper below used to repeat that work, turning one snapshot
-            # into five identical scans and holding the GIL for hundreds of ms.
-            viewed_content_keys, recent_viewed_bvids = isolated._recent_viewed_state_on(
-                isolated.conn
-            )
+            # Materialize the canonical all-time seen ledger once and reuse it
+            # across every availability/candidate helper in this transaction.
+            viewed_content_keys, seen_bvids = isolated._seen_state_on(isolated.conn)
             readiness = isolated.count_pool_readiness(
                 xhs_self_nickname=xhs_self_nickname,
                 _viewed_content_keys=viewed_content_keys,
@@ -1528,7 +1545,7 @@ class Database:
                         if added:
                             topups.append((token, added))
 
-            viewed = frozenset(recent_viewed_bvids)
+            viewed = frozenset(seen_bvids)
             history_limit = max(1, int(curator_history_limit))
             curator_signals = isolated.get_recent_recommendation_signals(limit=history_limit)
             feedback_signals = isolated.get_feedback_signals(limit=history_limit)
@@ -1538,7 +1555,7 @@ class Database:
                 candidate_rows=tuple(rows),
                 loaded_count=loaded_count,
                 platform_topups=tuple(topups),
-                recent_viewed_bvids=viewed,
+                seen_bvids=viewed,
                 curator_signals=tuple(curator_signals),
                 feedback_signals=tuple(feedback_signals),
             )
@@ -1595,7 +1612,7 @@ class Database:
         isolated._preserve_read_transaction = True
         try:
             isolated.conn.execute("BEGIN")
-            viewed_content_keys, _ = isolated._recent_viewed_state_on(isolated.conn)
+            viewed_content_keys, _ = isolated._seen_state_on(isolated.conn)
             rows = isolated._load_available_pool_candidate_rows_on(
                 isolated.conn,
                 max_per_topic_group=max_per_topic_group,
@@ -1713,14 +1730,45 @@ class Database:
         Returns:
             Inserted row ID.
         """
-        cursor = self._execute_write(
-            "INSERT INTO events "
-            "(event_type, url, title, context, metadata, "
-            " inferred_satisfaction, satisfaction_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            self._event_insert_params(event_type, kwargs),
-        )
-        return cursor.lastrowid or 0
+        params = self._event_insert_params(event_type, kwargs)
+        attempts = _LOCK_RETRY_ATTEMPTS
+        self._ensure_fresh_read()
+        while True:
+            try:
+                cursor = self.conn.execute(
+                    "INSERT INTO events "
+                    "(event_type, url, title, context, metadata, "
+                    " inferred_satisfaction, satisfaction_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                event_id = int(cursor.lastrowid or 0)
+                seen_changed = False
+                if event_type == "view" and event_id > 0:
+                    seen_changed = self._upsert_seen_items_from_view_event_on(
+                        self.conn,
+                        event_id=event_id,
+                        row={"url": params[1], "metadata": params[4]},
+                    )
+                self._advance_seen_items_cursor_on(self.conn, event_id)
+                self.conn.commit()
+                if seen_changed:
+                    self._invalidate_seen_state_cache()
+                return event_id
+            except sqlite3.OperationalError as exc:
+                self.conn.rollback()
+                message = str(exc).lower()
+                if "database is locked" not in message or attempts <= 1:
+                    raise
+                attempts -= 1
+                logger.warning(
+                    "SQLite event+seen write locked, retrying (%s attempts left)",
+                    attempts,
+                )
+                time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+            except Exception:
+                self.conn.rollback()
+                raise
 
     @staticmethod
     def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1774,16 +1822,35 @@ class Database:
         if not rows:
             return 0
         conn = self.open_connection()
+        seen_changed = False
+        last_event_id = 0
         try:
-            conn.executemany(
-                "INSERT INTO events "
-                "(event_type, url, title, context, metadata, "
-                " inferred_satisfaction, satisfaction_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
+            for params in rows:
+                cursor = conn.execute(
+                    "INSERT INTO events "
+                    "(event_type, url, title, context, metadata, "
+                    " inferred_satisfaction, satisfaction_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                last_event_id = int(cursor.lastrowid or last_event_id)
+                if params[0] == "view" and last_event_id > 0:
+                    seen_changed = (
+                        self._upsert_seen_items_from_view_event_on(
+                            conn,
+                            event_id=last_event_id,
+                            row={"url": params[1], "metadata": params[4]},
+                        )
+                        or seen_changed
+                    )
+            self._advance_seen_items_cursor_on(conn, last_event_id)
             conn.commit()
+            if seen_changed:
+                self._invalidate_seen_state_cache()
             return len(rows)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -6238,32 +6305,164 @@ class Database:
                 break
         return balanced[:limit]
 
-    def get_recent_viewed_bvids(self, limit: int = 2000) -> set[str]:
-        """Return recently viewed BVIDs from view events."""
-        cursor = self.conn.execute(
+    @staticmethod
+    def _advance_seen_items_cursor_on(conn: sqlite3.Connection, event_id: int) -> None:
+        if event_id <= 0:
+            return
+        conn.execute(
             """
-            SELECT url, metadata
-            FROM events
-            WHERE event_type = 'view'
-            ORDER BY id DESC
-            LIMIT ?
+            INSERT INTO seen_items_backfill_state (singleton, last_scanned_event_id)
+            VALUES (1, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                last_scanned_event_id = MAX(
+                    seen_items_backfill_state.last_scanned_event_id,
+                    excluded.last_scanned_event_id
+                )
             """,
-            (limit,),
+            (event_id,),
         )
-        viewed_bvids: set[str] = set()
-        for row in cursor.fetchall():
-            bvid = self._extract_bvid_from_view_event(dict(row))
-            if bvid:
-                viewed_bvids.add(bvid)
-        return viewed_bvids
+
+    def _invalidate_seen_state_cache(self) -> None:
+        with self._seen_state_lock:
+            self._seen_state_cache.clear()
+
+    @classmethod
+    def _upsert_seen_items_from_view_event_on(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        event_id: int,
+        row: dict[str, Any],
+        seen_at: str = "",
+    ) -> bool:
+        """Upsert every canonical identity carried by one view event."""
+        if event_id <= 0:
+            return False
+        keys, _ = cls._extract_view_event_identities(row)
+        canonical_rows: set[tuple[str, str, str]] = set()
+        for key in keys:
+            if ":" not in key:
+                continue
+            source_platform, content_id = key.split(":", 1)
+            platform = canonical_source_platform(source_platform)
+            content_id = content_id.strip()
+            if not platform or not content_id:
+                continue
+            try:
+                item_key = make_item_key(platform, content_id)
+            except ValueError:
+                continue
+            canonical_rows.add((item_key, platform, content_id))
+        for item_key, platform, content_id in canonical_rows:
+            conn.execute(
+                """
+                INSERT INTO seen_items (
+                    item_key,
+                    source_platform,
+                    content_id,
+                    first_event_id,
+                    last_event_id,
+                    first_seen_at,
+                    last_seen_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?,
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP),
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
+                )
+                ON CONFLICT(item_key) DO UPDATE SET
+                    first_event_id = MIN(
+                        seen_items.first_event_id,
+                        excluded.first_event_id
+                    ),
+                    last_event_id = MAX(
+                        seen_items.last_event_id,
+                        excluded.last_event_id
+                    ),
+                    first_seen_at = CASE
+                        WHEN excluded.first_event_id < seen_items.first_event_id
+                            THEN excluded.first_seen_at
+                        ELSE seen_items.first_seen_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN excluded.last_event_id >= seen_items.last_event_id
+                            THEN excluded.last_seen_at
+                        ELSE seen_items.last_seen_at
+                    END
+                """,
+                (
+                    item_key,
+                    platform,
+                    content_id,
+                    event_id,
+                    event_id,
+                    seen_at,
+                    seen_at,
+                ),
+            )
+        return bool(canonical_rows)
+
+    def get_seen_bvids(self) -> set[str]:
+        """Return every Bilibili identity recorded in the durable seen ledger."""
+        _, seen_bvids = self._seen_state_on(self.conn)
+        return seen_bvids
+
+    def get_seen_content_keys(self) -> set[str]:
+        """Return all source-aware content identities ever recorded as viewed."""
+        return self._seen_content_keys_on(self.conn)
+
+    def _seen_content_keys_on(self, conn: sqlite3.Connection) -> set[str]:
+        seen_keys, _ = self._seen_state_on(conn)
+        return seen_keys
+
+    def _seen_state_on(
+        self,
+        conn: sqlite3.Connection,
+    ) -> tuple[set[str], set[str]]:
+        """Materialize canonical seen keys and BVIDs from the durable ledger."""
+        latest_row = conn.execute(
+            "SELECT COALESCE(MAX(last_event_id), 0) AS latest_id FROM seen_items"
+        ).fetchone()
+        latest_id = int(latest_row["latest_id"] if latest_row else 0)
+        with self._seen_state_lock:
+            cached = self._seen_state_cache.get(latest_id)
+        if cached is not None:
+            cached_keys, cached_bvids = cached
+            return set(cached_keys), set(cached_bvids)
+
+        rows = conn.execute(
+            """
+            SELECT item_key, source_platform, content_id
+            FROM seen_items
+            ORDER BY item_key
+            """
+        ).fetchall()
+        seen_keys = {str(row["item_key"]) for row in rows if str(row["item_key"] or "")}
+        seen_bvids = {
+            str(row["content_id"])
+            for row in rows
+            if canonical_source_platform(str(row["source_platform"] or ""))
+            == _BILIBILI_SOURCE_FAMILY
+            and str(row["content_id"] or "").startswith("BV")
+        }
+        seen_keys.update(seen_bvids)
+        with self._seen_state_lock:
+            self._seen_state_cache.clear()
+            self._seen_state_cache[latest_id] = (
+                frozenset(seen_keys),
+                frozenset(seen_bvids),
+            )
+        return seen_keys, seen_bvids
+
+    def get_recent_viewed_bvids(self, limit: int = 2000) -> set[str]:
+        """Compatibility alias for the unbounded durable Bilibili seen set."""
+        del limit
+        return self.get_seen_bvids()
 
     def get_recent_viewed_content_keys(self, limit: int = 2000) -> set[str]:
-        """Return recently viewed content identities across supported sources.
-
-        Keys are source-aware (``source_platform:content_id``) and include
-        raw BVIDs for legacy Bilibili callers.
-        """
-        return self._recent_viewed_content_keys_on(self.conn, limit=limit)
+        """Compatibility alias for the unbounded durable canonical seen set."""
+        del limit
+        return self.get_seen_content_keys()
 
     def _recent_viewed_content_keys_on(
         self,
@@ -6271,9 +6470,9 @@ class Database:
         *,
         limit: int = 2000,
     ) -> set[str]:
-        """Connection-aware recent viewed identity extraction."""
-        viewed_keys, _ = self._recent_viewed_state_on(conn, limit=limit)
-        return viewed_keys
+        """Compatibility alias for connection-aware durable seen identities."""
+        del limit
+        return self._seen_content_keys_on(conn)
 
     def _recent_viewed_state_on(
         self,
@@ -6281,47 +6480,9 @@ class Database:
         *,
         limit: int = 2000,
     ) -> tuple[set[str], set[str]]:
-        """Return source-aware identities and BVIDs from one event scan."""
-        clean_limit = max(0, int(limit))
-        latest_row = conn.execute(
-            """
-            SELECT COALESCE(MAX(id), 0) AS latest_id
-            FROM events
-            WHERE event_type = 'view'
-            """
-        ).fetchone()
-        latest_id = int(latest_row["latest_id"] if latest_row else 0)
-        cache_key = (latest_id, clean_limit)
-        with self._recent_view_state_lock:
-            cached = self._recent_view_state_cache.get(cache_key)
-        if cached is not None:
-            cached_keys, cached_bvids = cached
-            return set(cached_keys), set(cached_bvids)
-
-        cursor = conn.execute(
-            """
-            SELECT url, metadata
-            FROM events
-            WHERE event_type = 'view'
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (clean_limit,),
-        )
-        viewed_keys: set[str] = set()
-        viewed_bvids: set[str] = set()
-        for row in cursor.fetchall():
-            keys, bvid = self._extract_view_event_identities(dict(row))
-            viewed_keys.update(keys)
-            if bvid:
-                viewed_bvids.add(bvid)
-        with self._recent_view_state_lock:
-            self._recent_view_state_cache.clear()
-            self._recent_view_state_cache[cache_key] = (
-                frozenset(viewed_keys),
-                frozenset(viewed_bvids),
-            )
-        return viewed_keys, viewed_bvids
+        """Compatibility alias for the connection-aware durable seen state."""
+        del limit
+        return self._seen_state_on(conn)
 
     @staticmethod
     def _explore_risk_cluster(row: dict[str, Any]) -> str:
@@ -7364,6 +7525,71 @@ class Database:
         if index_needs_rebuild:
             logger.info(
                 "Made content-cache identity index compatible with legacy blank-key writers"
+            )
+
+    def _ensure_seen_items_ledger(self) -> None:
+        """Create and incrementally backfill the all-time canonical seen ledger."""
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS seen_items (
+                item_key        TEXT PRIMARY KEY,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                first_event_id  INTEGER NOT NULL,
+                last_event_id   INTEGER NOT NULL,
+                first_seen_at   TIMESTAMP NOT NULL,
+                last_seen_at    TIMESTAMP NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_seen_items_platform_content
+                ON seen_items(source_platform, content_id);
+            CREATE TABLE IF NOT EXISTS seen_items_backfill_state (
+                singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+                last_scanned_event_id INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT OR IGNORE INTO seen_items_backfill_state (
+                singleton, last_scanned_event_id
+            ) VALUES (1, 0);
+            """
+        )
+        state = self.conn.execute(
+            """
+            SELECT last_scanned_event_id
+            FROM seen_items_backfill_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        last_scanned_event_id = int(state["last_scanned_event_id"] if state else 0)
+        rows = self.conn.execute(
+            """
+            SELECT id, url, metadata, created_at
+            FROM events
+            WHERE event_type = 'view' AND id > ?
+            ORDER BY id ASC
+            """,
+            (last_scanned_event_id,),
+        ).fetchall()
+        backfilled = 0
+        for row in rows:
+            if self._upsert_seen_items_from_view_event_on(
+                self.conn,
+                event_id=int(row["id"]),
+                row=dict(row),
+                seen_at=str(row["created_at"] or ""),
+            ):
+                backfilled += 1
+        latest = self.conn.execute(
+            "SELECT COALESCE(MAX(id), 0) AS latest_id FROM events"
+        ).fetchone()
+        self._advance_seen_items_cursor_on(
+            self.conn,
+            int(latest["latest_id"] if latest else 0),
+        )
+        if rows:
+            self._invalidate_seen_state_cache()
+        if backfilled:
+            logger.info(
+                "Backfilled %d legacy view event(s) into the durable seen-item ledger",
+                backfilled,
             )
 
     @staticmethod

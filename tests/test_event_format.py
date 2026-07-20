@@ -413,6 +413,7 @@ def test_default_signal_strength_search_is_explicit_intent() -> None:
     assert default_signal_strength_for_event("search", {}) == 0.5
     assert default_signal_strength_for_event("view", {}) == 0.35
     assert default_signal_strength_for_event("favorite", {}) == 1.0
+    assert default_signal_strength_for_event("reshuffle", {}) == 0.1
 
 
 def test_default_signal_strength_retraction_is_low() -> None:

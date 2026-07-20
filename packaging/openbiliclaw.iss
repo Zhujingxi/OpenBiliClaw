@@ -81,7 +81,11 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; Always launch the executable we just installed. This is intentionally not a
+; postinstall checkbox and is not skipped for silent upgrades: PrepareToInstall
+; stopped the old process tree, so a successful setup must hand off to the
+; freshly written {app} binary instead of leaving the old version running.
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait
 
 ; NOTE: user data (config.toml, data\, logs\) lives under
 ; %USERPROFILE%\OpenBiliClaw, the same root used by the one-line / AI installers,

@@ -1606,8 +1606,14 @@ class ContentDiscoveryEngine:
 
     def _recent_viewed_content_keys(self) -> set[str]:
         database = getattr(self, "_database", None)
-        get_recent = getattr(database, "get_recent_viewed_content_keys", None)
-        log_name = "get_recent_viewed_content_keys"
+        get_recent = getattr(database, "get_seen_content_keys", None)
+        log_name = "get_seen_content_keys"
+        if not callable(get_recent):
+            get_recent = getattr(database, "get_recent_viewed_content_keys", None)
+            log_name = "get_recent_viewed_content_keys"
+        if not callable(get_recent):
+            get_recent = getattr(database, "get_seen_bvids", None)
+            log_name = "get_seen_bvids"
         if not callable(get_recent):
             get_recent = getattr(database, "get_recent_viewed_bvids", None)
             log_name = "get_recent_viewed_bvids"

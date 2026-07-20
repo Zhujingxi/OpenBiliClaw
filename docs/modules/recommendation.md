@@ -59,13 +59,13 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | v0.3.1 SQL per-group 候选窗口 cap | ✅ | `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把候选窗口里每个 topic_group 限到 ≤3 条；600 池子 270 个 group 的长尾真正进入候选，distinct 主题数从 ~12-15 提升到 ~18-22 |
 | v0.3.44 MMR 多样化 | ✅ | `_select_diversified_batch` 引入 Maximum Marginal Relevance：`score = α*relevance - β*max_cos_to_picked`，靠 embedding 余弦把 LLM 误聚到同一 `topic_label` 伞标签下的硬核内容真正打散。每轮 unique_topics=10/10、top_topic_share≤10% |
 | v0.3.45 MMR embedding 提前 warm | ✅ | `warm_mmr_embeddings` 在 discovery 入池 + `classify_pool_backlog` 落库后立即并行 warm L2 SQLite embedding cache（cache key 文本由 `_mmr_embedding_text` 静态方法做 single source of truth），serve() 用 `asyncio.gather` 并行兜底,新增 `MMR embedding fetch: coverage=N/M elapsed=Xms` 埋点。换一批 P50 双峰（0.7s / 6-10s）收敛到稳定 <1s。v0.3.124+（lever 4）：冷启动伴侣 `prewarm_pool_mmr_embeddings()` 返回 `-1`＝没东西可暖(无 embedding service / 空池，良性)、`0`＝有候选但全嵌入失败(后端不可达)、`>0`＝已暖,供启动包装器区分良性冷启动与真故障 |
-| issue #98 换批先展示后记录 | ✅ | 桌面 Web 调用 `POST /api/recommendations/reshuffle` 时携带当前可见 ID；新批次成功后先替换网格，再以 fire-and-forget 方式把旧卡记为 `dismiss`。API/引擎会把 `excluded_bvids` 贯穿到最终过滤，并把候选读取窗口扩大为基础窗口加排除数，避免旧卡因平台保底或 top-40 截断回流。桌面 Web、移动 Web 与扩展 side panel 都把换批视为事务式替换：空响应或失败保留当前列表，移动 Web / side panel 同步给出“当前推荐已保留”提示并复读 runtime 库存；CLI 是无持久卡片状态的单次输出，不适用列表保留语义。 |
+| 换批默认硬去重 + 批次事件 | ✅ | 桌面 Web、移动 Web 与扩展 side panel 调用 `POST /api/recommendations/reshuffle` 时都会携带当前卡片 ID；桌面平台 Tab 还会排除该平台本会话已加载卡片。API/引擎把 `excluded_bvids` 贯穿到最终过滤，并把候选读取窗口扩大为基础窗口加排除数，避免旧卡因平台保底或 top-40 截断回流。成功换批只写一条 satisfaction-neutral、强度 `0.1` 的 `reshuffle` 批次事件，不再把整屏逐条伪装成 `dismiss`；误导性的“换一批时忽略当前”开关已移除。空响应或失败仍保留当前列表；CLI 是无持久卡片状态的单次输出，不适用列表保留语义。 |
 | issue #98 CPU 排序脱离事件循环 | ✅ | `_select_diversified_batch_async()` 与 `_build_supergroup_canonical_map_async()` 通过 `asyncio.to_thread()` 执行 MMR/多样性选择和 supergroup 两两 union-find；同步纯函数仍是唯一算法实现，异步包装保持完全相同的确定性输出。MMR 日志拆分 `selector_worker_ms` 与 `event_loop_resume_delay_ms`，不再把 worker 已完成后主协程迟迟未恢复的停顿误算成算法 CPU 时间。线程主要用于保持 asyncio 响应，不承诺绕过 Python GIL 提升吞吐。 |
-| issue #98 SQLite 换批热路径 | ✅ | `PoolServeSnapshot` 在独立 serve DB worker 的短生命周期连接、单个读事务内统一读取 readiness、候选窗口、平台补位、最近已看和 curator 信号；最近浏览身份每个快照只解析一次，并复用按最新 view event id 自动失效的缓存。API 不再前置重复扫描库存。推荐历史写入与 `pool_status='shown'` 在同一独立短事务中原子提交，和后台 maintenance worker/连接彻底分离；读取、维护或精确状态收敛期间 `/api/ping` / runtime stream 仍可响应。`recommendation_request_timing` 记录 profile/snapshot/embedding/selector/resume/persist/total 阶段，详细候选与 MMR 摘要只在 DEBUG 输出；`scripts/benchmark_reshuffle_latency.py` 使用独立预热的 health 连接并发验证尾延迟，避免 HTTP/1 客户端连接池串行化污染结果。 |
+| issue #98 SQLite 换批热路径 | ✅ | `PoolServeSnapshot` 在独立 serve DB worker 的短生命周期连接、单个读事务内统一读取 readiness、候选窗口、平台补位、`seen_items` 和 curator 信号；已看身份来自持久化 canonical 账本，而不是重复解析最近事件窗口。API 不再前置重复扫描库存。推荐历史写入与 `pool_status='shown'` 在同一独立短事务中原子提交，和后台 maintenance worker/连接彻底分离；读取、维护或精确状态收敛期间 `/api/ping` / runtime stream 仍可响应。`recommendation_request_timing` 记录 profile/snapshot/embedding/selector/resume/persist/total 阶段，详细候选与 MMR 摘要只在 DEBUG 输出；`scripts/benchmark_reshuffle_latency.py` 使用独立预热的 health 连接并发验证尾延迟，避免 HTTP/1 客户端连接池串行化污染结果。 |
 | v0.3.57 pool gate on precomputed copy | ✅ | `get_pool_candidates` / `count_pool_candidates` SQL 加 `AND COALESCE(pool_expression, '') != '' AND COALESCE(pool_topic_label, '') != ''` —— 未 precompute 的 row 对 serve() 不可见,消除"discovery 完成→precompute 完成"60–90s 窗口内 popup 显示占位模板的旧 bug。`engine.py:320` 的 `_fallback_expression` 路径变成 race-window 安全网,触发即 `logger.warning("Pool gate leak: ...")` |
 | v0.3.66 pool gate on classification | ✅ | `get_pool_candidates` / `count_pool_candidates` 现在同样要求 `style_key` 与 `topic_group` 非空；`get_pool_candidates_needing_copy` 也只挑已分类但缺文案的候选，避免未分类跨源内容先生成 copy 后绕过 serve 分类口径 |
 | v0.3.91 servable pool count | ✅ | `count_pool_candidates()` 在读取前刷新 SQLite/WAL snapshot，并默认应用与 `get_pool_candidates()` 相同的 `max_per_topic_group=3` 候选窗口；新增 `count_pool_readiness()` 拆分 `available/raw/pending`；`serve()` 零候选 warning 会输出 `raw/servable/pending`，用于定位“池子有素材但暂不可换”的真实原因。 |
-| v0.3.102 空池热路径短路 | ✅ | 真实引擎的 `/api/recommendations/reshuffle` 与 `/api/recommendations/append` 不再做重复 API 库存预查，由 `PoolServeSnapshot` 一次判定；可用池为 0、或候选被 `excluded_bvids` / 最近已看过滤到 0 后立即返回空结果，跳过 curator、MMR embedding 和推荐历史写入，并按 30 秒 debounce 触发补货。旧 test double / adapter 没有 `*_with_result()` 时保留 API 前置短路兼容。 |
+| v0.3.102 空池热路径短路 | ✅ | 真实引擎的 `/api/recommendations/reshuffle` 与 `/api/recommendations/append` 不再做重复 API 库存预查，由 `PoolServeSnapshot` 一次判定；可用池为 0、或候选被 `excluded_bvids` / `seen_items` 过滤到 0 后立即返回空结果，跳过 curator、MMR embedding 和推荐历史写入，并按 30 秒 debounce 触发补货。旧 test double / adapter 没有 `*_with_result()` 时保留 API 前置短路兼容。 |
 | durable shown commit callback | ✅ | `serve_with_result()` 只在独立连接已原子提交 recommendation + shown 后返回 `ServeResult(items, pool_counts_after, timings)`，随后 detached 通知 `set_pool_inventory_commit_callback()` 注入的 sync/async hook。API 先用结果中的扣减库存更新 refill gate / 广播，不在响应关键路径重新扫描；再后台读取精确 canonical snapshot 收敛 topic-window 补位等近似差异。写失败不触发 callback，callback 自身失败只记录日志、不取消已完成提交。 |
 | v0.3.x PC Web 空推荐展示 | ✅ | 桌面 Web `/web` 不再携带内置演示推荐作为初始 `state.videos`；后端 `/api/recommendations` 返回空数组时必须覆盖并清空当前卡片，和插件 side panel 的空列表语义保持一致。 |
 | v0.3.x available-target pool refill | ✅ | `count_pool_available_candidates_by_source()` 按 `count_pool_candidates()` 同口径统计各平台族的真实可换数量；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 raw material（含 `discovery_candidates` 待评估素材）用于 raw ceiling。补池不再因为 raw/linkable B 站库存达到 300 而停在前端 246 可换，raw trim 也不会在可换未达标时把库存压回 `pool_target_count`。 |
@@ -74,7 +74,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | X append 文字形态保持 | ✅ | `append_recommendations()` 从 discovery pool row 还原候选时保留 `content_type/body_text`，避免 X tweet 在续页链路退回默认 `video` 并丢正文；真实浏览器 E2E 覆盖 PC Web、移动 Web 与扩展 side panel |
 | Canonical 保存身份 | ✅ | 推荐、append 与 delight 输出保留同一个 `item_key/source_platform/content_id/content_url/content_type`；插件、桌面和移动保存按钮把这五项交给平台中立 `/api/saved/*`。本地保存失败才回滚按钮；平台同步失败保留本地已保存态并展示逐项状态。 |
 | v0.3.91 新兴趣放大保护 | ✅ | 新确认兴趣会生成 amplification key，`PoolCurator` 用最近 24h 推荐历史计算滚动占比，超过 25% 的方向会被降权；最终批量选择还会硬限制同一新方向最多 `max(1, floor(limit * 0.25))` 条，避免刚确认的兴趣短期刷屏 |
-| v0.3.91 推荐读取索引 | ✅ | `recommendations(created_at, id)`、`recommendations(bvid)`、`events(event_type, id)` 与 `content_cache(content_id)` 在数据库初始化时自动创建索引；推荐列表 / activity feed、候选池 `NOT EXISTS` 历史排除和最近已看读取不再退化为全表扫描。 |
+| v0.3.91 推荐读取索引 | ✅ | `recommendations(created_at, id)`、`recommendations(bvid)`、`events(event_type, id)`、`seen_items(source_platform, content_id)` 与 `content_cache(content_id)` 在数据库初始化时自动创建索引；推荐列表 / activity feed、候选池 `NOT EXISTS` 历史排除和已看账本读取不再退化为事件全表扫描。 |
 | v0.3.x 统一 admission 分数防线 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` / `/api/recommendations` 历史读取都会过滤低于 `[discovery].admission_min_score` 的内容；旧低分推荐会标记为 `suppressed_low_score`，防止 observed / 插件来源脏数据继续展示。 |
 | v0.3.74 recommendation JSON 容错统一 | ✅ | `RecommendationEngine` 的内容分类、单条表达和批量表达解析都改用 `llm.json_utils`。MiMo / OpenAI-compatible provider 返回 object wrapper、fenced JSON、JSONL、schema echo、pretty-printed singleton object 或 malformed `{ [ ... ] }` 时会优先提取满足字段 predicate 的真实结果；单候选推荐词请求不再因模型返回合法多行 root object 而误判 `ExpressionBatchMalformed`。Delight 预计算当前复用 Evo 结果，不再走独立 batch scorer |
 | v0.3.81 批量结果按内容 ID 绑定 | ✅ | 批量推荐文案和源无关内容分类的 prompt 都带 `bvid/content_id`，解析时优先按返回 ID 写回。模型乱序、漏项或只返回部分条目时不再按数组下标把原因写到错误视频；无 ID 且数量不完整的文案批次会降级单条生成，分类批次会标记失败避免错写 |
@@ -117,7 +117,7 @@ items = await engine.generate_recommendations(
 - 若传入 `discovered`，优先对该批内容排序
 - 若未传入 `discovered`，从 `content_cache` 中读取未推荐内容
 - 从 `content_cache` 读取时，也会先做一轮来源均衡，避免前排高分缓存把候选窗口压成单一来源
-- 从 `content_cache` / discovery pool 取候选时会用最近 `view` 事件里的 `source_platform:content_id` 过滤已看内容；B 站保留 raw BVID 兼容，其他来源不会再因为没有 BVID 而漏过滤
+- 从 `content_cache` / discovery pool 取候选时会用持久化 `seen_items` 里的 `source_platform:content_id` 过滤所有已知已看内容；B 站保留 raw BVID 兼容，其他来源不会再因为没有 BVID 而漏过滤，且不受旧版 2000 条事件窗口限制
 - 从 discovery pool 进入排序前，会用 `profile.preferences.disliked_topics` 做 serve-time 兜底硬过滤，防止已知避雷主题在异步清池尚未完成时继续展示
 - 排序主键先看 `candidate_tier`，再看 `relevance_score`、`last_scored_at/discovered_at`、`view_count`
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
@@ -157,6 +157,7 @@ zhihu_only = await engine.reshuffle_recommendations(
 
 - 直接从 `content_cache` discovery pool 里挑选 `fresh` 候选，不等待新一轮 discover 完成
 - `excluded_bvids` 是本次换批前仍可见的内容 ID；HTTP 入口接受可选 JSON `{"excluded_bvids": [...]}`，缺省或无 body 时等价于空列表，并会去空白、去重后传入引擎
+- 桌面 Web、移动 Web 和扩展 side panel 默认都会提交当前卡片作为排除集；这是换批本身的硬去重语义，不再由用户开关控制
 - `source_platform` 是可选 additive 平台作用域，HTTP 入口同名字段接受别名（`xhs` → `xiaohongshu`）并在 Pydantic 边界 canonical 化；未知平台返回 422，绝不静默回退到"全部"或 B 站。省略或空字符串保持旧行为，旧客户端不受影响
 - 平台作用域只缩小候选集合：跳过跨平台保底补位，其余排序、多样性、文案读取、推荐历史写入与 shown 消费全部与"全部"路径共用同一实现
 - 候选读取窗口会额外加上排除项数量，平台保底补入候选后还会执行一次最终排除，确保旧卡不会被补回新批次
@@ -172,10 +173,11 @@ zhihu_only = await engine.reshuffle_recommendations(
 - 如果候选缺少 `topic_key`，才退回 `tags` 和标题/来源兜底做软限流
 - 快路径现在不会现场调用 LLM，也不会再给整批卡片写同一个 fallback topic；只消费 pool 里已经预生成好的 `expression/topic_label`
 - 真实引擎路径不再由 API 单独预查库存；`PoolServeSnapshot` 在同一读事务内判断空池并返回 `items=[]`，随后按 30 秒 debounce 触发后台补货。没有 `*_with_result()` 的兼容 adapter 仍使用旧 API 前置短路
-- 若引擎内部发现可用池为 0，或候选被最近已看过滤到 0，会直接返回空数组，跳过 curator scoring、MMR embedding 和推荐历史写入
+- 若引擎内部发现可用池为 0，或候选被持久化已看账本过滤到 0，会直接返回空数组，跳过 curator scoring、MMR embedding 和推荐历史写入
 - 候选读取必须满足统一 admission 分数门：`content_cache.relevance_score >= [discovery].admission_min_score`。API 读取历史推荐时也会过滤 `recommendations.confidence` 低于同一阈值的旧行
 - 如果某条候选暂时还没预生成好推荐文案，这两个字段会保持为空，交给前端直接隐藏
 - 命中候选后会在 serve DB worker 的同一独立短事务中写入 `recommendations` 并把对应池子项标为 `shown`；只有原子 commit 成功后才调 inventory callback
+- API 仅在返回非空新批次时记录一条 `reshuffle` 事件，metadata 保留有界的排除 ID、返回 ID、批次大小与平台作用域；它是中性的批次导航动作，不触发逐内容 `dismiss` 或批量画像负反馈
 - API 先用 `ServeResult.pool_counts_after` 发布无需扫描的扣减库存，再在响应关键路径外读取精确 runtime pool 字段并发布收敛快照；其它客户端只同步库存提示，不得因此替换当前推荐列表
 - runtime 会把 discovery pool 持续补到 `pool_target_count` 个“真实可换”候选，默认目标现在是 `300`（允许配置到 `600`）；达到目标后停止 discover，等可换数掉回目标以下再补货。raw 素材库存不是 `pool_target_count` 的硬上限：当 topic window、预生成、分类或 XHS token 让 raw 与 available 之间存在折损时，raw 可增长到 `max(pool_target_count * 2, pool_target_count + 120)`，再由 raw ceiling trim 控制成本。补货和 trim 会按 `[scheduler.pool_source_shares]` 做平台级配比，默认保存 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi = 5 / 1 / 1 / 1 / 1 / 1 / 1 / 1，但除 B 站外默认关闭；显式启用某个平台后才会按保存 share 获得配额。少量补货时 discovery 会收缩 LLM 评估窗口，只评估可被当前平台可换缺口和 raw headroom 吸收的过采样候选
 - runtime 补货在调用 discovery 前会构建候选池分布 snapshot，把当前来源缺口和饱和方向作为可选上下文传给兼容的 discovery strategy
@@ -198,7 +200,7 @@ items = await engine.append_recommendations(
 - 用于 popup 和移动 Web 推荐流的续页，不会清空当前列表
 - 会先排除前端已经展示过的 `excluded_bvids`
 - 若 API 看到 `pool_available_count=0`，会立即返回 `items=[]` 并按 30 秒 debounce 触发一次后台补货；不会读取画像或进入推荐引擎
-- 若 `excluded_bvids` 或最近已看过滤把候选清空，引擎直接返回空数组，不执行 curator、MMR embedding 或推荐历史写入
+- 若 `excluded_bvids` 或持久化已看账本把候选清空，引擎直接返回空数组，不执行 curator、MMR embedding 或推荐历史写入
 - 仍然走 discovery pool 快路径，不等待新一轮 discover 完成
 - 从 pool row 还原 `DiscoveredContent` 时会保留 `item_key/content_type/body_text/content_id/content_url/source_platform`；X tweet / thread 在 append 续页里也必须继续按文字卡渲染
 - 同样复用 `topic_key + style_key + source` 的多样性选择逻辑，并只读取 pool 内已预生成好的推荐文案

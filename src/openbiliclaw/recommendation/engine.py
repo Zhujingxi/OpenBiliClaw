@@ -539,10 +539,8 @@ class RecommendationEngine:
             after_exclude_count = len(candidates)
             candidates = self._exclude_disliked_topic_candidates(candidates, profile)
             after_disliked_count = len(candidates)
-            if snapshot.recent_viewed_bvids:
-                candidates = [
-                    item for item in candidates if item.bvid not in snapshot.recent_viewed_bvids
-                ]
+            if snapshot.seen_bvids:
+                candidates = [item for item in candidates if item.bvid not in snapshot.seen_bvids]
             after_viewed_count = len(candidates)
             curator_snapshot = (
                 list(snapshot.curator_signals),
@@ -3536,7 +3534,10 @@ class RecommendationEngine:
         self,
         candidates: list[DiscoveredContent],
     ) -> list[DiscoveredContent]:
-        viewed_bvids = self._database.get_recent_viewed_bvids()
+        get_seen = getattr(self._database, "get_seen_bvids", None)
+        if not callable(get_seen):
+            get_seen = self._database.get_recent_viewed_bvids
+        viewed_bvids = get_seen()
         if not viewed_bvids:
             return candidates
         return [item for item in candidates if item.bvid not in viewed_bvids]

@@ -1364,6 +1364,31 @@ class _FakeXClient:
         return self._bookmarks[:limit]
 
 
+class _FakeXHealth:
+    def __init__(self, *, state: str = "ok", ready: bool = True) -> None:
+        self.state = state
+        self.ready = ready
+        self.successes: list[str] = []
+        self.errors: list[tuple[BaseException, str]] = []
+
+    def is_ready(self) -> bool:
+        return self.ready
+
+    def get(self) -> dict[str, Any]:
+        return {"state": self.state}
+
+    def record_success(self, *, strategy: str = "") -> None:
+        self.successes.append(strategy)
+        self.state = "ok"
+        self.ready = True
+
+    def record_error(self, exc: BaseException, *, strategy: str = "") -> str:
+        self.errors.append((exc, strategy))
+        self.state = "rate_limited"
+        self.ready = False
+        return self.state
+
+
 def _tweet(tid: str, *, text: str = "hello world", screen: str = "alice") -> dict[str, Any]:
     return {"id": tid, "text": text, "author": {"screenName": screen, "name": screen}}
 
@@ -1527,6 +1552,111 @@ async def test_x_fetch_error_records_error_and_preserves_bilibili(caplog) -> Non
     assert "x boom" in str(memory.state["last_sync_error"])
     assert memory.state["last_sync_error_kind"] == "error"
     assert "x likes" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_x_account_sync_honors_existing_source_cooldown(tmp_path: Path) -> None:
+    """A source-level 429 cooldown must gate likes/bookmarks too, not just discovery."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XRateLimitError
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
+
+    memory = _FakeMemoryManager()
+    x_client = _FakeXClient(likes=[_tweet("100")], bookmarks=[_tweet("200")])
+    db = Database(tmp_path / "x-health.db")
+    db.initialize()
+    health = XSourceHealthStore(db)
+    health.record_error(XRateLimitError("429 Too Many Requests"), strategy="search")
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+        x_health_store=health,
+    )
+
+    result = await service.sync_now()
+
+    assert x_client.likes_calls == 0
+    assert x_client.bookmarks_calls == 0
+    assert memory.state["last_sync_error_kind"] == "x_rate_limited"
+    assert "X 账号喜好同步因来源限流冷却而跳过" in result["errors"]
+    status = service.get_runtime_status()
+    assert status["last_account_sync_severity"] == "warning"
+    assert "X 暂时限流" in str(status["last_account_sync_message"])
+    assert "B 站等其他来源不受影响" in str(status["last_account_sync_message"])
+    assert "无需操作" in str(status["last_account_sync_message"])
+    assert "账号同步出错" not in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+async def test_x_live_rate_limit_opens_shared_cooldown_and_skips_second_request() -> None:
+    """The first 429 in a pair records health and prevents an immediate second hit."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XRateLimitError
+
+    memory = _FakeMemoryManager()
+    x_client = _FakeXClient(
+        likes_exc=XRateLimitError("429 Too Many Requests"),
+        bookmarks=[_tweet("200")],
+    )
+    health = _FakeXHealth()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+        x_health_store=health,
+    )
+
+    await service.sync_now()
+
+    assert x_client.likes_calls == 1
+    assert x_client.bookmarks_calls == 0
+    assert [(strategy, type(exc).__name__) for exc, strategy in health.errors] == [
+        ("likes", "XRateLimitError")
+    ]
+    assert memory.state["last_sync_error_kind"] == "x_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_x_success_updates_shared_health_for_both_account_paths() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    health = _FakeXHealth()
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=_FakeXClient(likes=[], bookmarks=[]),
+        x_health_store=health,
+    )
+
+    await service.sync_now()
+
+    assert health.successes == ["likes", "bookmarks"]
+
+
+@pytest.mark.asyncio
+async def test_non_x_error_prevents_misleading_x_only_status_copy() -> None:
+    """Do not claim other sources were unaffected when Bilibili also failed."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XAuthError
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_exc=RuntimeError("bilibili boom")),
+        soul_engine=_FakeSoulEngine(),
+        x_client=_FakeXClient(likes_exc=XAuthError("401 Unauthorized")),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_error_kind"] == "error"
+    assert "其他来源不受影响" not in str(status["last_account_sync_message"])
 
 
 @pytest.mark.asyncio
@@ -1823,6 +1953,11 @@ def test_user_facing_sync_message_actionable_for_llm_unavailability() -> None:
     )
     assert "自动重试" in rate_limited
 
+    x_rate_limited = AccountSyncService._user_facing_sync_message("x_rate_limited", "X 429")
+    assert "X 暂时限流" in x_rate_limited
+    assert "其他来源不受影响" in x_rate_limited
+    assert "无需操作" in x_rate_limited
+
 
 def test_runtime_status_severity_for_llm_kinds() -> None:
     """rate_limited reads as a warning (backoff), config faults as errors."""
@@ -1837,6 +1972,9 @@ def test_runtime_status_severity_for_llm_kinds() -> None:
 
     for kind, expected in (
         ("rate_limited", "warning"),
+        ("x_rate_limited", "warning"),
+        ("x_auth_expired", "warning"),
+        ("x_blocked", "error"),
         ("no_provider", "error"),
         ("model_not_found", "error"),
     ):

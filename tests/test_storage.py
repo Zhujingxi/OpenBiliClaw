@@ -1,5 +1,6 @@
 """Tests for the Storage database module."""
 
+import json
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta
@@ -2853,7 +2854,7 @@ class TestDatabase:
 
             db.close()
 
-    def test_pool_serve_snapshot_parses_view_history_once(self) -> None:
+    def test_pool_serve_snapshot_materializes_seen_ledger_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
             db.initialize()
@@ -2864,20 +2865,18 @@ class TestDatabase:
                 url="https://www.bilibili.com/video/BVSEEN",
                 metadata={"bvid": "BVSEEN"},
             )
-            original = Database._recent_viewed_state_on
+            original = Database._seen_state_on
             calls = 0
 
             def counted(
                 database: Database,
                 conn: sqlite3.Connection,
-                *,
-                limit: int = 2000,
             ) -> tuple[set[str], set[str]]:
                 nonlocal calls
                 calls += 1
-                return original(database, conn, limit=limit)
+                return original(database, conn)
 
-            with patch.object(Database, "_recent_viewed_state_on", counted):
+            with patch.object(Database, "_seen_state_on", counted):
                 snapshot = db.load_pool_serve_snapshot(limit=10)
 
             assert snapshot.readiness["available"] == 1
@@ -2885,7 +2884,7 @@ class TestDatabase:
             assert calls == 1
             db.close()
 
-    def test_pool_serve_snapshot_reuses_and_invalidates_view_history_cache(self) -> None:
+    def test_pool_serve_snapshot_reuses_and_invalidates_seen_ledger_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
             db.initialize()
@@ -2896,34 +2895,24 @@ class TestDatabase:
                 url="https://www.bilibili.com/video/BVSEEN1",
                 metadata={"bvid": "BVSEEN1"},
             )
-            original = Database._extract_view_event_identities.__func__
-            calls = 0
+            first = db.load_pool_serve_snapshot(limit=10)
+            assert first.seen_bvids == frozenset({"BVSEEN1"})
+            cached = dict(db._seen_state_cache)
 
-            def counted(
-                cls: type[Database],
-                row: dict[str, Any],
-            ) -> tuple[set[str], str]:
-                nonlocal calls
-                calls += 1
-                return original(cls, row)
+            second = db.load_pool_serve_snapshot(limit=10)
+            assert second.seen_bvids == first.seen_bvids
+            assert db._seen_state_cache == cached
 
-            with patch.object(
-                Database,
-                "_extract_view_event_identities",
-                classmethod(counted),
-            ):
-                db.load_pool_serve_snapshot(limit=10)
-                assert calls == 1
-                db.load_pool_serve_snapshot(limit=10)
-                assert calls == 1
-                db.insert_event(
-                    "view",
-                    title="看过二",
-                    url="https://www.bilibili.com/video/BVSEEN2",
-                    metadata={"bvid": "BVSEEN2"},
-                )
-                db.load_pool_serve_snapshot(limit=10)
-                assert calls == 3
+            db.insert_event(
+                "view",
+                title="看过二",
+                url="https://www.bilibili.com/video/BVSEEN2",
+                metadata={"bvid": "BVSEEN2"},
+            )
+            assert db._seen_state_cache == {}
+
+            refreshed = db.load_pool_serve_snapshot(limit=10)
+            assert refreshed.seen_bvids == frozenset({"BVSEEN1", "BVSEEN2"})
 
             db.close()
 
@@ -3197,6 +3186,76 @@ class TestDatabase:
             assert "BV1SEEN" in keys
             assert "zhihu:answer:42" in keys
 
+            db.close()
+
+    def test_seen_items_backfill_is_unbounded_and_excludes_oldest_legacy_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.db"
+            db = Database(path)
+            db.initialize()
+            db.conn.execute("DROP TABLE seen_items")
+            db.conn.execute("DROP TABLE seen_items_backfill_state")
+            db.conn.executemany(
+                """
+                INSERT INTO events (event_type, url, metadata)
+                VALUES ('view', ?, ?)
+                """,
+                [
+                    (
+                        f"https://www.bilibili.com/video/BVOLD{index:05d}",
+                        json.dumps({"bvid": f"BVOLD{index:05d}"}),
+                    )
+                    for index in range(2005)
+                ],
+            )
+            db.conn.commit()
+            db.close()
+
+            migrated = Database(path)
+            migrated.initialize()
+            _seed_visible(
+                migrated,
+                "BVOLD00000",
+                title="超过旧 2000 条窗口的已看内容",
+                source="search",
+                relevance_score=0.99,
+            )
+            _seed_visible(
+                migrated,
+                "BVFRESH",
+                title="没看过的新内容",
+                source="search",
+                relevance_score=0.90,
+            )
+
+            assert len(migrated.get_seen_bvids()) == 2005
+            assert [row["bvid"] for row in migrated.get_pool_candidates(limit=10)] == ["BVFRESH"]
+            migrated.close()
+
+    def test_event_batch_updates_seen_items_in_the_same_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            inserted = db.insert_events_batch(
+                [
+                    {
+                        "event_type": "view",
+                        "url": "https://www.youtube.com/watch?v=batch-seen",
+                        "metadata": {
+                            "source_platform": "youtube",
+                            "video_id": "batch-seen",
+                        },
+                    },
+                    {
+                        "event_type": "search",
+                        "metadata": {"query": "not a seen item"},
+                    },
+                ]
+            )
+
+            assert inserted == 2
+            assert db.get_seen_content_keys() == {"youtube:batch-seen"}
             db.close()
 
     def test_get_pool_candidates_skips_recently_viewed_non_bilibili_content(self) -> None:

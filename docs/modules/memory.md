@@ -96,7 +96,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计；正式事件类型为 `view/dialogue/pause/seek/search/favorite/like/coin/comment/click/scroll/hover/snapshot/feedback/follow/share`；入库前会为缺失 `metadata.signal_strength` 的事件补统一证据强度，已有平台自定义值不覆盖；v0.3.x 每行带 `inferred_satisfaction` + `satisfaction_reason`（写入时由 `classify_event_satisfaction` 决定），`query_events(satisfaction_modes=...)` 支持按 positive/negative/neutral/unknown 过滤，`unknown` 同时匹配 pre-migration 的 NULL 行；`query_events_since(after_event_id, event_types)` 提供按 `id ASC` 的游标增量读取，供反馈批学习这类严格 cursor 消费方避免 newest-first limit 跳过旧事件 |
+| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计；正式事件类型为 `view/dialogue/pause/seek/search/favorite/like/coin/comment/click/scroll/hover/snapshot/reshuffle/feedback/follow/share`；入库前会为缺失 `metadata.signal_strength` 的事件补统一证据强度，已有平台自定义值不覆盖。`reshuffle` 是强度 `0.1`、satisfaction-neutral 的单批导航事件，不等价于其中每条内容的 `dismiss`。v0.3.x 每行带 `inferred_satisfaction` + `satisfaction_reason`（写入时由 `classify_event_satisfaction` 决定），`query_events(satisfaction_modes=...)` 支持按 positive/negative/neutral/unknown 过滤，`unknown` 同时匹配 pre-migration 的 NULL 行；`query_events_since(after_event_id, event_types)` 提供按 `id ASC` 的游标增量读取，供反馈批学习这类严格 cursor 消费方避免 newest-first limit 跳过旧事件 |
 | 4.2 偏好层 | ✅ | LLM structured extraction + 合并 + 衰减 |
 | 4.3 灵魂层 | ✅ | 初始画像生成 + `profile` CLI 展示 |
 | 4.4 觉察层 + 洞察层 | ✅ | 觉察笔记、洞察假设、反馈更新 |
@@ -111,7 +111,7 @@
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
 | JSON 状态原子更新 | ✅ | `memory/json_state.py` 提供带进程内锁、跨进程文件锁和 `os.replace` 的 `update_json_state()`；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈 |
 
-> `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。批量版本把整批初始化事件交给 storage 的单事务接口，并通过 `asyncio.to_thread` 避免 SQLite 阻塞 API loop。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
+> `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。storage 会在同一事务内把 `view` 的 canonical identity upsert 到 `seen_items`，这是推荐去重索引，不是画像推断。批量版本把整批初始化事件交给 storage 的单事务接口，并通过 `asyncio.to_thread` 避免 SQLite 阻塞 API loop。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
 
 ## 公开 API
 
@@ -129,7 +129,7 @@ memory.initialize()
 
 # 写入事件
 await memory.propagate_event({
-    "event_type": "view",           # view|dialogue|pause|seek|search|favorite|like|coin|comment|click|scroll|hover|snapshot|feedback|follow|share
+    "event_type": "view",           # view|dialogue|pause|seek|search|favorite|like|coin|comment|click|scroll|hover|snapshot|reshuffle|feedback|follow|share
     "url": "https://www.bilibili.com/video/BV1xx",
     "title": "视频标题",
     "metadata": {"bvid": "BV1xx"},  # 缺失 signal_strength 时会按事件类型补默认值

@@ -176,7 +176,7 @@ async def test_propagate_event_accepts_extension_behavior_types(tmp_path: Path) 
     memory = MemoryManager(tmp_path)
     memory.initialize()
 
-    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin"]:
+    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin", "reshuffle"]:
         await memory.propagate_event(
             {
                 "event_type": event_type,
@@ -189,7 +189,7 @@ async def test_propagate_event_accepts_extension_behavior_types(tmp_path: Path) 
     events = memory.query_events(limit=20)
     persisted_types = {event["event_type"] for event in events}
 
-    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin"]:
+    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin", "reshuffle"]:
         assert event_type in persisted_types
 
 

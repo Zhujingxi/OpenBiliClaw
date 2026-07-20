@@ -5793,6 +5793,35 @@ def create_app(
             )
             counts_after = {}
             timings = None
+        if items:
+            propagate_event = getattr(ctx.memory_manager, "propagate_event", None)
+            if callable(propagate_event):
+                from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
+
+                returned_item_ids = [
+                    str(getattr(getattr(item, "content", None), "bvid", "") or "").strip()
+                    for item in items
+                ]
+                returned_item_ids = [item_id for item_id in returned_item_ids if item_id]
+                try:
+                    await propagate_event(
+                        build_event(
+                            event_type="reshuffle",
+                            source_platform=SOURCE_WEB,
+                            title="推荐列表",
+                            context="你在推荐页换了一批内容。",
+                            metadata={
+                                "recommendation_source_platform": source_platform or "all",
+                                "excluded_item_ids": excluded_bvids[:100],
+                                "returned_item_ids": returned_item_ids[:100],
+                                "batch_size": len(items),
+                            },
+                        )
+                    )
+                except Exception:
+                    # A behavioral breadcrumb must never turn a successful
+                    # recommendation response into an HTTP failure.
+                    logger.warning("Failed to persist reshuffle batch event", exc_info=True)
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(

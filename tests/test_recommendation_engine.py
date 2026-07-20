@@ -4685,7 +4685,7 @@ def _snapshot_with(rows: list[dict[str, Any]]) -> Any:
         candidate_rows=tuple(rows),
         loaded_count=len(rows),
         platform_topups=(),
-        recent_viewed_bvids=frozenset(),
+        seen_bvids=frozenset(),
         curator_signals=(),
         feedback_signals=(),
     )

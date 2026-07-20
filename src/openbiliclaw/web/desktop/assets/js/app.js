@@ -595,8 +595,6 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
-    const DISMISS_ON_RESHUFFLE_KEY = "openbiliclaw.dismissOnReshuffle";
-    state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
@@ -786,7 +784,6 @@
       applyThemeHue(state.themeHue);
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
-      renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
     }
@@ -798,16 +795,14 @@
       storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
       storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
-      storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
-      renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
-      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -2921,22 +2916,6 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (slider) slider.value = hue;
       const hueInput = $("#hueValueInput");
       if (hueInput) hueInput.value = hue;
-    }
-
-    function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
-      state.dismissOnReshuffle = Boolean(enabled);
-      if (persist) storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
-      renderReshuffleToggle();
-      if (toast) showToast(state.dismissOnReshuffle ? "换一批前会忽略当前显示的推荐" : "换一批不会自动忽略当前推荐");
-    }
-
-    function renderReshuffleToggle() {
-      const toggles = [$("#dismissOnReshuffleToggle"), $("#dismissOnReshuffleSetting")];
-      toggles.forEach((toggle) => {
-        if (toggle && toggle.checked !== state.dismissOnReshuffle) toggle.checked = state.dismissOnReshuffle;
-      });
-      const settingText = $("#dismissOnReshuffleSettingText");
-      if (settingText) settingText.textContent = state.dismissOnReshuffle ? "开启" : "关闭";
     }
 
     function setAutoLoadOnScroll(enabled, { persist = true, toast = false } = {}) {
@@ -5744,28 +5723,18 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
-    function dismissVisibleRecommendationsBeforeReshuffle(visibleItems) {
-      const submissions = visibleItems.map((item) => submitFeedback(item, "dismiss"));
-      void Promise.allSettled(submissions).then((results) => {
-        const failed = results.filter((result) => result.status === "rejected").length;
-        if (failed) showToast(`${failed} 张忽略提交失败（不影响当前列表）`);
-      });
-    }
-
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
-      const dismissToggle = $("#dismissOnReshuffleToggle");
       // 请求发出前捕获当时选中的平台：用户在请求期间切 Tab 不能把响应写进错误批次。
       const requestPlatform = activePlatformSlug();
-      // "换一批时忽略当前" 只提交本次请求对应平台、当时实际可见的卡片；
-      // 平台定向的排除集则覆盖该平台本会话已加载的全部内容（不止可见的那些）。
+      // 当前可见卡片始终是本次换一批的排除集；平台定向时覆盖该平台
+      // 本会话已加载的全部内容（不止可见的那些）。
       const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
       const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
       const scopedForExclusion = requestPlatform
         ? state.videos.filter((item) => item?.id != null && recommendationPlatformSlug(item) === requestPlatform)
         : visibleForExclusion;
       if (reshuffleButton) reshuffleButton.disabled = true;
-      if (dismissToggle) dismissToggle.disabled = true;
       try {
         const excludedBvids = scopedForExclusion.map((item) => item.bvid).filter(Boolean);
         const requestBody = { excluded_bvids: excludedBvids };
@@ -5783,9 +5752,6 @@ ${cardFeedbackBarHtml()}`;
         if (fresh.length) {
           state.videos = requestPlatform ? replacePlatformCards(state.videos, requestPlatform, fresh) : fresh;
           renderAll();
-          if (state.dismissOnReshuffle && visibleForExclusion.length) {
-            dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
-          }
           showToast("已换一批推荐");
         } else {
           showToast("暂时没有更多新推荐了");
@@ -5793,7 +5759,6 @@ ${cardFeedbackBarHtml()}`;
       } finally {
         schedulePlatformAvailabilityRefresh();
         if (reshuffleButton) reshuffleButton.disabled = false;
-        if (dismissToggle) dismissToggle.disabled = false;
       }
     }
 
@@ -5991,11 +5956,12 @@ ${cardFeedbackBarHtml()}`;
       if (!el) return;
       const kind = String(runtime?.last_account_sync_error_kind || "");
       const error = String(runtime?.last_account_sync_error || "");
+      const severity = String(runtime?.last_account_sync_severity || "");
       // Healthy installs (no error) show nothing — zero visual change.
       if (!error && !kind) {
         el.hidden = true;
         el.textContent = "";
-        el.classList.remove("is-auth-expired", "is-error");
+        el.classList.remove("is-auth-expired", "is-warning", "is-error");
         return;
       }
       el.hidden = false;
@@ -6003,12 +5969,13 @@ ${cardFeedbackBarHtml()}`;
       // the literals here are only a fallback for an older backend.
       const message = String(runtime?.last_account_sync_message || "");
       if (kind === "auth_expired") {
-        el.classList.add("is-auth-expired");
+        el.classList.add("is-auth-expired", "is-warning");
         el.classList.remove("is-error");
         el.textContent = message || "B 站登录已失效，账号同步已停止 — 请重新登录";
         return;
       }
-      el.classList.add("is-error");
+      el.classList.toggle("is-warning", severity === "warning");
+      el.classList.toggle("is-error", severity !== "warning");
       el.classList.remove("is-auth-expired");
       const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
       const detail = message || "账号同步出错";
@@ -7626,7 +7593,7 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function renderAll() {
-      const steps = [renderReshuffleToggle, renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
+      const steps = [renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
       for (const step of steps) {
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
@@ -8412,11 +8379,6 @@ ${cardFeedbackBarHtml()}`;
       const val = Math.min(360, Math.max(0, parseInt(event.target.value, 10) || 0));
       setThemeHue(val);
     });
-    ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
-      safeBind(selector, "change", (event) => {
-        setDismissOnReshuffle(Boolean(event.target.checked), { toast: true });
-      });
-    });
     safeBind("#autoLoadOnScrollSetting", "change", (event) => {
       setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
     });
@@ -8518,7 +8480,7 @@ ${cardFeedbackBarHtml()}`;
       $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
         const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {

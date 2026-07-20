@@ -282,13 +282,13 @@ Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Rele
 - Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.zip` (Firefox temporary debugging); AMO signing-enabled releases also include `openbiliclaw-extension-v*-firefox.xpi` (regular Firefox install)
 - Current desktop installer release: `desktop-v*`, with available `.dmg` / `.exe` assets when the same-version desktop channel has shipped; missing channels are shown as unpublished instead of being backfilled from a previous release
 
-- **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. Open `首次打开说明 First Launch.html` in the DMG, then drag OpenBiliClaw into Applications.
-- **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install.
+- **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. The recommended path is to double-click `安装并启动 Install OpenBiliClaw.command`: it verifies the new bundle, quits the old instance, atomically replaces the app in Applications, and launches the version just installed. Traditional drag-and-drop remains available, but upgrades must quit the old version first and reopen the replacement manually.
+- **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install. After a successful install or upgrade, Setup stops the old instance and automatically launches the newly installed version from the installation directory (including silent installs).
 
 It bundles local Ollama + `bge-m3` embedding (works out of the box) plus the default source dependencies, including X's `twitter-cli` and Reddit's `rdt-cli` (Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks). It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
 
 > ⚠️ **macOS security blocking (the app isn't signed / notarized yet)**:
-> - The current Release is ad-hoc signed but not notarized. On first launch, if macOS says it cannot verify the developer or the app was not checked for safety, drag it into Applications first, then right-click / Control-click `OpenBiliClaw.app` → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
+> - The current Release is ad-hoc signed but not notarized. On first launch, if macOS blocks either the install helper or the app, right-click / Control-click that item → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
 > - If macOS says "`OpenBiliClaw.app` is damaged and can't be opened", it is usually the download quarantine attribute. After confirming the package came from this project's Releases, run:
 >
 >   ```bash
@@ -564,7 +564,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🧭 **Avoidance Probes** — proactively confirms content forms and style boundaries you want to avoid; nothing is filtered until you confirm
 - 🌐 **Cross-Platform Sources** — Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / generic Web, so your interests stop being siloed ([details](docs/modules/discovery.md))
 - 🎯 **Smart Diversity** — topic quotas + cross-platform interleaving + small-source protection; goodbye to "all AI all day"
-- ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
+- ⚡ **Instant, deduplicated reshuffle** — ~0.6s; current cards, recommendation history, and the durable seen ledger are excluded by default
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
 - ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
@@ -612,12 +612,12 @@ guided init: signals → preferences → full profile commit → discover → ev
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
-│             → pool accounting · viewed identity    │
+│             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ Delight gate: formal copy/topic ready → score + atomic snapshot → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
-│ Reshuffle hot path: PoolServeSnapshot → isolated serve DB worker → short rec+shown write │
+│ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
 │ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
@@ -628,7 +628,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 │ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │
 │ unsupported_adapter_missing retryable · unsupported_content_type local-only │
-│ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
+│ Canonical ID · Local-first sync · Task poll · SQLite (events · seen ledger · pool · recs · saved/tasks)│
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 

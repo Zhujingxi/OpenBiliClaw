@@ -193,11 +193,6 @@
               <p>阿B 根据你的近期兴趣筛选的内容，有任何意见尽管和我聊~</p>
             </div>
             <div class="drawer-actions recommendation-actions">
-              <label class="reshuffle-toggle" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-                <input id="dismissOnReshuffleToggle" type="checkbox">
-                <span class="reshuffle-switch" aria-hidden="true"></span>
-                <span>换一批时忽略当前</span>
-              </label>
               <button class="icon-btn" id="reshuffleBtn" type="button" aria-label="换一批" title="换一批">↻</button>
               <button class="pill-btn" id="resetFiltersBtn" type="button" hidden="">重置筛选</button>
             </div>
@@ -748,15 +743,6 @@
             </div>
             <p class="settings-hue-hint" hidden>经典模式下不可用，切换至动态主题色后可自定义色相</p>
           </div>
-          <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-            <span>换一批时忽略当前</span>
-            <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>
-            <span class="reshuffle-toggle settings-toggle-inline">
-              <input id="dismissOnReshuffleSetting" type="checkbox">
-              <span class="reshuffle-switch" aria-hidden="true"></span>
-              <span id="dismissOnReshuffleSettingText">关闭</span>
-            </span>
-          </label>
           <label class="settings-field full settings-switch-field" title="开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。">
             <span>滚动到底自动加载推荐</span>
             <span class="settings-switch-copy">开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。</span>
@@ -766,7 +752,7 @@
               <span id="autoLoadOnScrollSettingText">开启</span>
             </span>
           </label>
-          <p class="settings-note-inline">后端地址、端口、外观主题、色彩引擎、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
+          <p class="settings-note-inline">后端地址、端口、外观主题、色彩引擎和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="logging" hidden>

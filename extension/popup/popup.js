@@ -6534,7 +6534,8 @@ async function handleManualRefresh() {
     normalizeRuntimeStatus(state.runtimeStatus).pool_available_count > 0;
   setRefreshButtonState(true, "正在给你换一批…");
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     if (!Array.isArray(result.items)) {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;

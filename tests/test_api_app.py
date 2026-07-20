@@ -16303,6 +16303,99 @@ def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
     ]
 
 
+def test_successful_reshuffle_records_one_batch_event_and_empty_result_records_none() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.discovery.engine import DiscoveredContent
+    from openbiliclaw.recommendation.engine import Recommendation
+
+    class FakeRuntimeController:
+        event_hub = None
+
+        def get_runtime_status(self) -> dict[str, object]:
+            return {
+                "initialized": True,
+                "pool_available_count": 3,
+                "pool_pending_count": 0,
+            }
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"profile": "ok"}
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def reshuffle_recommendations(
+            self,
+            *,
+            profile: object,
+            limit: int = 10,
+            excluded_bvids: list[str] | None = None,
+        ) -> list[Recommendation]:
+            del profile, limit, excluded_bvids
+            self.calls += 1
+            if self.calls > 1:
+                return []
+            return [
+                Recommendation(
+                    content=DiscoveredContent(
+                        bvid="BV1NEWBATCH",
+                        title="新批次",
+                        up_name="UP",
+                        cover_url="",
+                    ),
+                    recommendation_id=91,
+                    expression="这是一条新推荐。",
+                    topic_label="换批测试",
+                    confidence=0.9,
+                    presented=False,
+                )
+            ]
+
+    memory = FakeMemoryManager()
+    app = create_app(
+        memory_manager=memory,
+        database=object(),
+        soul_engine=FakeSoulEngine(),
+        recommendation_engine=FakeRecommendationEngine(),
+        runtime_controller=FakeRuntimeController(),
+    )
+    client = TestClient(app)
+
+    success = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1CURRENT", " BV1CURRENT ", "BV2CURRENT"]},
+    )
+    empty = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1NEWBATCH"]},
+    )
+
+    assert success.status_code == 200
+    assert empty.status_code == 200
+    assert len(memory.events) == 1
+    event = memory.events[0]
+    assert event["event_type"] == "reshuffle"
+    assert event["context"] == "你在推荐页换了一批内容。"
+    assert event["metadata"] == {
+        "recommendation_source_platform": "all",
+        "excluded_item_ids": ["BV1CURRENT", "BV2CURRENT"],
+        "returned_item_ids": ["BV1NEWBATCH"],
+        "batch_size": 1,
+        "source_platform": "web",
+        "signal_strength": 0.1,
+    }
+
+
 # ── Platform-scoped recommendation requests ─────────────────────────
 
 

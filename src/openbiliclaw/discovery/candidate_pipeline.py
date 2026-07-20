@@ -1403,7 +1403,11 @@ class DiscoveryCandidatePipeline:
         return str(self.xhs_self_nickname or "").strip()
 
     def _recent_viewed_content_keys(self) -> set[str]:
-        get_recent = getattr(self.database, "get_recent_viewed_content_keys", None)
+        get_recent = getattr(self.database, "get_seen_content_keys", None)
+        if not callable(get_recent):
+            get_recent = getattr(self.database, "get_recent_viewed_content_keys", None)
+        if not callable(get_recent):
+            get_recent = getattr(self.database, "get_seen_bvids", None)
         if not callable(get_recent):
             get_recent = getattr(self.database, "get_recent_viewed_bvids", None)
         if not callable(get_recent):

@@ -287,8 +287,14 @@ export async function refreshRecommendations() {
   return requestJson("/recommendations/refresh", { method: "POST" });
 }
 
-export async function reshuffleRecommendations() {
-  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+export async function reshuffleRecommendations(excludedBvids = []) {
+  const payload = await requestJson("/recommendations/reshuffle", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ excluded_bvids: excludedBvids }),
+  });
   return {
     ...payload,
     items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],

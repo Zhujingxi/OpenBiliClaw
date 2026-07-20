@@ -47,7 +47,10 @@ jobs:
           python -m pip install --upgrade pip
           # [packaging] pulls pyinstaller + pystray + Pillow + (on macOS) pyobjc
           # for the menu-bar tray desktop mode.
-          pip install -e ".[packaging]"
+          pip install -e ".[packaging]" "pytest>=8"
+
+      - name: Run macOS installer handoff E2E
+        run: python -m pytest -q tests/test_macos_installer_e2e.py
 
       - name: Download official Ollama.app runtime
         run: |

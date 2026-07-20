@@ -19,6 +19,13 @@ from openbiliclaw.llm.base import classify_llm_unavailability, safe_llm_failure_
 # keep this module's call sites unchanged.
 from openbiliclaw.sources.identity_keys import dedup_key as _dedup_key
 from openbiliclaw.sources.identity_keys import tweet_id_from_url as _tweet_id_from_url
+from openbiliclaw.sources.x_client import (
+    XAuthError,
+    XBlockedError,
+    XClientError,
+    XMissingCookieError,
+    XRateLimitError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -60,6 +67,13 @@ class SupportsRecentEventUrls(Protocol):
 class SupportsXClient(Protocol):
     async def likes(self, *, limit: int) -> list[dict[str, Any]]: ...
     async def bookmarks(self, *, limit: int) -> list[dict[str, Any]]: ...
+
+
+class SupportsXHealth(Protocol):
+    def is_ready(self) -> bool: ...
+    def get(self) -> dict[str, Any]: ...
+    def record_success(self, *, strategy: str = "") -> None: ...
+    def record_error(self, exc: BaseException, *, strategy: str = "") -> str: ...
 
 
 class SupportsAccountSyncState(Protocol):
@@ -123,6 +137,7 @@ class AccountSyncService:
     llm_work_allowed: Callable[[], bool] | None = None
     database: SupportsRecentEventUrls | None = None
     x_client: SupportsXClient | None = None
+    x_health_store: SupportsXHealth | None = None
     profile_analysis_timeout_seconds: float = DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
     _auto_bootstrap_attempted: bool = False
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
@@ -396,16 +411,41 @@ class AccountSyncService:
     def _record_stage_error(stage: str, exc: Exception, current_kind: str) -> str:
         """Log a swallowed fetch-stage error and classify it.
 
-        ``auth_expired`` (expired/logged-out cookie) always wins over a generic
-        ``error`` so the UI can surface a "re-login needed" state even when
-        another stage also failed for an unrelated reason.
+        Expected X failures keep their platform identity instead of collapsing
+        into the generic ``error`` used for unrelated fetch failures. This is
+        what lets the status surface explain that an X-only 429 did not break
+        Bilibili account sync. Higher-priority actionable states still win when
+        more than one stage fails in the same cycle.
         """
         logger.warning("account_sync: %s fetch failed: %s", stage, exc)
         if isinstance(exc, BilibiliAuthExpiredError):
-            return "auth_expired"
-        if current_kind == "auth_expired":
-            return current_kind
-        return "error"
+            candidate = "auth_expired"
+        elif isinstance(exc, (XMissingCookieError, XAuthError)):
+            candidate = "x_auth_expired"
+        elif isinstance(exc, XBlockedError):
+            candidate = "x_blocked"
+        elif isinstance(exc, (XRateLimitError, XClientError)):
+            candidate = "x_rate_limited"
+        else:
+            candidate = "error"
+        return AccountSyncService._prefer_error_kind(current_kind, candidate)
+
+    @staticmethod
+    def _prefer_error_kind(current_kind: str, candidate: str) -> str:
+        """Return the most actionable error kind observed in this sync cycle."""
+        priority = {
+            "": 0,
+            "x_rate_limited": 1,
+            "x_blocked": 2,
+            "x_auth_expired": 3,
+            # A non-X stage also failed, so X-only copy must not claim that
+            # Bilibili and every other source were unaffected.
+            "error": 4,
+            "auth_expired": 5,
+        }
+        current = str(current_kind or "")
+        new = str(candidate or "")
+        return new if priority.get(new, 2) > priority.get(current, 2) else current
 
     async def _apply_profile_update(self, events: list[dict[str, Any]]) -> None:
         """Route pulled events through the same profile machinery as live events.
@@ -550,6 +590,13 @@ class AccountSyncService:
         if self.x_client is None:
             return error_kind
 
+        blocked_state = self._x_unready_state()
+        if blocked_state:
+            message, kind = self._x_health_skip(blocked_state)
+            errors.append(message)
+            logger.info("account_sync: X likes/bookmarks skipped: source health=%s", blocked_state)
+            return self._prefer_error_kind(error_kind, kind)
+
         like_ids = self._string_list(state.get("x_like_ids", []))
         bookmark_ids = self._string_list(state.get("x_bookmark_ids", []))
         if not like_ids and not bookmark_ids:
@@ -562,9 +609,17 @@ class AccountSyncService:
             like_events, like_ids = self._x_ingest(likes, event_type="like", seen_ids=like_ids)
             events.extend(like_events)
             state["x_like_ids"] = like_ids
+            self._record_x_health_success("likes")
         except Exception as exc:
             errors.append(str(exc))
+            self._record_x_health_error(exc, "likes")
             error_kind = self._record_stage_error("x likes", exc, error_kind)
+
+        # A typed failure above may just have opened the shared source cooldown.
+        # Do not immediately spend a second request on bookmarks and defeat the
+        # backoff that the X discovery producer and status card both promise.
+        if self._x_unready_state():
+            return error_kind
 
         try:
             bookmarks = await self.x_client.bookmarks(limit=_X_FETCH_LIMIT)
@@ -573,11 +628,63 @@ class AccountSyncService:
             )
             events.extend(bookmark_events)
             state["x_bookmark_ids"] = bookmark_ids
+            self._record_x_health_success("bookmarks")
         except Exception as exc:
             errors.append(str(exc))
+            self._record_x_health_error(exc, "bookmarks")
             error_kind = self._record_stage_error("x bookmarks", exc, error_kind)
 
         return error_kind
+
+    def _x_unready_state(self) -> str:
+        """Return the shared X health state when it currently forbids a request."""
+        if self.x_health_store is None:
+            return ""
+        try:
+            if self.x_health_store.is_ready():
+                return ""
+            return str(self.x_health_store.get().get("state", "") or "")
+        except Exception:
+            # Health persistence is a guardrail, not a new single point of
+            # failure. Preserve the pre-health-store fetch path if its read fails.
+            logger.warning("account_sync: failed to read X source health", exc_info=True)
+            return ""
+
+    @staticmethod
+    def _x_health_skip(state: str) -> tuple[str, str]:
+        """Map a persisted X health block to safe diagnostics and display kind."""
+        if state == "rate_limited":
+            return (
+                "X 账号喜好同步因来源限流冷却而跳过",
+                "x_rate_limited",
+            )
+        if state in {"missing_cookie", "expired_cookie"}:
+            return (
+                "X 账号喜好同步因登录凭据缺失或失效而跳过",
+                "x_auth_expired",
+            )
+        if state == "blocked":
+            return (
+                "X 账号喜好同步因请求被拒绝而跳过",
+                "x_blocked",
+            )
+        return (f"X 账号喜好同步因来源状态 {state or 'unknown'} 而跳过", "error")
+
+    def _record_x_health_success(self, strategy: str) -> None:
+        if self.x_health_store is None:
+            return
+        try:
+            self.x_health_store.record_success(strategy=strategy)
+        except Exception:
+            logger.warning("account_sync: failed to record X source success", exc_info=True)
+
+    def _record_x_health_error(self, exc: BaseException, strategy: str) -> None:
+        if self.x_health_store is None:
+            return
+        try:
+            self.x_health_store.record_error(exc, strategy=strategy)
+        except Exception:
+            logger.warning("account_sync: failed to record X source error", exc_info=True)
 
     def _seed_x_ids_from_events(self) -> list[str]:
         """Seed the seen-tweet-id set from persisted X ``like``/``favorite`` events."""
@@ -720,7 +827,7 @@ class AccountSyncService:
             # sentence instead of each formatting the raw error themselves.
             "last_account_sync_message": self._user_facing_sync_message(kind, detail),
             "last_account_sync_severity": "warning"
-            if kind in ("auth_expired", "rate_limited")
+            if kind in ("auth_expired", "rate_limited", "x_auth_expired", "x_rate_limited")
             else ("error" if detail else ""),
         }
 
@@ -751,6 +858,21 @@ class AccountSyncService:
             )
         if kind == "rate_limited":
             return "AI 服务限流中，账号同步稍后会自动重试。"
+        if kind == "x_rate_limited":
+            return (
+                "X 暂时限流，已跳过本轮 X 喜好同步；B 站等其他来源不受影响。"
+                "冷却结束后会自动重试，无需操作。"
+            )
+        if kind == "x_auth_expired":
+            return (
+                "X 登录凭据缺失或已失效，X 喜好同步已暂停；"
+                "请在浏览器重新登录 X 并保持扩展在线。B 站等其他来源不受影响。"
+            )
+        if kind == "x_blocked":
+            return (
+                "X 拒绝了账号读取请求，已跳过 X 喜好同步；"
+                "请在来源设置中查看 X 状态并测试连接。B 站等其他来源不受影响。"
+            )
         if detail:
             return "账号同步出错，稍后会自动重试。"
         return ""

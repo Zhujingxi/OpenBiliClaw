@@ -146,8 +146,11 @@ export async function fetchRecommendations() {
   return Array.isArray(data.items) ? data.items : [];
 }
 
-export async function reshuffleRecommendations() {
-  const data = await requestJson("/recommendations/reshuffle", { method: "POST" });
+export async function reshuffleRecommendations(excludedBvids = []) {
+  const data = await requestJson(
+    "/recommendations/reshuffle",
+    json({ excluded_bvids: excludedBvids }),
+  );
   return { ...data, items: Array.isArray(data.items) ? data.items : [] };
 }
 

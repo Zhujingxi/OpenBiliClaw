@@ -1452,7 +1452,8 @@ async function handleReshuffle() {
   resetAutoAppendIntent();
   render();
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     const replacement = reconcileRecommendationReplacement(
       state.recommendations,
       result.items || [],

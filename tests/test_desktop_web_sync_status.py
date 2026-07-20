@@ -31,6 +31,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     assert "B 站登录已失效，账号同步已停止 — 请重新登录" in app_js
     assert 'kind === "auth_expired"' in app_js
     assert "last_account_sync_message" in app_js
+    assert 'severity === "warning"' in app_js
 
     render = re.search(
         r"function renderAccountSyncStatus\((?P<args>[^)]*)\) \{(?P<body>.*?)\n    \}",
@@ -43,6 +44,9 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     # error stays available for diagnostics even though it is no longer shown.
     assert "last_account_sync_error" in render_body
     assert "last_account_sync_at" in render_body
+    assert "last_account_sync_severity" in render_body
+    assert 'classList.toggle("is-warning"' in render_body
+    assert "（上次同步 ${when}）" in render_body
     # Timestamps go through the shared local-time formatter, not raw ISO.
     assert "formatLocalTime(" in render_body
 
@@ -65,6 +69,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
 
     assert 'id="accountSyncStatus"' in index_html
     assert ".account-sync-status" in app_css
+    assert ".account-sync-status.is-warning" in app_css
 
 
 def test_desktop_apply_runtime_status_renders_sync_chip() -> None:
