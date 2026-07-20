@@ -17,6 +17,7 @@ from typing import Any
 
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinBudgetExhausted as _DouyinBudgetExhausted,
 )
@@ -212,16 +213,9 @@ class DouyinDiscoveryProducer:
         return configured[:1] or ("search",)
 
     def _candidate_pool_full(self) -> bool:
-        if self.candidate_pipeline is None:
-            return False
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug("douyin producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "douyin", logger=logger, label="douyin producer"
+        )
 
     def _stamp_candidate_score_thresholds(self, items: list[Any]) -> None:
         for item in items:

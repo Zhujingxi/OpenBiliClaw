@@ -100,6 +100,80 @@
 
 **Acceptance:** 文档描述与最终代码行为一致;pre-merge checklist 可勾选。
 
+### Task 6: Producer 内部 pool_full 闸份额感知(真实 E2E 发现,见 spec D6 / Phase 5)
+
+**Files:** add `src/openbiliclaw/runtime/pool_gate.py`(共享助手);modify `src/openbiliclaw/discovery/candidate_pipeline.py`(`pool_full_for_source`)、`src/openbiliclaw/runtime/{bilibili,douyin,youtube,zhihu,bangumi,reddit}_producer.py`(内部闸改调助手);add tests(`tests/test_candidate_pipeline_admission.py` 的 `pool_full_for_source` 用例 + `tests/test_bangumi_producer.py` 的欠份额 producer 用例)。
+
+**Interfaces:** Consumes: `_share_targets`、`_available_by_family`、`_pool_full`、`_source_family`。Produces: `pipeline.pool_full_for_source(family)`;共享 `candidate_pool_full_for_source(pipeline, family, *, logger, label)`(pipeline 缺方法 → 回退全局 `pool_full()` → `False`)。
+
+**Steps:**
+
+- [x] 先写失败测试:①全局满 + 欠份额 → `pool_full_for_source` False;②全局满 + 已达份额 → True;③未注入策略 → 等同 `pool_full()`;④全局未满 → 恒 False;⑤bangumi `produce_if_due` 在「全局满 + bangumi 欠份额」时不再 `reason=pool_full`。
+- [x] 确认 FAIL(4 个 pipeline 断言 + 1 个 producer 断言)。
+- [x] 实现:pipeline `pool_full_for_source`;`runtime/pool_gate.py` 共享助手;六个 producer 内部闸改调助手并传各自 family(bilibili 族归并;reddit 旧的 `is_candidate_pool_full` 死闸一并替换)。`xhs`/`x` 自查确认无内部闸,不改。
+- [x] 确认 PASS(pipeline 4 + 六个 producer 既有回归 + bangumi 新用例);ruff、mypy、全量 pytest。
+
+**Acceptance:**
+
+- Numeric gate:`pool_full_for_source("bangumi")` 在 300/300 + bangumi 0/50 → **False**;`("reddit")` 在 169/25 → **True**;未注入策略时 == `pool_full()`;全局未满恒 False。bangumi `produce_if_due` 在全局满 + 欠份额时 `reason != "pool_full"`。
+- 既有断言更新:无(六个 producer 的 `_Pipeline`/`_FakeCandidatePipeline` 桩只有 `pool_full()`/无任何池方法,经 getattr 回退逐字节保持旧行为;bangumi 桩新增可选 `pool_full_for_source` 仅供新用例,旧 `full=True` 用例仍 skip pool_full)。
+
+### Task 7: 再平衡/摘要挂到两装配共同的收敛点(真实 E2E 发现,见 spec D7 / Phase 6）
+
+**Files:** modify `src/openbiliclaw/runtime/refresh.py`(新增 `run_pool_share_maintenance()`,legacy drain 改调它)、`src/openbiliclaw/runtime/candidate_eval.py`(新增 `pre_admit_hook` 参数 + `_run_pre_admit_hook`,`run_forever` 每 tick admission 前调用）、`src/openbiliclaw/api/runtime_context.py`（`getattr` 守卫注入 hook）；add tests（`tests/test_candidate_eval_coordinator.py` 的 hook 顺序用例 + `tests/test_refresh_source_deficit.py` 的 `run_pool_share_maintenance` 用例）。
+
+**Interfaces:** Consumes: `controller._rebalance_pool_shares`/`_log_source_deficit_summary`（已在 Task 3/4 落地）。Produces: `controller.run_pool_share_maintenance()`（两装配唯一入口）;`CandidateEvalCoordinator(pre_admit_hook=…)`。
+
+**Steps:**
+
+- [x] 先写失败测试:①coordinator 每 tick 在 `_admit_evaluated` 之前调 `pre_admit_hook`（顺序断言 `["hook","admit"]`）；②`run_pool_share_maintenance()` 顺序调 rebalance→summary。
+- [x] 确认 FAIL（`pre_admit_hook` 非法参数 + `run_pool_share_maintenance` 不存在）。
+- [x] 实现:controller `run_pool_share_maintenance()`（吞异常）；legacy drain 两处 `with suppress` 合并为调它一次；coordinator `pre_admit_hook` 参数 + `_run_pre_admit_hook`（admission 前、吞异常）；runtime_context 以 `getattr` 守卫注入 `controller.run_pool_share_maintenance`。
+- [x] 确认 PASS;全量 pytest + ruff + mypy。
+
+**防重复执行依据:** 三个 `_drain_discovery_candidates_and_precompute` 调用点在 coordinator 存在时都不生效——`_loop_candidate_eval`（唯一周期驱动）仅在 `candidate_eval_coordinator is None` 时被 `run_forever` 调度（`refresh.py:1455-1459` XOR）；`drain_discovery_candidates_once` 与 refresh 内联 drain 在 `coordinator.notify` 可调用时都提前 return。故 coordinator 装配下退坑只经 hook，legacy 装配下只经 drain,单轮至多一次。
+
+**Acceptance:**
+
+- Numeric gate:coordinator 一轮的事件序列首二项 == `["hook","admit"]`;`run_pool_share_maintenance` 调用序列 == `["rebalance","summary"]`；六个 producer 与既有 coordinator 回归全绿。
+- 既有断言更新:无（新增参数带默认值 `None`,既有 coordinator 构造/用例不受影响；bootstrap 装配测试的 `FakeRuntimeController` 缺 `run_pool_share_maintenance`,经 `getattr` 守卫回退为不注入 hook）。
+
+### Task 8: 无份额来源存量行可回收(真实 E2E 发现,见 spec D8 / Phase 7)
+
+**Files:** modify `src/openbiliclaw/runtime/refresh.py`(`_rebalance_pool_shares` 超额候选集 + `source_family` 归族 import）；add tests（`tests/test_refresh_source_deficit.py`）。
+
+**Interfaces:** Consumes: `available_by_source`、`target_counts`、`_platform_source_count`、`source_family`。Produces: 退坑候选集含缺席 `target_counts` 的族(target=0)。
+
+**Steps:**
+
+- [x] 先写失败测试:①available={bilibili:141, reddit:152, xiaohongshu:7}、targets={bangumi:150, reddit:150}、bangumi evaluated≥3 → 退 bilibili 3 行(不是 reddit 2 行)；②bilibili 以 {search:100, explore:41} 出现时归族后仍退 "bilibili" 3 行。
+- [x] 确认 FAIL（旧逻辑只挑 reddit、退 2 行）。
+- [x] 实现:候选族 = `set(target_counts)` ∪ {`source_family(k,k)` for k in available_by_source}；缺席 target 的族 target=0 计超额;排序/上限/最低分口径不变。
+- [x] 确认 PASS;既有 rebalance 测试(仅在册来源)全绿；全量 pytest + ruff + mypy。
+
+**Acceptance:**
+
+- Numeric gate:D8 复现场景单 tick `demote_calls == [("bilibili", 3)]`;strategy-name 变体同样 `[("bilibili", 3)]`;既有 `test_rebalance_*`(reddit 超额场景)结果不变。
+- 既有断言更新:无(新增候选族只增不减；仅在册来源的既有场景候选族不变,选择结果一致)。
+
+### Task 9: 评估端份额感知(真实 E2E 发现,链路最后一环,见 spec D9 / Phase 8）
+
+**Files:** modify `src/openbiliclaw/storage/database.py`（新增 `count_admission_waiting_discovery_candidates_by_source`、`claim_discovery_candidates_for_eval` 加 `preferred_source_platforms`）、`src/openbiliclaw/runtime/refresh.py`（`_evaluated_waiting_by_family`→`_waiting_supply_by_family`、fillable 用它）、`src/openbiliclaw/discovery/candidate_pipeline.py`（`claim_batch` 传 `_under_share_platforms()`）；add tests（`tests/test_refresh_source_deficit.py`、`tests/test_candidate_pipeline_admission.py`）。
+
+**Interfaces:** Consumes: `discovery_candidates` 各 status、`_under_share_platforms`。Produces: fillable 认 pending/evaluating 供给;claim 份额优先。
+
+**Steps:**
+
+- [x] 先写失败测试:①fillable 含 pending_eval（fake `pending_by_family`）→ 退 bilibili 3；②DB `count_admission_waiting_*` 计 pending+evaluating+evaluated；③claim 优先（真 DB，preferred=["bangumi"]）→ bangumi 3;④claim 无 preferred → 旧 round-robin `[reddit,bangumi,reddit]`;⑤pipeline `claim_batch` 注入份额 → bangumi 3;⑥无策略 → 旧序;⑦集成:hook 退坑(pending fillable)+ claim 优先。
+- [x] 确认 FAIL。
+- [x] 实现:DB 宽计数 + claim preferred 两层 round-robin(缺省单层==旧);controller `_waiting_supply_by_family`;pipeline `claim_batch` 传 preferred。
+- [x] 确认 PASS;全量 pytest + ruff + mypy。
+
+**Acceptance:**
+
+- Numeric gate:fillable-pending 场景 `demote_calls==[("bilibili",3)]`;`count_admission_waiting`=4 vs `count_evaluated`=1;claim preferred=`["bangumi",×3]`,无 preferred=`["reddit","bangumi","reddit"]`;集成 stale=3 且 claim=`["bangumi"×3]`。
+- 既有断言更新:无（`claim_*` 新增可选参默认 None、走 `except TypeError` 或空 preferred 单层 round-robin,既有 claim 测试逐字节不变；`_FakeRebalanceDB` 加 `pending_by_family`(默认 {}) 与 `count_admission_waiting_*` 方法,既有 rebalance 场景 `pending` 默认空 → 等于原 evaluated-only,结果不变）。
+
 ## Verification after merge
 
 验收人(主会话)在隔离项目根执行真实 E2E:拷贝本机真实 DB(reddit 169 超份额饿死态)→ 启用 bangumi(真实 bgm.tv 匿名 API,走 custom 代理)+ 商汤 LLM → 起真实 serve-api → 观察 ≥3 个 drain tick:①`bangumi_discovery_runs` 出现新行;②池组成收敛(reddit 净减、bangumi 净增);③全局池恒 ≤300;④日志出现每源缺口摘要与退坑记录。回滚触发条件:全局池超发、退坑波及非超份额来源、或全量测试回归失败——revert 整个 feature 分支。
