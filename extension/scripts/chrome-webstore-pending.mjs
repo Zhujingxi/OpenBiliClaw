@@ -9,17 +9,14 @@
  * @param {{ replacePending: boolean, upload: () => Promise<T>, cancelSubmission: () => Promise<unknown> }} deps
  * @returns {Promise<T>}
  */
-export async function uploadWithPendingReplacement({
-  replacePending,
-  upload,
-  cancelSubmission,
-}) {
+export async function uploadWithPendingReplacement({ replacePending, upload, cancelSubmission }) {
   try {
     return await upload();
   } catch (error) {
     if (
       !replacePending ||
-      /** @type {{ chromeWebStoreReason?: string }} */ (error)?.chromeWebStoreReason !== "NOT_UPDATEABLE"
+      /** @type {{ chromeWebStoreReason?: string }} */ (error)?.chromeWebStoreReason !==
+        "NOT_UPDATEABLE"
     ) {
       throw error;
     }

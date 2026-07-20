@@ -93,17 +93,11 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === "--poll-interval-seconds") {
-      options.pollIntervalSeconds = parsePositiveInt(
-        argv[++i],
-        "--poll-interval-seconds",
-      );
+      options.pollIntervalSeconds = parsePositiveInt(argv[++i], "--poll-interval-seconds");
       continue;
     }
     if (arg === "--wait-timeout-seconds") {
-      options.waitTimeoutSeconds = parsePositiveInt(
-        argv[++i],
-        "--wait-timeout-seconds",
-      );
+      options.waitTimeoutSeconds = parsePositiveInt(argv[++i], "--wait-timeout-seconds");
       continue;
     }
     throw new Error(`Unknown argument: ${arg}`);
@@ -159,9 +153,9 @@ async function requestJson(url, options) {
   }
   if (!response.ok) {
     const details = JSON.stringify(payload, null, 2);
-    const error = /** @type {Error & { chromeWebStoreReason?: string }} */ (new Error(
-      `HTTP ${response.status} ${response.statusText} from ${url}\n${details}`,
-    ));
+    const error = /** @type {Error & { chromeWebStoreReason?: string }} */ (
+      new Error(`HTTP ${response.status} ${response.statusText} from ${url}\n${details}`)
+    );
     const errorInfo = Array.isArray(payload?.error?.details)
       ? payload.error.details.find(
           /** @param {any} detail */
@@ -285,7 +279,9 @@ async function waitForUpload({ accessToken, publisherId, extensionId, options })
       return status;
     }
     if (state === "FAILED" || state === "NOT_FOUND") {
-      throw new Error(`Chrome Web Store upload did not succeed: ${JSON.stringify(status, null, 2)}`);
+      throw new Error(
+        `Chrome Web Store upload did not succeed: ${JSON.stringify(status, null, 2)}`,
+      );
     }
     await new Promise((resolveSleep) => {
       setTimeout(resolveSleep, options.pollIntervalSeconds * 1000);
@@ -345,7 +341,9 @@ async function main() {
     extensionId: requireEnv("CHROME_WEBSTORE_EXTENSION_ID"),
   };
 
-  console.log(`Uploading ${basename(archivePath)} to Chrome Web Store item ${credentials.extensionId}...`);
+  console.log(
+    `Uploading ${basename(archivePath)} to Chrome Web Store item ${credentials.extensionId}...`,
+  );
   const accessToken = await getAccessToken(credentials);
   const upload = await uploadWithPendingReplacement({
     replacePending: options.replacePending,

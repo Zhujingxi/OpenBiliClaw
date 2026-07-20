@@ -9,7 +9,9 @@ const isFirefox = process.env.TARGET === "firefox";
 const buildTarget = isFirefox ? "firefox140" : "chrome120";
 const outDir = isFirefox ? "dist-firefox" : "dist";
 
-console.log(`\n🔨 Building for ${isFirefox ? "Firefox" : "Chrome/Edge"} (target: ${buildTarget})\n`);
+console.log(
+  `\n🔨 Building for ${isFirefox ? "Firefox" : "Chrome/Edge"} (target: ${buildTarget})\n`,
+);
 
 const entrypoints = [
   {
@@ -89,9 +91,7 @@ for (const target of entrypoints) {
 // For Firefox builds, write the Firefox manifest with version injected from
 // the Chrome manifest (single source of truth), and stage popup/icons.
 if (isFirefox) {
-  const chromeManifest = JSON.parse(
-    await readFile(resolve(root, "manifest.json"), "utf-8"),
-  );
+  const chromeManifest = JSON.parse(await readFile(resolve(root, "manifest.json"), "utf-8"));
   const firefoxManifest = JSON.parse(
     await readFile(resolve(root, "manifest.firefox.json"), "utf-8"),
   );
@@ -100,12 +100,10 @@ if (isFirefox) {
   const merged = {};
   for (const [key, value] of Object.entries(firefoxManifest)) {
     merged[key] = value;
-    if (key === "name") merged.version = /** @type {{ version?: string }} */ (chromeManifest).version;
+    if (key === "name")
+      merged.version = /** @type {{ version?: string }} */ (chromeManifest).version;
   }
-  await writeFile(
-    resolve(root, `${outDir}/manifest.json`),
-    `${JSON.stringify(merged, null, 4)}\n`,
-  );
+  await writeFile(resolve(root, `${outDir}/manifest.json`), `${JSON.stringify(merged, null, 4)}\n`);
   console.log(
     `\n📄 Wrote ${outDir}/manifest.json (version ${chromeManifest.version} from manifest.json)`,
   );

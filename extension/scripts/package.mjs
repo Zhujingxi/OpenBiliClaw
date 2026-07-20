@@ -4,10 +4,7 @@ import { execSync } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import {
-  makeExtensionArchiveName,
-  normalizeReleaseVersion,
-} from "./release-utils.mjs";
+import { makeExtensionArchiveName, normalizeReleaseVersion } from "./release-utils.mjs";
 
 /**
  * Package the extension into a .zip for Chrome Web Store or sideloading.
@@ -20,8 +17,7 @@ import {
 const root = resolve(import.meta.dirname, "..");
 const skipBuild = process.argv.includes("--no-build");
 const archiveVersionFlag = process.argv.indexOf("--archive-version");
-const archiveVersionInput =
-  archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
+const archiveVersionInput = archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
 
 if (archiveVersionFlag !== -1 && !archiveVersionInput) {
   throw new Error("--archive-version requires a value");
@@ -34,9 +30,7 @@ if (!skipBuild) {
 }
 
 // --- 2. Read version from manifest ------------------------------------
-const manifest = JSON.parse(
-  await readFile(resolve(root, "manifest.json"), "utf-8"),
-);
+const manifest = JSON.parse(await readFile(resolve(root, "manifest.json"), "utf-8"));
 const version = normalizeReleaseVersion(archiveVersionInput ?? manifest.version);
 const outName = makeExtensionArchiveName(version);
 const outPath = resolve(root, outName);

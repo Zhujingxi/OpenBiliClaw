@@ -144,7 +144,10 @@ export async function requestJson(
   operation,
   url,
   options,
-  { fetchImpl, sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) },
+  {
+    fetchImpl,
+    sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  },
 ) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response;
@@ -157,7 +160,9 @@ export async function requestJson(
         signal: controller.signal,
       });
     } catch (error) {
-      throw new Error(`${operation} request failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `${operation} request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     } finally {
       clearTimeout(timeout);
     }
@@ -440,7 +445,9 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(`Chrome Web Store metadata command failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `Chrome Web Store metadata command failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exitCode = 1;
   });
 }

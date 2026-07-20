@@ -34,8 +34,8 @@ test("extension popup state module is a synced copy of the shared source", () =>
   );
   assert.ok(
     generated.endsWith(source),
-    "extension/popup/popup-model-config-state.js drifted from the shared source. "
-      + "Regenerate with: node extension/scripts/sync-model-config-state.mjs",
+    "extension/popup/popup-model-config-state.js drifted from the shared source. " +
+      "Regenerate with: node extension/scripts/sync-model-config-state.mjs",
   );
 });
 
@@ -84,7 +84,8 @@ function provider(id, overrides = {}) {
     "http_referer",
     "x_title",
     "num_ctx",
-  ]) delete item[field];
+  ])
+    delete item[field];
   return item;
 }
 
@@ -130,12 +131,14 @@ test("field-error vectors keep prototype-like stable IDs as own keys", () => {
     for (const [name, implementation] of IMPLEMENTATIONS) {
       const state = implementation.mapServerFieldErrors(
         implementation.hydrateModelConfig(snapshot()),
-        [{
-          connection_id: "__proto__",
-          path: "models.chat.connections.0.num_ctx",
-          code: "invalid",
-          message: "Invalid context window.",
-        }],
+        [
+          {
+            connection_id: "__proto__",
+            path: "models.chat.connections.0.num_ctx",
+            code: "invalid",
+            message: "Invalid context window.",
+          },
+        ],
       );
 
       assert.equal(
@@ -159,18 +162,10 @@ test("field-error vectors keep prototype-like stable IDs as own keys", () => {
 test("equal-revision remote vectors never create a false conflict", () => {
   for (const [name, implementation] of IMPLEMENTATIONS) {
     const base = implementation.hydrateModelConfig(snapshot(["a"], "revision-a"));
-    const dirty = implementation.updateRouteField(
-      base,
-      "chat",
-      "a",
-      "model",
-      "local-draft",
-    );
-    const received = implementation.receiveRemoteSnapshot(
-      dirty,
-      snapshot(["a"], "revision-a"),
-      { force: true },
-    );
+    const dirty = implementation.updateRouteField(base, "chat", "a", "model", "local-draft");
+    const received = implementation.receiveRemoteSnapshot(dirty, snapshot(["a"], "revision-a"), {
+      force: true,
+    });
 
     assert.equal(received.models.chat.connections[0].model, "local-draft", name);
     assert.equal(received.remoteUpdate, null, name);
@@ -191,113 +186,143 @@ const TYPE_DESCRIPTOR = {
 /** @type {Array<[string, (implementation: any) => any]>} */
 const PARITY_VECTORS = [
   ["hydrate", (implementation) => implementation.hydrateModelConfig(snapshot())],
-  ["append", (implementation) => implementation.appendRouteItem(
-    implementation.hydrateModelConfig(snapshot(["a", "b"])),
-    "chat",
-    connection("c"),
-  )],
-  ["remove", (implementation) => implementation.removeRouteItem(
-    implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
-    "chat",
-    "b",
-  )],
-  ["move up", (implementation) => implementation.moveRouteItem(
-    implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
-    "chat",
-    "c",
-    1,
-  )],
-  ["move down", (implementation) => implementation.moveRouteItem(
-    implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
-    "chat",
-    "a",
-    1,
-  )],
-  ["field update", (implementation) => {
-    let state = implementation.hydrateModelConfig(snapshot(["a"]));
-    state = implementation.updateRouteField(state, "chat", "a", "model", "updated-model");
-    return implementation.updateRouteField(
-      state,
-      "chat",
-      "a",
-      "credential",
-      { action: "set", value: "new-secret" },
-    );
-  }],
-  ["type switch field-clearing", (implementation) => implementation.changeConnectionType(
-    implementation.hydrateModelConfig(snapshot(["a"])),
-    "chat",
-    "a",
-    TYPE_DESCRIPTOR,
-    { confirmed: true, previousDescriptor: { category: "api_protocol" } },
-  )],
-  ["preset fill-only-empty", (implementation) => {
-    let state = implementation.hydrateModelConfig(snapshot(["a"]));
-    state = implementation.updateRouteField(
-      state,
-      "chat",
-      "a",
-      "base_url",
-      "https://custom.test/v1",
-    );
-    return implementation.applyPreset(state, "chat", "a", {
-      id: "openrouter",
-      defaults: {
-        base_url: "https://openrouter.ai/api/v1",
-        api_mode: "responses",
-        http_referer: "https://openbiliclaw.local",
-      },
-    }, {
-      previousPreset: { id: "custom", defaults: { api_mode: "chat_completions" } },
-    });
-  }],
-  ["payload construction", (implementation) => {
-    let state = implementation.hydrateModelConfig(snapshot(["a"]));
-    state = implementation.updateRouteField(
-      state,
-      "chat",
-      "a",
-      "credential",
-      { action: "set", value: "new-secret" },
-    );
-    state = implementation.setMigrationResolution(
-      state,
-      "legacy-1",
-      { action: "add_to_chat_route", position: 9 },
-    );
-    return implementation.toModelConfigPayload(state);
-  }],
-  ["remote conflict and revision", (implementation) => {
-    const clean = implementation.hydrateModelConfig(snapshot(["a"], "revision-a"));
-    const refreshed = implementation.receiveRemoteSnapshot(
-      clean,
-      snapshot(["remote"], "revision-b"),
-    );
-    const dirty = implementation.updateRouteField(clean, "chat", "a", "model", "local-model");
-    return {
-      refreshed,
-      retained: implementation.receiveRemoteSnapshot(
-        dirty,
-        snapshot(["remote"], "revision-b"),
+  [
+    "append",
+    (implementation) =>
+      implementation.appendRouteItem(
+        implementation.hydrateModelConfig(snapshot(["a", "b"])),
+        "chat",
+        connection("c"),
       ),
-    };
-  }],
-  ["exact-probe fingerprint", (implementation) => {
-    const initial = implementation.hydrateModelConfig(snapshot(["a", "b"]));
-    const signature = implementation.createProbeSignature(initial, "chat", "a");
-    const reordered = implementation.moveRouteItem(initial, "chat", "a", 1);
-    const accepted = implementation.applyProbeResult(
-      reordered,
-      signature,
-      { ok: true, connection_id: "a" },
-    );
-    const edited = implementation.updateRouteField(initial, "chat", "a", "model", "changed");
-    return {
-      signature,
-      accepted,
-      rejected: implementation.applyProbeResult(edited, signature, { ok: true }),
-    };
-  }],
+  ],
+  [
+    "remove",
+    (implementation) =>
+      implementation.removeRouteItem(
+        implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
+        "chat",
+        "b",
+      ),
+  ],
+  [
+    "move up",
+    (implementation) =>
+      implementation.moveRouteItem(
+        implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
+        "chat",
+        "c",
+        1,
+      ),
+  ],
+  [
+    "move down",
+    (implementation) =>
+      implementation.moveRouteItem(
+        implementation.hydrateModelConfig(snapshot(["a", "b", "c"])),
+        "chat",
+        "a",
+        1,
+      ),
+  ],
+  [
+    "field update",
+    (implementation) => {
+      let state = implementation.hydrateModelConfig(snapshot(["a"]));
+      state = implementation.updateRouteField(state, "chat", "a", "model", "updated-model");
+      return implementation.updateRouteField(state, "chat", "a", "credential", {
+        action: "set",
+        value: "new-secret",
+      });
+    },
+  ],
+  [
+    "type switch field-clearing",
+    (implementation) =>
+      implementation.changeConnectionType(
+        implementation.hydrateModelConfig(snapshot(["a"])),
+        "chat",
+        "a",
+        TYPE_DESCRIPTOR,
+        { confirmed: true, previousDescriptor: { category: "api_protocol" } },
+      ),
+  ],
+  [
+    "preset fill-only-empty",
+    (implementation) => {
+      let state = implementation.hydrateModelConfig(snapshot(["a"]));
+      state = implementation.updateRouteField(
+        state,
+        "chat",
+        "a",
+        "base_url",
+        "https://custom.test/v1",
+      );
+      return implementation.applyPreset(
+        state,
+        "chat",
+        "a",
+        {
+          id: "openrouter",
+          defaults: {
+            base_url: "https://openrouter.ai/api/v1",
+            api_mode: "responses",
+            http_referer: "https://openbiliclaw.local",
+          },
+        },
+        {
+          previousPreset: { id: "custom", defaults: { api_mode: "chat_completions" } },
+        },
+      );
+    },
+  ],
+  [
+    "payload construction",
+    (implementation) => {
+      let state = implementation.hydrateModelConfig(snapshot(["a"]));
+      state = implementation.updateRouteField(state, "chat", "a", "credential", {
+        action: "set",
+        value: "new-secret",
+      });
+      state = implementation.setMigrationResolution(state, "legacy-1", {
+        action: "add_to_chat_route",
+        position: 9,
+      });
+      return implementation.toModelConfigPayload(state);
+    },
+  ],
+  [
+    "remote conflict and revision",
+    (implementation) => {
+      const clean = implementation.hydrateModelConfig(snapshot(["a"], "revision-a"));
+      const refreshed = implementation.receiveRemoteSnapshot(
+        clean,
+        snapshot(["remote"], "revision-b"),
+      );
+      const dirty = implementation.updateRouteField(clean, "chat", "a", "model", "local-model");
+      return {
+        refreshed,
+        retained: implementation.receiveRemoteSnapshot(dirty, snapshot(["remote"], "revision-b")),
+      };
+    },
+  ],
+  [
+    "exact-probe fingerprint",
+    (implementation) => {
+      const initial = implementation.hydrateModelConfig(snapshot(["a", "b"]));
+      const signature = implementation.createProbeSignature(initial, "chat", "a");
+      const reordered = implementation.moveRouteItem(initial, "chat", "a", 1);
+      const accepted = implementation.applyProbeResult(reordered, signature, {
+        ok: true,
+        connection_id: "a",
+      });
+      const edited = implementation.updateRouteField(initial, "chat", "a", "model", "changed");
+      return {
+        signature,
+        accepted,
+        rejected: implementation.applyProbeResult(edited, signature, { ok: true }),
+      };
+    },
+  ],
 ];
 
 for (const [name, run] of PARITY_VECTORS) {

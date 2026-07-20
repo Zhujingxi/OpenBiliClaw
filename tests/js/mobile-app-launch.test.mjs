@@ -2,10 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  buildAppDeepLink,
-  isMobileUserAgent,
-} from "../../src/openbiliclaw/web/js/app-launch.js";
+import { buildAppDeepLink, isMobileUserAgent } from "../../src/openbiliclaw/web/js/app-launch.js";
 
 test("buildAppDeepLink maps bilibili video URLs to the app scheme", () => {
   assert.equal(
@@ -71,14 +68,8 @@ test("buildAppDeepLink maps douyin / youtube / twitter / zhihu", () => {
     buildAppDeepLink("https://www.zhihu.com/question/123/answer/456"),
     "zhihu://answers/456",
   );
-  assert.equal(
-    buildAppDeepLink("https://zhuanlan.zhihu.com/p/789"),
-    "zhihu://articles/789",
-  );
-  assert.equal(
-    buildAppDeepLink("https://www.zhihu.com/question/123"),
-    "zhihu://questions/123",
-  );
+  assert.equal(buildAppDeepLink("https://zhuanlan.zhihu.com/p/789"), "zhihu://articles/789");
+  assert.equal(buildAppDeepLink("https://www.zhihu.com/question/123"), "zhihu://questions/123");
 });
 
 test("buildAppDeepLink returns empty for unknown or malformed URLs", () => {

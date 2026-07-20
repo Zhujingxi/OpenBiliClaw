@@ -59,10 +59,10 @@ test("mergeProbeNotifications dedupes and filters handled probes", () => {
     ],
   );
 
-  assert.deepEqual(merged.map((item) => `${item.type}:${item.domain}`), [
-    "interest.probe:建筑美学",
-    "interest.probe:城市基础设施",
-  ]);
+  assert.deepEqual(
+    merged.map((item) => `${item.type}:${item.domain}`),
+    ["interest.probe:建筑美学", "interest.probe:城市基础设施"],
+  );
 });
 
 test("filterVisibleProbes filters a single profile list by handled state", () => {

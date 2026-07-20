@@ -1,13 +1,7 @@
 // @ts-check
 import { createHash } from "node:crypto";
 
-const PRESERVED_FIELDS = [
-  "title",
-  "category",
-  "defaultLocale",
-  "homepageUrl",
-  "supportUrl",
-];
+const PRESERVED_FIELDS = ["title", "category", "defaultLocale", "homepageUrl", "supportUrl"];
 
 /** @typedef {{ summary: string, description: string, homepageUrl: string, supportUrl: string }} Listing */
 /** @typedef {Record<string, unknown>} Draft */
@@ -25,10 +19,7 @@ function fencedBlock(markdown, heading) {
   }
   const sectionStart = headingStart + marker.length;
   const nextHeading = markdown.indexOf("\n## ", sectionStart);
-  const section = markdown.slice(
-    sectionStart,
-    nextHeading >= 0 ? nextHeading : markdown.length,
-  );
+  const section = markdown.slice(sectionStart, nextHeading >= 0 ? nextHeading : markdown.length);
   const match = section.match(/```(?:text)?\s*\n([\s\S]*?)\n```/);
   if (!match) {
     throw new Error(`Missing ${heading} fenced block`);
@@ -44,9 +35,7 @@ function fencedBlock(markdown, heading) {
 function documentedUrl(markdown, labels) {
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = markdown.match(
-      new RegExp(`^- ${escaped}:\\s*<?(https://[^>\\s]+)>?\\s*$`, "m"),
-    );
+    const match = markdown.match(new RegExp(`^- ${escaped}:\\s*<?(https://[^>\\s]+)>?\\s*$`, "m"));
     if (match) {
       return match[1];
     }
@@ -63,11 +52,7 @@ export function parseListingMarkdown(markdown) {
     summary: fencedBlock(markdown, "Short Description"),
     description: fencedBlock(markdown, "Detailed Description"),
     homepageUrl: documentedUrl(markdown, ["项目主页 / Website URL", "Homepage"]),
-    supportUrl: documentedUrl(markdown, [
-      "支持 / Support URL",
-      "支持 / GitHub 项目页",
-      "Support",
-    ]),
+    supportUrl: documentedUrl(markdown, ["支持 / Support URL", "支持 / GitHub 项目页", "Support"]),
   };
 }
 
@@ -96,7 +81,9 @@ export function validateListingMetadata(listing) {
  * @returns {string}
  */
 function sha256(value) {
-  return createHash("sha256").update(String(value ?? "")).digest("hex");
+  return createHash("sha256")
+    .update(String(value ?? ""))
+    .digest("hex");
 }
 
 /**
@@ -132,7 +119,9 @@ export function summarizeDraft(draft) {
  */
 export function buildMetadataPayload(draft, listing) {
   if (typeof draft.title !== "string" || typeof draft.defaultLocale !== "string") {
-    throw new Error("Draft lacks the title/defaultLocale identity fields required for a safe update");
+    throw new Error(
+      "Draft lacks the title/defaultLocale identity fields required for a safe update",
+    );
   }
 
   /** @type {Record<string, unknown>} */

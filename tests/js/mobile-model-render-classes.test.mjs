@@ -15,10 +15,7 @@ import {
 } from "../../src/openbiliclaw/web/shared/model-config-render.js";
 
 const root = resolve(import.meta.dirname, "..", "..");
-const mobileCss = readFileSync(
-  resolve(root, "src/openbiliclaw/web/css/app.css"),
-  "utf-8",
-);
+const mobileCss = readFileSync(resolve(root, "src/openbiliclaw/web/css/app.css"), "utf-8");
 const desktopCss = readFileSync(
   resolve(root, "src/openbiliclaw/web/desktop/assets/css/app.css"),
   "utf-8",
@@ -142,22 +139,13 @@ test("mobile prefix emits classes styled by the mobile stylesheet", () => {
     `expected mobile-model-credential-action in ${credentialClasses}`,
   );
   assert.match(mobileCss, /\.mobile-model-credential-actions\b/);
-  assert.match(
-    mobileCss,
-    /\.mobile-model-credential-actions button\[aria-pressed="true"\]/,
-  );
+  assert.match(mobileCss, /\.mobile-model-credential-actions button\[aria-pressed="true"\]/);
 
   // The desktop-only classes must NOT leak into the mobile render.
   assert.ok(!typeClasses.includes("model-type-group"), "desktop class leaked");
   assert.ok(!typeClasses.includes("model-type-option"), "desktop class leaked");
-  assert.ok(
-    !credentialClasses.includes("model-credential-actions"),
-    "desktop class leaked",
-  );
-  assert.ok(
-    !credentialClasses.includes("model-credential-action"),
-    "desktop class leaked",
-  );
+  assert.ok(!credentialClasses.includes("model-credential-actions"), "desktop class leaked");
+  assert.ok(!credentialClasses.includes("model-credential-action"), "desktop class leaked");
 });
 
 test("default prefix preserves desktop classes byte-for-byte", () => {
