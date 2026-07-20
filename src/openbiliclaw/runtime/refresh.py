@@ -2256,14 +2256,13 @@ class ContinuousRefreshController:
             logger.debug("candidate eval drain skipped: reason=locked caller=%s", reason)
             return {"evaluated": 0, "cached": 0, "rejected": 0}
         async with self._discovery_drain_lock:
-            # Pool-share fairness (spec 2026-07-20, Phase 3): before measuring
+            # Pool-share fairness (spec 2026-07-20, Phase 3/4): before measuring
             # the pool, gently evict a few over-share rows if an under-share
-            # source has supply waiting. This frees slots the same tick so the
-            # admission below (and the pool_at_cap gate) reflect the freed room.
-            with suppress(Exception):
-                self._rebalance_pool_shares()
-            with suppress(Exception):
-                self._log_source_deficit_summary()
+            # source has supply waiting, and log the deficit summary. This frees
+            # slots the same tick so the admission below (and the pool_at_cap
+            # gate) reflect the freed room. Shared with the coordinator assembly
+            # via the same entry point (D7).
+            self.run_pool_share_maintenance()
             try:
                 pool_available = self.database.count_pool_candidates(
                     xhs_self_nickname=self._xhs_self_nickname()
@@ -3164,6 +3163,23 @@ class ContinuousRefreshController:
                 fillable,
             )
         return demoted
+
+    def run_pool_share_maintenance(self) -> None:
+        """Run share rebalance + deficit summary once per candidate-eval tick.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3/4, wired per D7). This is
+        the single entry point invoked by BOTH candidate-eval assemblies —
+        legacy ``_loop_candidate_eval`` → ``_drain_discovery_candidates_and_precompute``
+        and the production ``CandidateEvalCoordinator`` (via its pre-admit
+        hook). The two are mutually exclusive at ``run_forever`` wiring
+        (``coordinator.run_forever()`` XOR ``_loop_candidate_eval()``), so this
+        never double-runs in a single tick. Errors are swallowed so pool
+        maintenance can never break the eval loop.
+        """
+        with suppress(Exception):
+            self._rebalance_pool_shares()
+        with suppress(Exception):
+            self._log_source_deficit_summary()
 
     def _log_source_deficit_summary(self) -> None:
         """Log a one-line per-source available/target/deficit summary on change.

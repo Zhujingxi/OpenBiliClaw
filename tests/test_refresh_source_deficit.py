@@ -310,3 +310,29 @@ def test_source_deficit_summary_logs_once_per_change(caplog) -> None:  # type: i
 
     summary_lines = [r for r in caplog.records if r.message.startswith("pool source shares:")]
     assert len(summary_lines) == 2
+
+
+# ── Task 7: rebalance + summary reachable from the coordinator assembly ──
+
+
+def test_run_pool_share_maintenance_invokes_rebalance_then_summary() -> None:
+    # Both candidate-eval assemblies (legacy drain + CandidateEvalCoordinator)
+    # funnel through this single controller entry point, so the Phase 3/4 hooks
+    # are no longer dead code under the production (coordinator) wiring.
+    controller = _controller(
+        database=_FakeDatabase(
+            [],
+            pool_count=300,
+            source_available_counts={"bilibili": 250, "bangumi": 50},
+            source_raw_counts={"bilibili": 250, "bangumi": 50},
+        ),
+        pool_target_count=300,
+        pool_source_shares={"bilibili": 5, "bangumi": 1},
+    )
+    calls: list[str] = []
+    controller._rebalance_pool_shares = lambda: (calls.append("rebalance"), 0)[1]  # type: ignore[method-assign]
+    controller._log_source_deficit_summary = lambda: calls.append("summary")  # type: ignore[method-assign]
+
+    controller.run_pool_share_maintenance()
+
+    assert calls == ["rebalance", "summary"]

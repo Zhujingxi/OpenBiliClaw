@@ -1154,6 +1154,12 @@ class RuntimeContext:
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
             ),
+            # Pool-share fairness (spec 2026-07-20, D7): run the controller's
+            # share rebalance + deficit summary each coordinator tick before
+            # admission. The coordinator assembly replaces _loop_candidate_eval,
+            # so without this the Phase 3/4 hooks are dead code in production.
+            # Guarded for controllers/test doubles lacking the helper.
+            pre_admit_hook=getattr(new_runtime_controller, "run_pool_share_maintenance", None),
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
