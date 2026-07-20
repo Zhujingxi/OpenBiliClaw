@@ -70,7 +70,7 @@ def build_health_router(deps: HealthRouteDeps) -> APIRouter:
 
     @router.get("/api/init-status", response_model=InitStatusOut)
     async def init_status(request: Request) -> InitStatusOut:
-        """Authoritative guided-init status + pre-init checklist (gui-init section 3).
+        """Authoritative guided-init status + pre-init checklist (gui-init §3).
 
         Remote-readable (mirrors autostart-status): a non-local caller still
         sees the state but ``can_manage`` is False. Degraded-mode readable.

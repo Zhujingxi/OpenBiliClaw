@@ -383,3 +383,49 @@ def test_init_status_exact_response(  # noqa: PLR0915
         b'"last_activity":""'
         b"}"
     )
+
+
+def test_init_status_openapi_description(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The OpenAPI ``description`` for ``GET /api/init-status`` must contain ``gui-init §3``.
+
+    This pins the exact docstring text from ``origin/main`` so any accidental
+    rewordings of the handler docstring (which FastAPI publishes into
+    ``/openapi.json``) are caught at the contract-test level.
+    """
+    from openbiliclaw.api import app as app_module
+
+    monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.100")
+    monkeypatch.setattr("openbiliclaw.docker_runtime.is_running_in_container", lambda: False)
+
+    class _MockDB:
+        def get_latest_init_run(self) -> None:
+            return None
+
+        def update_init_run(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def create_init_run(self, *args: object, **kwargs: object) -> str:
+            return "test-run-id"
+
+        def init_active(self) -> bool:
+            return False
+
+        def count_events_by_source_platform(self) -> dict[str, int]:
+            return {}
+
+        def initialize(self) -> None:
+            pass
+
+    app = create_app(
+        memory_manager=object(),
+        database=_MockDB(),
+        soul_engine=object(),
+        runtime_controller=object(),
+        runtime_event_hub=object(),
+    )
+    schema = app.openapi()
+    path_item = schema["paths"]["/api/init-status"]["get"]
+    assert "gui-init §3" in path_item["description"], (
+        f"Expected 'gui-init §3' in /api/init-status OpenAPI description, "
+        f"got: {path_item['description']!r}"
+    )
