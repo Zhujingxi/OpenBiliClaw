@@ -16303,6 +16303,234 @@ def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
     ]
 
 
+# ── Platform-scoped recommendation requests ─────────────────────────
+
+
+class _ScopedFakeSoulEngine:
+    async def get_profile(self) -> dict[str, object]:
+        return {"profile": "ok"}
+
+
+class _ScopedFakeRuntimeController:
+    event_hub = None
+
+    def __init__(self, available: int = 5) -> None:
+        self.available = available
+        self.requests: list[tuple[str, bool]] = []
+
+    def get_runtime_status(self) -> dict[str, object]:
+        return {
+            "initialized": True,
+            "pool_available_count": self.available,
+            "pool_pending_count": 0,
+        }
+
+    async def request_replenishment(self, *, reason: str, force: bool = False) -> dict[str, object]:
+        self.requests.append((reason, force))
+        return {"accepted": True, "state": "running", "reason": reason}
+
+
+class _ScopedResultEngine:
+    """Engine exposing the modern ``*_with_result`` surface."""
+
+    def __init__(self, items: list[object] | None = None) -> None:
+        self.reshuffle_kwargs: list[dict[str, object]] = []
+        self.append_kwargs: list[dict[str, object]] = []
+        self._items = items or []
+
+    def _result(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            items=list(self._items),
+            pool_counts_after={"available": 5, "raw": 5, "pending": 0},
+            timings=None,
+        )
+
+    async def reshuffle_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.reshuffle_kwargs.append(dict(kwargs))
+        return self._result()
+
+    async def append_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.append_kwargs.append(dict(kwargs))
+        return self._result()
+
+
+def _scoped_app(engine: object, runtime: object, database: object | None = None) -> object:
+    return create_app(
+        memory_manager=object(),
+        database=database if database is not None else object(),
+        soul_engine=_ScopedFakeSoulEngine(),
+        recommendation_engine=engine,
+        runtime_controller=runtime,
+    )
+
+
+def test_reshuffle_and_append_forward_canonical_source_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    reshuffle = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+    append = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+
+    assert reshuffle.status_code == 200
+    assert append.status_code == 200
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "zhihu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_recommendation_requests_normalize_platform_aliases() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    assert (
+        client.post(
+            "/api/recommendations/reshuffle",
+            json={"source_platform": "xhs"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/recommendations/append",
+            json={"excluded_bvids": [], "source_platform": " ZH "},
+        ).status_code
+        == 200
+    )
+
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "xiaohongshu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_omitted_platform_preserves_the_legacy_engine_call_shape() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    client.post("/api/recommendations/reshuffle", json={"excluded_bvids": []})
+    client.post("/api/recommendations/append", json={"excluded_bvids": []})
+    client.post("/api/recommendations/reshuffle", json={"source_platform": ""})
+
+    for call in (*engine.reshuffle_kwargs, *engine.append_kwargs):
+        assert "source_platform" not in call
+
+
+def test_recommendation_requests_reject_unknown_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    for path in ("/api/recommendations/reshuffle", "/api/recommendations/append"):
+        for bogus in ("weibo", "'; DROP TABLE content_cache; --", "bilibili2"):
+            response = client.post(path, json={"excluded_bvids": [], "source_platform": bogus})
+            assert response.status_code == 422, (path, bogus)
+
+    # A rejected request must never reach the engine or silently mean "全部".
+    assert engine.reshuffle_kwargs == []
+    assert engine.append_kwargs == []
+
+
+def test_scoped_short_batch_wakes_existing_replenishment_path() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": [], "source_platform": "zhihu"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    # Pool-wide inventory is healthy, so only the scoped shortfall can explain
+    # this; it must wake the existing forced replenishment path.
+    assert runtime.requests and runtime.requests[0][1] is True
+
+
+def test_unscoped_short_batch_with_healthy_pool_does_not_force_replenishment() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post("/api/recommendations/append", json={"excluded_bvids": []})
+
+    assert response.status_code == 200
+    assert runtime.requests == []
+
+
+class _AvailabilityDatabase:
+    def __init__(self, snapshot: object | None = None, error: Exception | None = None) -> None:
+        self._snapshot = snapshot
+        self._error = error
+        self.calls = 0
+
+    async def load_pool_platform_availability_async(self, **_kwargs: object) -> object:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._snapshot
+
+
+def test_platform_availability_endpoint_returns_canonical_map() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.storage.database import PoolPlatformAvailability
+
+    database = _AvailabilityDatabase(
+        PoolPlatformAvailability(
+            total_available=37,
+            by_platform={"bilibili": 18, "zhihu": 7, "xiaohongshu": 5, "reddit": 7},
+        )
+    )
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database)
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_available"] == 37
+    assert payload["by_platform"] == {
+        "bilibili": 18,
+        "zhihu": 7,
+        "xiaohongshu": 5,
+        "reddit": 7,
+    }
+    assert sum(payload["by_platform"].values()) == payload["total_available"]
+
+
+def test_platform_availability_read_failure_is_a_diagnosable_5xx() -> None:
+    """A failed read must not be published as an all-zero snapshot."""
+    from fastapi.testclient import TestClient
+
+    database = _AvailabilityDatabase(error=RuntimeError("database is locked"))
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code >= 500
+    assert "0" not in str(response.json().get("total_available", ""))
+    assert database.calls == 1
+
+
 def test_apply_retraction_db_marks_marks_matching_positive(tmp_path: Path) -> None:
     """The /api/events DB hook discounts stored positives undone by a retraction."""
     from openbiliclaw.api.app import apply_retraction_db_marks

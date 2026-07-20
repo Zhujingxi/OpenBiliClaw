@@ -2356,6 +2356,342 @@ class TestDatabase:
             assert sum(counts.values()) == db.count_pool_candidates()
             db.close()
 
+    def test_pool_platform_availability_total_matches_sum_by_platform(self) -> None:
+        """Platform-scoped tab counts must partition the canonical available set."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-AVAIL-1", title="B 站一", source="search", topic_group="G1")
+            _seed_visible(db, "BV-AVAIL-2", title="B 站二", source="trending", topic_group="G2")
+            _seed_visible(
+                db,
+                "zhihu-avail-1",
+                title="知乎一",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-avail-1",
+                content_url="https://www.zhihu.com/answer/1",
+                topic_group="G3",
+            )
+            _seed_visible(
+                db,
+                "zhihu-avail-2",
+                title="知乎二",
+                source="zhihu-search",
+                source_platform="zhihu",
+                content_id="zhihu-avail-2",
+                content_url="https://www.zhihu.com/answer/2",
+                topic_group="G4",
+            )
+            _seed_visible(
+                db,
+                "xhs-avail-1",
+                title="小红书一",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-avail-1",
+                content_url="https://www.xiaohongshu.com/explore/xhs-avail-1?xsec_token=ABC=",
+                topic_group="G5",
+            )
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.total_available == db.count_pool_candidates()
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            assert snapshot.by_platform == {"bilibili": 2, "zhihu": 2, "xiaohongshu": 1}
+            db.close()
+
+    def test_pool_platform_availability_groups_legacy_source_strategies(self) -> None:
+        """Legacy rows without source_platform still land in a canonical family."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-LEGACY", title="B 站", source="related_chain", topic_group="L1")
+            _seed_visible(
+                db,
+                "zhihu-legacy",
+                title="知乎旧策略",
+                source="zhihu-hot",
+                content_id="zhihu-legacy",
+                content_url="https://www.zhihu.com/answer/legacy",
+                topic_group="L2",
+            )
+            _seed_visible(
+                db,
+                "xhs-legacy",
+                title="小红书旧策略",
+                source="xhs-extension-search",
+                content_id="xhs-legacy",
+                content_url="https://www.xiaohongshu.com/explore/xhs-legacy?xsec_token=ABC=",
+                topic_group="L3",
+            )
+            _seed_visible(
+                db,
+                "dy-legacy",
+                title="抖音旧策略",
+                source="dy-plugin-search",
+                content_id="dy-legacy",
+                content_url="https://www.douyin.com/video/dy-legacy",
+                topic_group="L4",
+            )
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.by_platform == {
+                "bilibili": 1,
+                "zhihu": 1,
+                "xiaohongshu": 1,
+                "douyin": 1,
+            }
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            # The strict reader must resolve the same legacy rows.
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("zhihu")] == [
+                "zhihu-legacy"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("douyin")] == [
+                "dy-legacy"
+            ]
+            db.close()
+
+    def test_pool_platform_availability_excludes_non_servable_rows(self) -> None:
+        """Counts and strict reads share one servability gate."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            def _seed_zhihu(bvid: str, group: str, **kwargs: Any) -> None:
+                kwargs.setdefault("source", "zhihu-hot")
+                kwargs.setdefault("source_platform", "zhihu")
+                kwargs.setdefault("content_id", bvid)
+                kwargs.setdefault("content_url", f"https://www.zhihu.com/answer/{bvid}")
+                _seed_visible(db, bvid, title=bvid, topic_group=group, **kwargs)
+
+            _seed_zhihu("zhihu-ok", "S1")
+            _seed_zhihu("zhihu-recommended", "S2")
+            _seed_zhihu("zhihu-viewed", "S3")
+            _seed_zhihu("zhihu-delight", "S4")
+            # Unclassified and copy-pending rows never reach the serve window.
+            _seed_zhihu("zhihu-unclassified", "S5", style_key="")
+            _seed_zhihu("zhihu-copy-pending", "S6", pool_expression="")
+            # Non-linkable xhs rows mint dead links, so they are not inventory.
+            _seed_visible(
+                db,
+                "xhs-bare",
+                title="缺 token 的小红书",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-bare",
+                content_url="https://www.xiaohongshu.com/explore/xhs-bare",
+                topic_group="S7",
+            )
+
+            db.insert_recommendation(
+                "zhihu-recommended",
+                confidence=0.9,
+                expression="already recommended",
+                topic="testing",
+            )
+            db.insert_event(
+                "view",
+                title="zhihu-viewed",
+                url="https://www.zhihu.com/answer/zhihu-viewed",
+                metadata={"source_platform": "zhihu", "content_id": "zhihu-viewed"},
+            )
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score=0.9,
+                    delight_reason=pool_expression,
+                    delight_hook=pool_topic_label
+                WHERE bvid='zhihu-delight'
+                """
+            )
+            db.conn.commit()
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.by_platform.get("zhihu") == 1
+            assert "xiaohongshu" not in snapshot.by_platform
+            assert snapshot.total_available == db.count_pool_candidates()
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+            assert [row["bvid"] for row in strict] == ["zhihu-ok"]
+            assert db.get_pool_candidates_for_platform("xiaohongshu", limit=20) == []
+            db.close()
+
+    def test_get_pool_candidates_for_platform_matches_inventory_and_returns_full_rows(
+        self,
+    ) -> None:
+        """Strict reads are a subset of the counted set and carry full rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-MIX-1", title="B 站", source="search", topic_group="M1")
+            for index in range(3):
+                _seed_visible(
+                    db,
+                    f"zhihu-mix-{index}",
+                    title=f"知乎 {index}",
+                    source="zhihu-hot",
+                    source_platform="zhihu",
+                    content_id=f"zhihu-mix-{index}",
+                    content_url=f"https://www.zhihu.com/answer/mix-{index}",
+                    topic_group=f"M-Z{index}",
+                    relevance_score=0.9 - index * 0.01,
+                )
+
+            snapshot = db.load_pool_platform_availability()
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+
+            assert len(strict) == snapshot.by_platform["zhihu"] == 3
+            assert {row["source_platform"] for row in strict} == {"zhihu"}
+            # Full candidate rows so the existing recommendation path still works.
+            assert strict[0]["title"] == "知乎 0"
+            assert strict[0]["pool_expression"] == "测试推荐文案"
+            assert strict[0]["content_url"] == "https://www.zhihu.com/answer/mix-0"
+            # Stable relevance ordering, same as the canonical available set.
+            assert [row["bvid"] for row in strict] == [
+                "zhihu-mix-0",
+                "zhihu-mix-1",
+                "zhihu-mix-2",
+            ]
+            db.close()
+
+    def test_get_pool_candidates_for_platform_normalizes_platform_aliases(self) -> None:
+        """Aliases canonicalize before the query, so no alias leaks into SQL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(
+                db,
+                "xhs-alias",
+                title="小红书",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-alias",
+                content_url="https://www.xiaohongshu.com/explore/xhs-alias?xsec_token=ABC=",
+                topic_group="A1",
+            )
+            _seed_visible(
+                db,
+                "zhihu-alias",
+                title="知乎",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-alias",
+                content_url="https://www.zhihu.com/answer/alias",
+                topic_group="A2",
+            )
+
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("XHS")] == [
+                "xhs-alias"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("rednote")] == [
+                "xhs-alias"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("zh")] == [
+                "zhihu-alias"
+            ]
+            assert db.get_pool_candidates_for_platform("not-a-platform") == []
+            db.close()
+
+    def test_get_pool_candidates_for_platform_applies_topic_window(self) -> None:
+        """Strict reads honour the same topic window as the displayed count."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index in range(5):
+                _seed_visible(
+                    db,
+                    f"zhihu-window-{index}",
+                    title=f"同组知乎 {index}",
+                    source="zhihu-hot",
+                    source_platform="zhihu",
+                    content_id=f"zhihu-window-{index}",
+                    content_url=f"https://www.zhihu.com/answer/window-{index}",
+                    topic_group="同一个话题组",
+                    relevance_score=0.9 - index * 0.01,
+                )
+
+            snapshot = db.load_pool_platform_availability()
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+
+            # Default max_per_topic_group=3 caps a concentrated group in both.
+            assert snapshot.by_platform["zhihu"] == 3
+            assert len(strict) == 3
+            assert snapshot.total_available == db.count_pool_candidates() == 3
+            db.close()
+
+    def test_scoped_serve_snapshot_balances_topics_like_the_global_window(self) -> None:
+        """A platform-scoped window must be as topically rich as "全部".
+
+        ``get_pool_candidates`` round-robins the relevance-ordered pool by
+        topic_group so a few dominant groups cannot fill the candidate window.
+        A scoped read that merely truncates by relevance would hand the
+        downstream MMR/diversity stages a window covering a handful of groups,
+        making platform tabs visibly more repetitive than the mixed feed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            # 20 groups x 3 rows, relevance clustered so plain truncation would
+            # take whole groups off the head.
+            for group in range(20):
+                for index in range(3):
+                    bvid = f"zh-{group}-{index}"
+                    _seed_visible(
+                        db,
+                        bvid,
+                        title=bvid,
+                        source="zhihu-hot",
+                        source_platform="zhihu",
+                        content_id=bvid,
+                        content_url=f"https://www.zhihu.com/answer/{bvid}",
+                        topic_group=f"组{group}",
+                        relevance_score=0.99 - group * 0.01 - index * 0.0001,
+                    )
+
+            snapshot = db.load_pool_serve_snapshot(limit=12, source_platform="zhihu")
+
+            groups = {str(row["topic_group"]) for row in snapshot.candidate_rows}
+            assert len(snapshot.candidate_rows) == 12
+            # Pure relevance truncation would reach only 4 groups (12 / 3).
+            assert len(groups) == 12
+            assert {str(row["source_platform"]) for row in snapshot.candidate_rows} == {"zhihu"}
+            db.close()
+
+    async def test_load_pool_platform_availability_async_reads_in_isolation(self) -> None:
+        """The async snapshot must not borrow the process-shared connection."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-ASYNC", title="B 站", source="search", topic_group="N1")
+            _seed_visible(
+                db,
+                "zhihu-async",
+                title="知乎",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-async",
+                content_url="https://www.zhihu.com/answer/async",
+                topic_group="N2",
+            )
+
+            snapshot = await db.load_pool_platform_availability_async()
+
+            assert snapshot.total_available == 2
+            assert snapshot.by_platform == {"bilibili": 1, "zhihu": 1}
+            # The shared connection is left untouched by the isolated read.
+            assert not db.conn.in_transaction
+            db.close()
+
     def test_count_pool_raw_material_counts_pending_xhs_and_excludes_viewed_rows(
         self,
     ) -> None:

@@ -510,6 +510,22 @@
     .chip:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .chip:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .chip.is-active { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+    /* 平台 Tab：标签 + 紧凑库存计数。计数用 tabular numerals 且预留固定宽度，
+       数字从 7 变 12 时不推挤同排 chip。 */
+    .filter-row .chip { display: inline-flex; align-items: baseline; gap: 6px; }
+    .filter-row .chip .chip-count { font-variant-numeric: tabular-nums; font-size: 12px; line-height: 1.2; min-width: 2ch; text-align: right; opacity: 0.78; }
+    .filter-row .chip .chip-count[data-state="unknown"] { opacity: 0.55; }
+    /* hover 不做位移，避免鼠标划过整排 Tab 时抖动；按下的 scale 反馈保留。 */
+    .filter-row .chip:hover { transform: none; }
+    .filter-row .chip:active { transform: scale(0.97); }
+    /* 选中态不能只靠颜色：字重 + 内描边同时表达。描边跟随文字色，
+       accent / classic 两套主题下都与自身底色形成对比。 */
+    .filter-row .chip[aria-selected="true"] { font-weight: 650; box-shadow: inset 0 0 0 2px color-mix(in oklab, currentColor, transparent 55%); }
+    .filter-row .chip[aria-selected="true"] .chip-count { opacity: 1; }
+    /* focus ring 必须压过选中态描边（同特异度，靠顺序），否则选中的那个 Tab
+       上就看不到键盘焦点了。 */
+    .filter-row .chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .filter-row .chip[aria-selected="true"]:focus-visible { box-shadow: var(--focus-ring), inset 0 0 0 2px color-mix(in oklab, currentColor, transparent 55%); }
         .delight {
             position: relative;
             display: grid;

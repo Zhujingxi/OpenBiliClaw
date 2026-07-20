@@ -21,6 +21,7 @@ from pydantic import (
 
 from openbiliclaw.api.source_auth.contract import SourceAuthContract
 from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
+from openbiliclaw.sources.platforms import CANONICAL_SOURCE_FAMILIES, normalize_source_platform
 
 NativeSaveStatusOut = Literal[
     "pending",
@@ -262,16 +263,53 @@ class RecommendationReshuffleResponse(BaseModel):
     items: list[RecommendationOut]
 
 
-class RecommendationReshuffleIn(BaseModel):
-    """Optional visible-card exclusions for a reshuffle request."""
+class _PlatformScopedRecommendationIn(BaseModel):
+    """Shared exclusions plus the optional canonical platform scope.
+
+    ``source_platform`` is additive: omitting it (or sending an empty
+    string) keeps the pre-existing cross-platform behaviour, so clients
+    that predate platform tabs are unaffected. Aliases are canonicalized
+    here — the API boundary is the only place that accepts them — and an
+    unknown value is rejected with 422 rather than quietly degrading to
+    "全部" or bilibili, which would hand the user a tab full of content
+    from a platform they did not ask for.
+    """
 
     excluded_bvids: list[str] = Field(default_factory=list)
+    source_platform: str = ""
+
+    @field_validator("source_platform", mode="before")
+    @classmethod
+    def _canonicalize_source_platform(cls, value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        canonical = normalize_source_platform(raw)
+        if canonical not in CANONICAL_SOURCE_FAMILIES:
+            supported = ", ".join(CANONICAL_SOURCE_FAMILIES)
+            raise ValueError(f"unsupported source_platform {raw!r}; expected one of: {supported}")
+        return canonical
 
 
-class RecommendationAppendIn(BaseModel):
+class RecommendationReshuffleIn(_PlatformScopedRecommendationIn):
+    """Optional visible-card exclusions and platform scope for a reshuffle."""
+
+
+class RecommendationAppendIn(_PlatformScopedRecommendationIn):
     """Request payload for appending another recommendation page."""
 
-    excluded_bvids: list[str] = Field(default_factory=list)
+
+class PlatformAvailabilityResponse(BaseModel):
+    """Servable candidate inventory, split by canonical source platform.
+
+    ``total_available`` matches the "还有 N 条" count and always equals the
+    sum of ``by_platform``; both come from one isolated storage snapshot.
+    Platforms with no stock may be omitted — clients render ``0`` for an
+    enabled platform whose key is absent.
+    """
+
+    total_available: int = 0
+    by_platform: dict[str, int] = Field(default_factory=dict)
 
 
 class RecommendationRefreshResponse(BaseModel):

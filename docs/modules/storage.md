@@ -36,7 +36,8 @@
 | 最近已看过滤 | ✅ | 可换、raw 和评估路径复用 `source_platform:content_id` 与旧 BVID key，避免已看内容重复入池。 |
 | 统一 admission 分数门 | ✅ | 推荐池读取、raw/headroom 统计、topic/franchise 分布、suppressed 复活、delight 候选和历史推荐读取都会应用统一最低分；初始化会清理旧低分 `content_cache` / `recommendations` 脏数据。 |
 | 惊喜文案就绪门与通道占位排除 | ✅ | `get_pool_candidates_needing_delight_score()` 只领取 `pool_expression / pool_topic_label` 已同时生成的行；`update_delight_score()` 再以条件写入拒绝未就绪或非正式文案快照，因此推荐词生成前不会形成任何 delight 状态。`get_delight_candidates()` / `count_delight_candidates()` 继续只返回精确同步快照，evaluator 的内部 `relevance_reason` 不能进入惊喜状态或展示出口。`get_pool_candidates()` / `count_pool_candidates()` 统一排除已送达惊喜，或 delight 分数达动态阈值且正式文案快照已同步的行。动态阈值默认底线为 `0.75`，copy-ready 样本不少于 150 条且总体标准差至少 `0.08` 时才按 Top 10% 边界抬高；backfill 会修复旧版 reason/hook 快照。 |
-| serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
+| 平台定向候选读取 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 直接从 canonical available 集合（`_load_available_pool_candidate_rows_on(..., full_rows=True)`）取整行，与 `count_pool_candidates()` 共用 servability / 近期已看 / linkability / delight / topic-window 守卫与排序，因此 `strict_platform_candidates(p) ⊆ available_candidates_for(p)` 恒成立。平台过滤用 `_pool_source_family(source, source_platform)` 在 Python 侧归类而非裸列比较——`source_platform` 为空的 legacy 行要靠 `zhihu-hot` / `xhs-extension-task` 之类策略前缀才能归族，裸列比较会漏掉它们并破坏 `total == sum(by_platform)`。别名（`xhs`/`zh`）先 canonical 化，空值沿用 bilibili 默认。同时服务 serve 窗口的平台保底与 PC Web 的平台定向推荐请求；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（同口径守卫）。 |
+| 平台库存快照 | ✅ | `load_pool_platform_availability()` / `load_pool_platform_availability_async()` 在独立短连接的单次只读事务里物化一次 canonical available 集合，返回 `PoolPlatformAvailability(total_available, by_platform)`。两个数字出自同一份行集合，`total_available == sum(by_platform.values())` 是结构性成立而非两次独立查询的巧合（后者可能观察到不同 WAL 状态）。零库存平台不出现在 `by_platform` 中，由调用方按已启用来源补 `0`。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
 | 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
@@ -411,6 +412,23 @@ backlog = db.get_pool_candidates_needing_delight_score(
 - 动态阈值样本只统计 copy-ready 的已打分行，旧版在推荐词生成前留下的分数不再影响 Top 10% 校准。
 - 普通推荐的 delight claim guard 以“已送达，或达阈值且正式文案快照已精确同步”为准。任意非空 evaluator reason 不能占位，尚未生成文案的行仍留给 expression-copy backlog，copy-ready 但尚未同步的行也保留给 profile-aware scorer 作最终门槛判断。
 
+### Platform Availability
+
+```python
+snapshot = await db.load_pool_platform_availability_async()
+assert snapshot.total_available == sum(snapshot.by_platform.values())
+
+rows = db.get_pool_candidates_for_platform("zhihu", limit=10)
+assert len(rows) <= snapshot.by_platform.get("zhihu", 0)
+```
+
+行为说明：
+
+- `total_available` 与 `count_pool_candidates()` 同口径（fresh、非 dislike、达 admission floor、文案与分类齐全、链接可用、未被 delight 认领、未进推荐历史、未处于近期已看窗口，并遵循当前 topic window）。
+- `by_platform` 用 `_pool_source_family()` 归类，兼容 `source_platform` 为空的 legacy `source_strategy` 前缀行。
+- 计数与平台定向选片来自**同一份** canonical 行集合，不存在「Tab 显示有货但选片器取不到」的分叉。这里的必然推论是：被全局 topic window 挤出的行既不计数也不可选——它本来就不是库存。
+- 读取走独立短连接，不把进程共享连接交给线程；读取失败向上抛出，由 API 转成可诊断 5xx，绝不返回全零。
+
 ### Atomic Pool Maintenance
 
 ```python
@@ -436,10 +454,16 @@ raw ceiling 同时统计 `content_cache` 和 `discovery_candidates` active 行�
 
 ```python
 snapshot = await db.load_pool_serve_snapshot_async(limit=40)
+# 平台定向请求：只装载该 canonical 平台的候选，且不做跨平台保底补位
+scoped = await db.load_pool_serve_snapshot_async(limit=40, source_platform="zhihu")
 persisted = await db.persist_pool_serve_async(recommendation_rows, selected_bvids)
 ```
 
-两者都由 database-owned serve executor 串行执行，并为每次操作创建/关闭独立连接。snapshot 在显式只读事务内提供一致的 readiness、候选窗口、平台补位、最近已看与 curator/feedback rows；persist 把推荐历史和 shown 状态放进一次 `BEGIN IMMEDIATE`。后台维护有自己的 executor/连接，因此阻塞 maintenance worker 不会把交互读排在同一队列后面。交互写锁每次最多等待 250ms，沿既有 8 次有界重试最坏约 2.14s，保留 HTTP 3s 尾延迟预算。
+两者都由 database-owned serve executor 串行执行，并为每次操作创建/关闭独立连接。snapshot 在显式只读事务内提供一致的 readiness、候选窗口、平台补位、最近已看与 curator/feedback rows；persist 把推荐历史和 shown 状态放进一次 `BEGIN IMMEDIATE`。
+
+`source_platform` 为可选 canonical 平台作用域：非空时候选行改由 `_available_platform_rows_on()` 装载，并**跳过平台保底补位**——给平台定向批次补进别的平台，正是该作用域要防的泄漏。`readiness` 始终保持全池口径（它是 API 上报与补货判断依据的库存），排序、持久化与 shown 提交全部与跨平台路径共用。省略该参数时调用形状与行为与引入前一致。
+
+平台定向窗口同样经过 `_balance_pool_rows()` 的 topic 轮转再截断，与 `get_pool_candidates()` 一致。若按 relevance 直接截断，少数 topic_group 会占满整个候选窗口（实测同样 12 条窗口只覆盖 4 个组 vs 轮转后的 12 个组），下游 MMR / 多样性拿到的选择面比混合流窄得多——平台 Tab 会仅仅因为候选装载方式不同而显得比「全部」重复。后台维护有自己的 executor/连接，因此阻塞 maintenance worker 不会把交互读排在同一队列后面。交互写锁每次最多等待 250ms，沿既有 8 次有界重试最坏约 2.14s，保留 HTTP 3s 尾延迟预算。
 
 ### Admission Cleanup
 

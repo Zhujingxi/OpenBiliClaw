@@ -187,6 +187,21 @@ class PoolServeSnapshot:
 
 
 @dataclass(frozen=True)
+class PoolPlatformAvailability:
+    """Canonical servable inventory, split by source family.
+
+    ``total_available`` always equals ``sum(by_platform.values())`` because
+    both come from one isolated read of the same canonical available set
+    (the one ``count_pool_candidates`` counts and ``serve()`` can load).
+    Platforms holding nothing are absent from ``by_platform``; callers that
+    need an explicit ``0`` supply it from their own enabled-source list.
+    """
+
+    total_available: int
+    by_platform: dict[str, int]
+
+
+@dataclass(frozen=True)
 class PoolServePersistResult:
     """IDs committed by the recommendation hot path's isolated write."""
 
@@ -1342,6 +1357,7 @@ class Database:
         limit: int,
         xhs_self_nickname: str = "",
         curator_history_limit: int = 30,
+        source_platform: str = "",
     ) -> PoolServeSnapshot:
         """Load a recommendation snapshot on the interactive SQLite worker."""
         loop = asyncio.get_running_loop()
@@ -1353,6 +1369,7 @@ class Database:
                 limit=limit,
                 xhs_self_nickname=xhs_self_nickname,
                 curator_history_limit=curator_history_limit,
+                source_platform=source_platform,
             ),
         )
 
@@ -1409,8 +1426,19 @@ class Database:
         limit: int,
         xhs_self_nickname: str = "",
         curator_history_limit: int = 30,
+        source_platform: str = "",
     ) -> PoolServeSnapshot:
-        """Load all hot-path pool state through one isolated read snapshot."""
+        """Load all hot-path pool state through one isolated read snapshot.
+
+        ``source_platform`` narrows the candidate rows to a single canonical
+        family for platform-scoped requests. Only the candidate set changes:
+        ``readiness`` stays pool-wide (it is the inventory the API reports and
+        replenishes against), and every downstream ranking, persistence and
+        shown-commit step is shared with the cross-platform path. Strict mode
+        also skips the platform floor — topping a scoped batch up with another
+        platform is exactly the leak the scope exists to prevent.
+        """
+        scope = normalize_source_platform(source_platform)
         isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
         isolated._preserve_read_transaction = True
         try:
@@ -1426,44 +1454,79 @@ class Database:
                 xhs_self_nickname=xhs_self_nickname,
                 _viewed_content_keys=viewed_content_keys,
             )
-            rows = isolated.get_pool_candidates(
-                limit=max(0, int(limit)),
-                xhs_self_nickname=xhs_self_nickname,
-                _viewed_content_keys=viewed_content_keys,
-            )
-            loaded_count = len(rows)
-
-            platforms = isolated.list_servable_pool_platforms(
-                xhs_self_nickname=xhs_self_nickname,
-                _viewed_content_keys=viewed_content_keys,
-            )
-            present = {
-                str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
-                for row in rows
-            }
-            seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
-            topups: list[tuple[str, int]] = []
-            if len(platforms) > 1:
-                for platform in platforms:
-                    token = str(platform).strip().lower()
-                    if not token or token in present:
-                        continue
-                    added = 0
-                    for row in isolated.get_pool_candidates_for_platform(
-                        token,
-                        limit=5,
+            if scope:
+                # Take the platform's whole available set, then apply the same
+                # topic round-robin ``get_pool_candidates`` uses. Truncating by
+                # relevance instead would fill the window with a few dominant
+                # topic_groups, leaving the downstream MMR/diversity stages a
+                # far narrower window than the mixed feed gets — a platform tab
+                # would read as visibly more repetitive than "全部" for no
+                # reason other than how its candidates were loaded.
+                rows = Database._balance_pool_rows(
+                    isolated._available_platform_rows_on(
+                        isolated.conn,
+                        scope,
                         xhs_self_nickname=xhs_self_nickname,
                         _viewed_content_keys=viewed_content_keys,
-                    ):
-                        bvid = str(row.get("bvid", ""))
-                        if bvid and bvid in seen:
-                            continue
-                        if bvid:
-                            seen.add(bvid)
-                        rows.append(row)
-                        added += 1
-                    if added:
-                        topups.append((token, added))
+                    ),
+                    limit=max(0, int(limit)),
+                )
+            else:
+                rows = isolated.get_pool_candidates(
+                    limit=max(0, int(limit)),
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+            loaded_count = len(rows)
+
+            topups: list[tuple[str, int]] = []
+            if not scope:
+                present = {
+                    str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
+                    for row in rows
+                }
+                platforms = isolated.list_servable_pool_platforms(
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+                missing = [
+                    token
+                    for token in (str(name).strip().lower() for name in platforms)
+                    if token and token not in present
+                ]
+                seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
+                if len(platforms) > 1 and missing:
+                    # Materialize the canonical available set once and share it
+                    # across every top-up. Reading it per platform turned an
+                    # all-bilibili window with seven stocked platforms into
+                    # seven full-row scans (~35ms each) on the serve hot path;
+                    # the cheap platform list above keeps that scan off the
+                    # common case where no platform is missing at all.
+                    available_rows = isolated._load_available_pool_candidate_rows_on(
+                        isolated.conn,
+                        xhs_self_nickname=xhs_self_nickname,
+                        _viewed_content_keys=viewed_content_keys,
+                        full_rows=True,
+                    )
+                    for token in missing:
+                        added = 0
+                        for row in isolated._available_platform_rows_on(
+                            isolated.conn,
+                            token,
+                            limit=5,
+                            xhs_self_nickname=xhs_self_nickname,
+                            _viewed_content_keys=viewed_content_keys,
+                            _available_rows=available_rows,
+                        ):
+                            bvid = str(row.get("bvid", ""))
+                            if bvid and bvid in seen:
+                                continue
+                            if bvid:
+                                seen.add(bvid)
+                            rows.append(row)
+                            added += 1
+                        if added:
+                            topups.append((token, added))
 
             viewed = frozenset(recent_viewed_bvids)
             history_limit = max(1, int(curator_history_limit))
@@ -1513,6 +1576,64 @@ class Database:
             return isolated.count_pool_readiness(xhs_self_nickname=xhs_self_nickname)
         finally:
             isolated.close()
+
+    def load_pool_platform_availability(
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+    ) -> PoolPlatformAvailability:
+        """Read total and per-platform servable inventory in one transaction.
+
+        Both numbers derive from a single materialization of the canonical
+        available set, so ``total_available == sum(by_platform.values())`` is
+        structural rather than a coincidence of two independent queries that
+        could observe different WAL states. Runs on a short-lived connection
+        so a tab-count refresh never contends with the process-shared one.
+        """
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        isolated._preserve_read_transaction = True
+        try:
+            isolated.conn.execute("BEGIN")
+            viewed_content_keys, _ = isolated._recent_viewed_state_on(isolated.conn)
+            rows = isolated._load_available_pool_candidate_rows_on(
+                isolated.conn,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            isolated.conn.commit()
+        except Exception:
+            isolated.conn.rollback()
+            raise
+        finally:
+            isolated._preserve_read_transaction = False
+            isolated.close()
+        counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            counts[_pool_source_family(row["source"], row["source_platform"])] += 1
+        return PoolPlatformAvailability(
+            total_available=len(rows),
+            by_platform=dict(counts),
+        )
+
+    async def load_pool_platform_availability_async(
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+    ) -> PoolPlatformAvailability:
+        """Read platform inventory on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.load_pool_platform_availability,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+            ),
+        )
 
     def _ensure_fresh_read(self) -> None:
         """Close any implicit transaction so the next SELECT sees the latest WAL state.
@@ -3732,8 +3853,53 @@ class Database:
         """
         return clause, (pool_status, *admission_params, *guard_params, delight_threshold)
 
-    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
-        return self._pool_servable_where_clause_on(self.conn, xhs_self_nickname)
+    def _available_platform_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        platform: str,
+        *,
+        limit: int | None = None,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+        _available_rows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return canonical available rows belonging to one source family.
+
+        The platform filter is applied in Python on ``_pool_source_family``
+        rather than in SQL: a row's family also derives from legacy
+        ``source`` strategy prefixes (``zhihu-hot``, ``xhs-extension-task``)
+        when ``source_platform`` is blank, so a raw column comparison would
+        silently drop stocked legacy rows and break the
+        ``total == sum(by_platform)`` invariant the tab counts rely on.
+
+        Materializing the canonical set costs a full-row scan, so callers
+        that need several platforms from one read (the serve window's
+        platform floor) pass ``_available_rows`` to share a single load
+        instead of paying that scan once per platform.
+        """
+        canonical = normalize_source_platform(platform)
+        if not canonical:
+            return []
+        rows = (
+            _available_rows
+            if _available_rows is not None
+            else self._load_available_pool_candidate_rows_on(
+                conn,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=_viewed_content_keys,
+                full_rows=True,
+            )
+        )
+        selected: list[dict[str, Any]] = []
+        for row in rows:
+            if _pool_source_family(row["source"], row["source_platform"]) != canonical:
+                continue
+            selected.append(row)
+            if limit is not None and len(selected) >= limit:
+                break
+        return selected
 
     def get_pool_candidates_for_platform(
         self,
@@ -3743,60 +3909,38 @@ class Database:
         xhs_self_nickname: str = "",
         _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch up to ``limit`` servable pool rows for one platform token.
+        """Fetch up to ``limit`` servable pool rows for one canonical platform.
 
-        Companion to ``get_pool_candidates`` powering the recommendation serve
-        window's platform floor: when a relevance-ordered window happens to be
-        all-bilibili, this back-fills a stocked non-bilibili platform so it
-        can't be silently dropped for hours. Applies the exact servability
-        guards and relevance ordering of ``get_pool_candidates`` plus a
-        ``source_platform`` filter (``COALESCE(NULLIF(source_platform, ''),
-        'bilibili')``), and drops recently-viewed / non-linkable rows so every
-        returned row is one ``serve()`` can actually load.
+        Two callers share this reader, so it must never diverge from the
+        counted inventory:
+
+        * the serve window's platform floor, which back-fills a stocked
+          non-bilibili platform an all-bilibili relevance window would
+          otherwise drop for hours;
+        * platform-scoped recommendation requests from PC Web, where every
+          returned item has to belong to the requested platform.
+
+        Rows come straight out of the canonical available set backing
+        ``count_pool_candidates`` / ``load_pool_platform_availability`` — same
+        servability, recently-viewed, linkability, delight-claim and
+        topic-window guards, same relevance ordering — so
+        ``strict_platform_candidates(p) ⊆ available_candidates_for(p)`` holds
+        and a tab can never advertise stock this reader refuses to serve.
+        ``platform`` is canonicalized (``xhs`` → ``xiaohongshu``); an empty
+        value keeps the historical bilibili default.
         """
-        token = str(platform or "").strip().lower() or "bilibili"
+        token = normalize_source_platform(platform) or _BILIBILI_SOURCE_FAMILY
         fetch_limit = max(0, int(limit))
         if fetch_limit <= 0:
             return []
         self._ensure_fresh_read()
-        where_clause, where_params = self._pool_servable_where_clause(xhs_self_nickname)
-        sql = f"""
-            SELECT *
-            FROM content_cache
-            WHERE {where_clause}
-              AND LOWER(COALESCE(NULLIF(source_platform, ''), 'bilibili')) = ?
-            ORDER BY
-                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                relevance_score DESC,
-                last_scored_at DESC,
-                view_count DESC,
-                bvid ASC
-            LIMIT ?
-        """
-        # Over-fetch so viewed / non-linkable drops still leave up to `limit`.
-        cursor = self.conn.execute(sql, (*where_params, token, fetch_limit * 4 + 8))
-        viewed_content_keys = (
-            self.get_recent_viewed_content_keys()
-            if _viewed_content_keys is None
-            else _viewed_content_keys
+        return self._available_platform_rows_on(
+            self.conn,
+            token,
+            limit=fetch_limit,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
         )
-        rows: list[dict[str, Any]] = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            if not str(row_dict.get("bvid", "")).strip():
-                continue
-            if self._is_viewed_row(row_dict, viewed_content_keys):
-                continue
-            if not _is_linkable_pool_source(
-                row_dict.get("source"),
-                row_dict.get("source_platform"),
-                row_dict.get("content_url"),
-            ):
-                continue
-            rows.append(row_dict)
-            if len(rows) >= fetch_limit:
-                break
-        return rows
 
     def list_servable_pool_platforms(
         self,
@@ -3877,12 +4021,18 @@ class Database:
         max_per_topic_group: int = 3,
         xhs_self_nickname: str = "",
         _viewed_content_keys: set[str] | None = None,
+        full_rows: bool = False,
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
         Applies the delight claim guard like ``get_pool_candidates`` so
         the availability count never includes surprise-channel rows serve()
         would refuse to load.
+
+        ``full_rows=True`` widens the projection to whole ``content_cache``
+        rows without touching the gate or ordering, so platform-scoped serve
+        reads can hand complete candidates to the recommendation path while
+        still coming from the exact set the counts report.
         """
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
@@ -3891,12 +4041,19 @@ class Database:
             conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
+        projection = (
+            "*"
+            if full_rows
+            else (
+                "bvid, source, source_platform, content_url, topic_group, "
+                "candidate_tier, relevance_score, last_scored_at, view_count"
+            )
+        )
         if max_per_topic_group > 0:
             cursor = conn.execute(
                 f"""
                 WITH ranked AS (
-                    SELECT bvid, source, source_platform, content_url, topic_group,
-                           candidate_tier, relevance_score, last_scored_at, view_count,
+                    SELECT {projection},
                            ROW_NUMBER() OVER (
                                PARTITION BY topic_group
                                ORDER BY
@@ -3925,8 +4082,7 @@ class Database:
                         WHERE r.bvid = content_cache.bvid
                       )
                 )
-                SELECT bvid, source, source_platform, content_url, topic_group,
-                       candidate_tier, relevance_score, last_scored_at, view_count
+                SELECT {projection}
                 FROM ranked
                 WHERE group_rank <= ?
                 ORDER BY
@@ -3941,8 +4097,7 @@ class Database:
         else:
             cursor = conn.execute(
                 f"""
-                SELECT bvid, source, source_platform, content_url, topic_group,
-                       candidate_tier, relevance_score, last_scored_at, view_count
+                SELECT {projection}
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'

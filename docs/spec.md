@@ -230,6 +230,11 @@ degraded registry → provider-free ping(degraded) → static /web | /setup | /m
 
 reshuffle HTTP → PoolServeSnapshot → isolated serve DB worker/read transaction
                → unchanged MMR → short atomic recommendation+shown write
+  PC Web platform tab → optional source_platform (additive, canonical)
+                      → platform-scoped candidates, no cross-platform floor
+                      → same curator / MMR / diversity / persist path
+  platform-availability → isolated read of the canonical available set
+                        → {total_available, by_platform}; total == sum(by_platform)
 pool maintenance → isolated maintenance DB worker → ≤50 mutations/transaction
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
