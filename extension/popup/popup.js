@@ -6443,6 +6443,15 @@ function bindSettings() {
     }
   }
 
+  // Any real user keystroke in the log path field marks intentional edit
+  // intent, even if the final value equals the redacted GET echo (the
+  // exact-basename revert case). Programmatic renders via setVal() do not
+  // fire "input" events, so this only arms on genuine user edits.
+  const logPathInput = document.getElementById("cfgLogPath");
+  if (logPathInput) {
+    logPathInput.addEventListener("input", () => markLogPathDirty());
+  }
+
   async function populateBackendEndpoint() {
     try {
       const endpoint = await getBackendEndpointConfig();
@@ -6717,6 +6726,31 @@ function bindSettings() {
       directory: normalized.slice(0, slashIndex) || "/",
       filename: normalized.slice(slashIndex + 1) || fallback.filename,
     };
+  }
+
+  // Explicit user-intent tracking for the logging path field. String
+  // equality against the redacted GET echo cannot distinguish "unchanged
+  // full-form save" from "intentional edit to the exact displayed
+  // basename", so the payload branch keys off an explicit dirty flag set
+  // by real user input events and reset whenever the backend config is
+  // (re)rendered into the form (initial populate, save success).
+  let logPathDirty = false;
+
+  function markLogPathDirty() {
+    logPathDirty = true;
+  }
+
+  function resetLogPathDirty() {
+    logPathDirty = false;
+  }
+
+  function isLogPathUnmodified(currentLogging) {
+    // The dirty flag is the authoritative intent signal; the string
+    // comparison only guards the edge where the flag was never armed
+    // (e.g. listener not yet attached) — a pristine echo still counts as
+    // unmodified then.
+    if (logPathDirty) return false;
+    return getVal("cfgLogPath") === resolveLogPathFromConfig(currentLogging);
   }
 
   const getInt = (id, fallback) => {
@@ -6998,6 +7032,9 @@ function bindSettings() {
     const logFileLevel = document.getElementById("cfgLogFileLevel");
     if (logFileLevel) logFileLevel.value = cfg.logging?.file_level || "DEBUG";
     setVal("cfgLogPath", resolveLogPathFromConfig(cfg.logging));
+    // Programmatic render of the wire echo means the field is pristine
+    // again — any prior edit intent has either been saved or discarded.
+    resetLogPathDirty();
     setVal("cfgLogMaxFileSize", cfg.logging?.max_file_size_mb);
     setVal("cfgLogBackupCount", cfg.logging?.backup_count);
     setVal("cfgLogAggregateBudget", cfg.logging?.aggregate_budget_mb);
@@ -7145,17 +7182,30 @@ function bindSettings() {
         mode: getVal("cfgNetworkProxyMode"),
         proxy: getVal("cfgNetworkProxy"),
       },
-      logging: {
-        level: getVal("cfgLogLevel"),
-        file_level: getVal("cfgLogFileLevel"),
-        directory: logPath.directory,
-        filename: logPath.filename,
-        max_file_size_mb: getInt("cfgLogMaxFileSize", 100),
-        backup_count: getInt("cfgLogBackupCount", 1),
-        aggregate_budget_mb: getInt("cfgLogAggregateBudget", 500),
-        unmanaged_truncate_mb: getInt("cfgLogUnmanagedTruncate", 200),
-        unmanaged_max_age_days: getInt("cfgLogUnmanagedMaxAge", 30),
-      },
+      logging: (() => {
+        const base = {
+          level: getVal("cfgLogLevel"),
+          file_level: getVal("cfgLogFileLevel"),
+          max_file_size_mb: getInt("cfgLogMaxFileSize", 100),
+          backup_count: getInt("cfgLogBackupCount", 1),
+          aggregate_budget_mb: getInt("cfgLogAggregateBudget", 500),
+          unmanaged_truncate_mb: getInt("cfgLogUnmanagedTruncate", 200),
+          unmanaged_max_age_days: getInt("cfgLogUnmanagedMaxAge", 30),
+        };
+        // Unmodified full-form save: send file_path so the backend can
+        // detect the redacted echo and preserve canonical absolute paths.
+        // Intentional edit (including to the exact displayed basename):
+        // send directory/filename only — the backend applies them directly.
+        if (isLogPathUnmodified(state.runtimeConfig?.logging)) {
+          base.file_path = getVal("cfgLogPath");
+          base.directory = logPath.directory;
+          base.filename = logPath.filename;
+        } else {
+          base.directory = logPath.directory;
+          base.filename = logPath.filename;
+        }
+        return base;
+      })(),
     };
   }
 
@@ -7387,6 +7437,10 @@ function bindSettings() {
           applyRuntimeConfig(result.config);
           renderIssues(result.config.issues);
           renderDegradedBanner(result.config);
+          // Save succeeded: the submitted values are now canonical, so any
+          // armed edit intent has been consumed. Reset the dirty flag so a
+          // follow-up full-form save round-trips as a pristine echo.
+          resetLogPathDirty();
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);

@@ -68,6 +68,7 @@ from openbiliclaw.sources.platforms import (
 from openbiliclaw.sources.platforms import (
     source_family as _source_family,
 )
+from openbiliclaw.storage.migrations import ensure_columns
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -5978,20 +5979,17 @@ class Database:
 
     def _ensure_llm_usage_columns(self) -> None:
         """Idempotently backfill usage observability columns and indexes."""
-        existing_columns = {
-            str(row["name"]) for row in self.conn.execute("PRAGMA table_info(llm_usage)").fetchall()
-        }
-        required_columns = {
-            "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
-            "connection_id": "TEXT NOT NULL DEFAULT ''",
-            "connection_type": "TEXT NOT NULL DEFAULT ''",
-            "preset": "TEXT NOT NULL DEFAULT ''",
-            "route_position": "INTEGER NOT NULL DEFAULT 0",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "llm_usage",
+            {
+                "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+                "connection_id": "TEXT NOT NULL DEFAULT ''",
+                "connection_type": "TEXT NOT NULL DEFAULT ''",
+                "preset": "TEXT NOT NULL DEFAULT ''",
+                "route_position": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
         self.conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_llm_usage_connection_timestamp
@@ -6005,124 +6003,99 @@ class Database:
         Existing rows keep ``NULL`` in both columns; consumers treat NULL
         as ``unknown`` so the upgrade is non-blocking.
         """
-        existing_columns = {
-            str(row["name"]) for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
-        }
-        required_columns = {
-            "inferred_satisfaction": "TEXT",
-            "satisfaction_reason": "TEXT",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE events ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "events",
+            {
+                "inferred_satisfaction": "TEXT",
+                "satisfaction_reason": "TEXT",
+            },
+        )
 
     def _ensure_recommendation_feedback_columns(self) -> None:
         """Backfill recommendation feedback columns for existing databases."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(recommendations)").fetchall()
-        }
-        required_columns = {
-            "feedback_type": "TEXT",
-            "feedback_note": "TEXT",
-            "feedback_at": "TIMESTAMP",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE recommendations ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "recommendations",
+            {
+                "feedback_type": "TEXT",
+                "feedback_note": "TEXT",
+                "feedback_at": "TIMESTAMP",
+            },
+        )
 
     def _ensure_content_cache_runtime_columns(self) -> None:
         """Backfill content-cache runtime columns for continuous refresh."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
-        }
-        required_columns = {
-            "last_scored_at": "TIMESTAMP",
-            "notification_sent": "INTEGER DEFAULT 0",
-            "notified_at": "TIMESTAMP",
-            "pool_status": "TEXT DEFAULT 'fresh'",
-            "recommended_at": "TIMESTAMP",
-            "feedback_type": "TEXT",
-            "feedback_at": "TIMESTAMP",
-            "source": "TEXT",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "content_cache",
+            {
+                "last_scored_at": "TIMESTAMP",
+                "notification_sent": "INTEGER DEFAULT 0",
+                "notified_at": "TIMESTAMP",
+                "pool_status": "TEXT DEFAULT 'fresh'",
+                "recommended_at": "TIMESTAMP",
+                "feedback_type": "TEXT",
+                "feedback_at": "TIMESTAMP",
+                "source": "TEXT",
+            },
+        )
 
     def _ensure_content_cache_relevance_columns(self) -> None:
         """Backfill relevance fields for existing content-cache rows."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
-        }
-        required_columns = {
-            "relevance_score": "REAL DEFAULT 0.0",
-            "relevance_reason": "TEXT DEFAULT ''",
-            "candidate_tier": "TEXT DEFAULT 'primary'",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "content_cache",
+            {
+                "relevance_score": "REAL DEFAULT 0.0",
+                "relevance_reason": "TEXT DEFAULT ''",
+                "candidate_tier": "TEXT DEFAULT 'primary'",
+            },
+        )
 
     def _ensure_content_cache_topic_columns(self) -> None:
         """Backfill topic bucketing fields for existing content-cache rows."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
-        }
-        if "topic_key" not in existing_columns:
-            self.conn.execute("ALTER TABLE content_cache ADD COLUMN topic_key TEXT DEFAULT ''")
-        if "topic_group" not in existing_columns:
-            self.conn.execute("ALTER TABLE content_cache ADD COLUMN topic_group TEXT DEFAULT ''")
-        if "style_key" not in existing_columns:
-            self.conn.execute("ALTER TABLE content_cache ADD COLUMN style_key TEXT DEFAULT ''")
-        if "franchise_key" not in existing_columns:
-            # v0.3.18: LLM-tagged IP / franchise / series. Empty string for
-            # general-interest content; non-empty rows let the curator
-            # propagate dislikes within an IP and let
-            # /api/recommendations cap how many same-franchise items
-            # appear in a single response window — without relying on
-            # any title-string heuristic or hardcoded alias list.
-            self.conn.execute("ALTER TABLE content_cache ADD COLUMN franchise_key TEXT DEFAULT ''")
+        ensure_columns(
+            self.conn,
+            "content_cache",
+            {
+                "topic_key": "TEXT DEFAULT ''",
+                "topic_group": "TEXT DEFAULT ''",
+                "style_key": "TEXT DEFAULT ''",
+                # v0.3.18: LLM-tagged IP / franchise / series. Empty string for
+                # general-interest content; non-empty rows let the curator
+                # propagate dislikes within an IP and let
+                # /api/recommendations cap how many same-franchise items
+                # appear in a single response window — without relying on
+                # any title-string heuristic or hardcoded alias list.
+                "franchise_key": "TEXT DEFAULT ''",
+            },
+        )
 
     def _ensure_content_cache_pool_copy_columns(self) -> None:
         """Backfill precomputed pool-copy fields for existing databases."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
-        }
-        required_columns = {
-            "pool_expression": "TEXT DEFAULT ''",
-            "pool_topic_label": "TEXT DEFAULT ''",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "content_cache",
+            {
+                "pool_expression": "TEXT DEFAULT ''",
+                "pool_topic_label": "TEXT DEFAULT ''",
+            },
+        )
 
     def _ensure_content_cache_delight_columns(self) -> None:
         """Backfill proactive delight scoring fields for existing databases."""
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
-        }
-        required_columns = {
-            "delight_score": "REAL DEFAULT 0.0",
-            "delight_reason": "TEXT DEFAULT ''",
-            "delight_hook": "TEXT DEFAULT ''",
-            "delight_notified": "INTEGER DEFAULT 0",
-            "delight_notified_at": "TIMESTAMP",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+        ensure_columns(
+            self.conn,
+            "content_cache",
+            {
+                "delight_score": "REAL DEFAULT 0.0",
+                "delight_reason": "TEXT DEFAULT ''",
+                "delight_hook": "TEXT DEFAULT ''",
+                "delight_notified": "INTEGER DEFAULT 0",
+                "delight_notified_at": "TIMESTAMP",
+            },
+        )
 
     def _ensure_content_cache_multisource_columns(self) -> None:
         """Add multi-source content identity fields for existing databases."""
@@ -6333,35 +6306,29 @@ class Database:
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""
 
-        existing_columns = {
-            str(row["name"])
-            for row in self.conn.execute("PRAGMA table_info(discovery_candidates)").fetchall()
-        }
-        required_columns = {
-            "score_threshold": "REAL NOT NULL DEFAULT 0.0",
-            "eval_attempts": "INTEGER NOT NULL DEFAULT 0",
-            "batch_eval_attempts": "INTEGER NOT NULL DEFAULT 0",
-            "claim_token": "TEXT",
-            "body_text": "TEXT NOT NULL DEFAULT ''",
-            "favorite_count": "INTEGER NOT NULL DEFAULT 0",
-            "collect_count": "INTEGER NOT NULL DEFAULT 0",
-            "comment_count": "INTEGER NOT NULL DEFAULT 0",
-            "share_count": "INTEGER NOT NULL DEFAULT 0",
-            "danmaku_count": "INTEGER NOT NULL DEFAULT 0",
-            "reply_count": "INTEGER NOT NULL DEFAULT 0",
-            "retweet_count": "INTEGER NOT NULL DEFAULT 0",
-            "bookmark_count": "INTEGER NOT NULL DEFAULT 0",
-            "published_at": "TEXT NOT NULL DEFAULT ''",
-            "published_label": "TEXT NOT NULL DEFAULT ''",
-            # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
-            "source_keyword_id": "INTEGER",
-        }
-        for column_name, column_type in required_columns.items():
-            if column_name in existing_columns:
-                continue
-            self.conn.execute(
-                f"ALTER TABLE discovery_candidates ADD COLUMN {column_name} {column_type}"
-            )
+        ensure_columns(
+            self.conn,
+            "discovery_candidates",
+            {
+                "score_threshold": "REAL NOT NULL DEFAULT 0.0",
+                "eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "batch_eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "claim_token": "TEXT",
+                "body_text": "TEXT NOT NULL DEFAULT ''",
+                "favorite_count": "INTEGER NOT NULL DEFAULT 0",
+                "collect_count": "INTEGER NOT NULL DEFAULT 0",
+                "comment_count": "INTEGER NOT NULL DEFAULT 0",
+                "share_count": "INTEGER NOT NULL DEFAULT 0",
+                "danmaku_count": "INTEGER NOT NULL DEFAULT 0",
+                "reply_count": "INTEGER NOT NULL DEFAULT 0",
+                "retweet_count": "INTEGER NOT NULL DEFAULT 0",
+                "bookmark_count": "INTEGER NOT NULL DEFAULT 0",
+                "published_at": "TEXT NOT NULL DEFAULT ''",
+                "published_label": "TEXT NOT NULL DEFAULT ''",
+                # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
+                "source_keyword_id": "INTEGER",
+            },
+        )
 
     def _normalize_legacy_style_keys(self) -> None:
         """Rewrite known legacy content-form style keys to viewing-mode keys."""

@@ -2301,6 +2301,8 @@ body {
 .mobile-model-save-bar { position: sticky; bottom: 0; display: grid; gap: 8px; margin-top: 14px; padding: 12px 0 0; background: linear-gradient(180deg, transparent, var(--surface-strong) 18%); }
 .mobile-model-save-bar button { background: var(--brand); color: #fff; border-radius: 10px; font-weight: 750; }
 .mobile-model-field-error { color: var(--danger); font-size: 11px; }
+.mobile-model-circuit-chip { margin: 10px 0 0; padding: 6px 10px; border-radius: 999px; font-size: 11px; color: var(--warning, #b45309); border: 1px solid currentColor; display: inline-flex; }
+.mobile-model-unverified { margin: 10px 0 0; color: var(--warning, #b45309); font-size: 11px; }
 
 /* ── Save chips on the cover (稍后再看 ☆ / 收藏 ♥) ─────────────────
    Overlay the cover top-right so the bottom action bar stays light. */

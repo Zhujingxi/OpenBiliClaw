@@ -4,9 +4,116 @@
 
 ---
 
+## 迁移测试静态参数化消除未基线化跳过（评审 t_e03bfeff run 192 P1）
+
+- **P1 源头消除 10 个未基线化运行时跳过**：`tests/test_storage_schema_migrations.py` 的 `test_partial_db_repairs_each_non_content_table` 与 `test_ensure_columns_does_not_commit_or_rollback` 此前对完整 `_CONVERTED_METHODS`（含 5 个 content_cache 列组）参数化，再对每个 content_cache 行调用 `pytest.skip()`，共产生 5+5=10 个新跳过节点 ID，全部不在 checked-in `tests/contracts/quality-baseline.json`（45 条 known skips）中，导致本分支自身的 Check quality baseline 步骤 exit 1。content_cache 的对应形态本就有专属测试覆盖（`test_partial_db_repairs_each_content_cache_column_group` 与 `test_ensure_columns_does_not_commit_or_rollback_content_cache`），这些运行时跳过属于冗余收集。修复方式：新增 `_NON_CONTENT_CONVERTED_METHODS`（从 `_CONVERTED_METHODS` 静态过滤 `table != "content_cache"` 派生），两个仅覆盖非 content 表的测试改为对该集合参数化，并删除两处运行时 `pytest.skip()` 分支——收集期静态过滤产生零跳过记录，优于在 baseline 中 allowlist 十条永久跳过的冗余用例（后者会让比较器长期容忍死节点 ID）。
+- **回归**：`tests/test_quality_baseline_comparator.py` 新增 `test_checked_in_baseline_rejects_unbaselined_migration_skip`——以 checked-in baseline 运行比较器，注入一个未基线化的迁移测试参数化跳过节点，断言 exit 1（new skip 永不静默容忍），把「运行时 skip 重新进入套件」的漂移锁死在 CI 层。
+- **测试**：目标存储迁移测试 42 passed（0 skipped，此前 32 passed/10 skipped）、比较器测试 82 passed；ruff/mypy clean；完整套件 5769 passed/45 skipped（跳过数回到 baseline 恰好的 45 条），`scripts/check_quality_baseline.py` exit 0。
+
+---
+
+## 质量基线比较器第五轮 Fail-Closed 修复（评审 t_e03bfeff run 180 P2×2）
+
+- **P2-1 基线 schema 强制指纹语法（fail closed）**：`scripts/check_quality_baseline.py` 新增 `BaselineSchemaError` 与 `validate_known_failures()`——`pytest.known_failures` 的每个条目必须是精确的 `{node_id, fingerprint}` 对象，`node_id` 为非空字符串，`fingerprint` 必须完整匹配比较器自身语法 `<preview> | sha256:<64 hex>`。旧版纯 node-ID 字符串条目、无 fingerprint 的对象、畸形指纹、重复 node_id、未知键、非 list 形态一律视为 corrupt baseline，在比较发生之前以 exit 2 拒绝。此前 run 180 端到端探针证明：legacy 字符串条目与无指纹对象会完全跳过指纹强制，live 失败原因从 `AssertionError` 变异为 `SecurityError: replacement cause` 后 main() 仍打印 OK / 返回 0——checked-in baseline 一旦 stale/legacy/malformed，cause fingerprinting 即失效。当前 checked-in baseline `known_failures` 为空，属于零成本收紧窗口，直接迁移为 fail-closed。
+- **P2-2 指纹覆盖完整 JUnit 失败内容（消除属性盲区）**：新增 `_failure_outcome_content()`，把归一化后的 `message` 属性与完整 element text（含罕见嵌套子标记的序列化）以固定通道分隔符拼接后再进入 `_normalize_failure_fingerprint()` 做 SHA-256。标准 JUnit `<failure>` 可以省略可选 `message` 属性、或只放一个通用 headline 而把真正的异常/原因放在元素正文；此前只哈希属性，探针 baseline `<failure>ModuleNotFoundError: old</failure>` 后仅把正文改为 `<failure>SecurityError: replacement</failure>`，两次都解析为空字符串的 SHA-256 并通过。现在正文与属性两通道全部参与摘要——无 message 属性时正文变异、或 message 相同而正文变异，指纹都会改变并被拒绝。
+- **测试**：`tests/test_quality_baseline_comparator.py` 移除「legacy 字符串条目任意指纹通过」的旧断言，新增端到端/单元回归：legacy 字符串与无指纹对象基线非零退出、畸形指纹/未知键/重复 node 拒绝、无 message 属性正文变异 exit 1、相同通用 message 正文变异 exit 1；比较器测试合计 81 passed。`_minimal_junit` 测试辅助的 element text 默认取与 message 相同内容（对齐真实 pytest JUnit 形态），并新增 `failure_bodies` 覆盖入口。`tests/contracts/quality-baseline.json` description 与 `scripts/generate_quality_baseline.py` 发射文案同步更新为「属性 + 正文全量摘要 + 严格 schema」语义；checked-in baseline 当前无 known_failures，无需重生成指纹。
+
+---
+
+## Unreleased
+
+- **新增 `deploy/e2e/` 持久化 E2E Compose 栈**：把原先位于 `/tmp/obc-e2e-main`（重启即丢失）的 E2E Docker 栈迁移进仓库。`deploy/e2e/docker-compose.yml` 复制自主 `docker-compose.yml`（build context 改为仓库根 `../..`），`deploy/e2e/docker-compose.e2e-override.yml` 固定容器名 `obc-e2e-backend` / `obc-e2e-ollama`、宿主端口 **18421**（容器内 8420），并将四个既有 named volumes（`obc-e2e-main_openbiliclaw_{config,data,logs,ollama}`）声明为 external 以保留首次运行状态与已种入的 bge-m3 模型。`deploy/e2e/README.md` 记录构建、重建与重置流程（external volumes 不受 `down -v` 影响，重置需 `down` + 显式 `docker volume rm` 四个卷并重新创建后再 `up -d --build`）；E2E harness 目标地址为 `http://127.0.0.1:18421`。`docs/docker-deployment.md` 同步新增 E2E 测试栈小节。运行中的 E2E 栈已基于 `origin/main`（含 18df6a22 共享 E2E auth fixture）原地重建，`/api/ping` 返回 ok、`/api/health` 保持 `profile_ready: false`。本条不提升版本号；后端 API、配置格式与 CLI 均无变更。
+
+- **依赖地板：Click >= 8.4、Typer >= 0.27**：`pyproject.toml` 在 `[project.dependencies]` 中新增 `click>=8.4`，并把 `typer>=0.12` 提升为 `typer>=0.27`（仅地板，不加上限）。CI 使用 `pip install -e ".[dev,x]"` 一直解析到 PyPI 最新的 click 8.4.x / typer 0.27.x，而本地 `uv sync` 仍锁在 click 8.3.1 / typer 0.24.1，两端 Click/Typer 漂移曾掩盖 `cli_models.py` 在 Click 8.4 下的 typing 变化；本次把地板写进 pyproject 后，pip 与 uv 两条安装路径当前解析到同一主版本，当前 lock 与当前 CI 对齐。`click>=8.4` 允许 Click 9+、`typer>=0.27` 允许 Typer 1+，CI 仍会有意安装最新版，因此后续 CI 可能再次领先 lock，直到下一次 lock 刷新。`uv.lock` 通过 `uv lock --upgrade-package click --upgrade-package typer` 重新生成：click 由 8.3.1 升级到 8.4.2、typer 由 0.24.1 升级到 0.27.0（两者的 package 记录、源码/轮子 URL、hash、size 全部替换；typer 的依赖列表从 click 变为 colorama）；openbiliclaw 自身的 `dependencies` / `requires-dist` 元数据同步更新（新增 click、typer specifier 从 >=0.12 升至 >=0.27）；click、typer 与 openbiliclaw 三个 `[[package]]` 记录变更，其余 112 个 package 记录未动。本条不提升版本号；后端 API、模块边界、CLI 命令面均无变更。
+
+---
+
+## 质量基线比较器复审修复（评审 t_e03bfeff 第三轮 P1×3 + P2）
+
+- **集成分支到 `origin/main @ f6123bcc`（P1）**：合并 PR #13 合入点，`git merge-base --is-ancestor origin/main HEAD` 通过；`src/openbiliclaw/api/app.py` 与 `docs/changelog.md` 的 PR #13 变更完整保留，无无关回归工件。
+- **移除过期聚合发布 known-failure（P1）**：f6123bcc 修复了 `sync-aggregate-release.sh` 的 Python 选择器根因，`test_aggregate_release_helper_does_not_backfill_previous_channel_assets` 已 hermetic；从 `tests/contracts/quality-baseline.json` 删除该条 ModuleNotFoundError 指纹，同步更新 `.github/workflows/ci.yml` 注释——复发现在会被比较器拒绝而非容忍。新增端到端回归证明 checked-in baseline 对该旧失败返回 exit 1。
+- **`Found 0 errors` + exit 1 fail-closed（P1）**：`scripts/check_quality_baseline.py` 在 occurrence 对账之后新增显式矛盾检测——mypy exit 1（发现诊断）与 `Found 0 errors` 摘要矛盾，直接判 fail。新增回归用例覆盖该精确场景。
+- **长 headline 指纹保留 nested cause（P1）**：`_normalize_failure_fingerprint()` 从「合并三行后整体截断 200 字符」改为「headline 前 120 字符 + tail 后 80 字符」，JUnit XML 属性将换行折叠为空格后仍能保证 nested cause 不被长 headline 挤出指纹。新增 186 字符 headline 变异回归。
+- **mypy 摘要语法 fullmatch 锚定（P2）**：`MYPY_SUCCESS_RE` / `MYPY_FOUND_ERRORS_RE` 改为 `$` 结尾锚定，`Success: no issues found in 227 source files UNTRUSTED TRAILER` 等畸形摘要被识别为 unparseable 并以 exit 2 关闭；`mypy: INTERNAL ERROR` 从 `MYPY_NOISE_RE` 移除， crash 输出不再被当作良性噪音。新增 3 个回归用例（success trailer、found-errors trailer、INTERNAL ERROR）。
+- **测试**：`tests/test_quality_baseline_comparator.py` 新增 6 个回归用例，总计 51 passed；`tests/test_aggregate_release_workflow.py` 7 passed 确认聚合发布修复稳定。
+
+---
+
+## 质量基线比较器复审修复（评审 t_e03bfeff 第二轮 P1×3）
+
+- **基线指纹同步新语法（P1）**：`tests/contracts/quality-baseline.json` 的聚合发布 known-failure 指纹从旧两行语法（含字面 `\n`）重生成到现行三行语法（headline + traceback frame + nested cause，whitespace 折叠后单行存储）；新增端到端回归直接以 checked-in baseline 运行比较器——真实 nested message 原样通过（exit 0），`ModuleNotFoundError → SecurityError` 变异被拒（exit 1），防止 baseline 与 normalizer 再次漂移。baseline description 与 `scripts/generate_quality_baseline.py` 发射文案同步更新为准确描述指纹语法。
+- **mypy 摘要按 occurrence 对账（P1）**：`parse_mypy_output()` 内部拆出 `_parse_mypy_rows()` 同时返回去重 identity 集合与解析 occurrence 计数；新增 `count_mypy_error_occurrences()`。摘要 `Found N errors` 现在与 occurrence 数（去重前）对账：同一条 message 在两行各报一次时 summary 2 ↔ occurrence 2 通过（identity 仍只有一条，baseline 比较不变）；`Found 1 error` 但零诊断行的截断场景依旧 fail closed。新增 3 个回归用例。
+- **集成分支到 `origin/main @ 1ac6af67`（P1）**：整支 rebase 到 PR #14 合入点之上，`git merge-base --is-ancestor origin/main HEAD` 通过；pyproject.toml / uv.lock 与 origin/main 完全一致（Click 8.4 / Typer 0.27 floors 保留），两条既有 changelog 条目完整保留，无无关改动。
+
+---
+
+## 设置向导与配置页收口到共享模型配置模块
+
+- **新增共享渲染层 `web/shared/model-config-render.js`**：把桌面 `web/js/views/model-settings.js` 与 `desktop/assets/js/model-settings.js` 中重复实现的 descriptor 字段、credential 编辑器与连接类型分组渲染抽到同一 ES module，桌面与移动两个 model-settings 入口改为 thin adapter；渲染器接受 `classPrefix`（桌面默认 `model`，移动传入 `mobile-model`）以输出各表面 stylesheet 实际覆盖的类名；`/setup/` 向导复用其中的 `escapeHtml` 转义原语（删除本地 fork），其 descriptor/credential/连接类型渲染因向导布局（`.model-field` 包装结构）仍保留本地实现，统一收敛为后续项（计划 §10）；插件 popup 继续以同步副本对齐状态机。
+- **共享状态机补齐设置/向导需要的辅助能力**：`web/shared/model-config-state.js` 新增 `circuitView` / `circuitAnnouncementKey`（熔断状态 + 倒计时展示）、`hasUnverifiedChanges` / `unverifiedConnections`（自上次 exact probe 后 draft fingerprint 变化检测，保存前提示「存在未验证修改」）、`overrideLockFor` / `hasOverrideLocks`（`config.local.toml` 覆盖锁展示）、`createSingleConnectionDraft`（向导编辑单条 chat/embedding 记录的 lens，preservedFallbackCount 用于披露保留的 fallback 数量）、`prepareLocalOllamaEmbedding`（popup「一键启用本地 Ollama」动作的受守卫入口），并在 `applyProbeResult` 上写入 `probe.fingerprint` 作为后续变更检测的基线。`toModelConfigPayload` 现在对 `enabled=false` 的 Embedding route 序列化空 providers——后端对 disabled-with-providers 一律以 `embedding_disabled_with_providers` 拒绝；路由项仍保留在客户端状态里，同会话重新启用时恢复。
+- **设置向导 `/setup/index.html` 对齐共享模块并补齐缺失步骤**：改用 `<script type="module">` 从共享 state 模块构建单连接 draft、从共享 render 模块导入 `escapeHtml`，替代此前的内联转义实现；当 snapshot 报 `migration.state != "none"` 时整页切换为迁移 interstitial、禁用保存并指引到完整设置页的迁移面板（决策 3），向导不再尝试内联解决 legacy 迁移；新增可选 Embedding 配置节，沿用同一 descriptor 渲染与 `keep/set/env/clear` credential 语义（凭据值输入处理器合并保留已选 action，输入 API Key / 环境变量名不再被重置为 keep）；保存前披露 `preservedFallbackCount` 条已存在的 fallback 连接会被保留；继续沿用 probe-before-save 与 revision-gated `PUT /api/model-config`。
+- **插件 popup 删除 907 行 fork，改为受漂移保护的同步副本**：`extension/popup/popup-model-config-state.js` 现在是 `extension/scripts/sync-model-config-state.mjs` 从共享模块逐字节生成的 checked-in artifact（popup 以 loose ES module 形式打包，无法在运行时引用 extension/ 外的文件），`--check` 模式供 CI 检测漂移；`tests/js/model-config-parity.test.mjs` 在原有功能向量之上新增「popup 副本与共享源 byte-for-byte 一致」的守卫，并新增 14 个 web ↔ extension 行为对齐向量（hydrate / append / remove / move / field update / type switch / preset fill / payload / remote conflict / probe fingerprint 等）。
+- **桌面与移动 model-settings 同步接入新能力**：熔断状态 chip（含 `retry_after_seconds` 倒计时与 `failure_kind` tooltip）渲染在每条连接行；保存前检测到未验证修改时给出非阻塞警告；override 锁字段以禁用 + tooltip 标明来源文件。布局相关的窄/宽屏适配沿用 v0.3.168 已交付的断点体系，本次未改动。
+- 本条不提升版本号；后端 API、Pydantic 模型与持久化格式均无变更，属于纯前端重构 + 向导功能补齐。
+
+---
+
+## 质量基线比较器第四轮 Fail-Closed 修复（评审 t_e03bfeff run 171 P1+P2x2）
+
+- **P1 指纹盲区消除**：`_normalize_failure_fingerprint()` 从「headline 前 120 字符 + tail 后 80 字符」的盲中段截断改为对完整归一化消息做 SHA-256 摘要（格式 `<preview> | sha256:<hex>`，preview 供人类审阅 baseline diff）。此前 186 字符 headline + 200 字符 nested-cause payload 时异常类落在两个保留片段之间，`ModuleNotFoundError` → `SecurityError` 变异产生相同指纹并返回 0；现在摘要覆盖整条消息，任何位置的语义变化都改变指纹。`tests/contracts/quality-baseline.json` 的 `known_failures` 当前为空，无需重生成指纹；baseline 与 `scripts/generate_quality_baseline.py` 的 description 同步更新为新方案。
+- **P2 mypy 矛盾摘要拒绝**：`parse_mypy_summary()` 现在对多条 summary 形态行抛 `MypyOutputError`（此前静默返回第一条），`_parse_mypy_rows()` 拒绝终止摘要行之后的任何非空内容——「一条已 allowlist 诊断 + `Found 1 error` + 矛盾的 `Success: no issues found`」拼接工件此前返回 0，现在 exit 2 fail closed。
+- **P2 JUnit 互斥 outcome 拒绝**：`parse_junit_failures_and_skips()` 拒绝单个 testcase 上多个互斥 outcome 元素——`<failure>` + `<skipped>` 并存、多个 `<failure>`/`<error>` 子元素、多个 `<skipped>` 子元素均抛 `JUnitStructureError`（此前独立记录首个 failure 与任意 skip，结构不可能的工件在计数对齐时被接受）。
+- **测试**：`tests/test_quality_baseline_comparator.py` 新增 7 个端到端/单元回归（长 headline + 长 nested-cause 变异指纹、矛盾多摘要、摘要后内容、failure+skipped 并存、多 failure 子元素等），比较器测试 58 passed。
+
+---
+
+## 质量基线比较器 Fail-Closed 修复（评审 t_cce76b68 F1-F9）
+- **F1 [P1] 退出码/工件语义 reconciliation**：`scripts/check_quality_baseline.py` 新增 `parse_mypy_summary_kind()` 解析 mypy 摘要类型（success/errors），在 baseline 比较之前先对 `--pytest-exit-code` 与 `--mypy-exit-code` 做双向一致性校验：pytest 0 ↔ 无解析失败、pytest 1 ↔ 至少一个解析失败；mypy 0 ↔ Success 摘要、mypy 1 ↔ Found errors 摘要。矛盾组合（如 exit 0 + 含失败的 JUnit、exit 1 + clean JUnit、exit 1 + Success 摘要）一律 fail closed。两个 exit code 参数改为 required，消除 optional 带来的静默跳过。
+- **F2 [P2] 结构空 JUnit 拒绝**：`parse_junit_failures_and_skips()` 新增 `JUnitStructureError`：无 `<testsuite>`、无 `<testcase>`、tests/failures/errors 声明计数与解析行数不一致、重复 node ID、declared-but-unparsed failures/errors 均抛错并以 exit 2 关闭。此前 `<testsuites/>` 会被当作成功通过。
+- **F3 [P2] 非有限 coverage fail-closed**：`parse_coverage_line_percent()` 校验 `math.isfinite` 与 0..100 范围，NaN/inf/越界/非数字 line-rate 抛 `ValueError`（exit 2）；`compare_coverage()` 同步校验 baseline 中的 `line_percent` 与 `noise_tolerance` 为有限非负数。
+- **F4 [P2] mypy 单数语法**：`MYPY_SUCCESS_RE` 从 `source files\b` 放宽为 `source files?\b`，"Success: no issues found in 1 source file" 不再误报为 unparseable。
+- **F5 [P2] 架构棘轮补 2-level 直取**：`tests/test_architecture.py` 新增 `FORBIDDEN_DIRECT_DEP_FIELDS` 白名单（database/soul_engine/engine/services/runtime_context/runtime/config/llm_service/embedding_service/recommendation_engine/discovery_engine/dialogue/memory），在原有 `deps.services.x` 3-level 检测之外补获 `deps.<engine>` 2-level 直取；`test_ratchet_bites_on_synthetic_violations` 新增对应 negative-control 样本。
+- **F6 [P2] 迁移矩阵补 partial-state + 事务边界**：`tests/test_storage_schema_migrations.py` 新增 `test_partial_db_repairs_each_non_content_table`（events/recommendations/llm_usage/discovery_candidates 四表 partial-state 修复 + 幂等）与 `test_ensure_columns_does_not_commit_or_rollback`（sentinel row 未提交可见 + rollback 后 sentinel 与新列同时消失，证明 `storage/migrations.py:148-151` 的无 commit/rollback 边界）；content_cache 因 TEXT 主键单独覆盖。
+- **F7 架构图同步例外决定**：本切片为同层内部代码搬移，对外 API 表面、跨模块 wiring、数据流与依赖块均无变化（路由契约字节级锁定），`docs/spec.md` §3、`README.md`、`README_EN.md` 架构图按 CLAUDE.md:176-180 触发条件不强制更新；例外决定已在本条与「增量式架构重构 Must 切片实施」条中显式记录。
+- **F9 文档正确性**：`_normalize_failure_fingerprint()` 的归一化正则从双反斜杠 `\\s+` / `\\b\\d+\\b` 修正为单反斜杠 `\s+` / `\b\d+\b`，匹配 docstring 声明意图；行为更严格（更多字符被归一化），strictness 测试保持绿色。
+- **F8 分支重基**：分支已位于 `origin/main @ d1a3ac1d` 之上，`git merge-base --is-ancestor origin/main HEAD` 通过；基线工件随修复同步刷新。
+- **测试**：`tests/test_quality_baseline_comparator.py` 新增 20 个回归用例，覆盖 0/1 × clean/failing 全矩阵、空 JUnit、计数不匹配、重复 node ID、declared-but-unparsed failure、NaN/inf/越界 coverage、单数 mypy 摘要、非数值 line-rate、有限/非有限 baseline/tolerance 组合；`tests/test_architecture.py` 新增 deps.engine 直取 negative-control；`tests/test_storage_schema_migrations.py` 新增 4 表 partial-state + 事务边界用例。目标三文件合计 81 passed / 10 skipped。
+
+---
+
+## Must 切片修复（评审 #87 收口）
+
+- **Fail-closed 质量基线比较器（P1）**：`scripts/check_quality_baseline.py` 的 `parse_mypy_output()` 现在校验 mypy 摘要行语法（`Success: no issues found in N source files` 或 `Found N errors in M files` 形态），空流、crash-only stderr（`mypy: INTERNAL ERROR` 等无摘要场景）与不可解析的非空行一律抛 `MypyOutputError` 并以 exit 2 关闭；新增 `--mypy-exit-code` / `--pytest-exit-code` 参数，0/1 之外的退出码视为工具崩溃直接 fail。`.github/workflows/ci.yml` 用 `set -o pipefail` 跑 mypy 并把原始退出码写入 `build/*.status`，比较器步骤消费两个 status 文件——此前 `continue-on-error` + `| tee` 会把 mypy 崩溃吞掉让 CI 误判绿。复审（t_cce76b68）进一步发现 GitHub 默认 shell 带 `bash -e -o pipefail`，`continue-on-error` 并不关闭 errexit，预期非零的 pytest/mypy 会在写 status 行之前直接中止脚本；现两个步骤都在工具调用外加显式 `set +e`/`set -e` 保护区，mypy 取 `PIPESTATUS[0]`、pytest 取 `$?` 立即捕获后再恢复 errexit 写 status 文件，保证预期失败也能产出完整工件。
+- **pytest allowlist 指纹（评审 #2）**：`known_failures` 条目现在携带归一化失败指纹（异常类型 + headline，数字与 tmp 路径已 scrub），`compare_pytest()` 对 allowlist 节点的指纹不匹配失败判 fail——同一个节点上的新 bug 无法再躲在旧 allowlist 后面；旧字符串条目继续兼容解析（不强制指纹）。基线随之重生：聚合发布失败带指纹、10 条 cli_models mypy 诊断在 rebase 后消失、coverage 刷新到 52.26。
+- **Stale baseline 重基（评审 #7）**：分支 rebase 到 `origin/main @ 72addee8`（cli_models mypy 修复合入点），`git merge-base --is-ancestor origin/main HEAD` 为真；6 个原始重构 commit 完整保留。
+- **新增模块文档**：`docs/modules/api.md` 记录 `api/app.py` / `api/dependencies.py` / `api/routes/system.py` 的窄依赖路由提取边界，覆盖模块组成、对外契约、公共 API 与相关文档链接。**架构图同步例外决定（评审 t_cce76b68 F7）**：本切片为同层内部代码搬移，试点路由 `/api/ping`、`/api/qr-info` 的对外 HTTP 表面（路径、方法、响应体、content-type、注册顺序）由 `tests/test_api_route_contract.py` 与 `tests/test_api_pilot_endpoints_contract.py` 机械锁定，路由契约清单 134 条 / 121 个 OpenAPI 操作字节级一致；跨模块 wiring、数据流、依赖块与对外 API 表面均无变化，因此 `docs/spec.md` §3、`README.md`、`README_EN.md` 的架构图按 CLAUDE.md:176-180 的触发条件不强制更新。后续真实新增/移除路由、改变数据流或引入新依赖块的切片必须同步全部四份架构图。
+- **测试**：新增 `tests/test_quality_baseline_comparator.py`（15 个用例）覆盖缺失文件、空文件、畸形行、crash-only stderr、baseline 期望诊断、干净成功、指纹匹配/不匹配等 fail-closed 路径；新增 `tests/test_ci_status_capture.py`（6 个用例）在 `bash --noprofile --norc -e -o pipefail`（GitHub 默认 shell）下直接执行 ci.yml 的真实 run 片段，证明预期非零退出仍会同时产出工件与 status 文件、崩溃退出码（2/4）也被捕获、干净退出记 0，防止 errexit 保护被移除后回归；现有 `tests/test_architecture.py` / `tests/test_storage_schema_migrations.py` / `tests/test_api_route_contract.py` / `tests/test_api_pilot_endpoints_contract.py` 与新比较器测试合计 61 个用例全部通过。
+
+---
+
+## 增量式架构重构 Must 切片实施
+
+- **落地 Must 切片的全部六项内容**（依据 `docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` §6.0）：Phase 0 安全网（`tests/contracts/api-route-contract.json` 路由契约清单、`tests/test_api_pilot_endpoints_contract.py` `/api/ping` 与 `/api/qr-info` 精确响应测试、`tests/contracts/quality-baseline.json` + `scripts/check_quality_baseline.py` 归一化质量基线比较器、`tests/fixtures/storage_schema.py` 程序化 schema fixture、`tests/test_architecture.py` 窄架构棘轮）；试点路由提取；迁移去重 2A；CI 接线；文档更新。
+- **试点路由提取（Phase 1）**：`/api/ping` 与 `/api/qr-info` 从 `api/app.py` 内联装饰器迁移到 `api/routes/system.py` 的 `build_system_router(deps)` 工厂；新 `api/dependencies.py` 定义冻结的 `SystemRouteDeps(get_lan_ip: Callable[[], str | None])` 窄数据包，`create_app()` 在原注册位置通过 `include_router` 装配，路由匹配顺序与对外行为完全不变（由路由契约测试机械验证，134 条路由 / 121 个 OpenAPI 操作的清单字节级一致）。明确**不引入** `ApiServices` 服务定位器；`api/app.py` 中其余端点保持原状，留待后续切片。
+- **迁移去重 2A**：新 `storage/migrations.py` 提供数据驱动 `ensure_columns(conn, table, columns)` 工具，集中承载纯增量列迁移（先 `PRAGMA table_info` 再 `ALTER TABLE ... ADD COLUMN`）。表名与列名对照静态白名单校验并做标识符形态防御；不引入 schema 版本账（2B 显式推迟），不改变惰性调用点、事务时机或 `:memory:` 行为。9 个纯增量 `_ensure_*_columns` 方法迁移到 helper；带数据回填 / 索引联动 / 合并逻辑的 `_ensure_content_cache_multisource_columns`、`_ensure_content_identity_columns` 等保留手写并登记为例外。
+- **CI 接线**：`.github/workflows/ci.yml` 的既有 pytest 调用改为单次运行同时输出 JUnit XML 与 coverage XML（不为基线再跑一遍完整测试），mypy 输出经 `tee` 落盘；新增 `scripts/check_quality_baseline.py` 收尾步骤，对新增 pytest 失败、新增 mypy 诊断、新增 skip、缺失或不可解析的输出**一律 fail-closed**。发布工作流（`release-*.yml`、`verify-release-completeness.yml`）零改动。
+- **文档同步**：`docs/modules/storage.md` 新增 `storage/migrations.py` 模块组成说明；`docs/architecture.md` Storage 一节明确 `ensure_columns` 的承载边界。**架构图同步例外决定（评审 t_cce76b68 F7）**：迁移去重 2A 是同层内部工具函数集中化，9 个 `_ensure_*_columns` 方法的调用点、事务边界与 `:memory:` 行为完全不变，不引入 schema 版本账；跨模块 wiring、数据流与依赖块均无变化，因此 `docs/spec.md` §3、`README.md`、`README_EN.md` 的架构图按 CLAUDE.md:176-180 的触发条件不强制更新。后续 2B（schema 版本账）或新增表/迁移触发数据流变化时必须同步全部四份架构图。
+- **兼容性**：对外 HTTP 路由、方法、响应体与 content-type 完全不变；schema 终态与 `Database.initialize()` 不变量保持。回滚路径为单 PR revert。原「pytest allowlist 仅按 node ID 键控、未含异常指纹」的已知弱点已在后续修复切片中通过指纹化（异常类型 + headline 归一化）解决。
+
+---
+
 ## 架构清单与增量式重构计划
 
 - **新增仓库架构清单与增量式重构实施计划**：`docs/plans/2026-07-19-repository-inventory.md` 为时点性盘点快照，`docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` 为实施基线。计划定义了五层边界模型与窄依赖 router 工厂契约、存储兼容门面、迁移去重 2A（`PRAGMA table_info` + `ALTER TABLE ... ADD COLUMN`，保留惰性调用点；schema 版本账推迟）、生产者 protocol（两个生产者迁移后才考虑基类）、Must/Should/Could 交付切片、测试门禁与回滚策略。CI/CD 边界同步明确：验证统一由 `.github/workflows/ci.yml` 拥有，渠道工作流只负责打包/签名/发布；既有 pytest/mypy 诊断将按结构化身份 allowlist 而非计数容忍，诊断输出缺失或不可解析一律判失败。本条仅新增文档，不改变运行时代码。
+
+---
+
+## 共享 E2E 认证 Fixture
+
+- **新增 `tests/e2e_auth_fixtures.py`**：为需要真实 FastAPI app + 数据库的 E2E 测试提供统一的认证绕过方案，避免每个测试文件重复实现 app 构建逻辑。默认使用 loopback 绕过（`trust_loopback=True`），同时提供 opt-in 的 extension-token 交换路径供后续容器内浏览器测试使用。
+- **新增 `tests/test_e2e_auth_fixtures.py`**：fixture 自身的单元测试，验证 loopback 无 token 通过、跨源请求 401、extension-token 交换与 Bearer 认证。
+- **迁移 `tests/test_xhs_e2e_smoke.py`**：作为首个使用共享 fixture 的隔离 E2E 测试，保持 `XHS_E2E_SMOKE=1` 环境门控不变。其中 `test_task_queue_round_trip` 按当前服务端契约（`POST /api/sources/xhs/task-result` 对未知 task 返回 409）改为真实往返：经 `XhsTaskQueue.enqueue_with_id` 在同一 DB 上入队 → `next-task` 认领 → 对已存在任务提交结果返回 200。
+- **新增 `docs/testing/e2e-guide.md`**：完整说明两种认证策略、使用方式和已迁移测试列表。
 
 ---
 
@@ -21,6 +128,8 @@
 - **三端模型编辑器文案改为中文优先**：桌面、移动与插件模型编辑器统一使用「上移 / 下移 / 未命名连接」，桌面与插件另有「拖拽排序 / 未设置模型」；`Chat / Embedding / Runtime / Primary / Fallback` 等技术术语保留英文，守卫测试逐端断言两套用词。
 - **`openbiliclaw models` 恢复直接导入 click**：`cli_models.py` 与 `tests/test_cli_models.py` 改为直接 `import click`，不再依赖 typer 已移除的 `typer._click` 私有 shim（锁定环境升到 typer 0.24.1 后该 shim 缺失，导致 `openbiliclaw models` 导入即失败）；`main()` override 按 `TyperGroup` 签名重新标注，命令面与行为不变。
 - **新增前端契约守卫**：`tests/test_frontend_contract_alignment.py` 用静态守卫加参数化真实挂载检查钉住：无前端请求 `reveal_keys=true`、无前端消费 legacy saved / cognition 路径、插件无 debug 中继且不依赖 `/web/shared/`、桌面共享核心先于 `app.js` 加载且纳入缓存版本、共享核心不含 DOM 依赖与 CJK 文案、setup 单一 CSRF 助手且零 `/api/config`、三端中文优先文案与受保护术语，并实际请求 `/web/shared/saved-sync-core.js` 与 `/m/shared/saved-sync-core.js` 验证两个挂载都可达；`extension/tests/packaging-layout.test.ts` 检查 Chrome 与 Firefox zip 布局并断言产物中无 debug relay。模块、配置、init、saved-sync、移动 Web 与 LLM 文档同步到当前前端契约；本条不提升版本号或修改 README 发布预告。
+- **triage regression sweep：mypy 类型修复、release 脚本 Python 3.11+ 选择、`/api/config` 日志路径脱敏、删除 dead `ClaudeProvider`**：`sync-aggregate-release.sh` 在 `tomllib` 不可用时改探测 `python3.11+`，避免 macOS 自带 `python3`（3.9）拉发布包失败；`GET /api/config` 的 `logging.directory`、`logging.filename` 与 `logging.file_path` 改为不可逆脱敏输出——相对 `directory` 原样返回，绝对路径（如 `/srv/private/openbiliclaw/logs`）、`~` 前缀家目录相对路径、Windows 盘符绝对路径（`C:\Users\secret\logs`）、Windows 无盘符根路径（`\Users\alice\private\logs`）与 UNC 路径统一降为 basename，绝对 `filename` 同样降为 basename，根/卷根路径（`/`、`C:\`、`~`、`\`）与裸 `~user` 形式（如 `~alice`）脱敏为空且 `file_path` 回退为仅文件名，盘符限定形式（drive-only `C:` / `D:` 与 drive-relative `C:foo` / `C:private\logs`）先剥离盘符再按同一规则脱敏（drive-only 归为空、drive-relative 归为其 basename），不再泄露主机文件系统布局或盘符；`PUT /api/config` 改用无歧义协议——未修改时客户端回传 `file_path` 精确匹配脱敏 wire 形式即识别为 echo 并跳过，有意修改（包括改到与显示 basename 完全相同的相对路径）时省略 `file_path`、直接提交 `directory`/`filename` 即生效；桌面与插件设置页用**显式 dirty 意图标记**驱动该分支——字段真实 `input` 事件置位、配置渲染进表单与保存成功后复位，最终值相等不再被误判为未修改 echo（此前值相等启发式无法区分未修改 echo 与有意 basename 编辑；新增 `tests/test_api_app.py` POSIX root、Windows drive root、Windows rooted-no-drive、bare `~`、`~user`、Windows drive-only、Windows drive-relative 及 intentional-basename 碰撞回归，与桌面 `tests/test_desktop_web_logging_path_intent.py`、插件 `extension/tests/popup-settings.test.ts` 两侧客户端意图追踪回归）；桌面与插件设置页同步按「未修改发 `file_path`、已修改发 `directory`/`filename`」拆分保存负载；`openbiliclaw.llm` 删除未被任何生产代码使用的独立 `ClaudeProvider`（209 行）与其在 `__all__` 的导出，Anthropic 官方 / 自定义 Messages 网关统一由 `AnthropicCompatibleProvider` 承载，`tests/test_llm_providers.py` 同步收敛到现存 adapter；`mypy src/` 在 cli_models.py 类型漂移修复后回到 0 错误。本次为 maintenance 收口，不提升版本号或修改 README 发布预告。
+- **triage regression sweep 复审修复：盘符限定 `logging.filename` 脱敏补齐 + release 脚本 Python 选择面向未来**：复审在 `882e62fe` 上发现 `/api/config` 仍把不含 `/` 或 `\\` 的 Windows 盘符限定 `logging.filename` 原样回显——`filename="C:backend.log"` 在 Windows 上会被 `PureWindowsPath("logs") / "C:backend.log"` 折叠为盘符限定的 `C:backend.log`，悄悄丢弃配置的目录，`filename="D:"` 同样带盘符穿透 wire 形式；本次把 `_safe_logging_filename_for_wire()` 改为与目录侧规则对齐——drive-relative（`C:backend.log` / `c:backend.log` / `D:private\backend.log`，大小写盘符均覆盖）先剥离盘符再按既有分隔符规则降为 basename，drive-only（`C:` / `c:` / `D:` / `d:` 等）归为空字符串，`file_path` 此时仅含脱敏目录与尾部 `/`，永不携带盘符；新增 `tests/test_api_app.py` 大写/小写 drive-only 与 drive-relative GET `/api/config` 回归。`sync-aggregate-release.sh` 的 `pick_python` 此前硬编码 `python3 python3.13 python3.12 python3.11`，在系统 `python3` 为旧版本、唯一合适版本化二进制是 `python3.14` 的环境下退出 1（尽管 `python3.14` 满足 `pyproject.toml` 的 `>=3.11` 要求）；本次改为通用版本化发现——优先使用已满足 3.11+ 的 `python3`，否则扫描 PATH 中所有严格匹配 `python3.N` 的可执行文件（跳过 `python3.*-config` 等非解释器），按版本号数值降序挑选最高合适版本；选择对 PATH 顺序确定性，并保留旧 `python3` 与无合适版本化二进制时的文档化错误信息；新增 `tests/test_aggregate_release_workflow.py` 可执行工作流回归，用隔离 PATH 下旧 `python3` + `python3.10` + `python3.12` + `python3.14` + 杂散 `python3.13-config` 验证选择 `python3.14`，现代 `python3` 优先，以及无合适解释器时的退出 1 与错误文案。`docs/modules/config.md` 同步补全盘符限定 `filename` 的 wire 合同。
 
 ---
 

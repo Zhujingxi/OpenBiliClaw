@@ -94,9 +94,13 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
     model_js = Path("src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
         encoding="utf-8"
     )
-    assert "field.choices" in model_js
-    assert "preset_definitions" in model_js
-    assert '<option value="${escapeHtml(' in model_js
+    shared_render = Path("src/openbiliclaw/web/shared/model-config-render.js").read_text(
+        encoding="utf-8"
+    )
+    combined = model_js + shared_render
+    assert "field.choices" in combined
+    assert "preset_definitions" in combined
+    assert '<option value="${escapeHtml(' in combined
 
 
 def test_desktop_settings_allows_same_type_instances_with_distinct_ids() -> None:

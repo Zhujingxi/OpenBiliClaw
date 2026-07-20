@@ -33,11 +33,65 @@ jobs:
       - name: Run Ruff
         run: python -m ruff check src/ tests/
 
-      - name: Run MyPy
-        run: python -m mypy src/
+      - name: Run MyPy (capture output for baseline comparator)
+        # `continue-on-error` so the baseline comparator decides whether the
+        # diagnostics are acceptable; new diagnostics fail the next step.
+        # GitHub's default shell runs with `bash -e -o pipefail`, and
+        # continue-on-error does NOT disable shell errexit — so the tool
+        # invocation is wrapped in an explicit `set +e`/`set -e` region and
+        # its status is captured immediately from PIPESTATUS[0] (the left
+        # side of the `tee` pipeline), otherwise an expected nonzero mypy
+        # exit would abort the script before build/mypy.status is written.
+        continue-on-error: true
+        run: |
+          mkdir -p build
+          set -o pipefail
+          set +e
+          python -m mypy src/ 2>&1 | tee build/mypy.txt
+          mypy_status=${PIPESTATUS[0]}
+          set -e
+          echo "mypy_exit=$mypy_status" > build/mypy.status
 
-      - name: Run pytest
-        run: python -m pytest -q
+      - name: Run pytest (single run, emits JUnit XML + coverage)
+        # Single-run collection per the refactor plan: JUnit XML and coverage
+        # are emitted in the same pass that produces pass/fail, so the
+        # baseline comparator never re-runs the suite. Any failure that
+        # appears here must be explained by tests/contracts/quality-baseline.json
+        # or the comparator fails the next step (fail-closed). The aggregate-
+        # release Python-picker failure previously allowlisted here was fixed
+        # in f6123bcc and removed from the baseline; recurrence now fails CI.
+        # Same errexit guard as the mypy step: `set +e` around the expected-
+        # to-fail invocation, capture `$?` immediately, then re-enable `-e`
+        # before writing build/pytest.status.
+        continue-on-error: true
+        run: |
+          mkdir -p build
+          set +e
+          python -m pytest -q \
+            --junitxml=build/pytest-junit.xml \
+            --cov=openbiliclaw --cov-report=xml:build/coverage.xml
+          pytest_status=$?
+          set -e
+          echo "pytest_exit=$pytest_status" > build/pytest.status
+
+      - name: Check quality baseline (fail-closed)
+        # Compares the live pytest/mypy/coverage outputs against the
+        # normalized baseline in tests/contracts/quality-baseline.json.
+        # New pytest failures, new mypy diagnostics, new skips, missing
+        # files, or unparseable output all fail the job here. A nonzero
+        # mypy/pytest exit is allowed ONLY when the comparator can account
+        # for every diagnostic/failure via the baseline allowlist; a tool
+        # crash or missing summary grammar fails closed.
+        run: |
+          cat build/mypy.status build/pytest.status
+          MYPY_EXIT=$(cut -d= -f2 build/mypy.status)
+          PYTEST_EXIT=$(cut -d= -f2 build/pytest.status)
+          python scripts/check_quality_baseline.py \
+            --junit-xml build/pytest-junit.xml \
+            --mypy-output build/mypy.txt \
+            --coverage-xml build/coverage.xml \
+            --mypy-exit-code "$MYPY_EXIT" \
+            --pytest-exit-code "$PYTEST_EXIT"
 
   extension-firefox-build:
     name: Smoke-build Firefox extension

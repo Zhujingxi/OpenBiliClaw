@@ -272,6 +272,7 @@ X 是第六个内容源，分两条独立通路：
 - SQLite 数据库管理
 - 冷备份、完整性检查与显式修复
 - 候选质量信号持久化与数据迁移；`events` 行写入 `inferred_satisfaction` / `satisfaction_reason`，支持 `query_events(satisfaction_modes=...)`
+- 增量列迁移由 `storage/migrations.py` 的 `ensure_columns(conn, table, columns)` 工具集中承载（Phase 2A）；表 / 列标识符对照静态白名单校验，惰性调用点、事务时机和 `Database.initialize()` 总入口保持不变。带数据回填 / 索引联动 / 合并逻辑的迁移仍由 `Database` 手写保留。
 - v0.3.1 `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把每个 topic_group 在候选窗口里限到 ≤3 条，保证长尾 group 真正进得到候选窗口
 - `discovery_candidates` 持久化所有来源 raw candidates 的 lifecycle：`pending_eval`、`evaluating`、`evaluated`、`cached`、`rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_recently_viewed`、`rejected_franchise_quota`、`failed_eval`、`trimmed_capacity`；容量 victim 保留 terminal 行和 `eval_error` 原因，不做物理删除。
 - `discovery_inspiration_probe_cache` / `discovery_inspiration_expansion_cache` 持久化 query inspiration 搜索探针、横向扩展、curator 判断和 yield 反馈；`discovery_interest_selection_ledger` 记录二级兴趣抽中事件，让兴趣被抽到后立即进入冷却而不必等待 keyword yield；`discovery_keywords` 可携带 aspect / inspiration / expansion / angle 元数据，但不改变原有 in-flight 去重键。`KeywordPlanner` 的 inspiration-only 分支会从 selection ledger / keyword / raw candidate / admitted pool 构建二级兴趣 coverage snapshot，经过 brainstorm → provider-chain grounding → curator → deterministic quota / explore validation → bounded repair 后写入各平台关键词池；`keyword-inspiration-dry-run` 复用同一路径但跳过关键词写库，并使用独立 preview selection scope 做真实请求诊断。

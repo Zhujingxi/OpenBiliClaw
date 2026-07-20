@@ -10086,11 +10086,640 @@ class TestConfigApiE2E:
         assert data["logging"]["file_level"] == "WARNING"
         assert data["logging"]["directory"] == "runtime-logs"
         assert data["logging"]["filename"] == "backend.log"
-        assert data["logging"]["file_path"] == str(tmp_path / "runtime-logs" / "backend.log")
+        # /api/config must not leak resolved absolute host paths.
+        # The exposed form is the configured "<directory>/<filename>".
+        assert data["logging"]["file_path"] == "runtime-logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert str(tmp_path) not in data["logging"]["file_path"]
         assert data["logging"]["max_file_size_mb"] == 123
         assert data["logging"]["aggregate_budget_mb"] == 456
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
+
+    def test_get_config_redacts_absolute_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """Absolute ``logging.directory`` must not leak through /api/config.
+
+        Regression for the review finding that ``directory="/srv/private/..."``
+        previously produced an absolute ``file_path`` verbatim, leaking the
+        host filesystem layout. The wire form must reduce absolute (and
+        ``~``-prefixed) directories to their basename; relative directories
+        still pass through unchanged.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        # directory is reduced to its basename — the full host path is gone.
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["filename"] == "backend.log"
+        # file_path joins the redacted directory and filename; it must not
+        # expose any absolute host path component.
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "/srv" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+        assert "openbiliclaw/logs" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_tilde_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """``~``-prefixed logging.directory also leaks the home layout and is
+        reduced to its basename on the wire."""
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~/private-logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "private-logs"
+        assert data["logging"]["file_path"] == "private-logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "~" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_absolute_logging_filename(self, monkeypatch, tmp_path) -> None:
+        """Absolute ``logging.filename`` must not leak through /api/config.
+
+        Regression for the review finding that ``filename="/srv/private/..."``
+        previously produced an absolute ``file_path`` verbatim, leaking the
+        host filesystem layout. The wire form must reduce absolute filenames
+        to their basename; plain basenames still pass through unchanged.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "logs"
+        cfg.logging.filename = "/srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        # filename is reduced to its basename — the full host path is gone.
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["filename"] == "backend.log"
+        # file_path joins the redacted directory and filename; it must not
+        # expose any absolute host path component.
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "/srv" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_windows_drive_qualified_logging_filename(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-qualified ``logging.filename`` must not leak through /api/config.
+
+        Regression for the review finding that ``filename="C:backend.log"``
+        and ``filename="D:"`` previously passed through unchanged because the
+        redactor only handled names containing ``/`` or ``\\\\``. On Windows
+        ``PureWindowsPath("logs") / "C:backend.log"`` collapses to the
+        drive-qualified ``C:backend.log`` and silently drops the configured
+        directory, so the wire form must never carry a drive prefix —
+        independent of the host OS dialect.
+        """
+        from openbiliclaw.config import Config
+
+        # Drive-relative: uppercase and lowercase drive letters reduce to
+        # their basename; the drive prefix never reaches the wire.
+        for drive_relative, expected_basename in (
+            ("C:backend.log", "backend.log"),
+            ("c:backend.log", "backend.log"),
+            ("D:private/backend.log", "backend.log"),
+            ("d:private\\backend.log", "backend.log"),
+        ):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = "logs"
+            cfg.logging.filename = drive_relative
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive_relative
+            data = response.json()
+
+            assert data["logging"]["directory"] == "logs", drive_relative
+            assert data["logging"]["filename"] == expected_basename, drive_relative
+            assert data["logging"]["file_path"] == f"logs/{expected_basename}", drive_relative
+            assert ":" not in data["logging"]["file_path"], drive_relative
+            assert not data["logging"]["file_path"].startswith("/"), drive_relative
+
+        # Drive-only: uppercase and lowercase reduce to empty; ``file_path``
+        # falls back to the redacted directory + trailing slash only — no
+        # drive letter ever appears.
+        for drive_only in ("C:", "c:", "D:", "d:", "Z:", "z:"):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = "logs"
+            cfg.logging.filename = drive_only
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive_only
+            data = response.json()
+
+            assert data["logging"]["directory"] == "logs", drive_only
+            assert data["logging"]["filename"] == "", drive_only
+            # file_path joins directory + "/" + empty filename; the drive
+            # prefix is gone and the wire form contains no drive letter.
+            assert data["logging"]["file_path"] == "logs/", drive_only
+            assert ":" not in data["logging"]["file_path"], drive_only
+            assert not data["logging"]["file_path"].startswith("/"), drive_only
+
+    def test_get_config_redacts_windows_drive_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Windows drive-absolute ``logging.directory`` must not leak.
+
+        ``PurePath.is_absolute()`` is host-native, so on POSIX it misses
+        ``C:\\...`` forms. The wire form must reduce them to their basename
+        independent of the host OS.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "C:\\Users\\secret\\logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "C:" not in data["logging"]["file_path"]
+        assert "secret" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_unc_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """UNC ``logging.directory`` must not leak through /api/config.
+
+        ``PurePath.is_absolute()`` is host-native, so on POSIX it misses
+        ``\\\\server\\share`` forms. The wire form must reduce them to their
+        basename independent of the host OS.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "\\\\fileserver\\private\\logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "fileserver" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+
+    def test_put_config_unchanged_roundtrip_preserves_absolute_logging_paths(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """GET → unchanged PUT must not overwrite canonical absolute paths.
+
+        Regression for the review finding that the redacted GET projection
+        (basename only) was accepted as canonical state by PUT, so saving an
+        unrelated setting silently rewrote ``/srv/private/openbiliclaw/logs``
+        to ``logs``.  The backend must detect the redacted echo and skip
+        applying directory/filename.
+        """
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "/srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        # 1. GET returns the redacted wire form.
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["directory"] == "logs"
+        assert wire_logging["filename"] == "backend.log"
+        assert wire_logging["file_path"] == "logs/backend.log"
+
+        # 2. PUT the same logging object back (simulates unchanged settings
+        #    save from desktop/extension).  The redacted file_path must be
+        #    treated as echo, not as new canonical state.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"file_path": wire_logging["file_path"]}},
+        )
+        assert put_resp.status_code == 200
+
+        # Runtime config must still hold the original absolute paths.
+        assert cfg.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert cfg.logging.filename == "/srv/private/backend.log"
+
+        # Persisted config.toml must also hold the original values.
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert persisted.logging.filename == "/srv/private/backend.log"
+
+    def test_put_config_unchanged_roundtrip_preserves_tilde_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """GET → unchanged PUT must not overwrite a ``~``-prefixed directory."""
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~/private-logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["directory"] == "private-logs"
+        assert wire_logging["filename"] == "backend.log"
+
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"file_path": wire_logging["file_path"]}},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "~/private-logs"
+        assert cfg.logging.filename == "backend.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "~/private-logs"
+        assert persisted.logging.filename == "backend.log"
+
+    def test_put_config_intentional_logging_path_change_still_applies(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A genuinely edited log path must update the canonical config."""
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        # Intentionally change to a new relative directory.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"directory": "new-logs", "filename": "new.log"}},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "new-logs"
+        assert cfg.logging.filename == "new.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "new-logs"
+        assert persisted.logging.filename == "new.log"
+
+    def test_get_config_redacts_posix_root_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """POSIX root ``logging.directory`` must not leak through /api/config.
+
+        Regression for the review finding that ``directory="/"`` reduced to
+        ``""`` and then ``file_path`` blindly inserted ``/``, producing an
+        absolute path when the filename contained separators.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/"
+        cfg.logging.filename = "srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == ""
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "srv" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_windows_drive_root_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Windows drive-root ``logging.directory`` must not leak.
+
+        Regression for the review finding that ``directory="C:\\\\"`` reduced
+        to ``C:`` and ``file_path`` became ``C:/Users\\secret\\backend.log``.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "C:\\\\"
+        cfg.logging.filename = "Users\\\\secret\\\\backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == ""
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "C:" not in data["logging"]["file_path"]
+        assert "secret" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_windows_drive_only_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-only ``logging.directory`` (``C:`` / ``D:``) must not leak.
+
+        Regression for the review finding that ``directory="C:"`` passed
+        through unchanged because drive detection required ``len >= 3``, so
+        ``file_path`` became the absolute-looking ``C:/backend.log``.
+        ``PureWindowsPath("C:")`` is drive-qualified/drive-relative, so the
+        wire form must never emit a drive prefix.
+        """
+        from openbiliclaw.config import Config
+
+        for drive in ("C:", "D:", "c:"):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = drive
+            cfg.logging.filename = "backend.log"
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive
+            data = response.json()
+
+            assert data["logging"]["directory"] == "", drive
+            assert data["logging"]["filename"] == "backend.log", drive
+            assert data["logging"]["file_path"] == "backend.log", drive
+            assert not data["logging"]["file_path"].startswith("/"), drive
+            assert ":" not in data["logging"]["file_path"], drive
+
+    def test_get_config_redacts_windows_drive_relative_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-relative ``logging.directory`` (``C:foo``) must not leak.
+
+        Sibling of the drive-only regression: ``C:foo`` resolves against the
+        drive's current directory on Windows, so it is drive-qualified and
+        must reduce to its basename without emitting a drive prefix.
+        """
+        from openbiliclaw.config import Config
+
+        # Single-segment drive-relative collapses to that segment.
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "C:foo"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "foo"
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "foo/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert ":" not in data["logging"]["file_path"]
+
+        # Multi-segment drive-relative collapses to its basename.
+        cfg2 = Config(data_dir="runtime-data")
+        cfg2.logging.directory = "C:private/logs"
+        cfg2.logging.filename = "backend.log"
+
+        client2 = self._make_client(monkeypatch, tmp_path, cfg2)
+
+        response2 = client2.get("/api/config")
+        assert response2.status_code == 200
+        data2 = response2.json()
+
+        assert data2["logging"]["directory"] == "logs"
+        assert data2["logging"]["file_path"] == "logs/backend.log"
+        assert ":" not in data2["logging"]["file_path"]
+        assert "private" not in data2["logging"]["file_path"]
+
+    def test_get_config_redacts_bare_tilde_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """Bare ``~`` ``logging.directory`` must not leak through /api/config.
+
+        Regression for the review finding that ``directory="~"`` passed
+        through as ``~`` and ``file_path`` became ``~/backend.log``.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == ""
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "~" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_tilde_user_logging_directory(self, monkeypatch, tmp_path) -> None:
+        """Bare ``~user`` ``logging.directory`` must not leak through /api/config.
+
+        Regression for the review finding that ``directory="~alice"`` was
+        returned unchanged even though every ``~``-prefixed directory is
+        documented as redacted. The bare home-marker form collapses to an
+        empty directory so ``file_path`` carries only the filename.
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~alice"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == ""
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert "~" not in data["logging"]["file_path"]
+        assert "alice" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_tilde_user_subdir_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """``~user/subdir`` reduces to its basename, not the ``~user`` home."""
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~alice/private-logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "private-logs"
+        assert data["logging"]["file_path"] == "private-logs/backend.log"
+        assert "~" not in data["logging"]["file_path"]
+        assert "alice" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_windows_rooted_no_drive_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Windows rooted-no-drive ``logging.directory`` must not leak.
+
+        Regression for the review finding that ``directory="\\\\Users\\\\alice
+        \\\\private\\\\logs"`` passed through unchanged on a POSIX host even
+        though joining it to a Windows cwd resolves to an absolute path on
+        the current drive (``PureWindowsPath("\\\\Users\\\\...").root == "\\\\"``).
+        """
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "\\Users\\alice\\private\\logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "logs"
+        assert data["logging"]["file_path"] == "logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert not data["logging"]["file_path"].startswith("\\")
+        assert "Users" not in data["logging"]["file_path"]
+        assert "alice" not in data["logging"]["file_path"]
+        assert "private" not in data["logging"]["file_path"]
+
+    def test_get_config_redacts_windows_rooted_no_drive_root_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A bare Windows root marker ``\\`` collapses to an empty directory."""
+        from openbiliclaw.config import Config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "\\"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == ""
+        assert data["logging"]["file_path"] == "backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert not data["logging"]["file_path"].startswith("\\")
+
+    def test_put_config_intentional_edit_to_exact_displayed_basename(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Intentional edit to the exact displayed basename must apply.
+
+        Regression for the review finding that the value-equality echo
+        heuristic could not distinguish an unchanged redacted echo from an
+        intentional PUT to the exact relative basename. The new protocol
+        treats a ``file_path`` match as echo and a ``directory``/``filename``
+        -only payload as intentional edit.
+        """
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "/srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        # GET returns the redacted wire form.
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["directory"] == "logs"
+        assert wire_logging["filename"] == "backend.log"
+        assert wire_logging["file_path"] == "logs/backend.log"
+
+        # Intentional edit to the exact displayed basename: send
+        # directory/filename only (no file_path). The backend must apply
+        # them directly.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"directory": "logs", "filename": "backend.log"}},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "logs"
+        assert cfg.logging.filename == "backend.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "logs"
+        assert persisted.logging.filename == "backend.log"
+
+    def test_put_config_unchanged_file_path_echo_preserves_absolute_logging_paths(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """GET → unchanged PUT with ``file_path`` must preserve canonical paths.
+
+        The new unambiguous protocol treats an exact ``file_path`` match as
+        the redacted echo and skips applying directory/filename.
+        """
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "/srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["file_path"] == "logs/backend.log"
+
+        # Unchanged round-trip: send file_path exactly as received.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"file_path": wire_logging["file_path"]}},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert cfg.logging.filename == "/srv/private/backend.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert persisted.logging.filename == "/srv/private/backend.log"
 
     def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
         self, monkeypatch, tmp_path
