@@ -72,10 +72,8 @@ def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surfac
     # shared label-wrapped .settings-field — full adoption is plan §10), and
     # the extension popup carries the literal markup inline.
     surfaces = (
-        (ROOT / "src/openbiliclaw/web/shared/model-config-render.js").read_text(
-            encoding="utf-8"
-        ),
-        (ROOT / "extension/popup/popup-model-settings.js").read_text(encoding="utf-8"),
+        (ROOT / "src/openbiliclaw/web/shared/model-config-render.js").read_text(encoding="utf-8"),
+        (ROOT / "extension/popup/popup-model-settings.ts").read_text(encoding="utf-8"),
         (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8"),
     )
 
@@ -86,9 +84,7 @@ def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surfac
     # string must NOT be forked into their per-surface modules.
     for fork in (
         MODEL_JS_PATH.read_text(encoding="utf-8"),
-        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(
-            encoding="utf-8"
-        ),
+        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(encoding="utf-8"),
     ):
         assert "sharedRenderDescriptorField" in fork or "renderDescriptorField" in fork
 

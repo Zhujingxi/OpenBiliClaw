@@ -216,7 +216,7 @@ def test_all_graphical_saved_surfaces_keep_manual_controls_and_default_auto_sync
     assert "同步未同步内容" in mobile_saved
 
     for source in (
-        _read("extension/popup/popup.js"),
+        _read("extension/popup/popup.ts"),
         _read("src/openbiliclaw/web/desktop/assets/js/app.js"),
         _read("src/openbiliclaw/web/js/views/model-settings.js"),
     ):
