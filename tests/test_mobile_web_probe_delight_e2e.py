@@ -230,6 +230,8 @@ def chromium_page() -> Page:
               }
               close() { this.readyState = 3; }
             };
+            window.__openedUrls = [];
+            window.open = (url) => { window.__openedUrls.push(url); return null; };
             window.__emitRuntimeEvent = (payload) => {
               for (const socket of window.__fakeSockets || []) {
                 if (socket.readyState === window.WebSocket.OPEN) {
@@ -447,3 +449,75 @@ def test_mobile_failed_like_restores_unselected_actions(
     expect(like).to_be_enabled()
     expect(chromium_page.locator(".delight-result-state")).to_have_count(0)
     expect(chromium_page.locator(".delight-actions")).to_be_visible()
+
+
+def _delight_tray_box(page: Page) -> dict[str, float]:
+    tray = page.locator(".delight-tray")
+    expect(tray).to_be_visible()
+    box = tray.bounding_box()
+    assert box is not None
+    return box
+
+
+def _drag_delight_tray(page: Page, dx: float) -> None:
+    """Press on the tray body and release `dx` px away (0 = a plain tap)."""
+
+    box = _delight_tray_box(page)
+    start_x = box["x"] + box["width"] / 2
+    start_y = box["y"] + box["height"] / 2
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    if dx:
+        page.mouse.move(start_x + dx, start_y, steps=5)
+    page.mouse.up()
+
+
+def test_mobile_delight_tap_on_card_body_opens_content(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    """issue #126: the surprise card opens on a whole-card tap, like normal cards."""
+
+    base_url, stub = mobile_web_server
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    expect(chromium_page.locator(".delight-tray")).to_be_visible()
+
+    _drag_delight_tray(chromium_page, dx=0)
+
+    chromium_page.wait_for_function("() => (window.__openedUrls || []).length > 0")
+    assert chromium_page.evaluate("() => window.__openedUrls") == [
+        "https://www.bilibili.com/video/BV1DELIGHTLIKED"
+    ]
+    assert [post["response"] for post in stub.delight_posts] == ["view"]
+
+
+def test_mobile_delight_drag_past_dead_zone_does_not_open_content(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    """A finger drag must never be mistaken for a tap (误触 guard for the 10px dead zone)."""
+
+    base_url, stub = mobile_web_server
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    expect(chromium_page.locator(".delight-tray")).to_be_visible()
+
+    _drag_delight_tray(chromium_page, dx=-30)
+
+    chromium_page.wait_for_timeout(300)
+    assert stub.delight_posts == []
+    assert chromium_page.evaluate("() => window.__openedUrls") == []
+
+
+def test_mobile_delight_feedback_button_does_not_also_open_content(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    """Tapping a feedback action must not bubble into the new whole-card open."""
+
+    base_url, stub = mobile_web_server
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    chromium_page.locator('.delight-actions [data-delight-action="like"]').click()
+
+    assert stub.delight_post_received.wait(timeout=2)
+    assert [post["response"] for post in stub.delight_posts] == ["like"]
+    assert chromium_page.evaluate("() => window.__openedUrls") == []
