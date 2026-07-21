@@ -2371,6 +2371,21 @@ def create_app(
         _lan_ip_checked_at = time.monotonic()
         return _lan_ip_value
 
+    async def _fresh_lan_ip() -> str | None:
+        """Detect the LAN IP now, bypassing the ``/api/health`` TTL cache.
+
+        Opening the QR panel is a rare, user-initiated action, and a stale
+        address there is worse than a marginally slower panel: right after a
+        Wi-Fi switch the cached value still encodes a host the phone cannot
+        reach. Detection shells out to ifconfig / ip, so it runs in a worker
+        thread to keep the event loop responsive, and the result refreshes the
+        shared cache that ``/api/health`` reads.
+        """
+        nonlocal _lan_ip_value, _lan_ip_checked_at
+        _lan_ip_value = await asyncio.to_thread(_detect_lan_ip)
+        _lan_ip_checked_at = time.monotonic()
+        return _lan_ip_value
+
     # Embedding readiness is probed live (see _health_embedding_ready) and the
     # result cached here so frequent /api/health polls share one provider call.
     _embedding_probe_outcome: _EmbeddingProbeOutcome = "failed"
@@ -2617,9 +2632,12 @@ def create_app(
         """Lightweight endpoint for mobile QR code: LAN IP only.
 
         Unlike ``/api/health``, this skips the embedding readiness probe
-        so the QR drawer never blocks on a cold Ollama model load.
+        so the QR drawer never blocks on a cold Ollama model load, and it
+        detects the address fresh instead of serving the health TTL cache
+        (see ``_fresh_lan_ip``) so a scanned code is never a network change
+        behind.
         """
-        return JSONResponse({"lan_ip": _health_lan_ip()})
+        return JSONResponse({"lan_ip": await _fresh_lan_ip()})
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:

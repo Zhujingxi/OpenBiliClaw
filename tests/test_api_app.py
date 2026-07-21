@@ -2268,6 +2268,35 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"lan_ip": "192.168.1.7"}
 
+    def test_qr_info_endpoint_detects_lan_ip_fresh_on_every_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Wi-Fi switch must reach the QR panel at once, not after the TTL.
+
+        ``/api/health`` caches ``lan_ip`` for 30s. If the QR endpoint shared
+        that cache, a code scanned right after a network change would still
+        encode the old, phone-unreachable host.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        addresses = iter(["192.168.1.7", "192.168.31.98"])
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: next(addresses))
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        first = client.get("/api/qr-info")
+        second = client.get("/api/qr-info")
+
+        assert first.json() == {"lan_ip": "192.168.1.7"}
+        assert second.json() == {"lan_ip": "192.168.31.98"}
+        # The fresh probe also refreshes the cache /api/health serves, so health
+        # never regresses to the superseded address (a third _detect_lan_ip call
+        # would exhaust the iterator and raise).
+        assert client.get("/api/health").json()["lan_ip"] == "192.168.31.98"
+
     def test_sources_status_returns_every_source(self) -> None:
         """Unified /api/sources/status reports a status item per source."""
         from fastapi.testclient import TestClient

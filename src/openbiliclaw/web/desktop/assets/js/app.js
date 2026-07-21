@@ -8423,9 +8423,13 @@ ${cardFeedbackBarHtml()}`;
       hintEl.hidden = true;
       hintEl.textContent = "";
       // The backend knows its own LAN IP; the page host may be 127.0.0.1,
-      // which a phone cannot reach. Use the cached value from page load
-      // prefetch, falling back to a fresh request if unavailable.
-      const lanIp = _cachedLanIp || String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      // which a phone cannot reach. Always re-query on open: the address moves
+      // when the user switches Wi-Fi or plugs in a dongle, and a sticky cache
+      // would keep encoding an unreachable host until a full page reload. The
+      // page-load prefetch is only a fallback for when this request fails.
+      const freshLanIp = String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      if (freshLanIp) _cachedLanIp = freshLanIp;
+      const lanIp = freshLanIp || _cachedLanIp;
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
