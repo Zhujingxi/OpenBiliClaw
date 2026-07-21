@@ -34,7 +34,7 @@ from openbiliclaw.soul.confusion import ConfusionManager
 from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
@@ -143,11 +143,15 @@ class CognitionCycle:
         awareness_analyzer: AwarenessAnalyzer,
         insight_analyzer: InsightAnalyzer,
         min_interval_seconds: int = DEFAULT_MIN_INTERVAL_SECONDS,
+        pending_rebuild_hook: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
         self._memory = memory
         self._awareness_analyzer = awareness_analyzer
         self._insight_analyzer = insight_analyzer
         self._min_interval_seconds = int(min_interval_seconds)
+        # 12h-loop fallback trigger for the SoulEngine's debounced confirmed-
+        # hypotheses rebuild (spec invariant 4). Optional; best-effort.
+        self._pending_rebuild_hook = pending_rebuild_hook
         # Single-flight guard (Phase 5): the due-check + watermark consumption
         # must run under one lock so overlapping ticks (or an early trigger
         # racing the 12h tick) never double-process the same events.
@@ -262,6 +266,14 @@ class CognitionCycle:
             self._confusion_manager().expire_due(now=current_time)
         except Exception:
             logger.debug("Confusion TTL sweep failed", exc_info=True)
+
+        # 5. 12h-loop fallback: trigger the debounced confirmed-hypotheses
+        # rebuild (spec invariant 4). Best-effort — never breaks the cycle.
+        if self._pending_rebuild_hook is not None:
+            try:
+                await self._pending_rebuild_hook()
+            except Exception:
+                logger.debug("Pending rebuild hook failed during cognition cycle", exc_info=True)
 
         self._save_state(state)
         return result

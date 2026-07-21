@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -76,6 +77,22 @@ _REBUILD_WRITE_POINT: dict[str, str] = {
     _REBUILD_TRIGGER_FEEDBACK_BATCH: "feedback_soul_rebuild",
     _REBUILD_TRIGGER_CONFIRMED_HYPOTHESES: "hypotheses_soul_rebuild",
 }
+
+# A hypothesis only shapes a soul rebuild once it is validated AND confident
+# (spec invariant 3 / r3/F1). Rejected or unvalidated hypotheses are invisible
+# to every rebuild, so a reject's next rebuild squeezes an old conclusion out.
+_REBUILD_MIN_CONFIDENCE = 0.75
+# Debounce between a confirm/reject migration and the gated rebuild it schedules
+# (spec r3/F3). 6h sits between conversational cadence and the 12h cognition
+# loop — first-round calibration, re-tune after the first production month
+# (pitfall #3).
+_DEEP_REBUILD_DEBOUNCE_HOURS = 6
+# Bounded retry for a pending rebuild that keeps hitting a transient LLM/parse
+# error (is_error path). After this many failures the marker is cleared with a
+# WARNING so a persistently broken provider can't wedge the pending state.
+_REBUILD_MAX_RETRIES = 2
+# Cap on the confirmed-hypothesis list carried in the gate snapshot context.
+_REBUILD_CONTEXT_HYPOTHESIS_CAP = 12
 
 
 def _memory_database(memory: Any) -> Any | None:
@@ -196,6 +213,14 @@ class SoulEngine:
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
         self._feedback_batch_lock = asyncio.Lock()
+        # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
+        # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
+        # prevents overlapping builds while the lock is released for the long
+        # LLM build (compare-and-swap on ``set_at`` reconciles a concurrent
+        # re-mark). Restart recovery is automatic: the marker persists to disk
+        # and ``_rebuild_running`` resets to False on construction.
+        self._rebuild_pending_lock = asyncio.Lock()
+        self._rebuild_running = False
         self._module_overrides = dict(module_overrides or {})
         self._llm_concurrency = llm_concurrency
         self._llm_concurrency_gate = llm_concurrency_gate
@@ -254,6 +279,9 @@ class SoulEngine:
                 if cognition_cycle_interval_seconds is not None
                 else _DEFAULT_COG_INTERVAL
             ),
+            # 12h-loop fallback trigger for the debounced confirmed-hypotheses
+            # rebuild (spec invariant 4). Bound method; only invoked at run time.
+            pending_rebuild_hook=self.run_pending_rebuild_if_due,
         )
         self._profile_consolidator: ProfileConsolidator | None = None
         if profile_consolidation_enabled:
@@ -905,15 +933,18 @@ class SoulEngine:
             "validated": False,
             "confidence": 0.0,
         }
+        migrated = False
         for item in hypotheses:
             if self._normalize_text(item.hypothesis) != target:
                 continue
             if signal in {"confirm", "like", "support"}:
                 item.validated = True
                 item.confidence = min(1.0, round(max(item.confidence, 0.75), 4))
+                migrated = True
             elif signal in {"reject", "dislike", "deny"}:
                 item.validated = False
                 item.confidence = max(0.0, round(min(item.confidence, 0.35), 4))
+                migrated = True
             result["matched"] = True
             result["hypothesis"] = item.hypothesis
             result["validated"] = item.validated
@@ -921,6 +952,14 @@ class SoulEngine:
             break
         if result["matched"]:
             self._save_insights(hypotheses)
+            # A confirm OR reject migration (single-point ownership, spec
+            # invariant 4) schedules a debounced gated rebuild: the filtered
+            # rebuild input changes (a confirm adds the hypothesis; a reject
+            # drops it), so the next rebuild reflects — or squeezes out — it.
+            if migrated:
+                await self._mark_rebuild_pending(
+                    [f"insight_feedback:{signal}:{str(result['hypothesis'])[:60]}"]
+                )
             # The insight layer is the source of truth, but get_profile()
             # (UI profile-summary + delight scoring) reads the windowed
             # ``active_insights`` snapshot cached on the soul layer. Without
@@ -1188,9 +1227,7 @@ class SoulEngine:
                         awareness_notes=[
                             awareness_note_to_dict(item) for item in self._load_awareness_notes()
                         ],
-                        active_insights=[
-                            insight_hypothesis_to_dict(item) for item in self._load_insights()
-                        ],
+                        active_insights=self._rebuild_active_insights(),
                     )
                     profile = OnionProfile.from_legacy(legacy_profile)
                     profile.populate_from_flat_preference(updated_preference)
@@ -1217,6 +1254,13 @@ class SoulEngine:
                 item["applied"] = True
                 item["updated_at"] = datetime.now().isoformat()
         self._memory.save_insight_candidates(merged_candidates)
+
+        # Next dialogue-learning pass also triggers the debounced confirmed-
+        # hypotheses rebuild (spec invariant 4). Best-effort.
+        try:
+            await self.run_pending_rebuild_if_due()
+        except Exception:
+            logger.debug("pending rebuild trigger (dialogue) failed", exc_info=True)
 
         return {
             "event_logged": True,
@@ -1246,6 +1290,12 @@ class SoulEngine:
             await self.replay_held_updates()
         except Exception:
             logger.debug("held-replay consumer failed", exc_info=True)
+        # A periodic hook for the debounced confirmed-hypotheses rebuild (spec
+        # invariant 4). Best-effort — never breaks feedback processing.
+        try:
+            await self.run_pending_rebuild_if_due()
+        except Exception:
+            logger.debug("pending rebuild trigger (feedback batch) failed", exc_info=True)
         return result
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
@@ -1344,9 +1394,7 @@ class SoulEngine:
                         awareness_notes=[
                             awareness_note_to_dict(item) for item in self._load_awareness_notes()
                         ],
-                        active_insights=[
-                            insight_hypothesis_to_dict(item) for item in self._load_insights()
-                        ],
+                        active_insights=self._rebuild_active_insights(),
                     )
                     profile = OnionProfile.from_legacy(legacy_profile)
                     profile.populate_from_flat_preference(updated_preference)
@@ -1635,6 +1683,212 @@ class SoulEngine:
         layer.data.clear()
         layer.data.update({"hypotheses": [insight_hypothesis_to_dict(item) for item in insights]})
         layer.save()
+
+    def _rebuild_active_insights(self) -> list[dict[str, object]]:
+        """Insight dicts eligible to shape a soul rebuild (spec invariant 3 / F1).
+
+        Only validated hypotheses with confidence >= 0.75 are visible to a
+        rebuild; rejected/unvalidated ones are filtered out, so a reject's next
+        rebuild squeezes the old conclusion out instead of leaving it forever.
+        """
+        return [
+            insight_hypothesis_to_dict(item)
+            for item in self._load_insights()
+            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
+        ]
+
+    # -- Pending confirmed-hypotheses rebuild state machine (spec r3/F3) -------
+
+    def _rebuild_state_path(self) -> Path | None:
+        data_dir = getattr(self._memory, "_data_dir", None)
+        if data_dir is None:
+            return None
+        return Path(data_dir) / "memory" / "rebuild_pending_state.json"
+
+    def _load_rebuild_state(self) -> dict[str, Any]:
+        path = self._rebuild_state_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_rebuild_state(self, state: dict[str, Any]) -> None:
+        path = self._rebuild_state_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(path)
+        except OSError:
+            logger.debug("Failed to save rebuild pending state", exc_info=True)
+
+    async def _mark_rebuild_pending(self, trigger_refs: list[str]) -> None:
+        """Set/refresh the pending marker (confirm & reject single point, inv 4).
+
+        A new migration always re-stamps ``set_at`` and resets ``retry_count`` —
+        "new evidence reopens" — merging its refs with any still-pending ones.
+        """
+        async with self._rebuild_pending_lock:
+            state = self._load_rebuild_state()
+            existing = state.get("pending")
+            refs = (
+                list(existing.get("trigger_refs", []))
+                if isinstance(existing, dict) and isinstance(existing.get("trigger_refs"), list)
+                else []
+            )
+            for ref in trigger_refs:
+                if ref not in refs:
+                    refs.append(ref)
+            state["pending"] = {
+                "set_at": datetime.now().isoformat(),
+                "trigger_refs": refs,
+                "retry_count": 0,
+            }
+            self._save_rebuild_state(state)
+
+    async def run_pending_rebuild_if_due(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Run the debounced gated confirmed-hypotheses rebuild when due (inv 4).
+
+        Triggered by the 12h cognition loop and by the next dialogue-learning /
+        feedback-batch pass. Debounced by ``_DEEP_REBUILD_DEBOUNCE_HOURS``.
+        Clear-marker semantics (spec invariant 4):
+
+        - gate accept + build ok → clear the marker.
+        - gate downgrade/reject that is NOT an error (``is_error=False``) → this
+          batch is abandoned: clear the marker + record ``last_gate_refusal``. A
+          later confirm/reject re-opens it (no infinite retry).
+        - gate error OR build exception (``is_error=True``) → keep the marker,
+          bump ``retry_count``; after ``_REBUILD_MAX_RETRIES`` clear + WARNING.
+
+        A concurrent re-mark during the build is reconciled by comparing
+        ``set_at`` (compare-and-swap): if it changed, the fresh marker is left
+        intact rather than clobbered by this run's outcome.
+        """
+        current = now or datetime.now()
+        async with self._rebuild_pending_lock:
+            if self._rebuild_running:
+                return {"ran": False, "reason": "in_progress"}
+            state = self._load_rebuild_state()
+            pending = state.get("pending")
+            if not isinstance(pending, dict):
+                return {"ran": False, "reason": "not_pending"}
+            set_at = self._parse_iso(pending.get("set_at"))
+            if set_at is None or (current - set_at) < timedelta(hours=_DEEP_REBUILD_DEBOUNCE_HOURS):
+                return {"ran": False, "reason": "debounced"}
+            started_set_at = str(pending.get("set_at", ""))
+            trigger_refs = [str(r) for r in pending.get("trigger_refs", []) if isinstance(r, str)]
+            retry_count = int(pending.get("retry_count", 0) or 0)
+            self._rebuild_running = True
+
+        # The long LLM build runs WITHOUT the lock so a concurrent confirm/reject
+        # can re-mark pending (reconciled below via compare-and-swap on set_at).
+        try:
+            outcome = await self._execute_pending_rebuild(trigger_refs)
+        except Exception:
+            logger.exception("pending rebuild dispatch failed")
+            outcome = "error"
+
+        async with self._rebuild_pending_lock:
+            self._rebuild_running = False
+            state = self._load_rebuild_state()
+            pending = state.get("pending")
+            if not isinstance(pending, dict) or str(pending.get("set_at", "")) != started_set_at:
+                # A newer confirm/reject reopened the marker mid-build — leave it.
+                return {"ran": True, "outcome": outcome, "superseded": True}
+            if outcome == "accept":
+                state["pending"] = None
+            elif outcome == "refusal":
+                state["pending"] = None
+                state["last_gate_refusal"] = {
+                    "at": current.isoformat(),
+                    "trigger_refs": trigger_refs,
+                }
+            else:  # error
+                retry_count += 1
+                if retry_count >= _REBUILD_MAX_RETRIES:
+                    logger.warning(
+                        "pending rebuild exceeded retry budget (%d); clearing marker",
+                        _REBUILD_MAX_RETRIES,
+                    )
+                    state["pending"] = None
+                else:
+                    pending["retry_count"] = retry_count
+                    state["pending"] = pending
+            self._save_rebuild_state(state)
+            return {"ran": True, "outcome": outcome, "retry_count": retry_count}
+
+    async def _execute_pending_rebuild(self, trigger_refs: list[str]) -> str:
+        """Gate + run one confirmed-hypotheses rebuild. Returns the outcome tag.
+
+        ``accept`` (rebuilt), ``refusal`` (gate downgrade/reject, real verdict),
+        or ``error`` (gate is_error, or a build exception).
+        """
+        preference = dict(self._memory.get_layer("preference").data)
+        existing_profile = dict(self._memory.get_layer("soul").data)
+        validated = [
+            item
+            for item in self._load_insights()
+            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
+        ]
+        context: dict[str, object] = {
+            "confirmed_hypotheses": [item.hypothesis for item in validated][
+                :_REBUILD_CONTEXT_HYPOTHESIS_CAP
+            ],
+            "trigger_refs": trigger_refs,
+        }
+        source_refs = trigger_refs or ["rebuild_pending"]
+        decision = await self._gate_soul_rebuild(
+            trigger=_REBUILD_TRIGGER_CONFIRMED_HYPOTHESES,
+            existing_preference=preference,
+            updated_preference=preference,
+            source_refs=source_refs,
+            context=context,
+        )
+        if decision.blocks:
+            return "error" if decision.is_error else "refusal"
+        try:
+            with self._ledger.action(
+                write_point="hypotheses_soul_rebuild",
+                source="hypotheses",
+                before=existing_profile,
+                source_refs=source_refs,
+            ) as _entry:
+                legacy_profile = await self._profile_builder.build(
+                    history=[],
+                    preference=preference,
+                    awareness_notes=[
+                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                    ],
+                    active_insights=self._rebuild_active_insights(),
+                )
+                profile = OnionProfile.from_legacy(legacy_profile)
+                profile.populate_from_flat_preference(preference)
+                soul_layer = self._memory.get_layer("soul")
+                soul_layer.data.clear()
+                soul_layer.data.update(profile.to_dict())
+                soul_layer.save()
+                _entry.after = dict(soul_layer.data)
+            self._memory.sync_profile_files(profile)
+            return "accept"
+        except Exception:
+            logger.exception("Failed to rebuild soul profile from confirmed hypotheses")
+            return "error"
+
+    @staticmethod
+    def _parse_iso(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
 
     def _merge_insight_candidates(
         self,
