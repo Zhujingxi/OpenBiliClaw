@@ -1,5 +1,7 @@
 # 认知画像流水线 Spec — 三线更新、疑惑/假设生命周期、态势门控与台账
 
+> **后续归一（2026-07-22）**：本 spec 的「三线更新」中，深层画像（VALUES/CORE + soul 层）的事件驱动直写已被 `docs/plans/2026-07-22-deep-line-consolidation-spec.md` 收敛为唯一模式「假设确认 → 门控下 soul 重建」——P1（管线 VALUES/CORE 直写，接入点②）退役、P2（反馈批重建）补门控。以下正文保持历史原样，接入点②与管线深层消费的现状以归一 spec 为准。
+
 **Created:** 2026-07-17(r2,codex 第一轮 20 findings 修订)
 **Scope:** 画像认知层(`soul/`:engine、pipeline、layer_updaters、dialogue、speculator、cognition_cycle、awareness_analyzer、dialogue_insight_analyzer、profile)、存储(`storage/database.py` 新表)、prompt(`llm/prompts.py`)、API(`api/app.py` 对话/洞察端点)、CLI(`cli.py` ledger 命令)。四端契约:台账查询 CLI 先行,popup/桌面/移动 Web 显式排除至后续版本。
 **Out of scope:** 事件采集侧;多用户化;对话历史语义检索(v2);speculation / insight hypothesis 的存储迁移(收编不迁移);画像历史回溯重算;跨进程 lease(单 daemon 模型);trial topic 的推荐侧小流量消费(本版仅产状态,见 Phase 4 的最小消费例外)。

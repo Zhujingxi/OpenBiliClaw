@@ -4,6 +4,16 @@
 
 ---
 
+## v0.3.178：深层线归一——深层影响收敛为「假设 → 门控下 soul 重建」（2026-07-22）
+
+深层画像的事件驱动影响收敛为唯一模式。规格见 `docs/plans/2026-07-22-deep-line-consolidation-spec.md`。基于 `feat/cognitive-profile-pipeline`（未合 main，零 shadow 数据的最低成本窗口）。
+
+- **GateDecision 错误分类（F7）**：`soul/posture_gate.py` 的 `GateDecision` 新增 `is_error` 字段。enforce 下 LLM/解析**异常**仍保守 downgrade，但 `is_error=True`，让重建调用方对「真实 downgrade 判定」（清标）与「瞬时错误」（保留 pending 重试）分流；与 shadow 侧 `shadow_error`/`shadow_downgrade` 语义对齐；接入点①调用方不消费该字段，行为不变。
+- **P1 退役 + 一次性迁移**：pipeline 不再消费 VALUES/CORE——`_BUFFERED_LAYERS` 摘除、`FEEDBACK` 只路由 interest+surface、对话 `value/state` kind 在 pipeline 内失活、`update_layer(VALUES|CORE)` 封死 no-op + WARNING（接入点②随之退役）。新增 `migrate_pipeline_deep_buffers`：构造时幂等地把持久化 buffer 里残留的 VALUES/CORE 信号确定性转成 awareness note（前缀 `[migration:pipeline-deep]`，内容 hash 去重，marker + 台账行 `pipeline_deep_migration`，清空旧键）。
+- **接入点③快照泛化 + P2 补门控**：`_gate_soul_rebuild` 泛化承载三触发源（dialogue / feedback_batch / confirmed_hypotheses），快照带 `trigger`/`write_point`/旧 soul 摘要/触发上下文，返回 `GateDecision`。反馈批显著变化的整份重建此前绕过所有门控，现接入接入点③（`feedback_soul_rebuild` 写点，enforce 可拦）。
+- **重建输入过滤 + rebuild_pending 状态机**：所有 soul 重建只纳入 `validated && confidence>=0.75` 的假设（`_rebuild_active_insights`），rejected/未验证假设不可见。`update_from_feedback` 单点：confirm/reject 均置持久化 `rebuild_pending {set_at, trigger_refs, retry_count}`；去抖 6h 后由 12h 认知循环 / 下次对话学习 / 反馈批触发门控重建（`hypotheses_soul_rebuild` 写点）。清标语义：accept 清 / 真实 refusal 清+记 `last_gate_refusal` / error 保留有界重试（`is_error` 区分，retry<2）；`set_at` compare-and-swap 对账并发 re-mark；重启自动恢复。
+- **文档**：`docs/modules/soul.md` 新增「深层影响唯一模式」小节 + 台账写点表与态势门控/更新器行更新；架构图无跨模块布线变化（深层节点注记）。
+
 ## v0.3.177：认知画像流水线 Wave D——topic 状态机 + 觉察提炼节奏（2026-07-17）
 
 认知画像流水线的 **Wave D（Phase 4 + 5，RECOMMENDED）**，收官。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
