@@ -75,10 +75,7 @@ test("empty reshuffle preserves the visible recommendation batch", () => {
 });
 
 test("buildVideoUrl builds bilibili video url from bvid", () => {
-  assert.equal(
-    buildVideoUrl("BV1xx411c7mD"),
-    "https://www.bilibili.com/video/BV1xx411c7mD",
-  );
+  assert.equal(buildVideoUrl("BV1xx411c7mD"), "https://www.bilibili.com/video/BV1xx411c7mD");
 });
 
 test("buildContentUrl and click payload keep YouTube items source-aware", () => {
@@ -206,10 +203,7 @@ test("probe hydration skips locally handled and inactive probes", () => {
     shouldHydrateProbe({ domain: "城市基础设施", status: "confirmed" }, "interest.probe"),
     false,
   );
-  assert.equal(
-    shouldHydrateProbe({ domain: "城市基础设施" }, "interest.probe"),
-    true,
-  );
+  assert.equal(shouldHydrateProbe({ domain: "城市基础设施" }, "interest.probe"), true);
 });
 
 test("probe websocket display skips locally handled probes", () => {
@@ -392,7 +386,7 @@ test("getRecommendationCardKind keeps a cover card for video items with a cover"
 });
 
 test("popup recommendation renderer has text-card styles for X items", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
   assert.match(popupJs, /cover\.classList\.add\("is-fallback", "is-text-card"\)/);
@@ -515,14 +509,8 @@ test("normalizeRecommendation upgrades protocol-relative and http covers to http
     cover_url: "http://i2.hdslb.com/bfs/archive/insecure.jpg",
   });
 
-  assert.equal(
-    protocolRelative.cover_url,
-    "https://i1.hdslb.com/bfs/archive/protocol.jpg",
-  );
-  assert.equal(
-    insecure.cover_url,
-    "https://i2.hdslb.com/bfs/archive/insecure.jpg",
-  );
+  assert.equal(protocolRelative.cover_url, "https://i1.hdslb.com/bfs/archive/protocol.jpg");
+  assert.equal(insecure.cover_url, "https://i2.hdslb.com/bfs/archive/insecure.jpg");
 });
 
 test("buildImageProxyPath returns encoded backend proxy path for valid cover urls", () => {
@@ -538,7 +526,7 @@ test("buildImageProxyPath returns encoded backend proxy path for valid cover url
 });
 
 test("popup image rendering uses backend proxy without referrerPolicy", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.doesNotMatch(popupJs, /referrerPolicy = "no-referrer"/);
   assert.match(popupJs, /setProxyImageSrc/);
@@ -615,10 +603,14 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
     delight_reason: "新理由",
     delight_score: 0.9,
   });
-  const ignored = mergeDelightCandidate(current, {
-    bvid: "BV1SNOOZED",
-    title: "先别出现",
-  }, ["BV1SNOOZED"]);
+  const ignored = mergeDelightCandidate(
+    current,
+    {
+      bvid: "BV1SNOOZED",
+      title: "先别出现",
+    },
+    ["BV1SNOOZED"],
+  );
   const refreshedLiked = mergeDelightCandidate(
     normalizeDelightCandidate({ bvid: "BV1LIKED", state: "pending" }),
     { bvid: "BV1LIKED", state: "liked", response_message: "好，这类多来点。" },
@@ -778,7 +770,7 @@ test("getDelightUiState projects status and actions independently for every stat
 });
 
 test("popup delight renderer synchronizes liked ARIA and duplicate-action state", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /if \(uiState\.show_status\)/);
   assert.match(popupJs, /if \(uiState\.show_actions\)/);
@@ -1015,10 +1007,7 @@ test("shouldFetchProfileSummary allows force refresh after profile is cached", (
     shouldFetchProfileSummary({ online: true, profileLoaded: true, force: false }),
     false,
   );
-  assert.equal(
-    shouldFetchProfileSummary({ online: true, profileLoaded: true, force: true }),
-    true,
-  );
+  assert.equal(shouldFetchProfileSummary({ online: true, profileLoaded: true, force: true }), true);
   assert.equal(
     shouldFetchProfileSummary({ online: false, profileLoaded: false, force: true }),
     false,
@@ -1145,13 +1134,10 @@ test("getReadyRecommendationHint explains empty pool while refresh is still runn
 });
 
 test("getManualRefreshResultHint explains stale positive pool count after empty reshuffle", () => {
-  assert.deepEqual(
-    getManualRefreshResultHint({ itemCount: 0, hadAdvertisedInventory: true }),
-    {
-      message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
-      tone: "info",
-    },
-  );
+  assert.deepEqual(getManualRefreshResultHint({ itemCount: 0, hadAdvertisedInventory: true }), {
+    message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
+    tone: "info",
+  });
   assert.deepEqual(
     getManualRefreshResultHint({
       itemCount: 0,
@@ -1166,7 +1152,7 @@ test("getManualRefreshResultHint explains stale positive pool count after empty 
 });
 
 test("popup manual refresh applies the preserved empty replacement", () => {
-  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.ts"), "utf8");
   const start = popupSource.indexOf("async function handleManualRefresh()");
   const end = popupSource.indexOf("\nfunction bindTabs()", start);
   const body = popupSource.slice(start, end);
@@ -1443,19 +1429,47 @@ test("getRuntimeRefreshSubmissionState maps runtime events to feedback progress"
 
 test("shouldSubmitChatOnEnter only submits on plain Enter", () => {
   assert.equal(
-    shouldSubmitChatOnEnter({ key: "Enter", shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: false }),
+    shouldSubmitChatOnEnter({
+      key: "Enter",
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      isComposing: false,
+    }),
     true,
   );
   assert.equal(
-    shouldSubmitChatOnEnter({ key: "Enter", shiftKey: true, ctrlKey: false, metaKey: false, altKey: false, isComposing: false }),
+    shouldSubmitChatOnEnter({
+      key: "Enter",
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      isComposing: false,
+    }),
     false,
   );
   assert.equal(
-    shouldSubmitChatOnEnter({ key: "Enter", shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: true }),
+    shouldSubmitChatOnEnter({
+      key: "Enter",
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      isComposing: true,
+    }),
     false,
   );
   assert.equal(
-    shouldSubmitChatOnEnter({ key: "a", shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: false }),
+    shouldSubmitChatOnEnter({
+      key: "a",
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      isComposing: false,
+    }),
     false,
   );
 });
@@ -1470,17 +1484,38 @@ test("normalizeProfileSummary fills stable fallback fields", () => {
       mbti: { type: "INTJ", dimensions: { E_I: { pole: "I", strength: 0.8 } }, confidence: 0.7 },
       values: ["独立思考", "  真实  "],
       motivational_drivers: ["  建立判断确定性  ", "  找到秩序感 "],
-      likes: [{ domain: "  国际新闻  ", weight: 0.9, specifics: [{ name: "  中东局势  ", weight: 0.7 }] }],
+      likes: [
+        { domain: "  国际新闻  ", weight: 0.9, specifics: [{ name: "  中东局势  ", weight: 0.7 }] },
+      ],
       dislikes: [{ domain: "  标题党  ", weight: 0.8, specifics: [] }],
       favorite_up_users: ["  经济观察  ", "构图实验室"],
       life_stage: "  职业上升期  ",
       current_phase: "  最近更像在一边吸收信息，一边整理判断。  ",
       cognitive_style: ["  会先看结构  ", " 对证据敏感 "],
-      style: { preferred_duration: "long", preferred_pace: "moderate", quality_sensitivity: 0.7, humor_preference: 0.3, depth_preference: 0.9 },
-      context: { weekday_patterns: "  晚上深度阅读  ", weekend_patterns: "", time_of_day_patterns: "", session_type: "deep_dive" },
+      style: {
+        preferred_duration: "long",
+        preferred_pace: "moderate",
+        quality_sensitivity: 0.7,
+        humor_preference: 0.3,
+        depth_preference: 0.9,
+      },
+      context: {
+        weekday_patterns: "  晚上深度阅读  ",
+        weekend_patterns: "",
+        time_of_day_patterns: "",
+        session_type: "deep_dive",
+      },
       exploration_openness: 0.72,
       speculative_interests: [
-        { domain: "  建筑美学  ", reason: "  你最近的审美倾向  ", confidence: 0.4, confirmation_count: 1, confirmation_threshold: 3, status: "active", specifics: [{ name: "  现代主义建筑  ", confirmation_count: 1 }] },
+        {
+          domain: "  建筑美学  ",
+          reason: "  你最近的审美倾向  ",
+          confidence: 0.4,
+          confirmation_count: 1,
+          confirmation_threshold: 3,
+          status: "active",
+          specifics: [{ name: "  现代主义建筑  ", confirmation_count: 1 }],
+        },
       ],
       recent_cognition_updates: [
         {
@@ -1512,11 +1547,30 @@ test("normalizeProfileSummary fills stable fallback fields", () => {
       life_stage: "职业上升期",
       current_phase: "最近更像在一边吸收信息，一边整理判断。",
       cognitive_style: ["会先看结构", "对证据敏感"],
-      style: { preferred_duration: "long", preferred_pace: "moderate", quality_sensitivity: 0.7, humor_preference: 0.3, depth_preference: 0.9 },
-      context: { weekday_patterns: "晚上深度阅读", weekend_patterns: "", time_of_day_patterns: "", session_type: "deep_dive" },
+      style: {
+        preferred_duration: "long",
+        preferred_pace: "moderate",
+        quality_sensitivity: 0.7,
+        humor_preference: 0.3,
+        depth_preference: 0.9,
+      },
+      context: {
+        weekday_patterns: "晚上深度阅读",
+        weekend_patterns: "",
+        time_of_day_patterns: "",
+        session_type: "deep_dive",
+      },
       exploration_openness: 0.72,
       speculative_interests: [
-        { domain: "建筑美学", reason: "你最近的审美倾向", confidence: 0.4, confirmation_count: 1, confirmation_threshold: 3, status: "active", specifics: [{ name: "现代主义建筑", confirmation_count: 1 }] },
+        {
+          domain: "建筑美学",
+          reason: "你最近的审美倾向",
+          confidence: 0.4,
+          confirmation_count: 1,
+          confirmation_threshold: 3,
+          status: "active",
+          specifics: [{ name: "现代主义建筑", confirmation_count: 1 }],
+        },
       ],
       speculative_avoidances: [],
       recent_cognition_updates: [
@@ -1598,34 +1652,19 @@ test("formatRelativeTimestamp returns Chinese relative labels across time bucket
   assert.equal(formatRelativeTimestamp("not-a-date", now), "");
 
   // Under 1 minute → "刚刚"
-  assert.equal(
-    formatRelativeTimestamp("2026-03-15T11:59:30Z", now),
-    "刚刚",
-  );
+  assert.equal(formatRelativeTimestamp("2026-03-15T11:59:30Z", now), "刚刚");
 
   // Future timestamps also collapse to "刚刚"
-  assert.equal(
-    formatRelativeTimestamp("2026-03-15T12:01:00Z", now),
-    "刚刚",
-  );
+  assert.equal(formatRelativeTimestamp("2026-03-15T12:01:00Z", now), "刚刚");
 
   // Under 1 hour → "N 分钟前"
-  assert.equal(
-    formatRelativeTimestamp("2026-03-15T11:48:00Z", now),
-    "12 分钟前",
-  );
+  assert.equal(formatRelativeTimestamp("2026-03-15T11:48:00Z", now), "12 分钟前");
 
   // Under 1 day → "N 小时前"
-  assert.equal(
-    formatRelativeTimestamp("2026-03-15T09:00:00Z", now),
-    "3 小时前",
-  );
+  assert.equal(formatRelativeTimestamp("2026-03-15T09:00:00Z", now), "3 小时前");
 
   // Under 1 week → "N 天前"
-  assert.equal(
-    formatRelativeTimestamp("2026-03-13T12:00:00Z", now),
-    "2 天前",
-  );
+  assert.equal(formatRelativeTimestamp("2026-03-13T12:00:00Z", now), "2 天前");
 
   // Older than a week → "MM-DD HH:mm"
   const older = formatRelativeTimestamp("2026-03-01T10:30:00Z", now);
@@ -1834,14 +1873,14 @@ test("getConnectionBadgeState returns compact status copy for popup header", () 
 });
 
 test("popup failed chat turn renders durable error", () => {
-  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.ts"), "utf8");
 
   assert.match(popupSource, /status === "failed"/);
   assert.match(popupSource, /const message = turn\.error \|\| "刚刚没发出去，换个说法再试试。"/);
 });
 
 test("popup inline failed turns render errors without completing or removing probes", () => {
-  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.ts"), "utf8");
   const functionSlice = (name: string, nextName: string) => {
     const start = popupSource.indexOf(`function ${name}`);
     const end = popupSource.indexOf(`function ${nextName}`, start + 1);
@@ -1850,7 +1889,10 @@ test("popup inline failed turns render errors without completing or removing pro
   };
 
   const delight = functionSlice("expandDelightChat", "dismissMessageByBvid");
-  assert.ok(delight.indexOf('nextTurn.status === "failed"') < delight.indexOf('nextTurn.status === "completed"'));
+  assert.ok(
+    delight.indexOf('nextTurn.status === "failed"') <
+      delight.indexOf('nextTurn.status === "completed"'),
+  );
   const delightFailure = delight.slice(
     delight.indexOf("const showFailure"),
     delight.indexOf("const showReply"),
@@ -1858,7 +1900,10 @@ test("popup inline failed turns render errors without completing or removing pro
   assert.match(delightFailure, /nextTurn\.error/);
 
   const probe = functionSlice("sendInlineChat", "dismissMessage");
-  assert.ok(probe.indexOf('nextTurn.status === "failed"') < probe.indexOf('nextTurn.status === "completed"'));
+  assert.ok(
+    probe.indexOf('nextTurn.status === "failed"') <
+      probe.indexOf('nextTurn.status === "completed"'),
+  );
   assert.match(probe, /input\.closest\("\.message-chat-area"\)/);
   assert.match(probe, /input\.disabled = true/);
   const failureBranch = probe.slice(

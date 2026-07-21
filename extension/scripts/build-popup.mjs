@@ -7,7 +7,7 @@
  * working on the un-migrated tree.
  */
 import { build } from "esbuild";
-import { readdirSync, existsSync, rmSync, statSync } from "node:fs";
+import { readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,19 +38,8 @@ if (entryPoints.length === 0) {
   process.exit(0);
 }
 
-// Clean up stale compiled .js files from popup/ (the old source .js files
-// are tracked by git and should already be removed). This prevents shadowed
-// imports when a .ts file was renamed or removed.
-for (const entry of readdirSync(popupDir)) {
-  if (entry.endsWith(".js") && !entry.endsWith(".d.ts")) {
-    // Only remove .js files that have a corresponding .ts file (not hand-written scripts).
-    const tsPath = join(popupDir, entry.replace(/\.js$/, ".ts"));
-    if (existsSync(tsPath)) {
-      rmSync(join(popupDir, entry), { force: true });
-    }
-  }
-}
-
+// Overwrite each runtime file in place. Do not delete the full output set first:
+// Node runs test files concurrently and some tests import these modules lazily.
 for (const entry of entryPoints) {
   const outName = entry.slice(popupDir.length + 1).replace(/\.ts$/, ".js");
   await build({

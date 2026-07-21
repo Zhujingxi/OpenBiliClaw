@@ -23,7 +23,13 @@ test("createAutostartApi.status fetches /api/autostart-status", async () => {
   const calls: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     calls.push({ url, options });
-    return { ok: true, status: 200, async json() { return { enabled: true, can_manage: true }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { enabled: true, can_manage: true };
+      },
+    };
   };
   const api = createAutostartApi({ getBaseUrl, fetchImpl });
   const status = await api.status();
@@ -35,7 +41,13 @@ test("createAutostartApi.apply posts to /api/autostart/apply", async () => {
   const calls: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     calls.push({ url, options });
-    return { ok: true, status: 200, async json() { return { enabled: true, registered: true }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { enabled: true, registered: true };
+      },
+    };
   };
   const api = createAutostartApi({ getBaseUrl, fetchImpl });
   const result = await api.apply(true);
@@ -51,7 +63,9 @@ test("initAutostartControl reflects disabled non-manageable status", async () =>
   const fetchImpl = async () => ({
     ok: true,
     status: 200,
-    async json() { return { enabled: true, can_manage: false, reason: "env_managed" }; },
+    async json() {
+      return { enabled: true, can_manage: false, reason: "env_managed" };
+    },
   });
   const ctl = initAutostartControl({ checkbox, hint }, { getBaseUrl, fetchImpl });
   await ctl.reload();
@@ -67,15 +81,23 @@ test("initAutostartControl toggles immediately and reloads", async () => {
   const posts: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     if (String(url).endsWith("/autostart-status")) {
-      return { ok: true, status: 200, async json() {
-        return { enabled, can_manage: true, registered: enabled, manage_ollama: true };
-      } };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { enabled, can_manage: true, registered: enabled, manage_ollama: true };
+        },
+      };
     }
     posts.push(JSON.parse(options.body));
     enabled = true;
-    return { ok: true, status: 200, async json() {
-      return { enabled: true, can_manage: true, registered: true, manage_ollama: true };
-    } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { enabled: true, can_manage: true, registered: true, manage_ollama: true };
+      },
+    };
   };
   const ctl = initAutostartControl({ checkbox, hint }, { getBaseUrl, fetchImpl });
   await ctl.reload();
@@ -93,6 +115,6 @@ test("popup wires the autostart control into the general settings panel", async 
   const html = readFileSync(resolve("popup/popup.html"), "utf8");
   assert.match(html, /id="cfgAutostartEnabled"/);
   assert.match(html, /id="cfgAutostartHint"/);
-  const js = readFileSync(resolve("popup/popup.js"), "utf8");
+  const js = readFileSync(resolve("popup/popup.ts"), "utf8");
   assert.match(js, /initAutostartControl/);
 });

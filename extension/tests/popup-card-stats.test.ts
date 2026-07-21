@@ -8,9 +8,9 @@ import assert from "node:assert/strict";
 // (surprise) card, mirroring the desktop + mobile web surfaces. These are
 // static source contracts that lock the wiring in place.
 
-const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-const popupHelpers = readFileSync(resolve("popup", "popup-helpers.js"), "utf8");
+const popupHelpers = readFileSync(resolve("popup", "popup-helpers.ts"), "utf8");
 
 test("popup exposes the shared count formatter + stats builder", () => {
   assert.match(popupJs, /function formatCountCn\(/);

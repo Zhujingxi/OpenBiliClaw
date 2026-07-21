@@ -1,5 +1,3 @@
-/** Platform-neutral local saved lists with explicit native-sync controls. */
-
 import { fetchSavedItems, pollSavedSyncTask, removeSavedItem, syncSavedItems } from "../api.js";
 import { getCoverImageAttrs, buildContentUrl } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
@@ -9,74 +7,10 @@ import {
   createRetainedSavedListState,
   createSavedSubmissionFence,
   createSavedTaskCoordinator,
-  restoreSavedFocus,
+  restoreSavedFocus
 } from "../saved-sync-runtime.js";
-import type { FocusToken, SavedSyncTask, SavedSyncTaskItem } from "../../shared/saved-sync-core.js";
-
 const PAGE_SIZE = 50;
-type Presentation = [label: string, tone: string, retryable: boolean];
-
-// TODO(types): Replace these provisional payload shapes with shared API/runtime contracts.
-interface SavedItemInput {
-  [key: string]: unknown;
-  source_platform?: unknown;
-  content_id?: unknown;
-  bvid?: unknown;
-  id?: unknown;
-  item_key?: unknown;
-  content_url?: unknown;
-  content_type?: unknown;
-  title?: unknown;
-  author_name?: unknown;
-  up_name?: unknown;
-  cover_url?: unknown;
-  sync_status?: unknown;
-  sync_task_id?: unknown;
-  resolved_target?: unknown;
-  error_code?: unknown;
-  error_message?: unknown;
-}
-
-interface SavedListItem extends SavedItemInput {
-  item_key: string;
-  source_platform: string;
-  content_id: string;
-  content_url: string;
-  content_type: string;
-  title: string;
-  author_name: string;
-  cover_url: string;
-  sync_status: string;
-  resolved_target: string;
-  error_code: string;
-  error_message: string;
-}
-
-interface SavedListResponse {
-  items?: unknown;
-  total?: unknown;
-}
-
-interface SavedListSnapshot {
-  items: SavedListItem[];
-  total: number;
-  loaded: boolean;
-  error: string;
-}
-
-interface ErrorPayload {
-  message?: string;
-}
-
-interface SavedViewConfig {
-  listKind: string;
-  icon: string;
-  title: string;
-  emptyText: string;
-  countId: string;
-}
-
-const PRESENTATION: Record<string, Presentation> = {
+const PRESENTATION = {
   not_started: ["待同步", "neutral", false],
   pending: ["待同步", "neutral", false],
   syncing: ["同步中", "info", false],
@@ -86,33 +20,27 @@ const PRESENTATION: Record<string, Presentation> = {
   unsupported: ["仅本地保存", "neutral", false],
   rate_limited: ["同步失败", "error", true],
   extension_required: ["需要连接插件", "warning", true],
-  failed: ["同步失败", "error", true],
+  failed: ["同步失败", "error", true]
 };
-const PLATFORM_NAMES: Record<string, string> = {
+const PLATFORM_NAMES = {
   bilibili: "B站",
   youtube: "YouTube",
   twitter: "X",
   xiaohongshu: "小红书",
   douyin: "抖音",
   zhihu: "知乎",
-  reddit: "Reddit",
+  reddit: "Reddit"
 };
-
-function esc(s: unknown): string {
+function esc(s) {
   const el = document.createElement("span");
   el.textContent = s == null ? "" : String(s);
   return el.innerHTML;
 }
-
-function safeText(value: unknown, maxLength = 240): string {
-  return String(value || "")
-    .replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "")
-    .trim()
-    .slice(0, maxLength);
+function safeText(value, maxLength = 240) {
+  return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
 }
-
-export function normalizeSavedListItem(item: unknown = {}): SavedListItem {
-  const raw = item as SavedItemInput;
+export function normalizeSavedListItem(item = {}) {
+  const raw = item;
   const platform = safeText(raw.source_platform || "bilibili", 64);
   const contentId = safeText(raw.content_id || raw.bvid || raw.id, 2048);
   return {
@@ -125,26 +53,18 @@ export function normalizeSavedListItem(item: unknown = {}): SavedListItem {
     title: safeText(raw.title || contentId),
     author_name: safeText(raw.author_name || raw.up_name),
     cover_url: safeText(raw.cover_url, 2048),
-    sync_status: PRESENTATION[raw.sync_status as string]
-      ? (raw.sync_status as string)
-      : raw.sync_status
-        ? "failed"
-        : "",
+    sync_status: PRESENTATION[raw.sync_status] ? raw.sync_status : raw.sync_status ? "failed" : "",
     resolved_target: safeText(raw.resolved_target),
     error_code: safeText(raw.error_code, 96),
-    error_message: safeText(raw.error_message),
+    error_message: safeText(raw.error_message)
   };
 }
-
-export function getSavedSyncViewModel(item: unknown) {
+export function getSavedSyncViewModel(item) {
   const normalized = normalizeSavedListItem(item);
   const statusKey = normalized.sync_status || "not_started";
   let [label, tone, retryable] = PRESENTATION[statusKey] || PRESENTATION.failed;
-  const busy =
-    statusKey === "syncing" ||
-    (statusKey === "pending" && Boolean(safeText(normalized.sync_task_id, 64)));
-  const localOnly =
-    statusKey === "unsupported" && normalized.error_code === "unsupported_content_type";
+  const busy = statusKey === "syncing" || statusKey === "pending" && Boolean(safeText(normalized.sync_task_id, 64));
+  const localOnly = statusKey === "unsupported" && normalized.error_code === "unsupported_content_type";
   if (statusKey === "unsupported" && normalized.error_code === "unsupported_adapter_missing") {
     label = "待升级重试";
     tone = "warning";
@@ -158,10 +78,7 @@ export function getSavedSyncViewModel(item: unknown) {
   let detail;
   if (localOnly) {
     detail = "此内容类型暂不支持平台同步，仅保存在本地。";
-  } else if (
-    statusKey === "unsupported" &&
-    normalized.error_code === "unsupported_adapter_missing"
-  ) {
+  } else if (statusKey === "unsupported" && normalized.error_code === "unsupported_adapter_missing") {
     detail = "同步能力可能正在滚动升级，请更新后端与插件后重试。";
   } else if (statusKey === "unsupported") {
     detail = normalized.error_message || "当前同步能力暂不可用，请更新后重试。";
@@ -176,13 +93,9 @@ export function getSavedSyncViewModel(item: unknown) {
       login_required: "请登录对应平台后重试。",
       rate_limited: "平台请求过于频繁，请稍后重试。",
       extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
-      failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。",
+      failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。"
     }[statusKey];
-    detail =
-      normalized.error_message ||
-      normalized.resolved_target ||
-      fallback ||
-      "平台目标将在同步时确认";
+    detail = normalized.error_message || normalized.resolved_target || fallback || "平台目标将在同步时确认";
   }
   return {
     ...normalized,
@@ -193,61 +106,52 @@ export function getSavedSyncViewModel(item: unknown) {
     actionable,
     busy,
     localOnly,
-    actionLabel: busy ? "同步中…" : retryable ? "重试同步" : "同步",
+    actionLabel: busy ? "同步中…" : retryable ? "重试同步" : "同步"
   };
 }
-
-function summarize(items: SavedSyncTaskItem[]): string {
-  const groups = new Map<string, [number, number]>();
+function summarize(items) {
+  const groups = /* @__PURE__ */ new Map();
   for (const item of items) {
     const platform = safeText(item.item_key, 2048).split(":", 1)[0] || "unknown";
     const group = groups.get(platform) || [0, 0];
     group[1] += 1;
-    if (["synced", "already_synced"].includes(item.status as string)) group[0] += 1;
+    if (["synced", "already_synced"].includes(item.status)) group[0] += 1;
     groups.set(platform, group);
   }
   return Array.from(
     groups,
-    ([platform, [success, total]]) => `${PLATFORM_NAMES[platform] || platform} ${success}/${total}`,
+    ([platform, [success, total]]) => `${PLATFORM_NAMES[platform] || platform} ${success}/${total}`
   ).join(" · ");
 }
-
-export function isSavedSyncEligibleStatus(
-  status: unknown,
-  errorCode: unknown = "",
-  syncTaskId: unknown = "",
-): boolean {
+export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
   return getSavedSyncViewModel({
     sync_status: status,
     error_code: errorCode,
-    sync_task_id: syncTaskId,
+    sync_task_id: syncTaskId
   }).actionable;
 }
-
-function eligible(item: SavedListItem): boolean {
+function eligible(item) {
   return getSavedSyncViewModel(item).actionable;
 }
-
-function createSavedView(cfg: SavedViewConfig) {
-  let $root: HTMLElement | null = null;
-  let items: SavedListItem[] = [];
+function createSavedView(cfg) {
+  let $root = null;
+  let items = [];
   let total = 0;
   let loading = false;
   let loaded = false;
   const syncingKeys = createSavedSubmissionFence();
   let message = "";
   let messageIsError = false;
-  let pendingFocus: FocusToken | null = null;
+  let pendingFocus = null;
   let visibilityBound = false;
   const retained = createRetainedSavedListState();
   const taskTracker = createDurableTaskTracker({
-    poll: async (taskId: string) => (await pollSavedSyncTask(taskId)) as SavedSyncTask,
+    poll: async (taskId) => await pollSavedSyncTask(taskId)
   });
   const taskCoordinator = createSavedTaskCoordinator({
     tracker: taskTracker,
-    fetchTask: async (taskId: string) => (await pollSavedSyncTask(taskId)) as SavedSyncTask,
+    fetchTask: async (taskId) => await pollSavedSyncTask(taskId)
   });
-
   const recoveredTaskCallbacks = () => ({
     onProgress: () => {
       message = "正在同步已恢复的任务…";
@@ -264,19 +168,17 @@ function createSavedView(cfg: SavedViewConfig) {
       messageIsError = false;
       renderList();
     },
-    onTerminal: (terminalTask: SavedSyncTask) => {
-      message = summarize(terminalTask.items!) || "同步已完成";
+    onTerminal: (terminalTask) => {
+      message = summarize(terminalTask.items) || "同步已完成";
       messageIsError = false;
       void load();
-    },
+    }
   });
-
-  function renderShell(bodyHtml: string): void {
+  function renderShell(bodyHtml) {
     const pending = items.filter(
-      (item) =>
-        eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key),
+      (item) => eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
     ).length;
-    $root!.innerHTML = `
+    $root.innerHTML = `
       <div class="saved-view">
         <div class="saved-head">
           <span class="saved-head-icon" aria-hidden="true">${cfg.icon}</span>
@@ -290,52 +192,36 @@ function createSavedView(cfg: SavedViewConfig) {
         </div>
         <div class="saved-body">${bodyHtml}</div>
       </div>`;
-    $root!
-      .querySelector<HTMLButtonElement>(".saved-sync-all")
-      ?.addEventListener("click", (event) => {
-        pendingFocus = captureSavedFocus($root, event.currentTarget as HTMLButtonElement) || {
-          kind: "list",
-          action: "sync-all",
-        };
-        void runSync(
-          items.filter(
-            (item) =>
-              eligible(item) &&
-              !syncingKeys.has(item.item_key) &&
-              !taskCoordinator.owns(item.item_key),
-          ),
-          event.currentTarget as HTMLButtonElement,
-          true,
-        );
-      });
-    $root!
-      .querySelector<HTMLButtonElement>(".saved-load-retry")
-      ?.addEventListener("click", (event) => {
-        pendingFocus = captureSavedFocus($root, event.currentTarget as HTMLButtonElement) || {
-          kind: "list",
-          action: "retry",
-        };
-        void load();
-      });
+    $root.querySelector(".saved-sync-all")?.addEventListener("click", (event) => {
+      pendingFocus = captureSavedFocus($root, event.currentTarget) || {
+        kind: "list",
+        action: "sync-all"
+      };
+      void runSync(
+        items.filter(
+          (item) => eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
+        ),
+        event.currentTarget,
+        true
+      );
+    });
+    $root.querySelector(".saved-load-retry")?.addEventListener("click", (event) => {
+      pendingFocus = captureSavedFocus($root, event.currentTarget) || {
+        kind: "list",
+        action: "retry"
+      };
+      void load();
+    });
   }
-
-  async function runSync(
-    selected: SavedListItem[],
-    activeButton: HTMLButtonElement,
-    confirmBatch = false,
-  ): Promise<void> {
+  async function runSync(selected, activeButton, confirmBatch = false) {
     selected = selected.filter(
-      (item) =>
-        eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key),
+      (item) => eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
     );
     if (!selected.length || activeButton.disabled) return;
     const platforms = Array.from(
-      new Set(selected.map((item) => PLATFORM_NAMES[item.source_platform] || item.source_platform)),
+      new Set(selected.map((item) => PLATFORM_NAMES[item.source_platform] || item.source_platform))
     );
-    if (
-      confirmBatch &&
-      !window.confirm(`将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`)
-    )
+    if (confirmBatch && !window.confirm(`将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`))
       return;
     const selectedKeys = selected.map((item) => item.item_key);
     if (!syncingKeys.claim(selectedKeys)) return;
@@ -348,7 +234,7 @@ function createSavedView(cfg: SavedViewConfig) {
     let submitted = false;
     try {
       const task = await syncSavedItems(cfg.listKind, selectedKeys);
-      const typedTask = task as SavedSyncTask;
+      const typedTask = task;
       const taskId = safeText(typedTask.task_id, 64);
       if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
       taskCoordinator.track(typedTask, selectedKeys, {
@@ -367,17 +253,17 @@ function createSavedView(cfg: SavedViewConfig) {
           messageIsError = false;
           renderList();
         },
-        onTerminal: (terminalTask: SavedSyncTask) => {
-          message = summarize(terminalTask.items!) || "同步已完成";
+        onTerminal: (terminalTask) => {
+          message = summarize(terminalTask.items) || "同步已完成";
           messageIsError = false;
           void load();
-        },
+        }
       });
       submitted = true;
       message = `同步任务已提交 · ${selected.length} 项`;
       await load();
-    } catch (error: unknown) {
-      message = (error as ErrorPayload | null)?.message || "同步失败，请稍后重试。";
+    } catch (error) {
+      message = error?.message || "同步失败，请稍后重试。";
       messageIsError = true;
     } finally {
       syncingKeys.release(selectedKeys);
@@ -389,7 +275,6 @@ function createSavedView(cfg: SavedViewConfig) {
       }
     }
   }
-
   function renderList() {
     const focusToken = captureSavedFocus($root) || pendingFocus;
     if (loading && !loaded) {
@@ -398,23 +283,18 @@ function createSavedView(cfg: SavedViewConfig) {
     }
     if (!items.length) {
       renderShell(
-        `<div class="saved-empty"><div class="saved-empty-icon">${cfg.icon}</div><div class="saved-empty-text">${esc(cfg.emptyText)}</div></div>`,
+        `<div class="saved-empty"><div class="saved-empty-icon">${cfg.icon}</div><div class="saved-empty-text">${esc(cfg.emptyText)}</div></div>`
       );
       return;
     }
-    const cards = items
-      .map((raw) => {
-        const it = getSavedSyncViewModel(
-          syncingKeys.has(raw.item_key) || taskCoordinator.owns(raw.item_key)
-            ? { ...raw, sync_status: "syncing" }
-            : raw,
-        );
-        const cover = getCoverImageAttrs(it.cover_url);
-        const url = buildContentUrl(it);
-        const coverHtml = cover
-          ? `<img class="saved-card-cover" src="${esc(cover.src)}" alt="" loading="lazy">`
-          : `<div class="saved-card-cover saved-card-cover-empty" aria-hidden="true">${cfg.icon}</div>`;
-        return `<article class="saved-card" data-item-key="${esc(it.item_key)}">
+    const cards = items.map((raw) => {
+      const it = getSavedSyncViewModel(
+        syncingKeys.has(raw.item_key) || taskCoordinator.owns(raw.item_key) ? { ...raw, sync_status: "syncing" } : raw
+      );
+      const cover = getCoverImageAttrs(it.cover_url);
+      const url = buildContentUrl(it);
+      const coverHtml = cover ? `<img class="saved-card-cover" src="${esc(cover.src)}" alt="" loading="lazy">` : `<div class="saved-card-cover saved-card-cover-empty" aria-hidden="true">${cfg.icon}</div>`;
+      return `<article class="saved-card" data-item-key="${esc(it.item_key)}">
         <button class="saved-card-open" data-saved-action="open" type="button" ${url ? `data-url="${esc(url)}"` : "disabled"} aria-label="打开 ${esc(it.title || it.content_id)}">${coverHtml}</button>
         <div class="saved-card-body">
           <div class="saved-card-title">${esc(it.title || it.content_id)}</div>
@@ -426,40 +306,36 @@ function createSavedView(cfg: SavedViewConfig) {
           <button class="saved-card-remove" data-saved-action="remove" type="button" aria-label="从本地移除" title="只从 OpenBiliClaw 本地移除">×</button>
         </div>
       </article>`;
-      })
-      .join("");
+    }).join("");
     renderShell(`<div class="saved-list">${cards}</div>`);
-
-    for (const card of $root!.querySelectorAll<HTMLElement>(".saved-card")) {
-      const item = items.find((row) => row.item_key === card.dataset.itemKey)!;
-      const open = card.querySelector<HTMLButtonElement>(".saved-card-open");
+    for (const card of $root.querySelectorAll(".saved-card")) {
+      const item = items.find((row) => row.item_key === card.dataset.itemKey);
+      const open = card.querySelector(".saved-card-open");
       open?.addEventListener("click", () => {
         if (open.dataset.url) openContentUrl(open.dataset.url);
       });
-      card
-        .querySelector<HTMLButtonElement>(".saved-card-sync")
-        ?.addEventListener("click", (event) => {
-          pendingFocus = captureSavedFocus($root, event.currentTarget as HTMLButtonElement) || {
-            itemKey: item.item_key,
-            action: "sync",
-            index: 0,
-          };
-          void runSync([item], event.currentTarget as HTMLButtonElement);
-        });
-      const remove = card.querySelector<HTMLButtonElement>(".saved-card-remove")!;
+      card.querySelector(".saved-card-sync")?.addEventListener("click", (event) => {
+        pendingFocus = captureSavedFocus($root, event.currentTarget) || {
+          itemKey: item.item_key,
+          action: "sync",
+          index: 0
+        };
+        void runSync([item], event.currentTarget);
+      });
+      const remove = card.querySelector(".saved-card-remove");
       remove.addEventListener("click", async () => {
         pendingFocus = captureSavedFocus($root, remove) || {
           itemKey: item.item_key,
           action: "remove",
-          index: 0,
+          index: 0
         };
         remove.disabled = true;
         try {
           await removeSavedItem(cfg.listKind, item.item_key);
           await load();
-        } catch (error: unknown) {
+        } catch (error) {
           remove.disabled = false;
-          message = (error as ErrorPayload | null)?.message || "本地移除失败，请重试。";
+          message = error?.message || "本地移除失败，请重试。";
           messageIsError = true;
           renderList();
         }
@@ -467,24 +343,23 @@ function createSavedView(cfg: SavedViewConfig) {
     }
     if (restoreSavedFocus($root, focusToken)) pendingFocus = null;
   }
-
   async function load() {
     loading = true;
     renderList();
     const hadLoadError = Boolean(retained.snapshot().error);
     try {
-      const data = (await fetchSavedItems(cfg.listKind, PAGE_SIZE, 0)) as SavedListResponse | null;
+      const data = await fetchSavedItems(cfg.listKind, PAGE_SIZE, 0);
       retained.commit({
         items: (Array.isArray(data?.items) ? data.items : []).map(normalizeSavedListItem),
-        total: Number(data?.total) || (Array.isArray(data?.items) ? data.items.length : 0),
+        total: Number(data?.total) || (Array.isArray(data?.items) ? data.items.length : 0)
       });
-      ({ items, total, loaded } = retained.snapshot() as SavedListSnapshot);
+      ({ items, total, loaded } = retained.snapshot());
       await taskCoordinator.recover(items, recoveredTaskCallbacks());
       if (hadLoadError) message = "";
       messageIsError = false;
     } catch (error) {
       retained.fail(error);
-      ({ items, total, loaded } = retained.snapshot() as SavedListSnapshot);
+      ({ items, total, loaded } = retained.snapshot());
       message = retained.snapshot().error;
       messageIsError = true;
     } finally {
@@ -492,8 +367,7 @@ function createSavedView(cfg: SavedViewConfig) {
       renderList();
     }
   }
-
-  return function init(rootEl: HTMLElement): void {
+  return function init(rootEl) {
     $root = rootEl;
     if (!visibilityBound) {
       visibilityBound = true;
@@ -505,24 +379,20 @@ function createSavedView(cfg: SavedViewConfig) {
     void load();
   };
 }
-
-const CLOCK_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
-const STAR_SVG =
-  '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
-
+const CLOCK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+const STAR_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
 export const initWatchLaterView = createSavedView({
   listKind: "watch_later",
   icon: CLOCK_SVG,
   title: "稍后再看",
   emptyText: "还没有稍后再看的内容，去推荐里点时钟图标加入吧。",
-  countId: "watchLaterViewCount",
+  countId: "watchLaterViewCount"
 });
-
 export const initFavoritesView = createSavedView({
   listKind: "favorite",
   icon: STAR_SVG,
   title: "我的收藏",
   emptyText: "还没有收藏的内容，去推荐里点星标收藏吧。",
-  countId: "favoritesViewCount",
+  countId: "favoritesViewCount"
 });
+//# sourceMappingURL=saved.js.map

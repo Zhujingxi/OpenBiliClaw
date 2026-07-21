@@ -62,10 +62,7 @@ test("saved sync API helpers send canonical identity and manual sync keys", asyn
   assert.deepEqual(JSON.parse(String(calls[2].options.body)), {
     item_keys: ["bilibili:BV1"],
   });
-  assert.equal(
-    calls[3].url,
-    "http://127.0.0.1:8420/api/saved/watch_later?limit=20&offset=40",
-  );
+  assert.equal(calls[3].url, "http://127.0.0.1:8420/api/saved/watch_later?limit=20&offset=40");
   assert.equal(
     calls[4].url,
     "http://127.0.0.1:8420/api/saved-sync/tasks/123e4567-e89b-12d3-a456-426614174000",
@@ -74,7 +71,7 @@ test("saved sync API helpers send canonical identity and manual sync keys", asyn
 
 test("saved sync UI exposes consentful config, live status, and manual controls", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const warning =
     "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
 

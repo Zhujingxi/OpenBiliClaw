@@ -4,17 +4,20 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 test("recommendation auto-load listens to the shared content scroller", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /content:\s*document\.querySelector\("\.content"\)/);
-  assert.match(popupJs, /elements\.content\.scrollHeight - elements\.content\.scrollTop - elements\.content\.clientHeight/);
+  assert.match(
+    popupJs,
+    /elements\.content\.scrollHeight - elements\.content\.scrollTop - elements\.content\.clientHeight/,
+  );
   assert.match(popupJs, /elements\.content\.addEventListener\("scroll"/);
   assert.match(popupJs, /maybeLoadMoreRecommendations\(\)/);
   assert.doesNotMatch(popupJs, /elements\.viewProfile\.addEventListener\("scroll"/);
 });
 
 test("profile cognition history paginates on click only — no scroll auto-load", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // The "阿B 最近新记住了什么" section must paginate strictly on an explicit
   // "加载更多" click. The old eager scroll auto-load pulled every page the
@@ -36,25 +39,28 @@ test("profile cognition history paginates on click only — no scroll auto-load"
 });
 
 test("recommendation auto-load checks again after render and append", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /function queueRecommendationLoadCheck\(\)/);
   assert.match(popupJs, /recommendationAutoLoadUserArmed/);
   assert.match(popupJs, /initRecommendationAutoLoadIntent\(\)/);
   assert.match(popupJs, /shouldAutoLoadRecommendations/);
   assert.match(popupJs, /queueRecommendationLoadCheck\(\);\r?\n\s*return;\r?\n\s*}/);
-  assert.match(popupJs, /finally \{\r?\n\s*state\.loadingMore = false;\r?\n\s*queueRecommendationLoadCheck\(\);/);
+  assert.match(
+    popupJs,
+    /finally \{\r?\n\s*state\.loadingMore = false;\r?\n\s*queueRecommendationLoadCheck\(\);/,
+  );
 });
 
 test("recommendation covers do not rely on native lazy loading inside the popup scroller", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /const image = document\.createElement\("img"\);/);
   assert.doesNotMatch(popupJs, /image\.loading = "lazy"/);
 });
 
 test("runtime stream skips startup re-fetch but refreshes after a reconnect", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.doesNotMatch(popupJs, /let hasRuntimeStreamConnected = false;/);
   assert.match(

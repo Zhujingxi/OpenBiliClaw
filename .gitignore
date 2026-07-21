@@ -89,6 +89,8 @@ backend.err
 # TypeScript migration emitted artifacts (Phase B-E)
 node_modules/
 extension/popup-built/
+extension/popup/*.js
+extension/popup/*.js.map
 src/openbiliclaw/web/**/*.js.map
 # Emitted sibling .js files are intentionally tracked runtime assets. Clean
 # Python, Docker, and desktop installs do not require the dev-only Node toolchain.

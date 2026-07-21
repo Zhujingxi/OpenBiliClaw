@@ -110,9 +110,9 @@ def test_model_editors_use_chinese_first_labels_and_preserve_technical_terms() -
     surfaces = {
         "desktop": _read("src/openbiliclaw/web/desktop/index.html")
         + _read("src/openbiliclaw/web/desktop/assets/js/model-settings.js"),
-        "mobile": _read("src/openbiliclaw/web/js/views/model-settings.js"),
+        "mobile": _read("src/openbiliclaw/web/js/views/model-settings.ts"),
         "popup": _read("extension/popup/popup.html")
-        + _read("extension/popup/popup-model-settings.js"),
+        + _read("extension/popup/popup-model-settings.ts"),
     }
     for name, text in surfaces.items():
         assert "上移" in text, name
@@ -122,7 +122,7 @@ def test_model_editors_use_chinese_first_labels_and_preserve_technical_terms() -
             assert term in text, f"{name}: {term}"
     for editor in (
         "src/openbiliclaw/web/desktop/assets/js/model-settings.js",
-        "extension/popup/popup-model-settings.js",
+        "extension/popup/popup-model-settings.ts",
     ):
         assert "拖拽排序" in _read(editor), editor
         assert "未设置模型" in _read(editor), editor

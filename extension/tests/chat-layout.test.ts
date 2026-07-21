@@ -21,7 +21,8 @@ test("chat tab layout pins a compact composer below a flexible history pane", ()
   const chatMessagesBlock = cssBlockWith(popupHtml, ".chat-messages", /overflow-y:\s*auto;/);
   const chatFormBlock = cssBlockWith(popupHtml, ".chat-form", /margin-top:\s*auto;/);
   const chatFooterBlock =
-    popupHtml.match(/\.shell:has\(#viewChat:not\(\[hidden\]\)\)\s+\.footer\s*\{[\s\S]*?\}/)?.[0] ?? "";
+    popupHtml.match(/\.shell:has\(#viewChat:not\(\[hidden\]\)\)\s+\.footer\s*\{[\s\S]*?\}/)?.[0] ??
+    "";
 
   assert.match(viewBlock, /flex:\s*1;/);
   assert.match(chatShellBlock, /flex:\s*1;/);
@@ -38,7 +39,9 @@ test("chat composer stays compact so short side panels keep room for messages", 
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const chatFormBlock = cssBlockWith(popupHtml, ".chat-form", /margin-top:\s*auto;/);
   const chatInputShellBlock = cssBlockWith(popupHtml, ".chat-input-shell", /padding:/);
-  const chatInputBlocks = [...popupHtml.matchAll(/\.chat-input\s*\{[\s\S]*?\}/g)].map((match) => match[0]);
+  const chatInputBlocks = [...popupHtml.matchAll(/\.chat-input\s*\{[\s\S]*?\}/g)].map(
+    (match) => match[0],
+  );
   const chatInputBlock = chatInputBlocks.at(-1) ?? "";
   const chatStatusEmptyBlock = popupHtml.match(/\.chat-status:empty\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const chatStatusFilledBlock =
@@ -58,7 +61,9 @@ test("chat composer stays compact so short side panels keep room for messages", 
 
 test("chat textarea keeps inner spacing and readable line height", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const chatInputBlocks = [...popupHtml.matchAll(/\.chat-input\s*\{[\s\S]*?\}/g)].map((match) => match[0]);
+  const chatInputBlocks = [...popupHtml.matchAll(/\.chat-input\s*\{[\s\S]*?\}/g)].map(
+    (match) => match[0],
+  );
   const chatInputBlock = chatInputBlocks.at(-1) ?? "";
 
   assert.match(chatInputBlock, /padding:\s*8px\s+10px;/);
@@ -67,7 +72,7 @@ test("chat textarea keeps inner spacing and readable line height", () => {
 });
 
 test("chat input placeholder rotation array and timer are defined", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /CHAT_PLACEHOLDERS\s*=\s*\[/);
   // At least 4 distinct placeholder hints
@@ -87,9 +92,9 @@ test("chat form reserves a dedicated status line for staged progress", () => {
 });
 
 test("chat tab scrolls restored history to the newest message", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const setActiveTabBlock =
-    popupJs.match(/function setActiveTab\(tabName\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    popupJs.match(/function setActiveTab\(tabName[^)]*\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   const hydrateBlock =
     popupJs.match(/async function hydrateChatHistory\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 

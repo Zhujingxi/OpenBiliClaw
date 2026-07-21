@@ -7,12 +7,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "src/openbiliclaw/web"
-APP_PATH = WEB / "js/app.js"
-API_PATH = WEB / "js/api.js"
-MODEL_PATH = WEB / "js/views/model-settings.js"
+APP_PATH = WEB / "js/app.ts"
+API_PATH = WEB / "js/api.ts"
+MODEL_PATH = WEB / "js/views/model-settings.ts"
 CSS_PATH = WEB / "css/app.css"
 FOCUS_RUNTIME_PATH = WEB / "shared/saved-sync-core.js"
-CONTROLLER_PATH = WEB / "js/mobile-model-settings-controller.js"
+CONTROLLER_PATH = WEB / "js/mobile-model-settings-controller.ts"
 
 
 def _read(path: Path) -> str:

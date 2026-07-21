@@ -185,8 +185,8 @@ def test_mobile_web_saved_sync_runtime_is_thin_adapter_over_shared_core() -> Non
 
 def test_extension_side_panel_and_config_contract() -> None:
     html = _read("extension/popup/popup.html")
-    js = _read("extension/popup/popup.js")
-    runtime = _read("extension/popup/popup-saved-sync.js")
+    js = _read("extension/popup/popup.ts")
+    runtime = _read("extension/popup/popup-saved-sync.ts")
 
     assert 'id="cfgSavedAutoSync"' in html
     assert "保存时自动同步到对应平台" in html
@@ -237,8 +237,8 @@ def test_saved_sync_css_preserves_focus_motion_and_mobile_touch_safety() -> None
 
 
 def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
-    popup = _read("extension/popup/popup.js")
-    popup_runtime = _read("extension/popup/popup-saved-sync.js")
+    popup = _read("extension/popup/popup.ts")
+    popup_runtime = _read("extension/popup/popup-saved-sync.ts")
     mobile_settings = _read("src/openbiliclaw/web/js/views/model-settings.js")
     mobile_css = _read("src/openbiliclaw/web/css/app.css")
     mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
@@ -275,8 +275,8 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
 
 
 def test_saved_sync_second_review_timeout_recovery_and_focus_contract() -> None:
-    popup_api = _read("extension/popup/popup-api.js")
-    popup = _read("extension/popup/popup.js")
+    popup_api = _read("extension/popup/popup-api.ts")
+    popup = _read("extension/popup/popup.ts")
     popup_html = _read("extension/popup/popup.html")
     mobile_api = _read("src/openbiliclaw/web/js/api.js")
     mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
@@ -295,7 +295,7 @@ def test_saved_sync_second_review_timeout_recovery_and_focus_contract() -> None:
             definition = api.split(f"function {helper}", 1)[1].split("\n}", 1)[0]
             assert "timeoutMs" in definition
         assert "function fetchConfig(timeoutMs" in api
-        assert "function updateConfig(data, timeoutMs" in api
+        assert re.search(r"function updateConfig\(data(?:: unknown)?, timeoutMs", api)
 
     for source in (popup, mobile_saved, desktop):
         assert any(

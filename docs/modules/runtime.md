@@ -94,7 +94,7 @@ guided-init 的 `InitPrereqs.chat_ready()` 只读取 production `OrderedLLMRoute
 
 ## 公开 API
 
-桌面静态入口把 TypeScript 源 `web/shared/model-config-state.ts` 构建出的 `/web/shared/model-config-state.js` 作为可复用、无 DOM 的状态边界，并让 `/web/assets/js/model-settings.js` 只负责 descriptor/API/DOM 编排。运行时 `.js` 作为 tracked package data 随 Python wheel、Docker `COPY src` 和桌面 PyInstaller web-tree data 一起交付；Node 工具链只供开发时 `build:web` 生成与 `check:web-build` 漂移验证，安装/发布路径不运行 npm。运行时 URL 和 import specifier 保持 `.js`；两者与 desktop CSS/app shell 一起进入静态资源 hash，`/web` HTML 引用会附带同一 cache-busting revision。shared mount 位于通用 `/web` mount 之前，避免被 SPA 静态目录吞掉。
+桌面静态入口把 TypeScript 源 `web/shared/model-config-state.ts` 构建出的 `/web/shared/model-config-state.js` 作为可复用、无 DOM 的状态边界，并让 `/web/assets/js/model-settings.js` 只负责 descriptor/API/DOM 编排。`npm run build:web` 扫描 `web/js/`、`web/shared/` 与 `web/desktop/assets/js/` 三个源码根（包括 `web/js/views/` 子目录），当前校验共 18 个 TypeScript 入口，并把同目录 `.js` 作为 tracked package data 随 Python wheel、Docker `COPY src` 和桌面 PyInstaller web-tree data 一起交付；Node 工具链只供开发时生成，`npm run check:web-build` 在 CI 校验所有产物存在且无漂移，安装/发布路径不运行 npm。运行时 URL 和 import specifier 保持 `.js`；产物与 desktop CSS/app shell 一起进入静态资源 hash，`/web` HTML 引用会附带同一 cache-busting revision。shared mount 位于通用 `/web` mount 之前，避免被 SPA 静态目录吞掉。移动 shell 与 saved-sync 适配层已纳入严格类型检查；`chat.ts`、`model-settings.ts`、`profile.ts`、`recommend.ts` 暂以显式 `@ts-nocheck` 和迁移 TODO 作为稳定化边界，后续按视图逐个收窄，不影响其生成运行时和行为合同测试。
 
 模型 runtime bundle 与 coordinator 边界：
 

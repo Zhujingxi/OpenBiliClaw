@@ -1,18 +1,10 @@
-// TODO(types): Replace this temporary stabilization boundary with explicit profile types.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- tracked migration debt
-// @ts-nocheck
-/**
- * Profile view — full onion model with uninit state, all layers,
- * expandable cognition cards, speculative interest/avoidance actions.
- */
-
 import {
   fetchProfileSummary,
   respondToProbe,
   respondToAvoidanceProbe,
   fetchEditState,
   submitProfileEdit,
-  submitInsightFeedback,
+  submitInsightFeedback
 } from "../api.js";
 import {
   normalizeProfileSummary,
@@ -24,38 +16,32 @@ import {
   getProfileStyleDisplay,
   getAvoidanceProbeMessageActions,
   getProbeMessageActions,
-  formatRelativeTimestamp,
+  formatRelativeTimestamp
 } from "../view-models.js";
 import { state, patchState } from "../state.js";
 import {
   filterVisibleProbes,
   forgetHandledProbe,
-  rememberHandledProbe,
+  rememberHandledProbe
 } from "./probe-notification-helpers.js";
-
 let $root = null;
-let cognitionHistory = null; // { items, hasMore, nextCursor, loadingMore }
+let cognitionHistory = null;
 let expandedCognitionIdx = null;
 let loading = false;
-const PROFILE_REFRESH_DEBOUNCE_MS = 1000;
+const PROFILE_REFRESH_DEBOUNCE_MS = 1e3;
 let profileRefreshTimer = null;
 let profileRefreshInFlight = false;
 let profileRefreshPending = false;
 let editing = false;
 let editState = null;
-
-// ── Escape helper ────────────────────────────────────────────
 function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
 }
-
 function escAttr(s) {
   return esc(String(s)).replace(/"/g, "&quot;");
 }
-
-// Editable fields (Phase 3): onion paths + interest polarities, in display order.
 const EDIT_FIELD_LABELS = {
   personality_portrait: "人格素描",
   "core.core_traits": "核心特质",
@@ -71,7 +57,7 @@ const EDIT_FIELD_LABELS = {
   "surface.exploration_openness": "探索开放度",
   "surface.style.quality_sensitivity": "质量敏感度",
   "surface.style.humor_preference": "幽默偏好",
-  "surface.style.depth_preference": "深度偏好",
+  "surface.style.depth_preference": "深度偏好"
 };
 const EDIT_FIELD_ORDER = [
   "personality_portrait",
@@ -88,122 +74,98 @@ const EDIT_FIELD_ORDER = [
   "surface.exploration_openness",
   "surface.style.quality_sensitivity",
   "surface.style.humor_preference",
-  "surface.style.depth_preference",
+  "surface.style.depth_preference"
 ];
-
 function chipList(items, cls = "") {
   if (!items?.length) return "";
   return `<div class="chip-list">${items.map((t) => `<span class="chip ${cls}">${esc(String(t))}</span>`).join("")}</div>`;
 }
-
 function section(title, html) {
   return `<div class="profile-section"><div class="profile-section-title">${esc(title)}</div>${html}</div>`;
 }
-
-// ── Render ────────────────────────────────────────────────────
 function render() {
   if (!$root) return;
   const p = state.profile;
-
   if (loading && !p) {
     $root.innerHTML = `<div style="padding:40px"><div class="spinner"></div></div>`;
     return;
   }
-
   if (!p) {
-    $root.innerHTML = `<div class="profile-uninit"><div class="profile-uninit-icon">\u{1F9E0}</div><div class="profile-uninit-text">\u8FD8\u6CA1\u6709\u753B\u50CF\u6570\u636E</div></div>`;
+    $root.innerHTML = `<div class="profile-uninit"><div class="profile-uninit-icon">🧠</div><div class="profile-uninit-text">还没有画像数据</div></div>`;
     return;
   }
-
   if (!p.initialized) {
-    $root.innerHTML = `<div class="profile-uninit"><div class="profile-uninit-icon">\u{1F9E0}</div><div class="profile-uninit-text">\u8FD8\u6CA1\u5B8C\u6210\u521D\u59CB\u5316\uFF0C\u5148\u8FD0\u884C <code>openbiliclaw init</code></div></div>`;
+    $root.innerHTML = `<div class="profile-uninit"><div class="profile-uninit-icon">🧠</div><div class="profile-uninit-text">还没完成初始化，先运行 <code>openbiliclaw init</code></div></div>`;
     return;
   }
-
   if (editing) {
     $root.innerHTML = renderEditPanelHtml();
     bindEditActions();
     return;
   }
-
   let html = `<div class="profile-edit-bar"><button class="profile-edit-toggle" data-edit-toggle="enter">✏️ 编辑画像</button></div>`;
-
-  // Portrait
   html += section(
-    "\u4EBA\u683C\u7D20\u63CF",
-    `<div class="profile-portrait">${esc(p.personality_portrait)}</div>`,
+    "人格素描",
+    `<div class="profile-portrait">${esc(p.personality_portrait)}</div>`
   );
-
-  // Core
   const coreHtml = [];
   if (p.core_traits.length)
     coreHtml.push(`<div style="margin-bottom:8px">${chipList(p.core_traits, "brand")}</div>`);
   if (p.deep_needs.length)
     coreHtml.push(
-      `<div style="margin-bottom:8px"><span style="font-size:11px;color:var(--text-muted)">\u6DF1\u5C42\u9700\u6C42</span>${chipList(p.deep_needs)}</div>`,
+      `<div style="margin-bottom:8px"><span style="font-size:11px;color:var(--text-muted)">深层需求</span>${chipList(p.deep_needs)}</div>`
     );
   if (p.mbti?.type) coreHtml.push(renderMBTI(p.mbti));
   if (coreHtml.length) html += section("CORE", coreHtml.join(""));
-
-  // Values & Drivers
   const valHtml = [];
   if (p.values.length) valHtml.push(chipList(p.values, "success"));
   if (p.motivational_drivers.length) {
     valHtml.push(
-      `<div style="margin-top:8px"><span style="font-size:11px;color:var(--text-muted)">\u5185\u5728\u9A71\u52A8\u529B</span>${chipList(p.motivational_drivers)}</div>`,
+      `<div style="margin-top:8px"><span style="font-size:11px;color:var(--text-muted)">内在驱动力</span>${chipList(p.motivational_drivers)}</div>`
     );
   }
-  if (valHtml.length) html += section("\u4EF7\u503C\u89C2", valHtml.join(""));
-
-  // Interests
+  if (valHtml.length) html += section("价值观", valHtml.join(""));
   const intHtml = [];
   if (p.likes.length) {
     intHtml.push(
-      `<div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--sky)">\u559C\u6B22</div>`,
+      `<div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--sky)">喜欢</div>`
     );
     intHtml.push(renderInterestTree(p.likes, false));
   }
   if (p.dislikes.length) {
     intHtml.push(
-      `<div style="margin-bottom:8px;margin-top:12px;font-size:12px;font-weight:600;color:var(--danger)">\u4E0D\u559C\u6B22</div>`,
+      `<div style="margin-bottom:8px;margin-top:12px;font-size:12px;font-weight:600;color:var(--danger)">不喜欢</div>`
     );
     intHtml.push(renderInterestTree(p.dislikes, true));
   }
   if (p.favorite_up_users.length) {
     intHtml.push(
-      `<div style="margin-top:12px"><span style="font-size:11px;color:var(--text-muted)">\u5173\u6CE8\u7684 UP</span>${chipList(p.favorite_up_users, "brand")}</div>`,
+      `<div style="margin-top:12px"><span style="font-size:11px;color:var(--text-muted)">关注的 UP</span>${chipList(p.favorite_up_users, "brand")}</div>`
     );
   }
-  if (intHtml.length) html += section("\u5174\u8DA3\u9886\u57DF", intHtml.join(""));
-
-  // Role
+  if (intHtml.length) html += section("兴趣领域", intHtml.join(""));
   if (p.life_stage || p.current_phase) {
-    const roleHtml = [p.life_stage, p.current_phase]
-      .filter(Boolean)
-      .map((s) => `<div style="font-size:13px;margin-bottom:4px">${esc(s)}</div>`)
-      .join("");
-    html += section("\u89D2\u8272", roleHtml);
+    const roleHtml = [p.life_stage, p.current_phase].filter(Boolean).map((s) => `<div style="font-size:13px;margin-bottom:4px">${esc(s)}</div>`).join("");
+    html += section("角色", roleHtml);
   }
-
-  // Surface
   const surfHtml = [];
   if (p.cognitive_style.length) surfHtml.push(chipList(p.cognitive_style));
   if (p.style) {
     const styleDisplay = getProfileStyleDisplay(p.style);
     const prefs = [
-      ["preferred_duration", "\u559C\u6B22\u65F6\u957F"],
-      ["preferred_pace", "\u559C\u6B22\u8282\u594F"],
+      ["preferred_duration", "喜欢时长"],
+      ["preferred_pace", "喜欢节奏"]
     ];
     for (const [key, label] of prefs) {
       if (styleDisplay?.[key])
         surfHtml.push(
-          `<div style="font-size:12px;margin-top:4px">${esc(label)}: <strong>${esc(styleDisplay[key])}</strong></div>`,
+          `<div style="font-size:12px;margin-top:4px">${esc(label)}: <strong>${esc(styleDisplay[key])}</strong></div>`
         );
     }
     const bars = [
-      ["quality_sensitivity", "\u8D28\u91CF\u654F\u611F\u5EA6"],
-      ["humor_preference", "\u5E7D\u9ED8\u504F\u597D"],
-      ["depth_preference", "\u6DF1\u5EA6\u504F\u597D"],
+      ["quality_sensitivity", "质量敏感度"],
+      ["humor_preference", "幽默偏好"],
+      ["depth_preference", "深度偏好"]
     ];
     for (const [key, label] of bars) {
       if (typeof styleDisplay?.[key] === "number") {
@@ -217,113 +179,89 @@ function render() {
     const patterns = getContextPatternRows(p.context);
     if (patterns.length) {
       surfHtml.push(
-        `<div class="context-patterns" style="margin-top:8px">${patterns
-          .map(
-            (row) =>
-              `<div><div class="context-pattern-label">${esc(row.label)}</div><div style="font-size:12px">${esc(row.value)}</div></div>`,
-          )
-          .join("")}</div>`,
+        `<div class="context-patterns" style="margin-top:8px">${patterns.map(
+          (row) => `<div><div class="context-pattern-label">${esc(row.label)}</div><div style="font-size:12px">${esc(row.value)}</div></div>`
+        ).join("")}</div>`
       );
     }
   }
   if (typeof p.exploration_openness === "number") {
     surfHtml.push(renderExplorationBar(p.exploration_openness));
   }
-  if (surfHtml.length) html += section("\u8BA4\u77E5\u98CE\u683C", surfHtml.join(""));
-
-  // Speculative interests
+  if (surfHtml.length) html += section("认知风格", surfHtml.join(""));
   const visibleSpeculativeInterests = filterVisibleProbes(
     p.speculative_interests,
-    "interest.probe",
+    "interest.probe"
   );
   if (visibleSpeculativeInterests.length) {
     html += section(
-      "\u63A8\u6D4B\u6027\u5174\u8DA3",
-      renderSpecInterests(visibleSpeculativeInterests),
+      "推测性兴趣",
+      renderSpecInterests(visibleSpeculativeInterests)
     );
   }
-
-  // Speculative avoidances
   const visibleSpeculativeAvoidances = filterVisibleProbes(
     p.speculative_avoidances,
-    "avoidance.probe",
+    "avoidance.probe"
   );
   if (visibleSpeculativeAvoidances.length) {
     html += section(
-      "\u5F85\u786E\u8BA4\u907F\u96F7\u65B9\u5411",
-      renderSpecAvoidances(visibleSpeculativeAvoidances),
+      "待确认避雷方向",
+      renderSpecAvoidances(visibleSpeculativeAvoidances)
     );
   }
-
-  // Cognition history
   const cogItems = cognitionHistory?.items || p.recent_cognition_updates || [];
   if (cogItems.length) {
     let cogHtml = cogItems.map((c, i) => renderCognitionCard(c, i)).join("");
     const hasMore = cognitionHistory?.hasMore ?? p.has_more_cognition_updates;
     if (hasMore) {
-      cogHtml += `<button class="load-more-btn" id="load-more-cognition">${cognitionHistory?.loadingMore ? "\u52A0\u8F7D\u4E2D\u2026" : "\u52A0\u8F7D\u66F4\u591A"}</button>`;
+      cogHtml += `<button class="load-more-btn" id="load-more-cognition">${cognitionHistory?.loadingMore ? "加载中…" : "加载更多"}</button>`;
     }
-    html += section("\u8BA4\u77E5\u66F4\u65B0\u5386\u53F2", cogHtml);
+    html += section("认知更新历史", cogHtml);
   }
-
-  // Active insights
   if (p.active_insights.length) {
-    const insHtml = p.active_insights
-      .map((i, idx) => {
-        let extra = "";
-        if (i.evidence.length) {
-          extra += `<div class="insight-evidence">${i.evidence.map((e) => `<div>\u2022 ${esc(e)}</div>`).join("")}</div>`;
-        }
-        const confPct = Math.round(i.confidence * 100);
-        return `
+    const insHtml = p.active_insights.map((i, idx) => {
+      let extra = "";
+      if (i.evidence.length) {
+        extra += `<div class="insight-evidence">${i.evidence.map((e) => `<div>• ${esc(e)}</div>`).join("")}</div>`;
+      }
+      const confPct = Math.round(i.confidence * 100);
+      return `
         <div class="insight-item" data-insight-idx="${idx}">
-          <div class="insight-label">\u{1F4A1} Insight
+          <div class="insight-label">💡 Insight
             <span class="insight-confidence">${confPct}%</span>
-            ${i.validated ? `<span class="insight-validated">\u2713 \u5DF2\u9A8C\u8BC1</span>` : ""}
+            ${i.validated ? `<span class="insight-validated">✓ 已验证</span>` : ""}
           </div>
           <div>${esc(i.hypothesis)}</div>
           ${extra}
           ${i.created_at ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${esc(formatRelativeTimestamp(i.created_at))}</div>` : ""}
           <div class="insight-actions" style="display:flex;gap:8px;margin-top:8px">
-            <button class="spec-btn confirm" data-action="confirm" title="\u8FD9\u4E2A\u731C\u6D4B\u51C6">\u51C6</button>
-            <button class="spec-btn reject" data-action="reject" title="\u8FD9\u4E2A\u731C\u6D4B\u4E0D\u51C6">\u4E0D\u51C6</button>
+            <button class="spec-btn confirm" data-action="confirm" title="这个猜测准">准</button>
+            <button class="spec-btn reject" data-action="reject" title="这个猜测不准">不准</button>
           </div>
         </div>`;
-      })
-      .join("");
-    html += section("\u6D3B\u8DC3\u6D1E\u5BDF", insHtml);
+    }).join("");
+    html += section("活跃洞察", insHtml);
   }
-
-  // Recent awareness
   if (p.recent_awareness.length) {
-    const awHtml = p.recent_awareness
-      .map(
-        (a) => `
+    const awHtml = p.recent_awareness.map(
+      (a) => `
       <div class="awareness-item">
-        <div class="awareness-label">\u{1F331} ${esc(a.date || "Awareness")}</div>
+        <div class="awareness-label">🌱 ${esc(a.date || "Awareness")}</div>
         <div>${esc(a.observation)}</div>
-        ${a.trend ? `<div class="awareness-trend">\u8D8B\u52BF: ${esc(a.trend)}</div>` : ""}
-        ${a.emotion_guess ? `<div class="awareness-emotion">\u60C5\u7EEA: ${esc(a.emotion_guess)}</div>` : ""}
-      </div>`,
-      )
-      .join("");
-    html += section("\u8FD1\u671F\u611F\u77E5", awHtml);
+        ${a.trend ? `<div class="awareness-trend">趋势: ${esc(a.trend)}</div>` : ""}
+        ${a.emotion_guess ? `<div class="awareness-emotion">情绪: ${esc(a.emotion_guess)}</div>` : ""}
+      </div>`
+    ).join("");
+    html += section("近期感知", awHtml);
   }
-
   $root.innerHTML = html;
-
-  // Bind events
-  $root
-    .querySelector('[data-edit-toggle="enter"]')
-    ?.addEventListener("click", () => void enterEdit());
+  $root.querySelector('[data-edit-toggle="enter"]')?.addEventListener("click", () => void enterEdit());
   $root.querySelector("#load-more-cognition")?.addEventListener("click", loadMoreCognition);
   bindSpecInterestActions();
   bindSpecAvoidanceActions();
   bindInsightActions();
   bindCognitionExpand();
 }
-
-// ── MBTI ─────────────────────────────────────────────────────
 function renderMBTI(mbti) {
   const display = getMbtiDisplayState(mbti);
   if (!display.type) return "";
@@ -340,81 +278,57 @@ function renderMBTI(mbti) {
   }
   return `<div class="mbti-type">${esc(display.type)}${display.confidence_label ? `<span style="font-size:11px;font-weight:500;color:var(--text-muted);margin-left:8px">${esc(display.confidence_label)}</span>` : ""}</div>${dimsHtml ? `<div class="mbti-dims">${dimsHtml}</div>` : ""}`;
 }
-
-// ── Interest Tree ────────────────────────────────────────────
 function renderInterestTree(domains, isDislike) {
-  return domains
-    .map((d) => {
-      const weight = Math.round((d.weight ?? 0.5) * 100);
-      const specifics = (d.specifics || []).map((s) => s.name).join(", ");
-      return `
+  return domains.map((d) => {
+    const weight = Math.round((d.weight ?? 0.5) * 100);
+    const specifics = (d.specifics || []).map((s) => s.name).join(", ");
+    return `
       <div class="interest-domain">
         <div class="interest-domain-name">${esc(d.domain)}</div>
         <div class="interest-bar"><div class="interest-bar-fill${isDislike ? " dislike" : ""}" style="width:${weight}%"></div></div>
         ${specifics ? `<div class="interest-topics">${esc(specifics)}</div>` : ""}
       </div>`;
-    })
-    .join("");
+  }).join("");
 }
-
-// ── Exploration Bar ──────────────────────────────────────────
 function renderExplorationBar(value) {
   const pct = Math.round(value * 100);
-  const labels = ["\u4FDD\u5B88", "\u9002\u4E2D", "\u5F00\u653E", "\u975E\u5E38\u5F00\u653E"];
+  const labels = ["保守", "适中", "开放", "非常开放"];
   const label = labels[Math.min(Math.floor(value * labels.length), labels.length - 1)];
   return `
     <div class="exploration-bar" style="margin-top:8px">
-      <span class="exploration-label">\u63A2\u7D22\u5F00\u653E\u5EA6</span>
+      <span class="exploration-label">探索开放度</span>
       <div class="exploration-track"><div class="exploration-fill" style="width:${pct}%"></div></div>
       <span class="exploration-label">${esc(label)} ${pct}%</span>
     </div>`;
 }
-
-// ── Speculative Interests ────────────────────────────────────
 function renderProbeActionMarkup(actions, extraClass = "") {
-  return actions
-    .filter((action) => action.action !== "chat")
-    .map((action) => {
-      const classes = ["spec-btn", extraClass, action.primary ? "confirm" : action.action]
-        .filter(Boolean)
-        .join(" ");
-      return `
+  return actions.filter((action) => action.action !== "chat").map((action) => {
+    const classes = ["spec-btn", extraClass, action.primary ? "confirm" : action.action].filter(Boolean).join(" ");
+    return `
         <button type="button" class="${classes}" data-action="${action.action}">${esc(action.label)}</button>`;
-    })
-    .join("");
+  }).join("");
 }
-
 function renderSpecInterests(interests) {
-  return interests
-    .map((si) => {
-      const canAct = si.status === "active" || si.status === "pending";
-      const actionMarkup = renderProbeActionMarkup(getProbeMessageActions());
-      const progressPct =
-        si.confirmation_threshold > 0
-          ? Math.round((si.confirmation_count / si.confirmation_threshold) * 100)
-          : 0;
-      return `
+  return interests.map((si) => {
+    const canAct = si.status === "active" || si.status === "pending";
+    const actionMarkup = renderProbeActionMarkup(getProbeMessageActions());
+    const progressPct = si.confirmation_threshold > 0 ? Math.round(si.confirmation_count / si.confirmation_threshold * 100) : 0;
+    return `
       <div class="spec-interest" data-domain="${esc(si.domain)}">
         <div class="spec-interest-info">
           <div class="spec-interest-name">${esc(si.domain)}</div>
-          <div class="spec-interest-status">${esc(si.status)}${si.confidence ? ` \u00B7 ${Math.round(si.confidence * 100)}%` : ""}</div>
+          <div class="spec-interest-status">${esc(si.status)}${si.confidence ? ` · ${Math.round(si.confidence * 100)}%` : ""}</div>
           ${si.reason ? `<div style="font-size:11px;color:var(--text-muted)">${esc(si.reason)}</div>` : ""}
           <div class="spec-interest-progress"><div class="spec-interest-progress-fill" style="width:${progressPct}%"></div></div>
           ${si.specifics?.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${si.specifics.map((s) => esc(s.name)).join(", ")}</div>` : ""}
         </div>
-        ${
-          canAct
-            ? `
+        ${canAct ? `
         <div class="spec-interest-actions">
           ${actionMarkup}
-        </div>`
-            : ""
-        }
+        </div>` : ""}
       </div>`;
-    })
-    .join("");
+  }).join("");
 }
-
 function bindSpecInterestActions() {
   for (const btn of $root.querySelectorAll(".spec-interest:not(.spec-avoidance) .spec-btn")) {
     btn.addEventListener("click", async (e) => {
@@ -432,8 +346,8 @@ function bindSpecInterestActions() {
           patchState({
             profile: {
               ...p,
-              speculative_interests: p.speculative_interests.filter((si) => si.domain !== domain),
-            },
+              speculative_interests: p.speculative_interests.filter((si) => si.domain !== domain)
+            }
           });
         }
         render();
@@ -444,7 +358,6 @@ function bindSpecInterestActions() {
     });
   }
 }
-
 function bindInsightActions() {
   for (const btn of $root.querySelectorAll(".insight-item .spec-btn")) {
     btn.addEventListener("click", async (e) => {
@@ -458,14 +371,12 @@ function bindInsightActions() {
         const res = await submitInsightFeedback(insight.hypothesis, action);
         const p = state.profile;
         if (p?.active_insights && res?.matched) {
-          const updated = p.active_insights.map((it, i) =>
-            i === idx
-              ? {
-                  ...it,
-                  validated: Boolean(res.validated),
-                  confidence: typeof res.confidence === "number" ? res.confidence : it.confidence,
-                }
-              : it,
+          const updated = p.active_insights.map(
+            (it, i) => i === idx ? {
+              ...it,
+              validated: Boolean(res.validated),
+              confidence: typeof res.confidence === "number" ? res.confidence : it.confidence
+            } : it
           );
           patchState({ profile: { ...p, active_insights: updated } });
         }
@@ -476,43 +387,31 @@ function bindInsightActions() {
     });
   }
 }
-
-// ── Speculative Avoidances ──────────────────────────────────
 function renderSpecAvoidances(avoidances) {
-  return avoidances
-    .map((item) => {
-      const canAct = item.status === "active" || item.status === "pending";
-      const actionMarkup = renderProbeActionMarkup(
-        getAvoidanceProbeMessageActions(),
-        "spec-avoidance-btn",
-      );
-      const progressPct =
-        item.confirmation_threshold > 0
-          ? Math.round((item.confirmation_count / item.confirmation_threshold) * 100)
-          : 0;
-      const source = item.source_mode ? ` \u00B7 ${esc(item.source_mode)}` : "";
-      return `
+  return avoidances.map((item) => {
+    const canAct = item.status === "active" || item.status === "pending";
+    const actionMarkup = renderProbeActionMarkup(
+      getAvoidanceProbeMessageActions(),
+      "spec-avoidance-btn"
+    );
+    const progressPct = item.confirmation_threshold > 0 ? Math.round(item.confirmation_count / item.confirmation_threshold * 100) : 0;
+    const source = item.source_mode ? ` · ${esc(item.source_mode)}` : "";
+    return `
       <div class="spec-interest spec-avoidance" data-domain="${esc(item.domain)}">
         <div class="spec-interest-info">
           <div class="spec-interest-name">${esc(item.domain)}</div>
-          <div class="spec-interest-status">${esc(item.status)}${item.confidence ? ` \u00B7 ${Math.round(item.confidence * 100)}%` : ""}${source}</div>
+          <div class="spec-interest-status">${esc(item.status)}${item.confidence ? ` · ${Math.round(item.confidence * 100)}%` : ""}${source}</div>
           ${item.reason ? `<div style="font-size:11px;color:var(--text-muted)">${esc(item.reason)}</div>` : ""}
           <div class="spec-interest-progress"><div class="spec-interest-progress-fill" style="width:${progressPct}%"></div></div>
           ${item.specifics?.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${item.specifics.map((s) => esc(s.name)).join(", ")}</div>` : ""}
         </div>
-        ${
-          canAct
-            ? `
+        ${canAct ? `
         <div class="spec-interest-actions">
           ${actionMarkup}
-        </div>`
-            : ""
-        }
+        </div>` : ""}
       </div>`;
-    })
-    .join("");
+  }).join("");
 }
-
 function bindSpecAvoidanceActions() {
   for (const btn of $root.querySelectorAll(".spec-avoidance .spec-avoidance-btn")) {
     btn.addEventListener("click", async (e) => {
@@ -530,8 +429,8 @@ function bindSpecAvoidanceActions() {
           patchState({
             profile: {
               ...p,
-              speculative_avoidances: p.speculative_avoidances.filter((si) => si.domain !== domain),
-            },
+              speculative_avoidances: p.speculative_avoidances.filter((si) => si.domain !== domain)
+            }
           });
         }
         render();
@@ -542,8 +441,6 @@ function bindSpecAvoidanceActions() {
     });
   }
 }
-
-// ── Cognition Cards ──────────────────────────────────────────
 function renderCognitionCard(raw, idx) {
   const c = normalizeCognitionUpdateCard(raw);
   const isExpanded = expandedCognitionIdx === idx;
@@ -553,19 +450,14 @@ function renderCognitionCard(raw, idx) {
       <div class="cognition-summary">${esc(c.summary)}</div>
       <div style="font-size:11px;color:var(--text-muted)">${esc(c.contextLine)}</div>
       ${c.sourceLabel ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${esc(c.sourceLabel)}</div>` : ""}
-      ${c.expandable ? `<div class="cognition-expand-hint">${isExpanded ? "\u6536\u8D77" : esc(c.expandLabel)}</div>` : ""}
-      ${
-        c.expandable
-          ? `<div class="cognition-detail">
-        ${c.impact ? `<div><strong>\u5F71\u54CD:</strong> ${esc(c.impact)}</div>` : ""}
-        ${c.reasoning ? `<div><strong>\u63A8\u7406:</strong> ${esc(c.reasoning)}</div>` : ""}
-        ${c.evidence ? `<div><strong>\u8BC1\u636E:</strong> ${esc(c.evidence)}</div>` : ""}
-      </div>`
-          : ""
-      }
+      ${c.expandable ? `<div class="cognition-expand-hint">${isExpanded ? "收起" : esc(c.expandLabel)}</div>` : ""}
+      ${c.expandable ? `<div class="cognition-detail">
+        ${c.impact ? `<div><strong>影响:</strong> ${esc(c.impact)}</div>` : ""}
+        ${c.reasoning ? `<div><strong>推理:</strong> ${esc(c.reasoning)}</div>` : ""}
+        ${c.evidence ? `<div><strong>证据:</strong> ${esc(c.evidence)}</div>` : ""}
+      </div>` : ""}
     </div>`;
 }
-
 function bindCognitionExpand() {
   for (const card of $root.querySelectorAll(".cognition-card.expandable")) {
     card.addEventListener("click", () => {
@@ -575,13 +467,6 @@ function bindCognitionExpand() {
     });
   }
 }
-
-// ── Editable profile (Phase 3) ───────────────────────────────
-// Edit mode swaps the display for an edit panel rendered from
-// GET /api/profile/edit-state (un-truncated). Each control posts one
-// deterministic op to /api/profile/edit and re-renders from edit_state.
-// Edits survive profile rebuilds (server-side overrides overlay).
-
 async function enterEdit() {
   editing = true;
   editState = null;
@@ -589,22 +474,15 @@ async function enterEdit() {
   try {
     editState = await fetchEditState();
   } catch {
-    // Distinguish a failed request (404/500/network) from a genuinely
-    // uninitialized profile — the latter is what the server reports as
-    // {initialized:false}. Conflating them showed "先跑一遍 init" even
-    // when the profile exists (view mode renders it fine) and only the
-    // edit-state request failed.
     editState = { loadError: true };
   }
   render();
 }
-
 function exitEdit() {
   editing = false;
   editState = null;
   loadData();
 }
-
 async function applyEdit(payload) {
   try {
     const res = await submitProfileEdit(payload);
@@ -613,12 +491,10 @@ async function applyEdit(payload) {
     try {
       editState = await fetchEditState();
     } catch {
-      /* keep current editState */
     }
   }
   render();
 }
-
 function renderTextEditField(path, label, field) {
   const pinned = Boolean(field.pinned);
   const rows = path === "personality_portrait" ? 4 : 2;
@@ -633,15 +509,10 @@ function renderTextEditField(path, label, field) {
       </div>
     </div>`;
 }
-
-// Scalar (0..1) fields render as a percent slider. Like text fields they
-// commit on an explicit 保存 tap (not per-drag) to avoid a POST per pixel;
-// the live label updates on input so the value is visible while dragging.
 function renderScalarEditField(path, label, field) {
   const pinned = Boolean(field.pinned);
   const pct = Math.round((Number(field.value) || 0) * 100);
-  const aiPct =
-    typeof field.ai_suggestion === "number" ? Math.round(field.ai_suggestion * 100) : null;
+  const aiPct = typeof field.ai_suggestion === "number" ? Math.round(field.ai_suggestion * 100) : null;
   return `
     <div class="edit-field">
       <div class="edit-field-head"><span class="edit-field-label">${esc(label)}</span>${pinned ? `<span class="edit-badge">已编辑</span>` : ""}</div>
@@ -656,18 +527,12 @@ function renderScalarEditField(path, label, field) {
       </div>
     </div>`;
 }
-
 function renderListEditField(path, label, field) {
   const items = Array.isArray(field.items) ? field.items : [];
   const edited = (field.added?.length || 0) > 0 || (field.removed?.length || 0) > 0;
-  const chips = items.length
-    ? items
-        .map(
-          (it) =>
-            `<span class="edit-chip">${esc(it)}<button class="edit-chip-remove" data-edit-remove="${escAttr(path)}" data-edit-value="${escAttr(it)}">✕</button></span>`,
-        )
-        .join("")
-    : `<p class="edit-empty">还没有，添加一个吧</p>`;
+  const chips = items.length ? items.map(
+    (it) => `<span class="edit-chip">${esc(it)}<button class="edit-chip-remove" data-edit-remove="${escAttr(path)}" data-edit-value="${escAttr(it)}">✕</button></span>`
+  ).join("") : `<p class="edit-empty">还没有，添加一个吧</p>`;
   return `
     <div class="edit-field">
       <div class="edit-field-head"><span class="edit-field-label">${esc(label)}</span>${edited ? `<span class="edit-badge">已编辑</span>` : ""}</div>
@@ -679,13 +544,11 @@ function renderListEditField(path, label, field) {
       ${edited ? `<div class="edit-field-actions"><button class="edit-reset-btn" data-edit-reset="${escAttr(path)}">恢复 AI 建议</button></div>` : ""}
     </div>`;
 }
-
 function editSpecificName(item) {
   if (typeof item === "string") return item;
   if (item && typeof item === "object") return item.name || item.label || "";
   return "";
 }
-
 function hasSpecificEdits(field) {
   const edits = field?.specific_edits;
   if (!edits || typeof edits !== "object") return false;
@@ -694,29 +557,16 @@ function hasSpecificEdits(field) {
     return (edit.add?.length || 0) > 0 || (edit.remove?.length || 0) > 0;
   });
 }
-
 function renderInterestEditField(path, label, field) {
   const domains = Array.isArray(field.domains) ? field.domains : [];
-  const edited =
-    (field.removed_domains?.length || 0) > 0 ||
-    domains.some((d) => d?.user_added) ||
-    hasSpecificEdits(field);
-  const tree = domains.length
-    ? domains
-        .map((d) => {
-          if (!d?.domain) return "";
-          const specifics = Array.isArray(d.specifics)
-            ? d.specifics.map(editSpecificName).filter(Boolean)
-            : [];
-          const specificChips = specifics.length
-            ? specifics
-                .map(
-                  (specific) =>
-                    `<span class="edit-chip edit-specific-chip">${esc(specific)}<button class="edit-chip-remove" data-edit-remove-specific="${escAttr(path)}" data-edit-parent="${escAttr(d.domain)}" data-edit-value="${escAttr(specific)}">✕</button></span>`,
-                )
-                .join("")
-            : `<p class="edit-empty edit-specific-empty">还没有二级兴趣</p>`;
-          return `
+  const edited = (field.removed_domains?.length || 0) > 0 || domains.some((d) => d?.user_added) || hasSpecificEdits(field);
+  const tree = domains.length ? domains.map((d) => {
+    if (!d?.domain) return "";
+    const specifics = Array.isArray(d.specifics) ? d.specifics.map(editSpecificName).filter(Boolean) : [];
+    const specificChips = specifics.length ? specifics.map(
+      (specific) => `<span class="edit-chip edit-specific-chip">${esc(specific)}<button class="edit-chip-remove" data-edit-remove-specific="${escAttr(path)}" data-edit-parent="${escAttr(d.domain)}" data-edit-value="${escAttr(specific)}">✕</button></span>`
+    ).join("") : `<p class="edit-empty edit-specific-empty">还没有二级兴趣</p>`;
+    return `
             <div class="edit-interest-domain">
               <div class="edit-interest-domain-head">
                 <span class="edit-chip edit-domain-chip">${esc(d.domain)}${d.user_added ? " ＋" : ""}<button class="edit-chip-remove" data-edit-remove="${escAttr(path)}" data-edit-value="${escAttr(d.domain)}">✕</button></span>
@@ -727,9 +577,7 @@ function renderInterestEditField(path, label, field) {
                 <button class="edit-add-btn" data-edit-add-specific="${escAttr(path)}" data-edit-parent="${escAttr(d.domain)}">添加</button>
               </div>
             </div>`;
-        })
-        .join("")
-    : `<p class="edit-empty">还没有，添加一个吧</p>`;
+  }).join("") : `<p class="edit-empty">还没有，添加一个吧</p>`;
   const placeholder = path === "dislikes" ? "添加要避开的领域" : "添加感兴趣的领域";
   return `
     <div class="edit-field">
@@ -742,7 +590,6 @@ function renderInterestEditField(path, label, field) {
       ${edited ? `<div class="edit-field-actions"><button class="edit-reset-btn" data-edit-reset="${escAttr(path)}">恢复 AI 建议</button></div>` : ""}
     </div>`;
 }
-
 function renderEditPanelHtml() {
   let html = `<div class="profile-edit-bar"><button class="profile-edit-toggle" data-edit-toggle="exit">✓ 完成</button></div>`;
   if (!editState) {
@@ -769,38 +616,34 @@ function renderEditPanelHtml() {
   }
   return html;
 }
-
 function bindEditActions() {
   $root.querySelector('[data-edit-toggle="exit"]')?.addEventListener("click", exitEdit);
   $root.querySelector("[data-edit-retry]")?.addEventListener("click", () => void enterEdit());
-
   for (const btn of $root.querySelectorAll("[data-edit-remove]")) {
     btn.addEventListener(
       "click",
-      () =>
-        void applyEdit({
-          target: btn.dataset.editRemove,
-          op: "remove",
-          value: btn.dataset.editValue,
-        }),
+      () => void applyEdit({
+        target: btn.dataset.editRemove,
+        op: "remove",
+        value: btn.dataset.editValue
+      })
     );
   }
   for (const btn of $root.querySelectorAll("[data-edit-remove-specific]")) {
     btn.addEventListener(
       "click",
-      () =>
-        void applyEdit({
-          target: btn.dataset.editRemoveSpecific,
-          op: "remove",
-          value: btn.dataset.editValue,
-          parent: btn.dataset.editParent || "",
-        }),
+      () => void applyEdit({
+        target: btn.dataset.editRemoveSpecific,
+        op: "remove",
+        value: btn.dataset.editValue,
+        parent: btn.dataset.editParent || ""
+      })
     );
   }
   for (const btn of $root.querySelectorAll("[data-edit-reset]")) {
     btn.addEventListener(
       "click",
-      () => void applyEdit({ target: btn.dataset.editReset, op: "reset" }),
+      () => void applyEdit({ target: btn.dataset.editReset, op: "reset" })
     );
   }
   for (const btn of $root.querySelectorAll("[data-edit-add]")) {
@@ -821,7 +664,7 @@ function bindEditActions() {
         target: btn.dataset.editAddSpecific,
         op: "add",
         value,
-        parent: btn.dataset.editParent || "",
+        parent: btn.dataset.editParent || ""
       });
     });
   }
@@ -844,7 +687,7 @@ function bindEditActions() {
         target: input.dataset.editSpecificInput,
         op: "add",
         value,
-        parent: input.dataset.editParent || "",
+        parent: input.dataset.editParent || ""
       });
     });
   }
@@ -872,8 +715,6 @@ function bindEditActions() {
     });
   }
 }
-
-// ── Load ─────────────────────────────────────────────────────
 async function loadData() {
   loading = true;
   render();
@@ -886,15 +727,13 @@ async function loadData() {
       hasMore: profile.has_more_cognition_updates,
       nextCursor: profile.next_cognition_cursor,
       loadingMore: false,
-      loadMoreError: "",
+      loadMoreError: ""
     };
   } catch {
-    /* ignore */
   }
   loading = false;
   render();
 }
-
 function scheduleProfileRefresh({ delayMs = PROFILE_REFRESH_DEBOUNCE_MS } = {}) {
   if (profileRefreshTimer !== null) {
     clearTimeout(profileRefreshTimer);
@@ -904,10 +743,9 @@ function scheduleProfileRefresh({ delayMs = PROFILE_REFRESH_DEBOUNCE_MS } = {}) 
       profileRefreshTimer = null;
       void runScheduledProfileRefresh();
     },
-    Math.max(0, delayMs),
+    Math.max(0, delayMs)
   );
 }
-
 async function runScheduledProfileRefresh() {
   if (profileRefreshInFlight) {
     profileRefreshPending = true;
@@ -924,7 +762,6 @@ async function runScheduledProfileRefresh() {
     }
   }
 }
-
 async function loadMoreCognition() {
   if (!cognitionHistory?.nextCursor || cognitionHistory.loadingMore) return;
   cognitionHistory.loadingMore = true;
@@ -933,7 +770,7 @@ async function loadMoreCognition() {
     const data = await fetchProfileSummary({ limit: 5, cursor: cognitionHistory.nextCursor });
     cognitionHistory = buildNextCognitionHistoryState(
       cognitionHistory,
-      normalizeProfileSummary(data),
+      normalizeProfileSummary(data)
     );
     render();
   } catch {
@@ -942,16 +779,14 @@ async function loadMoreCognition() {
     render();
   }
 }
-
-// ── Public API ───────────────────────────────────────────────
 export function initProfileView(root) {
   $root = root;
   loadData();
 }
-
 export function onStreamEvent(payload) {
   const type = payload?.type || payload?.event;
   if (type === "profile_updated") {
     scheduleProfileRefresh();
   }
 }
+//# sourceMappingURL=profile.js.map

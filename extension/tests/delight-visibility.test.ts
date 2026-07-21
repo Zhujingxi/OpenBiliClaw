@@ -16,29 +16,23 @@ test("mobile stream removes only negative delight feedback", () => {
     resolve("../src/openbiliclaw/web/js/views/recommend.js"),
     "utf8",
   );
-  const chatJs = readFileSync(
-    resolve("../src/openbiliclaw/web/js/views/chat.js"),
-    "utf8",
-  );
+  const chatJs = readFileSync(resolve("../src/openbiliclaw/web/js/views/chat.js"), "utf8");
 
   assert.doesNotMatch(
     recommendJs,
     /type === "delight\.liked"\s*\|\|\s*type === "delight\.disliked"/,
   );
   assert.match(recommendJs, /type === "delight\.disliked"/);
-  assert.doesNotMatch(
+  assert.doesNotMatch(chatJs, /type === "delight\.liked"\s*\|\|\s*type === "delight\.disliked"/);
+  assert.doesNotMatch(chatJs, /if \(scope === "delight"\) \{\s*delightMsgs = delightMsgs\.filter/);
+  assert.match(
     chatJs,
-    /type === "delight\.liked"\s*\|\|\s*type === "delight\.disliked"/,
+    /if \(permanent\) \{\s*markDelightSent[\s\S]*?delightMsgs = delightMsgs\.filter/,
   );
-  assert.doesNotMatch(
-    chatJs,
-    /if \(scope === "delight"\) \{\s*delightMsgs = delightMsgs\.filter/,
-  );
-  assert.match(chatJs, /if \(permanent\) \{\s*markDelightSent[\s\S]*?delightMsgs = delightMsgs\.filter/);
 });
 
 test("extension delight banner keeps positive actions visible", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const openBlock = sourceBlock(
     popupJs,
     "const openButton = createActionButton(",
@@ -67,7 +61,7 @@ test("desktop delight actions remove only explicit negative responses", () => {
   );
   const responseBlock = sourceBlock(
     desktopJs,
-    "const feedbackToast = response === \"like\"",
+    'const feedbackToast = response === "like"',
     "function openMessageChat(msg)",
   );
 

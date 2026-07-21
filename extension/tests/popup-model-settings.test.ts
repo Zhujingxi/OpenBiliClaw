@@ -3,9 +3,9 @@ import { resolve } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const modelState = await import("../popup/popup-model-config-state.js").catch(
-  () => ({} as Record<string, unknown>),
-) as any;
+const modelState = (await import("../popup/popup-model-config-state.js").catch(
+  () => ({}) as Record<string, unknown>,
+)) as any;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -45,7 +45,14 @@ function chatConnection(id: string, overrides: Record<string, unknown> = {}) {
 
 function embeddingProvider(id: string, overrides: Record<string, unknown> = {}) {
   const record = chatConnection(id, overrides) as Record<string, unknown>;
-  for (const field of ["model", "api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx"]) {
+  for (const field of [
+    "model",
+    "api_mode",
+    "reasoning_effort",
+    "http_referer",
+    "x_title",
+    "num_ctx",
+  ]) {
     delete record[field];
   }
   return record;
@@ -80,19 +87,33 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
 }
 
 test("model settings state appends, removes, and reorders stable route peers", () => {
-  for (const name of ["hydrateModelConfig", "appendRouteItem", "removeRouteItem", "moveRouteItem"]) {
+  for (const name of [
+    "hydrateModelConfig",
+    "appendRouteItem",
+    "removeRouteItem",
+    "moveRouteItem",
+  ]) {
     assert.equal(typeof modelState[name], "function", `${name} should be exported`);
   }
 
   let state = modelState.hydrateModelConfig(snapshot(["a", "b"]));
   state = modelState.appendRouteItem(state, "chat", chatConnection("c"));
-  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["a", "b", "c"]);
+  assert.deepEqual(
+    state.models.chat.connections.map((item: any) => item.id),
+    ["a", "b", "c"],
+  );
   assert.equal(state.selected.chat, "c");
   state = modelState.moveRouteItem(state, "chat", "c", 0);
-  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["c", "a", "b"]);
+  assert.deepEqual(
+    state.models.chat.connections.map((item: any) => item.id),
+    ["c", "a", "b"],
+  );
   assert.equal(state.models.chat.connections[0].credential.action, "keep");
   state = modelState.removeRouteItem(state, "chat", "a");
-  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["c", "b"]);
+  assert.deepEqual(
+    state.models.chat.connections.map((item: any) => item.id),
+    ["c", "b"],
+  );
 });
 
 test("popup model load installs descriptors independently when its snapshot becomes stale", async () => {
@@ -109,7 +130,9 @@ test("popup model load installs descriptors independently when its snapshot beco
     snapshotRequest: () => staleSnapshot.promise,
     descriptorRequest: () => descriptors.promise,
     blocked: () => false,
-    applySnapshot: (value: any) => { visibleRevision = value.revision; },
+    applySnapshot: (value: any) => {
+      visibleRevision = value.revision;
+    },
     installDescriptors: (value: any) => {
       installedTypes = value.connection_types.map((item: any) => item.id);
     },
@@ -118,7 +141,9 @@ test("popup model load installs descriptors independently when its snapshot beco
     gate,
     request: () => latestSnapshot.promise,
     blocked: () => false,
-    apply: (value: any) => { visibleRevision = value.revision; },
+    apply: (value: any) => {
+      visibleRevision = value.revision;
+    },
   });
 
   latestSnapshot.resolve({ revision: "revision-new" });
@@ -155,13 +180,7 @@ test("pending popup model load retains a dirty draft without a false same-revisi
     installDescriptors: () => {},
   });
 
-  current = modelState.updateRouteField(
-    current,
-    "chat",
-    "a",
-    "model",
-    "local-edit-while-loading",
-  );
+  current = modelState.updateRouteField(current, "chat", "a", "model", "local-edit-while-loading");
   pendingSnapshot.resolve(snapshot(["remote"], "revision-a"));
 
   assert.deepEqual(await loading, {
@@ -209,11 +228,13 @@ test("full load revalidates snapshot ownership after its snapshot already applie
 
   const loaded = await fullLoad;
   const operations = modelState.createModelOperationGate();
-  if (operations.canStartSaveAfterLoad({
-    startedSaveGeneration: operations.saveGeneration,
-    loadResult: loaded,
-    state: current,
-  })) {
+  if (
+    operations.canStartSaveAfterLoad({
+      startedSaveGeneration: operations.saveGeneration,
+      loadResult: loaded,
+      state: current,
+    })
+  ) {
     puts += 1;
     snapshotGate.invalidate();
   }
@@ -224,7 +245,11 @@ test("full load revalidates snapshot ownership after its snapshot already applie
     descriptorsInstalled: true,
   });
   assert.equal(puts, 0, "the superseded full load must not issue a convenience PUT");
-  assert.equal(await reload, true, "the still-current snapshot-only reload must not be invalidated");
+  assert.equal(
+    await reload,
+    true,
+    "the still-current snapshot-only reload must not be invalidated",
+  );
   assert.equal(current.revision, "revision-b");
 });
 
@@ -285,29 +310,31 @@ test("full resource failure waits for a winning sibling before owning final stat
   let descriptorsInstalled = false;
   let visibleStatus = "loading";
 
-  const completion = modelState.loadIndependentModelResources({
-    gate: snapshotGate,
-    descriptorGate,
-    snapshotRequest: () => failedSnapshot.promise,
-    descriptorRequest: () => delayedDescriptors.promise,
-    blocked: () => blocked,
-    applySnapshot: () => {},
-    installDescriptors: () => {
-      descriptorsInstalled = true;
-      visibleStatus = "synced by descriptor render";
-    },
-  }).then(
-    (value: any) => {
-      completed = true;
-      visibleStatus = "loaded";
-      return { value, error: null };
-    },
-    (error: Error) => {
-      completed = true;
-      visibleStatus = `error: ${error.message}`;
-      return { value: null, error };
-    },
-  );
+  const completion = modelState
+    .loadIndependentModelResources({
+      gate: snapshotGate,
+      descriptorGate,
+      snapshotRequest: () => failedSnapshot.promise,
+      descriptorRequest: () => delayedDescriptors.promise,
+      blocked: () => blocked,
+      applySnapshot: () => {},
+      installDescriptors: () => {
+        descriptorsInstalled = true;
+        visibleStatus = "synced by descriptor render";
+      },
+    })
+    .then(
+      (value: any) => {
+        completed = true;
+        visibleStatus = "loaded";
+        return { value, error: null };
+      },
+      (error: Error) => {
+        completed = true;
+        visibleStatus = `error: ${error.message}`;
+        return { value: null, error };
+      },
+    );
 
   failedSnapshot.reject(expectedError);
   await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
@@ -332,22 +359,29 @@ test("overlapping popup model loads keep the latest descriptor registry", async 
   let visibleRevision = "";
   let installedTypes: string[] = [];
 
-  const startLoad = (snapshotRequest: () => Promise<any>, descriptorRequest: () => Promise<any>) => (
+  const startLoad = (snapshotRequest: () => Promise<any>, descriptorRequest: () => Promise<any>) =>
     modelState.loadIndependentModelResources({
       gate: snapshotGate,
       descriptorGate,
       snapshotRequest,
       descriptorRequest,
       blocked: () => false,
-      applySnapshot: (value: any) => { visibleRevision = value.revision; },
+      applySnapshot: (value: any) => {
+        visibleRevision = value.revision;
+      },
       installDescriptors: (value: any) => {
         installedTypes = value.connection_types.map((item: any) => item.id);
       },
-    })
-  );
+    });
 
-  const older = startLoad(() => oldSnapshot.promise, () => oldDescriptors.promise);
-  const newer = startLoad(() => newSnapshot.promise, () => newDescriptors.promise);
+  const older = startLoad(
+    () => oldSnapshot.promise,
+    () => oldDescriptors.promise,
+  );
+  const newer = startLoad(
+    () => newSnapshot.promise,
+    () => newDescriptors.promise,
+  );
   newDescriptors.resolve({ connection_types: [{ id: "new-type" }], groups: [] });
   newSnapshot.resolve({ revision: "revision-new" });
   assert.deepEqual(await newer, { snapshotApplied: true, descriptorsInstalled: true });
@@ -380,10 +414,16 @@ test("stale popup descriptor rejection cannot clobber a newer completed load", a
   });
 
   const older = modelState.loadIndependentModelResources(
-    options(() => oldSnapshot.promise, () => oldDescriptors.promise),
+    options(
+      () => oldSnapshot.promise,
+      () => oldDescriptors.promise,
+    ),
   );
   const newer = modelState.loadIndependentModelResources(
-    options(() => newSnapshot.promise, () => newDescriptors.promise),
+    options(
+      () => newSnapshot.promise,
+      () => newDescriptors.promise,
+    ),
   );
   newSnapshot.resolve({ revision: "revision-new" });
   newDescriptors.resolve({ connection_types: [{ id: "new-type" }], groups: [] });
@@ -406,11 +446,14 @@ test("one-click load guard refuses a PUT after an edit, save, or stale snapshot"
     const startedSaveGeneration = operations.saveGeneration;
     const oneClick = (async () => {
       const loaded = await load.promise;
-      if (operations.canStartSaveAfterLoad({
-        startedSaveGeneration,
-        loadResult: loaded,
-        state: current,
-      })) puts += 1;
+      if (
+        operations.canStartSaveAfterLoad({
+          startedSaveGeneration,
+          loadResult: loaded,
+          state: current,
+        })
+      )
+        puts += 1;
     })();
 
     current = modelState.updateRouteField(current, "chat", "a", "model", "local-edit");
@@ -429,11 +472,14 @@ test("one-click load guard refuses a PUT after an edit, save, or stale snapshot"
     const startedSaveGeneration = operations.saveGeneration;
     const oneClick = (async () => {
       const loaded = await load.promise;
-      if (operations.canStartSaveAfterLoad({
-        startedSaveGeneration,
-        loadResult: loaded,
-        state: current,
-      })) puts += 1;
+      if (
+        operations.canStartSaveAfterLoad({
+          startedSaveGeneration,
+          loadResult: loaded,
+          state: current,
+        })
+      )
+        puts += 1;
     })();
 
     const normalSave = operations.beginSave();
@@ -449,11 +495,14 @@ test("one-click load guard refuses a PUT after an edit, save, or stale snapshot"
   await t.test("snapshot was superseded", async () => {
     const operations = modelState.createModelOperationGate();
     const current = modelState.hydrateModelConfig(snapshot(["a"]));
-    assert.equal(operations.canStartSaveAfterLoad({
-      startedSaveGeneration: operations.saveGeneration,
-      loadResult: { snapshotApplied: false, descriptorsInstalled: true },
-      state: current,
-    }), false);
+    assert.equal(
+      operations.canStartSaveAfterLoad({
+        startedSaveGeneration: operations.saveGeneration,
+        loadResult: { snapshotApplied: false, descriptorsInstalled: true },
+        state: current,
+      }),
+      false,
+    );
   });
 });
 
@@ -527,13 +576,7 @@ test("model settings state enforces ten peers and protects the final active rout
 
 test("model settings presets fill untouched defaults without overwriting custom values", () => {
   let state = modelState.hydrateModelConfig(snapshot(["a"]));
-  state = modelState.updateRouteField(
-    state,
-    "chat",
-    "a",
-    "base_url",
-    "https://custom.test/v1",
-  );
+  state = modelState.updateRouteField(state, "chat", "a", "base_url", "https://custom.test/v1");
   state = modelState.applyPreset(
     state,
     "chat",
@@ -695,14 +738,16 @@ test("one-click local Ollama prepares one shared embedding route and preserves C
     similarity_threshold: 0.82,
     multimodal_enabled: false,
   });
-  assert.deepEqual(payload.models.embedding.providers, [{
-    id: "embedding-local-ollama",
-    name: "Local Ollama",
-    type: "ollama",
-    preset: "",
-    base_url: "http://127.0.0.1:11434/v1",
-    credential: { action: "clear" },
-  }]);
+  assert.deepEqual(payload.models.embedding.providers, [
+    {
+      id: "embedding-local-ollama",
+      name: "Local Ollama",
+      type: "ollama",
+      preset: "",
+      base_url: "http://127.0.0.1:11434/v1",
+      credential: { action: "clear" },
+    },
+  ]);
   assert.equal("model" in payload.models.embedding.providers[0], false);
 });
 
@@ -751,8 +796,8 @@ test("one-click local Ollama refuses dirty, overridden, or configured non-Ollama
 
 test("model settings page is sequential list/detail and removes every legacy provider form", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.ts"), "utf8");
 
   for (const id of [
     "popupModelRouteTabs",
@@ -810,7 +855,7 @@ test("model settings page is sequential list/detail and removes every legacy pro
 
 test("popup model editor copy is Chinese-first and keeps technical terms", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.ts"), "utf8");
 
   for (const copy of [
     'aria-label="拖拽排序"',
@@ -828,7 +873,8 @@ test("popup model editor copy is Chinese-first and keeps technical terms", () =>
     "<span>Chat 路由</span>",
     "<span>Embedding 路由</span>",
     "<span>当前健康状态</span>",
-  ]) assert.match(controller, new RegExp(copy));
+  ])
+    assert.match(controller, new RegExp(copy));
   assert.match(popupHtml, /<strong id="popupModelRouteTitle">Chat 连接<\/strong>/);
   assert.match(popupHtml, />上移<\/button>/);
   assert.match(popupHtml, />下移<\/button>/);
@@ -845,17 +891,18 @@ test("popup model editor copy is Chinese-first and keeps technical terms", () =>
     "Credential source",
     "Current health",
     "Probe failed",
-  ]) assert.doesNotMatch(controller, new RegExp(oldCopy));
+  ])
+    assert.doesNotMatch(controller, new RegExp(oldCopy));
 });
 
 test("model and general settings saves are separate scopes", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.ts"), "utf8");
 
   assert.match(popupHtml, /id="popupModelSaveButton"[^>]*>保存模型路由</);
   assert.match(popupHtml, /id="settingsSave"[^>]*>保存通用配置</);
-  assert.match(controller, /updateModelConfig\(toModelConfigPayload\(state\)\)/);
+  assert.match(controller, /updateModelConfig\(\s*toModelConfigPayload\(state\),?\s*\)/);
   assert.match(popupJs, /updateConfig\(data\)/);
   assert.doesNotMatch(popupJs, /\bllm:\s*\{/);
   assert.doesNotMatch(popupJs, /cfg\.llm\?\./);
@@ -863,10 +910,10 @@ test("model and general settings saves are separate scopes", () => {
 });
 
 test("model controller handles revision conflict, save locking, and popup focus restoration", () => {
-  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.ts"), "utf8");
 
-  assert.match(controller, /error\.status === 409/);
-  assert.match(controller, /error\.details\?\.error === "revision_conflict"/);
+  assert.match(controller, /modelError\.status === 409/);
+  assert.match(controller, /modelError\.details\?\.error === "revision_conflict"/);
   assert.match(controller, /setModelEditorLocked\(true\)/);
   assert.match(controller, /setModelEditorLocked\(false\)/);
   assert.match(controller, /if \(!state \|\| modelOperations\.saveInFlight\) return/);
@@ -875,13 +922,13 @@ test("model controller handles revision conflict, save locking, and popup focus 
   assert.match(controller, /requestAnimationFrame/);
   assert.match(controller, /popupModelDetailBack/);
   assert.match(controller, /prepareLocalOllamaEmbedding/);
-  assert.match(controller, /updateModelConfig\(toModelConfigPayload\(prepared\)\)/);
+  assert.match(controller, /updateModelConfig\(\s*toModelConfigPayload\(prepared\),?\s*\)/);
   assert.match(controller, /configured embedding route/);
   assert.doesNotMatch(controller, /updateConfig\([^)]*llm/);
 });
 
 test("model controller owns load, descriptor, probe, and save completion races", () => {
-  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.ts"), "utf8");
 
   assert.match(controller, /createModelOperationGate/);
   assert.match(controller, /const modelOperations = createModelOperationGate\(\)/);
@@ -897,7 +944,7 @@ test("model controller owns load, descriptor, probe, and save completion races",
   assert.match(controller, /function beginModelSave\(\)/);
   assert.match(controller, /const save = modelOperations\.beginSave\(\)/);
   assert.match(controller, /save\?\.invalidatedProbe/);
-  assert.match(controller, /renderProbeStatus\(selectedRecord\(state, state\.activeRoute\)\)/);
+  assert.match(controller, /renderProbeStatus\(selectedRecord\(state, state\.activeRoute[^)]*\)\)/);
   assert.equal(controller.match(/const save = beginModelSave\(\)/g)?.length, 2);
   assert.match(controller, /modelOperations\.controlState\(\)/);
 });

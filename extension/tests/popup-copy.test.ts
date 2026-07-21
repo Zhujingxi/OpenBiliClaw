@@ -5,8 +5,8 @@ import { resolve } from "node:path";
 
 test("popup copy uses a more native bilibili-style voice in key entry points", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-  const popupHelpers = readFileSync(resolve("popup", "popup-helpers.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
+  const popupHelpers = readFileSync(resolve("popup", "popup-helpers.ts"), "utf8");
 
   assert.match(popupHtml, /首页先放一边，这里是你最近更可能点开的。/);
   assert.match(popupHtml, /这几条，你大概会点开/);
@@ -49,7 +49,7 @@ test("popup copy uses a more native bilibili-style voice in key entry points", (
 
 test("popup avoidance probe contract is wired", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const serviceWorker = readFileSync(resolve("src", "background", "service-worker.ts"), "utf8");
 
   assert.match(popupHtml, /profileSpeculativeAvoidances/);
@@ -63,7 +63,7 @@ test("popup avoidance probe contract is wired", () => {
 
 test("popup probe inbox gives interest challenge and avoidance distinct treatments", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /isChallengeProbe/);
   assert.match(popupJs, /is-challenge/);

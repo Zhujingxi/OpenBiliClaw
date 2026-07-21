@@ -9,7 +9,7 @@ import {
   normalizeRecommendation,
 } from "../popup/popup-helpers.js";
 
-const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
 function functionSource(name: string): string {

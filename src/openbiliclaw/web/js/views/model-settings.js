@@ -1,13 +1,10 @@
-// TODO(types): Replace this temporary stabilization boundary with explicit editor types.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- tracked migration debt
-// @ts-nocheck
 import {
   fetchConfig,
   fetchModelConfig,
   fetchModelConnectionTypes,
   probeModelConnection,
   updateConfig,
-  updateModelConfig,
+  updateModelConfig
 } from "../api.js";
 import { createDialogFocusController } from "../saved-sync-runtime.js";
 import {
@@ -18,7 +15,7 @@ import {
   normalizeMobileModelValidationDetails,
   parseMobileModelNumericDraft,
   readOwnMobileModelFieldError,
-  validateMobileModelNumbers,
+  validateMobileModelNumbers
 } from "../mobile-model-settings-controller.js";
 import {
   MAX_ROUTE_ITEMS,
@@ -43,7 +40,7 @@ import {
   toModelConfigPayload,
   unverifiedConnections,
   updateRouteField,
-  updateRouteSetting,
+  updateRouteSetting
 } from "../../shared/model-config-state.js";
 import {
   applyTypeOptionRovingTabindex,
@@ -52,29 +49,20 @@ import {
   moveTypeOptionFocus as sharedMoveTypeOptionFocus,
   renderConnectionTypeGroups,
   renderCredentialEditor,
-  renderDescriptorField as sharedRenderDescriptorField,
+  renderDescriptorField as sharedRenderDescriptorField
 } from "../../shared/model-config-render.js";
-
 const CONFIG_RELOADED_TYPE = "config_reloaded";
 const ROUTE_OVERRIDE_PATHS = {
   chat: "models.chat.connections",
-  embedding: "models.embedding.providers",
+  embedding: "models.embedding.providers"
 };
-
 let requestCloseActiveSettings = null;
-
 function buildSavedSyncUpdate(enabled) {
   return { saved_sync: { auto_sync_enabled: Boolean(enabled) } };
 }
-
-/**
- * Open the mobile settings dialog. Saved Sync and Models retain separate
- * persistence owners; model state never passes through the legacy config API.
- */
 export async function openMobileSettings(opener) {
   if (requestCloseActiveSettings && !requestCloseActiveSettings()) return null;
   document.getElementById("mobile-settings-overlay")?.remove();
-
   const overlay = document.createElement("section");
   overlay.id = "mobile-settings-overlay";
   overlay.className = "mobile-settings-overlay";
@@ -82,7 +70,6 @@ export async function openMobileSettings(opener) {
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
   overlay.tabIndex = -1;
-
   const card = document.createElement("div");
   card.className = "mobile-settings-card mobile-model-settings";
   card.innerHTML = `
@@ -258,7 +245,6 @@ export async function openMobileSettings(opener) {
     </section>`;
   overlay.append(card);
   document.body.append(overlay);
-
   const byId = (id) => card.querySelector(`#${CSS.escape(id)}`);
   const savedToggle = byId("mobile-saved-auto-sync");
   const savedSave = card.querySelector(".mobile-settings-save");
@@ -291,15 +277,13 @@ export async function openMobileSettings(opener) {
     },
     onLoading: () => setModelStatus("正在读取模型配置与连接类型…"),
     onReady: () => renderReadyModelStatus(),
-    onRecoverableIncomplete: () =>
-      setModelStatus("模型配置未完整加载；编辑器仍锁定，请重试。", "error"),
-    onError: (error) => setModelStatus(error?.message || "无法读取模型配置。", "error"),
+    onRecoverableIncomplete: () => setModelStatus("模型配置未完整加载；编辑器仍锁定，请重试。", "error"),
+    onError: (error) => setModelStatus(error?.message || "无法读取模型配置。", "error")
   });
   const modelResources = createMobileModelResourceCoordinator({
     snapshotRequest: () => fetchModelConfig(),
     descriptorRequest: () => fetchModelConnectionTypes(),
-    blocked: ({ remote }) =>
-      disposed || modelOperations.saveInFlight || (!remote && Boolean(state?.dirty)),
+    blocked: ({ remote }) => disposed || modelOperations.saveInFlight || !remote && Boolean(state?.dirty),
     onSnapshotBlocked: (snapshot) => {
       if (disposed || !state) return;
       state = receiveRemoteSnapshot(state, snapshot);
@@ -319,13 +303,11 @@ export async function openMobileSettings(opener) {
       connectionTypes = descriptors;
       if (state && !modelOperations.saveInFlight) render({ preserveStatus: true });
     },
-    onReadinessChange: modelLoadRecovery.onReadinessChange,
+    onReadinessChange: modelLoadRecovery.onReadinessChange
   });
   const exactDraftRenderer = createExactDraftRenderCoordinator({
     clearInlineErrors: () => {
-      card
-        .querySelectorAll("[data-mobile-model-inline-error]")
-        .forEach((element) => element.remove());
+      card.querySelectorAll("[data-mobile-model-inline-error]").forEach((element) => element.remove());
     },
     renderErrorSummary,
     renderRouteList,
@@ -339,7 +321,7 @@ export async function openMobileSettings(opener) {
       if (!state || state.activeRoute === "runtime") return;
       const record = selectedRecord(state, state.activeRoute);
       if (record) renderCredential(record, descriptorFor(record.type));
-    },
+    }
   });
   numericValidation = createMobileModelNumericValidationController({
     getState: () => state,
@@ -348,16 +330,14 @@ export async function openMobileSettings(opener) {
       renderNumericFieldErrors();
       renderErrorSummary();
     },
-    focusFirstError: focusFirstNumericError,
+    focusFirstError: focusFirstNumericError
   });
-
   function setSavedStatus(message, alert = false) {
     if (disposed) return;
     savedStatus.textContent = message;
     if (alert) savedStatus.setAttribute("role", "alert");
     else savedStatus.removeAttribute("role");
   }
-
   async function loadSavedSync() {
     configLoaded = false;
     savedToggle.disabled = true;
@@ -379,7 +359,6 @@ export async function openMobileSettings(opener) {
       setSavedStatus(error?.message || "配置加载失败，请稍后重试。", true);
     }
   }
-
   async function saveSavedSync() {
     if (!configLoaded || savedSave.disabled) return;
     savedSave.disabled = true;
@@ -399,52 +378,38 @@ export async function openMobileSettings(opener) {
       }
     }
   }
-
   function activeItems() {
     if (!state || state.activeRoute === "runtime") return [];
-    return state.activeRoute === "chat"
-      ? state.models.chat.connections
-      : state.models.embedding.providers;
+    return state.activeRoute === "chat" ? state.models.chat.connections : state.models.embedding.providers;
   }
-
   function descriptorFor(typeId) {
     return connectionTypes.connection_types.find((descriptor) => descriptor.id === typeId) || null;
   }
-
   function presetFor(descriptor, presetId) {
     return descriptor?.preset_definitions?.find((preset) => preset.id === presetId) || null;
   }
-
   function descriptorsFor(kind) {
-    return connectionTypes.connection_types.filter((descriptor) =>
-      descriptor.capabilities?.includes(kind),
+    return connectionTypes.connection_types.filter(
+      (descriptor) => descriptor.capabilities?.includes(kind)
     );
   }
-
   function selectedIndex() {
     const record = selectedRecord(state, state.activeRoute);
     return record ? activeItems().findIndex((item) => item.id === record.id) : -1;
   }
-
   function derivedRole(index) {
     return index === 0 ? "Primary" : `Fallback ${index}`;
   }
-
   function modelControlLocked(path) {
     if (!state) return null;
     return state.overrideLocks?.[path] || null;
   }
-
   function routeLocked(kind) {
-    return kind === "chat" || kind === "embedding"
-      ? modelControlLocked(ROUTE_OVERRIDE_PATHS[kind])
-      : null;
+    return kind === "chat" || kind === "embedding" ? modelControlLocked(ROUTE_OVERRIDE_PATHS[kind]) : null;
   }
-
   function modelMutationBlocked() {
     return !state || !modelResources.readiness().ready || modelOperations.saveInFlight;
   }
-
   function syncOperationControls() {
     const controls = modelOperations.controlState();
     const save = byId("mobileModelSaveButton");
@@ -453,7 +418,6 @@ export async function openMobileSettings(opener) {
     if (save) save.disabled = controls.saveDisabled || !state || !resourcesReady;
     if (probe) probe.disabled = controls.probeDisabled || !state || !resourcesReady;
   }
-
   function setModelEditorLocked(locked) {
     const boundary = byId("mobileModelEditorBoundary");
     if (!boundary) return;
@@ -462,13 +426,11 @@ export async function openMobileSettings(opener) {
     boundary.inert = editorLocked;
     syncOperationControls();
   }
-
   function setModelEditorBusy(busy) {
     const boundary = byId("mobileModelEditorBoundary");
     if (!boundary) return;
     boundary.setAttribute("aria-busy", busy ? "true" : "false");
   }
-
   function setModelStatus(message, tone = "") {
     if (disposed) return;
     const status = byId("mobileModelSaveStatus");
@@ -477,7 +439,6 @@ export async function openMobileSettings(opener) {
     if (tone) status.dataset.tone = tone;
     else delete status.dataset.tone;
   }
-
   function renderReadyModelStatus() {
     if (!state) return;
     if (state.remoteUpdate) {
@@ -488,27 +449,18 @@ export async function openMobileSettings(opener) {
       setModelStatus(`模型配置已同步 · ${state.revision.slice(0, 12)}`);
     }
   }
-
   function numericPathError(path) {
     return numericFieldErrors.byPath?.[path] || null;
   }
-
   function serverPathError(path) {
     return state?.fieldErrors?.global?.find((error) => error.path === path) || null;
   }
-
   function displayedPathError(path) {
     return numericPathError(path) || serverPathError(path);
   }
-
   function fieldError(recordId, field) {
-    return (
-      readOwnMobileModelFieldError(numericFieldErrors.byConnection, recordId, field) ||
-      readOwnMobileModelFieldError(state?.fieldErrors?.byConnection, recordId, field) ||
-      null
-    );
+    return readOwnMobileModelFieldError(numericFieldErrors.byConnection, recordId, field) || readOwnMobileModelFieldError(state?.fieldErrors?.byConnection, recordId, field) || null;
   }
-
   function errorMarkup(recordId, field) {
     const error = fieldError(recordId, field);
     if (field === "num_ctx") {
@@ -516,18 +468,15 @@ export async function openMobileSettings(opener) {
           class="mobile-model-field-error" data-mobile-model-num-ctx-error="${escapeHtml(recordId)}"
           role="alert"${error ? "" : " hidden"}>${escapeHtml(error?.message || "")}</span>`;
     }
-    return error
-      ? `<span class="mobile-model-field-error" data-mobile-model-inline-error
-          role="alert">${escapeHtml(error.message)}</span>`
-      : "";
+    return error ? `<span class="mobile-model-field-error" data-mobile-model-inline-error
+          role="alert">${escapeHtml(error.message)}</span>` : "";
   }
-
   function safeHealth(record) {
     if (record?.circuit?.state === "open") {
       const circuit = circuitView(record);
       return {
         label: circuit?.label || record.circuit.failure_kind || "熔断已打开",
-        tone: "warning",
+        tone: "warning"
       };
     }
     if (record?.probe?.ok === true) return { label: "探测通过", tone: "success" };
@@ -536,13 +485,10 @@ export async function openMobileSettings(opener) {
     }
     return { label: "尚未探测", tone: "" };
   }
-
   function uniqueId(kind) {
-    const token =
-      window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const token = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return `${kind}-${token}`;
   }
-
   function renderTabs() {
     card.querySelectorAll("[data-mobile-model-route]").forEach((tab) => {
       const active = tab.dataset.mobileModelRoute === state.activeRoute;
@@ -554,134 +500,110 @@ export async function openMobileSettings(opener) {
     card.querySelector('[data-mobile-model-view="route"]').hidden = runtime;
     byId("mobileModelEmbeddingSharedSettings").hidden = state.activeRoute !== "embedding";
   }
-
   function renderRemoteUpdate() {
     byId("mobileModelRemoteBanner").hidden = !state.remoteUpdate;
   }
-
   function renderOverrides() {
     const host = byId("mobileModelOverrideNotice");
     const overrides = state.overrides || [];
     host.hidden = overrides.length === 0;
-    host.innerHTML = overrides.length
-      ? `
+    host.innerHTML = overrides.length ? `
         <strong>只读模型覆盖</strong>
         <p>高优先级配置锁定下列字段；其余基础配置仍可保存。</p>
-        <ul>${overrides
-          .map(
-            (override) => `
+        <ul>${overrides.map(
+      (override) => `
           <li><code>${escapeHtml(override.path)}</code>
-            <span>${escapeHtml(override.source)}</span></li>`,
-          )
-          .join("")}</ul>`
-      : "";
+            <span>${escapeHtml(override.source)}</span></li>`
+    ).join("")}</ul>` : "";
   }
-
   function renderErrorSummary() {
     const host = byId("mobileModelErrorSummary");
     const global = state.fieldErrors?.global || [];
     const connectionErrors = Object.entries(state.fieldErrors?.byConnection || {}).flatMap(
-      ([connectionId, fields]) =>
-        Object.values(fields).map((error) => ({
-          connectionId,
-          error,
-        })),
+      ([connectionId, fields]) => Object.values(fields).map((error) => ({
+        connectionId,
+        error
+      }))
     );
     const numericErrors = Object.values(numericFieldErrors.byPath || {});
     const rows = [
-      ...numericErrors.map((error) =>
-        error.connectionId
-          ? `${escapeHtml(error.connectionId)}: ${escapeHtml(error.message)}`
-          : `${escapeHtml(error.path)}: ${escapeHtml(error.message)}`,
+      ...numericErrors.map(
+        (error) => error.connectionId ? `${escapeHtml(error.connectionId)}: ${escapeHtml(error.message)}` : `${escapeHtml(error.path)}: ${escapeHtml(error.message)}`
       ),
       ...global.map((error) => escapeHtml(error.message)),
       ...connectionErrors.map(
-        ({ connectionId, error }) => `${escapeHtml(connectionId)}: ${escapeHtml(error.message)}`,
-      ),
+        ({ connectionId, error }) => `${escapeHtml(connectionId)}: ${escapeHtml(error.message)}`
+      )
     ];
-    // API validation entries are keyed by connection_id before the shared reducer maps them.
     host.hidden = rows.length === 0;
     host.innerHTML = rows.length ? `<ul><li>${rows.join("</li><li>")}</li></ul>` : "";
   }
-
   function setFieldErrorHost(host, error) {
     if (!host) return;
     host.textContent = error?.message || "";
     host.hidden = !error;
   }
-
   function renderNumericFieldErrors() {
     setFieldErrorHost(
       byId("mobileModelChatConcurrencyError"),
-      displayedPathError("models.chat.concurrency"),
+      displayedPathError("models.chat.concurrency")
     );
     setFieldErrorHost(
       byId("mobileModelChatTimeoutError"),
-      displayedPathError("models.chat.timeout_seconds"),
+      displayedPathError("models.chat.timeout_seconds")
     );
     setFieldErrorHost(
       byId("mobileModelEmbeddingDimensionError"),
-      displayedPathError("models.embedding.settings.output_dimensionality"),
+      displayedPathError("models.embedding.settings.output_dimensionality")
     );
     setFieldErrorHost(
       byId("mobileModelEmbeddingSimilarityError"),
-      displayedPathError("models.embedding.settings.similarity_threshold"),
+      displayedPathError("models.embedding.settings.similarity_threshold")
     );
     card.querySelectorAll("[data-mobile-model-num-ctx-error]").forEach((host) => {
       setFieldErrorHost(host, fieldError(host.dataset.mobileModelNumCtxError, "num_ctx"));
     });
   }
-
   function renderEmbeddingSettings() {
     if (state.activeRoute !== "embedding") return;
     const settings = state.models.embedding.settings;
     byId("mobileModelEmbeddingEnabled").checked = state.models.embedding.enabled;
     byId("mobileModelEmbeddingEnabled").disabled = Boolean(
-      modelControlLocked("models.embedding.enabled"),
+      modelControlLocked("models.embedding.enabled")
     );
     byId("mobileModelEmbeddingModel").value = settings.model;
     byId("mobileModelEmbeddingModel").disabled = Boolean(
-      modelControlLocked("models.embedding.settings.model"),
+      modelControlLocked("models.embedding.settings.model")
     );
     byId("mobileModelEmbeddingDimension").value = String(settings.output_dimensionality);
     byId("mobileModelEmbeddingDimension").disabled = Boolean(
-      modelControlLocked("models.embedding.settings.output_dimensionality"),
+      modelControlLocked("models.embedding.settings.output_dimensionality")
     );
     byId("mobileModelEmbeddingSimilarity").value = String(settings.similarity_threshold);
     byId("mobileModelEmbeddingSimilarity").disabled = Boolean(
-      modelControlLocked("models.embedding.settings.similarity_threshold"),
+      modelControlLocked("models.embedding.settings.similarity_threshold")
     );
     byId("mobileModelEmbeddingMultimodal").checked = settings.multimodal_enabled;
     byId("mobileModelEmbeddingMultimodal").disabled = Boolean(
-      modelControlLocked("models.embedding.settings.multimodal_enabled"),
+      modelControlLocked("models.embedding.settings.multimodal_enabled")
     );
     renderNumericFieldErrors();
   }
-
   function renderRouteList() {
     if (state.activeRoute === "runtime") return;
     const kind = state.activeRoute;
     const items = activeItems();
     const locked = routeLocked(kind);
-    byId("mobileModelRouteTitle").textContent =
-      kind === "chat" ? "Chat 连接" : "Embedding Provider";
-    byId("mobileModelRouteHelp").textContent =
-      kind === "chat"
-        ? "第 1 项是 Primary，其余项依序作为 Fallback；最多 10 项。"
-        : "Provider 按此顺序 Fallback，并共享唯一 Embedding 模型设置；最多 10 项。";
-    byId("mobileModelAddConnection").disabled =
-      Boolean(locked) ||
-      items.length >= MAX_ROUTE_ITEMS ||
-      (kind === "embedding" && !state.models.embedding.enabled);
-    byId("mobileModelRouteList").innerHTML =
-      items
-        .map((record, index) => {
-          const descriptor = descriptorFor(record.type);
-          const preset = presetFor(descriptor, record.preset);
-          const health = safeHealth(record);
-          const model = kind === "chat" ? record.model : state.models.embedding.settings.model;
-          const selected = state.selected[kind] === record.id;
-          return `
+    byId("mobileModelRouteTitle").textContent = kind === "chat" ? "Chat 连接" : "Embedding Provider";
+    byId("mobileModelRouteHelp").textContent = kind === "chat" ? "第 1 项是 Primary，其余项依序作为 Fallback；最多 10 项。" : "Provider 按此顺序 Fallback，并共享唯一 Embedding 模型设置；最多 10 项。";
+    byId("mobileModelAddConnection").disabled = Boolean(locked) || items.length >= MAX_ROUTE_ITEMS || kind === "embedding" && !state.models.embedding.enabled;
+    byId("mobileModelRouteList").innerHTML = items.map((record, index) => {
+      const descriptor = descriptorFor(record.type);
+      const preset = presetFor(descriptor, record.preset);
+      const health = safeHealth(record);
+      const model = kind === "chat" ? record.model : state.models.embedding.settings.model;
+      const selected = state.selected[kind] === record.id;
+      return `
         <article class="mobile-model-route-row${selected ? " is-selected" : ""}"
           data-model-record-id="${escapeHtml(record.id)}" role="listitem">
           <button class="mobile-model-route-row-copy" type="button"
@@ -696,10 +618,8 @@ export async function openMobileSettings(opener) {
               ${escapeHtml(health.label)}</small>
           </button>
         </article>`;
-        })
-        .join("") || '<p class="mobile-settings-hint">当前路由为空。</p>';
+    }).join("") || '<p class="mobile-settings-hint">当前路由为空。</p>';
   }
-
   function renderConnectionTypes() {
     const record = selectedRecord(state, state.activeRoute);
     if (!record) return;
@@ -711,25 +631,20 @@ export async function openMobileSettings(opener) {
       kind: state.activeRoute,
       locked,
       query: byId("mobileModelTypeSearch")?.value || "",
-      classPrefix: "mobile-model",
+      classPrefix: "mobile-model"
     });
     applyTypeOptionRovingTabindex(host);
   }
-
   function moveTypeOptionFocus(event) {
     sharedMoveTypeOptionFocus(event);
   }
-
   function focusSelectedTypeOption() {
     const record = selectedRecord(state, state.activeRoute);
     if (!record) return;
     window.requestAnimationFrame(() => {
-      byId("mobileModelConnectionTypeGroups")
-        ?.querySelector(`[data-model-type="${CSS.escape(record.type)}"]`)
-        ?.focus();
+      byId("mobileModelConnectionTypeGroups")?.querySelector(`[data-model-type="${CSS.escape(record.type)}"]`)?.focus();
     });
   }
-
   function renderDescriptorField(record, descriptor, field) {
     return sharedRenderDescriptorField({
       record,
@@ -740,10 +655,9 @@ export async function openMobileSettings(opener) {
       errorMarkup,
       fieldClass: "mobile-model-field",
       fullWidthFields: false,
-      numCtxDescribedBy: "mobileModelSelectedNumCtxError",
+      numCtxDescribedBy: "mobileModelSelectedNumCtxError"
     });
   }
-
   function renderCredential(record, descriptor) {
     const host = byId("mobileModelCredentialEditor");
     const rendered = renderCredentialEditor({
@@ -755,12 +669,11 @@ export async function openMobileSettings(opener) {
       fieldClass: "mobile-model-field",
       credentialValueId: "mobileModelCredentialValue",
       noteClass: "mobile-settings-hint",
-      classPrefix: "mobile-model",
+      classPrefix: "mobile-model"
     });
     host.hidden = rendered.hidden;
     host.innerHTML = rendered.html;
   }
-
   function renderProbeStatus(record) {
     const status = byId("mobileModelProbeStatus");
     if (!status) return;
@@ -776,7 +689,6 @@ export async function openMobileSettings(opener) {
     status.textContent = `${probe.ok ? "通过" : probe.error_code || "失败"}${dimensions}${latency}${timestamp}`;
     status.dataset.tone = probe.ok ? "success" : "error";
   }
-
   function renderInspector() {
     if (state.activeRoute === "runtime") return;
     const kind = state.activeRoute;
@@ -791,18 +703,11 @@ export async function openMobileSettings(opener) {
     byId("mobileModelInspectorTitle").textContent = record.name || "连接详情";
     byId("mobileModelMoveUp").disabled = locked || index <= 0;
     byId("mobileModelMoveDown").disabled = locked || index < 0 || index >= activeItems().length - 1;
-    byId("mobileModelRemoveConnection").disabled =
-      locked ||
-      (kind === "chat" && activeItems().length <= 1) ||
-      (kind === "embedding" && state.models.embedding.enabled && activeItems().length <= 1);
+    byId("mobileModelRemoveConnection").disabled = locked || kind === "chat" && activeItems().length <= 1 || kind === "embedding" && state.models.embedding.enabled && activeItems().length <= 1;
     byId("mobileModelTypeSearch").disabled = locked;
     const circuit = circuitView(record);
-    const circuitChip = circuit
-      ? `<p class="mobile-model-circuit-chip" role="status">${escapeHtml(circuit.label)}</p>`
-      : "";
-    const unverified = hasUnverifiedChanges(state, kind, record.id)
-      ? '<p class="mobile-model-unverified" role="status">此连接在上次探测通过后被修改，保存前建议重新探测。</p>'
-      : "";
+    const circuitChip = circuit ? `<p class="mobile-model-circuit-chip" role="status">${escapeHtml(circuit.label)}</p>` : "";
+    const unverified = hasUnverifiedChanges(state, kind, record.id) ? '<p class="mobile-model-unverified" role="status">此连接在上次探测通过后被修改，保存前建议重新探测。</p>' : "";
     byId("mobileModelInspectorFields").innerHTML = `
       <label class="mobile-model-field">
         <span>连接名称</span>
@@ -817,23 +722,20 @@ export async function openMobileSettings(opener) {
         ${errorMarkup(record.id, "id")}
       </label>
       ${circuitChip}${unverified}`;
-    byId("mobileModelDescriptorFields").innerHTML = descriptor
-      ? descriptor.fields.map((field) => renderDescriptorField(record, descriptor, field)).join("")
-      : "";
+    byId("mobileModelDescriptorFields").innerHTML = descriptor ? descriptor.fields.map((field) => renderDescriptorField(record, descriptor, field)).join("") : "";
     renderConnectionTypes();
     renderCredential(record, descriptor);
     renderProbeStatus(record);
   }
-
   function renderRuntime() {
     if (state.activeRoute !== "runtime") return;
     byId("mobileModelChatConcurrency").value = String(state.models.chat.concurrency);
     byId("mobileModelChatConcurrency").disabled = Boolean(
-      modelControlLocked("models.chat.concurrency"),
+      modelControlLocked("models.chat.concurrency")
     );
     byId("mobileModelChatTimeout").value = String(state.models.chat.timeout_seconds);
     byId("mobileModelChatTimeout").disabled = Boolean(
-      modelControlLocked("models.chat.timeout_seconds"),
+      modelControlLocked("models.chat.timeout_seconds")
     );
     const all = [...state.models.chat.connections, ...state.models.embedding.providers];
     const open = all.filter((record) => record.circuit?.state === "open").length;
@@ -848,42 +750,33 @@ export async function openMobileSettings(opener) {
         ${healthy} 个探测通过 · ${open} 个熔断打开</strong></div>`;
     renderNumericFieldErrors();
   }
-
   function migrationResolution(action) {
     if (action === "apply_shared_embedding_settings") {
       return { action, embedding_settings: { ...state.models.embedding.settings } };
     }
     return { action };
   }
-
   function renderMigration() {
     const panel = byId("mobileModelMigrationPanel");
     const issues = state.migration?.issues || [];
     panel.hidden = issues.length === 0;
-    panel.innerHTML = issues.length
-      ? `<h3>确认旧配置迁移</h3>
-        ${issues
-          .map((issue) => {
-            const selected = state.migration_resolutions?.[issue.id]?.action || "";
-            return `<article data-migration-issue="${escapeHtml(issue.id)}">
+    panel.innerHTML = issues.length ? `<h3>确认旧配置迁移</h3>
+        ${issues.map((issue) => {
+      const selected = state.migration_resolutions?.[issue.id]?.action || "";
+      return `<article data-migration-issue="${escapeHtml(issue.id)}">
             <strong>${escapeHtml(issue.reason || issue.code)}</strong>
             <span>${escapeHtml(issue.field)}
               ${issue.provider ? ` · ${escapeHtml(issue.provider)}` : ""}</span>
-            <div>${(issue.allowed_actions || [])
-              .map(
-                (action) => `
+            <div>${(issue.allowed_actions || []).map(
+        (action) => `
               <button type="button" data-migration-action="${escapeHtml(action)}"
                 data-migration-id="${escapeHtml(issue.id)}"
                 class="${selected === action ? "is-active" : ""}">
-                ${escapeHtml(action.replaceAll("_", " "))}</button>`,
-              )
-              .join("")}</div>
+                ${escapeHtml(action.replaceAll("_", " "))}</button>`
+      ).join("")}</div>
           </article>`;
-          })
-          .join("")}`
-      : "";
+    }).join("")}` : "";
   }
-
   function render({ preserveStatus = false } = {}) {
     if (!state || disposed) return;
     renderTabs();
@@ -899,21 +792,17 @@ export async function openMobileSettings(opener) {
     syncOperationControls();
     if (!preserveStatus) {
       setModelStatus(
-        state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`,
+        state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`
       );
     }
   }
-
   function focusSelectedRouteControl() {
     const record = selectedRecord(state, state.activeRoute);
     if (!record) return;
     window.requestAnimationFrame(() => {
-      byId("mobileModelRouteList")
-        ?.querySelector(`[data-model-select="${CSS.escape(record.id)}"]`)
-        ?.focus();
+      byId("mobileModelRouteList")?.querySelector(`[data-model-select="${CSS.escape(record.id)}"]`)?.focus();
     });
   }
-
   function focusFirstNumericError(error) {
     if (!state || !error) return;
     state.activeRoute = error.route;
@@ -927,28 +816,24 @@ export async function openMobileSettings(opener) {
       timeout_seconds: "#mobileModelChatTimeout",
       num_ctx: '[data-model-field="num_ctx"]',
       output_dimensionality: "#mobileModelEmbeddingDimension",
-      similarity_threshold: "#mobileModelEmbeddingSimilarity",
+      similarity_threshold: "#mobileModelEmbeddingSimilarity"
     }[error.field];
     window.requestAnimationFrame(() => card.querySelector(selector)?.focus());
   }
-
   function focusDetailControl(id = "mobileModelInspectorBack") {
     window.requestAnimationFrame(() => byId(id)?.focus());
   }
-
   function showRouteList({ focus = true } = {}) {
     exactDraftRenderer.beforeRouteList();
     routeView = "list";
     byId("mobileModelRouteLayout")?.classList.remove("is-detail");
     if (focus) focusSelectedRouteControl();
   }
-
   function openRouteDetail() {
     routeView = "detail";
     byId("mobileModelRouteLayout")?.classList.add("is-detail");
     focusDetailControl();
   }
-
   function moveSelected(delta) {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const record = selectedRecord(state, state.activeRoute);
@@ -958,14 +843,12 @@ export async function openMobileSettings(opener) {
     render();
     focusDetailControl(delta < 0 ? "mobileModelMoveUp" : "mobileModelMoveDown");
   }
-
   function selectRecord(id) {
     if (modelMutationBlocked()) return;
     state = selectRouteItem(state, state.activeRoute, id);
     render({ preserveStatus: true });
     openRouteDetail();
   }
-
   function addConnection() {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const descriptor = descriptorsFor(state.activeRoute)[0];
@@ -973,8 +856,8 @@ export async function openMobileSettings(opener) {
       setModelStatus("当前路由没有可用连接类型。", "error");
       return;
     }
-    const preset = descriptor.preset_definitions?.find((candidate) =>
-      candidate.capabilities?.includes(state.activeRoute),
+    const preset = descriptor.preset_definitions?.find(
+      (candidate) => candidate.capabilities?.includes(state.activeRoute)
     );
     const id = uniqueId(state.activeRoute);
     const record = {
@@ -985,18 +868,16 @@ export async function openMobileSettings(opener) {
       base_url: "",
       credential: {
         action: descriptor.category === "oauth" ? "keep" : "clear",
-        value: "",
+        value: ""
       },
-      ...(state.activeRoute === "chat"
-        ? {
-            model: "",
-            api_mode: "",
-            reasoning_effort: "",
-            http_referer: "",
-            x_title: "",
-            num_ctx: 0,
-          }
-        : {}),
+      ...state.activeRoute === "chat" ? {
+        model: "",
+        api_mode: "",
+        reasoning_effort: "",
+        http_referer: "",
+        x_title: "",
+        num_ctx: 0
+      } : {}
     };
     try {
       state = appendRouteItem(state, state.activeRoute, record);
@@ -1009,7 +890,6 @@ export async function openMobileSettings(opener) {
       setModelStatus(error.message, "error");
     }
   }
-
   function removeSelected() {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const record = selectedRecord(state, state.activeRoute);
@@ -1024,7 +904,6 @@ export async function openMobileSettings(opener) {
       setModelStatus(error.message, "error");
     }
   }
-
   function changeType(typeId) {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const record = selectedRecord(state, state.activeRoute);
@@ -1034,22 +913,22 @@ export async function openMobileSettings(opener) {
     const previousPreset = presetFor(previousDescriptor, record.preset);
     let result = changeConnectionType(state, state.activeRoute, record.id, descriptor, {
       confirmed: false,
-      previousDescriptor,
+      previousDescriptor
     });
     if (result.incompatibleFields.length) {
       const confirmed = window.confirm(
-        `切换连接类型会清除这些不兼容字段：${result.incompatibleFields.join(", ")}。继续吗？`,
+        `切换连接类型会清除这些不兼容字段：${result.incompatibleFields.join(", ")}。继续吗？`
       );
       if (!confirmed) return;
       result = changeConnectionType(state, state.activeRoute, record.id, descriptor, {
         confirmed: true,
-        previousDescriptor,
+        previousDescriptor
       });
     }
     state = result.state;
     const updated = selectedRecord(state, state.activeRoute);
     const preset = descriptor.preset_definitions?.find(
-      (candidate) => candidate.id === updated?.preset,
+      (candidate) => candidate.id === updated?.preset
     );
     if (preset) {
       state = applyPreset(state, state.activeRoute, record.id, preset, { previousPreset });
@@ -1058,7 +937,6 @@ export async function openMobileSettings(opener) {
     render();
     focusSelectedTypeOption();
   }
-
   function updateField(field, target) {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const record = selectedRecord(state, state.activeRoute);
@@ -1070,18 +948,18 @@ export async function openMobileSettings(opener) {
       const preset = presetFor(descriptor, value);
       if (preset) {
         let result = changePreset(state, state.activeRoute, record.id, descriptor, preset, {
-          confirmed: false,
+          confirmed: false
         });
         if (result.incompatibleFields.length) {
           const confirmed = window.confirm(
-            `切换 preset 会清除这些不兼容字段：${result.incompatibleFields.join(", ")}。继续吗？`,
+            `切换 preset 会清除这些不兼容字段：${result.incompatibleFields.join(", ")}。继续吗？`
           );
           if (!confirmed) {
             renderInspector();
             return;
           }
           result = changePreset(state, state.activeRoute, record.id, descriptor, preset, {
-            confirmed: true,
+            confirmed: true
           });
         }
         state = result.state;
@@ -1098,7 +976,6 @@ export async function openMobileSettings(opener) {
     }
     setModelStatus("有未保存的模型更改。");
   }
-
   function updateCredential(action, value = "", rerender = true) {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const record = selectedRecord(state, state.activeRoute);
@@ -1108,15 +985,11 @@ export async function openMobileSettings(opener) {
     exactDraftRenderer.afterDraftMutation({ rerenderCredential: rerender });
     setModelStatus("有未保存的模型更改。");
   }
-
   function probeRequestVisible(signature) {
     return Boolean(
-      state &&
-      state.activeRoute === signature.kind &&
-      state.selected?.[signature.kind] === signature.id,
+      state && state.activeRoute === signature.kind && state.selected?.[signature.kind] === signature.id
     );
   }
-
   async function probeSelected() {
     if (!state || modelOperations.saveInFlight || modelOperations.probeInFlight) return;
     if (!numericValidation.runProbeIfValid(state)) {
@@ -1130,23 +1003,17 @@ export async function openMobileSettings(opener) {
     const signature = createProbeSignature(state, kind, record.id);
     if (!signature.fingerprint) return;
     const payload = toModelConfigPayload(state);
-    const selectedDraft =
-      signature.kind === "chat"
-        ? payload.models.chat.connections.find((item) => item.id === signature.id)
-        : payload.models.embedding.providers.find((item) => item.id === signature.id);
-    const body =
-      signature.kind === "chat"
-        ? {
-            kind: signature.kind,
-            revision: signature.revision,
-            connection: selectedDraft,
-          }
-        : {
-            kind: signature.kind,
-            revision: signature.revision,
-            provider: selectedDraft,
-            settings: payload.models.embedding.settings,
-          };
+    const selectedDraft = signature.kind === "chat" ? payload.models.chat.connections.find((item) => item.id === signature.id) : payload.models.embedding.providers.find((item) => item.id === signature.id);
+    const body = signature.kind === "chat" ? {
+      kind: signature.kind,
+      revision: signature.revision,
+      connection: selectedDraft
+    } : {
+      kind: signature.kind,
+      revision: signature.revision,
+      provider: selectedDraft,
+      settings: payload.models.embedding.settings
+    };
     syncOperationControls();
     const status = byId("mobileModelProbeStatus");
     status.textContent = "正在探测精确草稿…";
@@ -1160,7 +1027,7 @@ export async function openMobileSettings(opener) {
         ...result,
         observed_dimension: result.observed_dimension,
         probed_at: result.probed_at,
-        latency_ms: Math.round(finished - started),
+        latency_ms: Math.round(finished - started)
       });
       state = applied.state;
       renderRouteList();
@@ -1186,26 +1053,21 @@ export async function openMobileSettings(opener) {
       if (!disposed) syncOperationControls();
     }
   }
-
   function retainSelection(next, previous) {
     for (const kind of ["chat", "embedding"]) {
       const id = previous?.selected?.[kind];
-      const items =
-        kind === "chat" ? next.models.chat.connections : next.models.embedding.providers;
+      const items = kind === "chat" ? next.models.chat.connections : next.models.embedding.providers;
       if (id && items.some((item) => item.id === id)) next.selected[kind] = id;
     }
     next.activeRoute = previous?.activeRoute || "chat";
     return next;
   }
-
   async function saveModels() {
     if (!state) return;
     let save = null;
-    if (
-      !numericValidation.runSaveIfValid(state, () => {
-        save = modelOperations.beginSave();
-      })
-    ) {
+    if (!numericValidation.runSaveIfValid(state, () => {
+      save = modelOperations.beginSave();
+    })) {
       setModelStatus("请修正标记的模型数值字段；当前草稿尚未丢失。", "error");
       return;
     }
@@ -1243,7 +1105,7 @@ export async function openMobileSettings(opener) {
       } else if (Array.isArray(error.details?.detail)) {
         state = mapServerFieldErrors(
           state,
-          normalizeMobileModelValidationDetails(error.details.detail, state),
+          normalizeMobileModelValidationDetails(error.details.detail, state)
         );
         render({ preserveStatus: true });
         setModelStatus("请修正标记的模型字段；当前草稿尚未丢失。", "error");
@@ -1260,13 +1122,11 @@ export async function openMobileSettings(opener) {
       }
     }
   }
-
   async function fetchModelSnapshot(remote = false) {
     if (modelOperations.saveInFlight) return false;
     if (!remote) return modelResources.enterModels();
     return modelResources.reloadSnapshot();
   }
-
   async function loadModelSettings() {
     modelLoadRecovery.beginEntry();
     try {
@@ -1278,11 +1138,9 @@ export async function openMobileSettings(opener) {
       return modelLoadRecovery.failEntry(error, modelResources.readiness());
     }
   }
-
   function confirmLeave() {
     return !state?.dirty || window.confirm("模型路由有未保存的更改，确定离开吗？");
   }
-
   function destroy({ restoreFocus = true } = {}) {
     if (disposed) return;
     disposed = true;
@@ -1295,13 +1153,11 @@ export async function openMobileSettings(opener) {
       requestCloseActiveSettings = null;
     }
   }
-
   function requestClose() {
     if (!confirmLeave()) return false;
     destroy();
     return true;
   }
-
   function switchSettingsSection(nextSection, trigger = null) {
     if (nextSection === currentSettingsSection) {
       const readiness = modelResources.readiness();
@@ -1332,19 +1188,17 @@ export async function openMobileSettings(opener) {
     });
     return true;
   }
-
   function onBeforeUnload(event) {
     if (!state?.dirty) return;
     event.preventDefault();
     event.returnValue = "";
   }
-
   function onConfigReloaded(event) {
     if (event.detail?.type && event.detail.type !== CONFIG_RELOADED_TYPE) return;
     if (modelOperations.saveInFlight) return;
-    void fetchModelSnapshot(true).catch(() => {});
+    void fetchModelSnapshot(true).catch(() => {
+    });
   }
-
   card.querySelectorAll("[data-mobile-settings-section]").forEach((tab) => {
     tab.addEventListener("click", () => {
       switchSettingsSection(tab.dataset.mobileSettingsSection, tab);
@@ -1362,14 +1216,12 @@ export async function openMobileSettings(opener) {
   });
   savedToggle.addEventListener("change", () => {
     if (!savedToggle.checked || savedStoredValue) return;
-    const warning =
-      "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+    const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
     if (!window.confirm(warning)) {
       savedToggle.checked = false;
       setSavedStatus("已取消，自动同步仍为关闭。");
     }
   });
-
   card.querySelectorAll("[data-mobile-model-route]").forEach((tab) => {
     tab.addEventListener("click", () => {
       if (modelMutationBlocked()) return;
@@ -1414,8 +1266,7 @@ export async function openMobileSettings(opener) {
     if (field) updateField(field, event.target);
   });
   byId("mobileModelCredentialEditor").addEventListener("click", (event) => {
-    const action = event.target.closest("[data-model-credential-action]")?.dataset
-      .modelCredentialAction;
+    const action = event.target.closest("[data-model-credential-action]")?.dataset.modelCredentialAction;
     if (action) updateCredential(action);
   });
   byId("mobileModelCredentialEditor").addEventListener("input", (event) => {
@@ -1460,19 +1311,18 @@ export async function openMobileSettings(opener) {
       "mobileModelEmbeddingDimension",
       "output_dimensionality",
       "number",
-      "models.embedding.settings.output_dimensionality",
+      "models.embedding.settings.output_dimensionality"
     ],
     [
       "mobileModelEmbeddingSimilarity",
       "similarity_threshold",
       "number",
-      "models.embedding.settings.similarity_threshold",
-    ],
+      "models.embedding.settings.similarity_threshold"
+    ]
   ]) {
     byId(id).addEventListener("input", (event) => {
       if (modelMutationBlocked() || modelControlLocked(path)) return;
-      const value =
-        kind === "number" ? parseMobileModelNumericDraft(event.target.value) : event.target.value;
+      const value = kind === "number" ? parseMobileModelNumericDraft(event.target.value) : event.target.value;
       state = updateRouteSetting(state, "embedding", field, value);
       numericValidation.afterDraftMutation();
       exactDraftRenderer.afterDraftMutation();
@@ -1480,10 +1330,7 @@ export async function openMobileSettings(opener) {
     });
   }
   byId("mobileModelEmbeddingMultimodal").addEventListener("change", (event) => {
-    if (
-      modelMutationBlocked() ||
-      modelControlLocked("models.embedding.settings.multimodal_enabled")
-    )
+    if (modelMutationBlocked() || modelControlLocked("models.embedding.settings.multimodal_enabled"))
       return;
     state = updateRouteSetting(state, "embedding", "multimodal_enabled", event.target.checked);
     numericValidation.afterDraftMutation();
@@ -1496,7 +1343,7 @@ export async function openMobileSettings(opener) {
       state,
       "chat",
       "concurrency",
-      parseMobileModelNumericDraft(event.target.value),
+      parseMobileModelNumericDraft(event.target.value)
     );
     numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
@@ -1508,7 +1355,7 @@ export async function openMobileSettings(opener) {
       state,
       "chat",
       "timeout_seconds",
-      parseMobileModelNumericDraft(event.target.value),
+      parseMobileModelNumericDraft(event.target.value)
     );
     numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
@@ -1521,14 +1368,13 @@ export async function openMobileSettings(opener) {
     state = setMigrationResolution(
       state,
       button.dataset.migrationId,
-      migrationResolution(button.dataset.migrationAction),
+      migrationResolution(button.dataset.migrationAction)
     );
     numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
     renderMigration();
     setModelStatus("迁移选择尚未保存。");
   });
-
   setModelEditorLocked(true);
   setModelEditorBusy(false);
   focusController = createDialogFocusController({
@@ -1539,7 +1385,7 @@ export async function openMobileSettings(opener) {
       if (liveOpener?.isConnected) return liveOpener;
       return opener?.isConnected ? opener : null;
     },
-    onClose: requestClose,
+    onClose: requestClose
   });
   focusController.activate();
   window.addEventListener("beforeunload", onBeforeUnload);
@@ -1549,3 +1395,4 @@ export async function openMobileSettings(opener) {
   void loadSavedSync();
   return { requestClose, switchSettingsSection };
 }
+//# sourceMappingURL=model-settings.js.map

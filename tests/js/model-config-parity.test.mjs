@@ -1,18 +1,11 @@
 // @ts-check
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import test from "node:test";
 
 import * as popupState from "../../extension/popup/popup-model-config-state.js";
 import * as webState from "../../src/openbiliclaw/web/shared/model-config-state.js";
 
-/**
- * The popup module is a byte-synced copy of the web module (asserted below),
- * so both namespaces expose the same loose-record API. Typed as any here
- * because the pre-TS-conversion .js source exports no types.
- * @type {any}
- */
+/** @type {any} */
 const popupImpl = popupState;
 /** @type {any} */
 const webImpl = webState;
@@ -21,23 +14,6 @@ const IMPLEMENTATIONS = [
   ["web", webImpl],
   ["extension", popupImpl],
 ];
-
-test("extension popup state module is a synced copy of the shared source", () => {
-  const root = resolve(import.meta.dirname, "..", "..");
-  const source = readFileSync(
-    resolve(root, "src/openbiliclaw/web/shared/model-config-state.js"),
-    "utf-8",
-  );
-  const generated = readFileSync(
-    resolve(root, "extension/popup/popup-model-config-state.js"),
-    "utf-8",
-  );
-  assert.ok(
-    generated.endsWith(source),
-    "extension/popup/popup-model-config-state.js drifted from the shared source. " +
-      "Regenerate with: node extension/scripts/sync-model-config-state.mjs",
-  );
-});
 
 /**
  * @param {string} id

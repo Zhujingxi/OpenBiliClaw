@@ -1,10 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  normalizeDelightCandidate,
-  normalizeRecommendation,
-} from "../popup/popup-helpers.js";
+import { normalizeDelightCandidate, normalizeRecommendation } from "../popup/popup-helpers.js";
 import {
   captureSavedFocus as capturePopupSavedFocus,
   createRetainedSavedListState as createPopupRetainedState,
@@ -109,61 +106,76 @@ test("recommendation and delight normalizers preserve canonical saved identity",
 });
 
 test("saved identity never uses a recommendation row id or namespaced legacy id as content_id", () => {
-  assert.deepEqual(normalizeCanonicalSavedItem({
-    id: 77,
-    bvid: "youtube:yt-1",
-    item_key: "youtube:yt-1",
-    source_platform: "youtube",
-    content_url: "https://www.youtube.com/watch?v=yt-1",
-    content_type: "video",
-  }), {
-    item_key: "youtube:yt-1",
-    source_platform: "youtube",
-    content_id: "",
-    content_url: "https://www.youtube.com/watch?v=yt-1",
-    content_type: "video",
-  });
+  assert.deepEqual(
+    normalizeCanonicalSavedItem({
+      id: 77,
+      bvid: "youtube:yt-1",
+      item_key: "youtube:yt-1",
+      source_platform: "youtube",
+      content_url: "https://www.youtube.com/watch?v=yt-1",
+      content_type: "video",
+    }),
+    {
+      item_key: "youtube:yt-1",
+      source_platform: "youtube",
+      content_id: "",
+      content_url: "https://www.youtube.com/watch?v=yt-1",
+      content_type: "video",
+    },
+  );
 
-  assert.equal(normalizeCanonicalSavedItem({
-    id: 88,
-    item_key: "web:url:0123456789abcdef01234567",
-    source_platform: "web",
-    content_url: "https://example.com/story",
-    content_type: "article",
-  }).content_id, "");
+  assert.equal(
+    normalizeCanonicalSavedItem({
+      id: 88,
+      item_key: "web:url:0123456789abcdef01234567",
+      source_platform: "web",
+      content_url: "https://example.com/story",
+      content_type: "article",
+    }).content_id,
+    "",
+  );
 
-  assert.deepEqual(normalizeMobileSavedIdentity({
-    id: 99,
-    bvid: "twitter:1900000000000000001",
-    item_key: "twitter:1900000000000000001",
-    source_platform: "twitter",
-    content_url: "https://x.com/openai/status/1900000000000000001",
-    content_type: "tweet",
-  }), {
-    id: 99,
-    bvid: "twitter:1900000000000000001",
-    item_key: "twitter:1900000000000000001",
-    source_platform: "twitter",
-    content_id: "",
-    content_url: "https://x.com/openai/status/1900000000000000001",
-    content_type: "tweet",
-  });
+  assert.deepEqual(
+    normalizeMobileSavedIdentity({
+      id: 99,
+      bvid: "twitter:1900000000000000001",
+      item_key: "twitter:1900000000000000001",
+      source_platform: "twitter",
+      content_url: "https://x.com/openai/status/1900000000000000001",
+      content_type: "tweet",
+    }),
+    {
+      id: 99,
+      bvid: "twitter:1900000000000000001",
+      item_key: "twitter:1900000000000000001",
+      source_platform: "twitter",
+      content_id: "",
+      content_url: "https://x.com/openai/status/1900000000000000001",
+      content_type: "tweet",
+    },
+  );
 });
 
 test("save payload normalization does not force unknown text content to video", () => {
-  assert.equal(normalizeSavedItemInput({
-    item_key: "twitter:url:0123456789abcdef01234567",
-    source_platform: "twitter",
-    content_id: "",
-    content_url: "https://x.com/openai/status/1900000000000000001",
-    content_type: "",
-  }).content_type, "");
-  assert.equal(normalizeSavedItemInput({
-    id: 77,
-    bvid: "youtube:yt-1",
-    source_platform: "youtube",
-    content_url: "https://www.youtube.com/watch?v=yt-1",
-  }).content_id, "");
+  assert.equal(
+    normalizeSavedItemInput({
+      item_key: "twitter:url:0123456789abcdef01234567",
+      source_platform: "twitter",
+      content_id: "",
+      content_url: "https://x.com/openai/status/1900000000000000001",
+      content_type: "",
+    }).content_type,
+    "",
+  );
+  assert.equal(
+    normalizeSavedItemInput({
+      id: 77,
+      bvid: "youtube:yt-1",
+      source_platform: "youtube",
+      content_url: "https://www.youtube.com/watch?v=yt-1",
+    }).content_id,
+    "",
+  );
 });
 
 test("desktop saved API uses bounded strict requests and propagates failures", async () => {
@@ -184,18 +196,21 @@ test("desktop saved API uses bounded strict requests and propagates failures", a
     content_type: "tweet",
   };
   assert.deepEqual(core.normalizeSavedItem(xItem), xItem);
-  assert.deepEqual(core.normalizeSavedItem({
-    source_platform: "x",
-    content_id: "1900000000000000002",
-    content_url: "https://x.com/openai/status/1900000000000000002",
-    content_type: "tweet",
-  }), {
-    source_platform: "twitter",
-    content_id: "1900000000000000002",
-    content_url: "https://x.com/openai/status/1900000000000000002",
-    content_type: "tweet",
-    item_key: "twitter:1900000000000000002",
-  });
+  assert.deepEqual(
+    core.normalizeSavedItem({
+      source_platform: "x",
+      content_id: "1900000000000000002",
+      content_url: "https://x.com/openai/status/1900000000000000002",
+      content_type: "tweet",
+    }),
+    {
+      source_platform: "twitter",
+      content_id: "1900000000000000002",
+      content_url: "https://x.com/openai/status/1900000000000000002",
+      content_type: "tweet",
+      item_key: "twitter:1900000000000000002",
+    },
+  );
   await api.save("favorite", xItem);
   await api.remove("favorite", xItem.item_key);
   await api.list("favorite");
@@ -272,12 +287,20 @@ test("saved list state retains the last successful rows when refresh fails", () 
 test("saved mutation registry isolates keys and discards stale hydration", async () => {
   const registry = createSavedMutationRegistry();
   let finishHydration: (value: unknown) => void = () => {};
-  const hydration = registry.hydrate("favorite", "youtube:1", () => new Promise((resolve) => {
-    finishHydration = resolve;
-  }));
+  const hydration = registry.hydrate(
+    "favorite",
+    "youtube:1",
+    () =>
+      new Promise((resolve) => {
+        finishHydration = resolve;
+      }),
+  );
   let finishSave: (value: unknown) => void = () => {};
   const mutation = registry.toggle("favorite", "youtube:1", {
-    add: () => new Promise((resolve) => { finishSave = resolve; }),
+    add: () =>
+      new Promise((resolve) => {
+        finishSave = resolve;
+      }),
     remove: async () => ({ saved: false }),
   });
   assert.equal(registry.isBusy("favorite", "youtube:1"), true);
@@ -299,7 +322,10 @@ test("mobile task tracker survives an aborted poll and remains resumable", async
       if (attempts === 1) throw Object.assign(new Error("aborted"), { name: "AbortError" });
       return { task_id: "task-mobile", items: [{ item_key: "youtube:1", status: "synced" }] };
     },
-    schedule: (run: () => void) => { scheduled.push(run); return scheduled.length; },
+    schedule: (run: () => void) => {
+      scheduled.push(run);
+      return scheduled.length;
+    },
     cancel: () => {},
   });
   tracker.track({
@@ -317,14 +343,24 @@ test("saved focus token restores the same item action after rerender", () => {
   let focused = 0;
   const action = {
     dataset: { savedAction: "remove" },
-    focus() { focused += 1; },
-    closest(selector: string) { return selector === "[data-item-key]" ? card : null; },
+    focus() {
+      focused += 1;
+    },
+    closest(selector: string) {
+      return selector === "[data-item-key]" ? card : null;
+    },
   };
   const card = {
     dataset: { itemKey: "youtube:video-1" },
-    querySelectorAll() { return [action]; },
+    querySelectorAll() {
+      return [action];
+    },
   };
-  const root = { querySelectorAll() { return [card]; } };
+  const root = {
+    querySelectorAll() {
+      return [card];
+    },
+  };
   const token = captureSavedFocus(root, action);
   assert.deepEqual(token, { itemKey: "youtube:video-1", action: "remove", index: 0 });
   assert.equal(restoreSavedFocus(root, token), true);
@@ -341,15 +377,24 @@ test("extension saved runtime retains list state and keeps polling after the hor
   const scheduled: Array<() => void> = [];
   const messages: string[] = [];
   const tracker = createSavedSyncTaskTracker({
-    poll: async () => ({ task_id: "popup-task", items: [{ item_key: "zhihu:1", status: "syncing" }] }),
+    poll: async () => ({
+      task_id: "popup-task",
+      items: [{ item_key: "zhihu:1", status: "syncing" }],
+    }),
     now: () => now,
-    schedule: (run: () => void) => { scheduled.push(run); return scheduled.length; },
+    schedule: (run: () => void) => {
+      scheduled.push(run);
+      return scheduled.length;
+    },
     cancel: () => {},
     foregroundHorizonMs: 20_000,
   });
-  tracker.track({ task_id: "popup-task", items: [{ item_key: "zhihu:1", status: "syncing" }] }, {
-    onBackground: () => messages.push("仍在后台同步"),
-  });
+  tracker.track(
+    { task_id: "popup-task", items: [{ item_key: "zhihu:1", status: "syncing" }] },
+    {
+      onBackground: () => messages.push("仍在后台同步"),
+    },
+  );
   now = 21_000;
   await scheduled.shift()();
   assert.deepEqual(messages, ["仍在后台同步"]);
@@ -378,7 +423,13 @@ test("desktop saved core retains rows, isolates mutations, and restores focus", 
   await first;
 
   let focused = false;
-  const action = { dataset: { savedAction: "sync" }, focus() { focused = true; }, closest: () => card };
+  const action = {
+    dataset: { savedAction: "sync" },
+    focus() {
+      focused = true;
+    },
+    closest: () => card,
+  };
   const card = { dataset: { itemKey: "reddit:t3_1" }, querySelectorAll: () => [action] };
   const root = { querySelectorAll: () => [card] };
   const token = core.captureSavedFocus(root, action);
@@ -394,8 +445,12 @@ test("mobile adapter injects document into the dialog focus controller", async (
   const listeners = new Map<string, (event: any) => void>();
   const doc = {
     activeElement: null,
-    addEventListener(type: string, fn: (event: any) => void) { listeners.set(type, fn); },
-    removeEventListener(type: string) { listeners.delete(type); },
+    addEventListener(type: string, fn: (event: any) => void) {
+      listeners.set(type, fn);
+    },
+    removeEventListener(type: string) {
+      listeners.delete(type);
+    },
   };
   (globalThis as any).document = doc;
   try {
@@ -403,7 +458,9 @@ test("mobile adapter injects document into the dialog focus controller", async (
     const controller = mobile.createDialogFocusController({
       dialog: { querySelectorAll: () => [] },
       opener: { focus() {} },
-      onClose: () => { closed += 1; },
+      onClose: () => {
+        closed += 1;
+      },
     });
     controller.activate();
     assert.equal(listeners.has("keydown"), true, "adapter must inject document");
@@ -419,13 +476,21 @@ test("dialog focus controller closes on Escape and restores its opener", () => {
   const listeners = new Map<string, (event: any) => void>();
   let openerFocused = 0;
   let closed = 0;
-  const opener = { focus() { openerFocused += 1; } };
+  const opener = {
+    focus() {
+      openerFocused += 1;
+    },
+  };
   const first = { focus() {} };
   const last = { focus() {} };
   const doc = {
     activeElement: first,
-    addEventListener(type: string, fn: (event: any) => void) { listeners.set(type, fn); },
-    removeEventListener(type: string) { listeners.delete(type); },
+    addEventListener(type: string, fn: (event: any) => void) {
+      listeners.set(type, fn);
+    },
+    removeEventListener(type: string) {
+      listeners.delete(type);
+    },
   };
   const dialog = {
     contains: () => true,
@@ -435,7 +500,9 @@ test("dialog focus controller closes on Escape and restores its opener", () => {
     dialog,
     opener,
     document: doc,
-    onClose: () => { closed += 1; },
+    onClose: () => {
+      closed += 1;
+    },
   });
   controller.activate();
   listeners.get("keydown")?.({ key: "Escape", preventDefault() {} });
@@ -453,10 +520,13 @@ test("extension all-queue keeps failed URL items and accepts server-issued item 
     content_type: "article",
   };
   const failed = { ...urlItem, content_url: "https://example.com/failed" };
-  const partition = partitionSavedQueueResults([urlItem, failed], [
-    { status: "fulfilled", value: { saved: true, item_key: "web:url:0123456789abcdef01234567" } },
-    { status: "rejected", reason: new Error("offline") },
-  ]);
+  const partition = partitionSavedQueueResults(
+    [urlItem, failed],
+    [
+      { status: "fulfilled", value: { saved: true, item_key: "web:url:0123456789abcdef01234567" } },
+      { status: "rejected", reason: new Error("offline") },
+    ],
+  );
   assert.equal(partition.savedCount, 1);
   assert.equal(partition.failedCount, 1);
   assert.equal(partition.saved[0].itemKey, "web:url:0123456789abcdef01234567");
@@ -466,40 +536,54 @@ test("extension all-queue keeps failed URL items and accepts server-issued item 
 function installAbortAwareNeverFetch(safetyMs = 80) {
   const original = globalThis.fetch;
   const seenSignals: AbortSignal[] = [];
-  globalThis.fetch = (async (_input: unknown, init: RequestInit = {}) => new Promise((_resolve, reject) => {
-    const signal = init.signal as AbortSignal | undefined;
-    if (signal) seenSignals.push(signal);
-    const safety = setTimeout(() => reject(Object.assign(new Error("safety timeout"), { name: "SafetyError" })), safetyMs);
-    const abort = () => {
-      clearTimeout(safety);
-      reject(signal?.reason || Object.assign(new Error("aborted"), { name: "AbortError" }));
-    };
-    if (signal?.aborted) abort();
-    else signal?.addEventListener("abort", abort, { once: true });
-  })) as typeof fetch;
+  globalThis.fetch = (async (_input: unknown, init: RequestInit = {}) =>
+    new Promise((_resolve, reject) => {
+      const signal = init.signal as AbortSignal | undefined;
+      if (signal) seenSignals.push(signal);
+      const safety = setTimeout(
+        () => reject(Object.assign(new Error("safety timeout"), { name: "SafetyError" })),
+        safetyMs,
+      );
+      const abort = () => {
+        clearTimeout(safety);
+        reject(signal?.reason || Object.assign(new Error("aborted"), { name: "AbortError" }));
+      };
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    })) as typeof fetch;
   return {
     seenSignals,
-    restore() { globalThis.fetch = original; },
+    restore() {
+      globalThis.fetch = original;
+    },
   };
 }
 
 function installPopupAuthStorage(initial: Record<string, unknown>) {
   const values = { ...initial };
   const originalChrome = (globalThis as any).chrome;
-  (globalThis as any).chrome = { storage: { local: {
-    get(keys: string | string[], callback: (items: Record<string, unknown>) => void) {
-      const selected = Array.isArray(keys) ? keys : [keys];
-      callback(Object.fromEntries(selected.filter((key) => key in values).map((key) => [key, values[key]])));
+  (globalThis as any).chrome = {
+    storage: {
+      local: {
+        get(keys: string | string[], callback: (items: Record<string, unknown>) => void) {
+          const selected = Array.isArray(keys) ? keys : [keys];
+          callback(
+            Object.fromEntries(
+              selected.filter((key) => key in values).map((key) => [key, values[key]]),
+            ),
+          );
+        },
+        set(items: Record<string, unknown>, callback: () => void) {
+          Object.assign(values, items);
+          callback();
+        },
+        remove(keys: string | string[], callback: () => void) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+          callback();
+        },
+      },
     },
-    set(items: Record<string, unknown>, callback: () => void) {
-      Object.assign(values, items);
-      callback();
-    },
-    remove(keys: string | string[], callback: () => void) {
-      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
-      callback();
-    },
-  } } };
+  };
   __resetPopupDeviceAuthForTests();
   __resetBackendEndpointForTests();
   return {
@@ -518,13 +602,23 @@ function neverSettlingAuthFetch(authSignals: AbortSignal[], protectedStatus = 20
     }
     if (init.signal) authSignals.push(init.signal);
     return new Promise<Response>((_resolve, reject) => {
-      const safety = setTimeout(() => reject(Object.assign(new Error("auth safety timeout"), {
-        name: "SafetyError",
-      })), 80);
-      init.signal?.addEventListener("abort", () => {
-        clearTimeout(safety);
-        reject(init.signal?.reason || new DOMException("Aborted", "AbortError"));
-      }, { once: true });
+      const safety = setTimeout(
+        () =>
+          reject(
+            Object.assign(new Error("auth safety timeout"), {
+              name: "SafetyError",
+            }),
+          ),
+        80,
+      );
+      init.signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(safety);
+          reject(init.signal?.reason || new DOMException("Aborted", "AbortError"));
+        },
+        { once: true },
+      );
     });
   }) as typeof fetch;
 }
@@ -571,7 +665,9 @@ test("extension saved and config requests abort a never-resolving fetch within t
     await assert.rejects(syncPopupSavedItems("favorite", ["youtube:1"], 5), { name: "AbortError" });
     await assert.rejects(pollPopupSavedSyncTask("task-timeout", 5), { name: "AbortError" });
     await assert.rejects(fetchPopupConfig(5), { name: "AbortError" });
-    await assert.rejects(updatePopupConfig({ saved_sync: { auto_sync_enabled: false } }, 5), { name: "AbortError" });
+    await assert.rejects(updatePopupConfig({ saved_sync: { auto_sync_enabled: false } }, 5), {
+      name: "AbortError",
+    });
     assert.equal(never.seenSignals.length, 7);
     assert.ok(never.seenSignals.every((signal) => signal.aborted));
   } finally {
@@ -584,12 +680,17 @@ test("a timed-out extension mutation clears per-item busy state", async () => {
   const registry = createSavedMutationRegistry();
   try {
     const mutation = registry.toggle("favorite", "youtube:timeout", {
-      add: () => savePopupItem("favorite", {
-        source_platform: "youtube",
-        content_id: "timeout",
-        content_url: "https://youtube.com/watch?v=timeout",
-        content_type: "video",
-      }, 5),
+      add: () =>
+        savePopupItem(
+          "favorite",
+          {
+            source_platform: "youtube",
+            content_id: "timeout",
+            content_url: "https://youtube.com/watch?v=timeout",
+            content_type: "video",
+          },
+          5,
+        ),
       remove: async () => ({ saved: false }),
     });
     assert.equal(registry.isBusy("favorite", "youtube:timeout"), true);
@@ -607,13 +708,24 @@ test("mobile saved and config requests abort and remain retryable after a hung f
   const never = installAbortAwareNeverFetch();
   try {
     await assert.rejects(api.fetchSavedItems("watch_later", 10, 0, 5), { name: "AbortError" });
-    await assert.rejects(api.savedItemStatus("watch_later", "youtube:1", 5), { name: "AbortError" });
-    await assert.rejects(api.saveItem("watch_later", { source_platform: "youtube", content_id: "1" }, 5), { name: "AbortError" });
-    await assert.rejects(api.removeSavedItem("watch_later", "youtube:1", 5), { name: "AbortError" });
-    await assert.rejects(api.syncSavedItems("watch_later", ["youtube:1"], 5), { name: "AbortError" });
+    await assert.rejects(api.savedItemStatus("watch_later", "youtube:1", 5), {
+      name: "AbortError",
+    });
+    await assert.rejects(
+      api.saveItem("watch_later", { source_platform: "youtube", content_id: "1" }, 5),
+      { name: "AbortError" },
+    );
+    await assert.rejects(api.removeSavedItem("watch_later", "youtube:1", 5), {
+      name: "AbortError",
+    });
+    await assert.rejects(api.syncSavedItems("watch_later", ["youtube:1"], 5), {
+      name: "AbortError",
+    });
     await assert.rejects(api.pollSavedSyncTask("task-timeout", 5), { name: "AbortError" });
     await assert.rejects(api.fetchConfig(5), { name: "AbortError" });
-    await assert.rejects(api.updateConfig({ saved_sync: { auto_sync_enabled: false } }, 5), { name: "AbortError" });
+    await assert.rejects(api.updateConfig({ saved_sync: { auto_sync_enabled: false } }, 5), {
+      name: "AbortError",
+    });
     assert.equal(never.seenSignals.length, 8);
     assert.ok(never.seenSignals.every((signal) => signal.aborted));
   } finally {
@@ -625,9 +737,16 @@ test("mobile saved and config requests abort and remain retryable after a hung f
 async function exerciseRecoveredTaskCoordinator(createCoordinator: Function) {
   const tracked = new Map<string, any>();
   const tracker = {
-    has(taskId: string) { return tracked.has(taskId); },
-    track(task: any, callbacks: any) { tracked.set(task.task_id, callbacks); return task.task_id; },
-    stop(taskId: string) { return tracked.delete(taskId); },
+    has(taskId: string) {
+      return tracked.has(taskId);
+    },
+    track(task: any, callbacks: any) {
+      tracked.set(task.task_id, callbacks);
+      return task.task_id;
+    },
+    stop(taskId: string) {
+      return tracked.delete(taskId);
+    },
   };
   let fetches = 0;
   let terminals = 0;
@@ -637,7 +756,9 @@ async function exerciseRecoveredTaskCoordinator(createCoordinator: Function) {
       fetches += 1;
       return { task_id: taskId, items: [{ item_key: "youtube:1", status: "syncing" }] };
     },
-    onTerminal: () => { terminals += 1; },
+    onTerminal: () => {
+      terminals += 1;
+    },
   });
   const rows = [
     { item_key: "youtube:1", sync_status: "syncing", sync_task_id: "persisted-task" },
@@ -655,19 +776,28 @@ async function exerciseRecoveredTaskCoordinator(createCoordinator: Function) {
   assert.equal(coordinator.owns("youtube:1"), false);
   assert.equal(terminals, 1);
 
-  coordinator.track({
-    task_id: "new-task",
-    items: [{ item_key: "reddit:1", status: "syncing" }],
-  }, ["reddit:1"]);
-  coordinator.track({
-    task_id: "new-task",
-    items: [{ item_key: "zhihu:2", status: "syncing" }],
-  }, ["zhihu:2"]);
+  coordinator.track(
+    {
+      task_id: "new-task",
+      items: [{ item_key: "reddit:1", status: "syncing" }],
+    },
+    ["reddit:1"],
+  );
+  coordinator.track(
+    {
+      task_id: "new-task",
+      items: [{ item_key: "zhihu:2", status: "syncing" }],
+    },
+    ["zhihu:2"],
+  );
   assert.equal(coordinator.owns("reddit:1"), true);
   assert.equal(coordinator.owns("zhihu:2"), true);
   tracked.get("new-task").onTerminal({
     task_id: "new-task",
-    items: [{ item_key: "reddit:1", status: "synced" }, { item_key: "zhihu:2", status: "synced" }],
+    items: [
+      { item_key: "reddit:1", status: "synced" },
+      { item_key: "zhihu:2", status: "synced" },
+    ],
   });
   assert.equal(coordinator.owns("reddit:1"), false);
   assert.equal(coordinator.owns("zhihu:2"), false);
@@ -697,8 +827,14 @@ test("saved sync eligibility distinguishes content limits from rolling upgrades 
 
   for (const runtime of [popup, mobile, desktop]) {
     assert.equal(typeof runtime.isSavedSyncEligibleStatus, "function");
-    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_content_type"), false);
-    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_adapter_missing"), true);
+    assert.equal(
+      runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_content_type"),
+      false,
+    );
+    assert.equal(
+      runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_adapter_missing"),
+      true,
+    );
     assert.equal(runtime.isSavedSyncEligibleStatus("pending", "", "task-1"), false);
     assert.equal(runtime.isSavedSyncEligibleStatus("pending", "", ""), true);
     assert.equal(runtime.isSavedSyncEligibleStatus("syncing"), false);
@@ -710,11 +846,17 @@ test("saved sync eligibility distinguishes content limits from rolling upgrades 
 
   const { readFile } = await import("node:fs/promises");
   const [popupRuntime, popupView, mobileView, desktopCore, desktopView] = await Promise.all([
-    readFile(new URL("../popup/popup-saved-sync.js", import.meta.url), "utf8"),
-    readFile(new URL("../popup/popup.js", import.meta.url), "utf8"),
+    readFile(new URL("../popup/popup-saved-sync.ts", import.meta.url), "utf8"),
+    readFile(new URL("../popup/popup.ts", import.meta.url), "utf8"),
     readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8"),
-    readFile(new URL("../../src/openbiliclaw/web/shared/saved-sync-core.js", import.meta.url), "utf8"),
-    readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../src/openbiliclaw/web/shared/saved-sync-core.js", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+      "utf8",
+    ),
   ]);
   for (const source of [popupRuntime, mobileView]) {
     assert.match(source, /仅本地保存/);
@@ -739,16 +881,21 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
   (globalThis as any).location = oldLocation;
   const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const viewModels = [
-    (item: any) => popup.getSavedSyncPresentation(
-      item.sync_status,
-      item.error_code,
-      item.resolved_target,
-      item.error_message,
-      item.sync_task_id,
-    ),
-    (item: any) => mobile.getSavedSyncViewModel({
-      item_key: "youtube:1", source_platform: "youtube", content_id: "1", ...item,
-    }),
+    (item: any) =>
+      popup.getSavedSyncPresentation(
+        item.sync_status,
+        item.error_code,
+        item.resolved_target,
+        item.error_message,
+        item.sync_task_id,
+      ),
+    (item: any) =>
+      mobile.getSavedSyncViewModel({
+        item_key: "youtube:1",
+        source_platform: "youtube",
+        content_id: "1",
+        ...item,
+      }),
   ];
 
   for (const model of viewModels) {
@@ -773,13 +920,15 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
     assert.match(extension.detail, /连接已安装 OpenBiliClaw 插件/);
 
     const contentLimit = model({
-      sync_status: "unsupported", error_code: "unsupported_content_type",
+      sync_status: "unsupported",
+      error_code: "unsupported_content_type",
     });
     assert.equal(contentLimit.localOnly, true);
     assert.equal(contentLimit.actionable, false);
 
     const rollingUpgrade = model({
-      sync_status: "unsupported", error_code: "unsupported_adapter_missing",
+      sync_status: "unsupported",
+      error_code: "unsupported_adapter_missing",
     });
     assert.equal(rollingUpgrade.localOnly, false);
     assert.equal(rollingUpgrade.actionable, true);
@@ -799,7 +948,9 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
 
   for (const platform of ["youtube", "twitter", "xiaohongshu", "douyin", "zhihu", "reddit"]) {
     const ready = mobile.getSavedSyncViewModel({
-      item_key: `${platform}:1`, source_platform: platform, content_id: "1",
+      item_key: `${platform}:1`,
+      source_platform: platform,
+      content_id: "1",
     });
     assert.equal(ready.label, "待同步", platform);
     assert.equal(ready.actionable, true, platform);
@@ -830,13 +981,15 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
   assert.equal(extensionRequired.detailKey, "extension_required");
 
   const contentLimit = desktopModel({
-    sync_status: "unsupported", error_code: "unsupported_content_type",
+    sync_status: "unsupported",
+    error_code: "unsupported_content_type",
   });
   assert.equal(contentLimit.localOnly, true);
   assert.equal(contentLimit.actionable, false);
 
   const rollingUpgrade = desktopModel({
-    sync_status: "unsupported", error_code: "unsupported_adapter_missing",
+    sync_status: "unsupported",
+    error_code: "unsupported_adapter_missing",
   });
   assert.equal(rollingUpgrade.localOnly, false);
   assert.equal(rollingUpgrade.actionable, true);
@@ -856,7 +1009,8 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
 
   const { readFile } = await import("node:fs/promises");
   const desktopView = await readFile(
-    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8",
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+    "utf8",
   );
   for (const copy of [
     /平台同步任务已提交，请稍候/,
@@ -867,23 +1021,30 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
     /平台同步失败，请重试/,
     /平台已确认同步完成/,
     /待同步/,
-  ]) assert.match(desktopView, copy);
+  ])
+    assert.match(desktopView, copy);
 });
 
 function actionCard(itemKey: string, action: string, sink: string[]) {
   const button = {
     dataset: { savedAction: action },
-    focus() { sink.push(itemKey); },
+    focus() {
+      sink.push(itemKey);
+    },
   };
   return {
     dataset: { itemKey },
-    querySelectorAll(selector: string) { return selector === "[data-saved-action]" ? [button] : []; },
+    querySelectorAll(selector: string) {
+      return selector === "[data-saved-action]" ? [button] : [];
+    },
   };
 }
 
 function fallbackRoot(cards: any[], listAction: any = null, heading: any = null) {
   return {
-    querySelectorAll(selector: string) { return selector === "[data-item-key]" ? cards : []; },
+    querySelectorAll(selector: string) {
+      return selector === "[data-item-key]" ? cards : [];
+    },
     querySelector(selector: string) {
       if (selector.includes("data-saved-list-action")) return listAction;
       if (selector === "[data-saved-heading]") return heading;
@@ -904,24 +1065,49 @@ test("focus restoration follows adjacent card, batch action, then heading across
   for (const [restore, label] of flows) {
     const focused: string[] = [];
     const cards = [actionCard("previous", "remove", focused), actionCard("next", "sync", focused)];
-    assert.equal(restore(fallbackRoot(cards), { itemKey: "removed", action: "remove", index: 1 }), true, label);
+    assert.equal(
+      restore(fallbackRoot(cards), { itemKey: "removed", action: "remove", index: 1 }),
+      true,
+      label,
+    );
     assert.deepEqual(focused, ["next"], label);
 
     focused.length = 0;
     const syncedCard = actionCard("synced", "remove", focused);
     const afterSynced = actionCard("after-synced", "sync", focused);
-    assert.equal(restore(
-      fallbackRoot([syncedCard, afterSynced]),
-      { itemKey: "synced", action: "sync", index: 0 },
-    ), true, label);
+    assert.equal(
+      restore(fallbackRoot([syncedCard, afterSynced]), {
+        itemKey: "synced",
+        action: "sync",
+        index: 0,
+      }),
+      true,
+      label,
+    );
     assert.deepEqual(focused, ["after-synced"], label);
 
-    const batch = { focus() { focused.push("batch"); } };
-    assert.equal(restore(fallbackRoot([], batch), { itemKey: "removed", action: "remove", index: 0 }), true, label);
+    const batch = {
+      focus() {
+        focused.push("batch");
+      },
+    };
+    assert.equal(
+      restore(fallbackRoot([], batch), { itemKey: "removed", action: "remove", index: 0 }),
+      true,
+      label,
+    );
     assert.equal(focused.at(-1), "batch", label);
 
-    const heading = { focus() { focused.push("heading"); } };
-    assert.equal(restore(fallbackRoot([], null, heading), { itemKey: "removed", action: "remove", index: 0 }), true, label);
+    const heading = {
+      focus() {
+        focused.push("heading");
+      },
+    };
+    assert.equal(
+      restore(fallbackRoot([], null, heading), { itemKey: "removed", action: "remove", index: 0 }),
+      true,
+      label,
+    );
     assert.equal(focused.at(-1), "heading", label);
   }
 });
@@ -939,8 +1125,12 @@ test("list-level batch and retry focus tokens round-trip before card fallback on
       const focused: string[] = [];
       const listAction = {
         dataset: { savedListAction: actionName },
-        closest() { return null; },
-        focus() { focused.push(`list:${actionName}`); },
+        closest() {
+          return null;
+        },
+        focus() {
+          focused.push(`list:${actionName}`);
+        },
       };
       const card = actionCard("first-card", "remove", focused);
       const root = fallbackRoot([card], listAction);
@@ -954,22 +1144,46 @@ test("list-level batch and retry focus tokens round-trip before card fallback on
 
 test("retry and batch handlers capture list focus before work on all three surfaces", async () => {
   const { readFile } = await import("node:fs/promises");
-  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
-  const mobile = await readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8");
-  const desktop = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8");
-  assert.match(popup, /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?loadSavedList/);
-  assert.match(mobile, /saved-load-retry[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?load\(\)/);
-  assert.match(desktop, /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?reload\(\)/);
-  assert.match(popup, /async function runSavedSync[\s\S]*?captureSavedFocus\(focusRoot, button\)[\s\S]*?button\.disabled = true/);
-  assert.match(mobile, /saved-sync-all[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus\(\$root, event\.currentTarget\)[\s\S]*?runSync/);
-  assert.match(desktop, /async function runDesktopSavedSync[\s\S]*?captureSavedFocus\(focusRoot, activeButton\)[\s\S]*?activeButton\.disabled = true/);
+  const popup = await readFile(new URL("../popup/popup.ts", import.meta.url), "utf8");
+  const mobile = await readFile(
+    new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
+    "utf8",
+  );
+  const desktop = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    popup,
+    /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?loadSavedList/,
+  );
+  assert.match(
+    mobile,
+    /saved-load-retry[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?load\(\)/,
+  );
+  assert.match(
+    desktop,
+    /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?reload\(\)/,
+  );
+  assert.match(
+    popup,
+    /async function runSavedSync[\s\S]*?captureSavedFocus\(focusRoot, button\)[\s\S]*?button\.disabled = true/,
+  );
+  assert.match(
+    mobile,
+    /saved-sync-all[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus\(\$root, event\.currentTarget\)[\s\S]*?runSync/,
+  );
+  assert.match(
+    desktop,
+    /async function runDesktopSavedSync[\s\S]*?captureSavedFocus\(focusRoot, activeButton\)[\s\S]*?activeButton\.disabled = true/,
+  );
 });
 
 test("static batch buttons clear stale busy ARIA after success failure or abort reload", async () => {
   const { readFile } = await import("node:fs/promises");
   const popupRuntime = await import("../popup/popup-saved-sync.js");
   const desktopRuntime = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
-  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const popup = await readFile(new URL("../popup/popup.ts", import.meta.url), "utf8");
   const desktop = await readFile(
     new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
     "utf8",
@@ -988,8 +1202,12 @@ test("static batch buttons clear stale busy ARIA after success failure or abort 
       ]);
       const button = {
         disabled: true,
-        setAttribute(name: string, value: string) { attrs.set(name, value); },
-        removeAttribute(name: string) { attrs.delete(name); },
+        setAttribute(name: string, value: string) {
+          attrs.set(name, value);
+        },
+        removeAttribute(name: string) {
+          attrs.delete(name);
+        },
       };
       update(button, 2);
       assert.equal(button.disabled, false, outcome);
@@ -1000,8 +1218,12 @@ test("static batch buttons clear stale busy ARIA after success failure or abort 
     const attrs = new Map([["aria-busy", "true"]]);
     const button = {
       disabled: false,
-      setAttribute(name: string, value: string) { attrs.set(name, value); },
-      removeAttribute(name: string) { attrs.delete(name); },
+      setAttribute(name: string, value: string) {
+        attrs.set(name, value);
+      },
+      removeAttribute(name: string) {
+        attrs.delete(name);
+      },
     };
     update(button, 0);
     assert.equal(button.disabled, true);
@@ -1010,10 +1232,13 @@ test("static batch buttons clear stale busy ARIA after success failure or abort 
   }
 
   assert.equal(popupRuntime.getSavedSyncPresentation("pending", "", "", "", "task-1").busy, true);
-  assert.equal(desktopRuntime.getSavedSyncPresentation({
-    sync_status: "pending",
-    sync_task_id: "task-1",
-  }).busy, true);
+  assert.equal(
+    desktopRuntime.getSavedSyncPresentation({
+      sync_status: "pending",
+      sync_task_id: "task-1",
+    }).busy,
+    true,
+  );
 });
 
 test("single-item submission fences exclude batch and refresh overlap on all surfaces", async () => {
@@ -1031,14 +1256,20 @@ test("single-item submission fences exclude batch and refresh overlap on all sur
     const fence = createFence();
     assert.equal(fence.claim(["youtube:one"]), true);
     const rows = ["youtube:one", "reddit:two"];
-    assert.deepEqual(rows.filter((key) => !fence.has(key)), ["reddit:two"]);
-    assert.deepEqual(rows.filter((key) => !fence.has(key)), ["reddit:two"]);
+    assert.deepEqual(
+      rows.filter((key) => !fence.has(key)),
+      ["reddit:two"],
+    );
+    assert.deepEqual(
+      rows.filter((key) => !fence.has(key)),
+      ["reddit:two"],
+    );
     assert.equal(fence.claim(["youtube:one"]), false);
     fence.release(["youtube:one"]);
     assert.equal(fence.has("youtube:one"), false);
   }
 
-  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const popup = await readFile(new URL("../popup/popup.ts", import.meta.url), "utf8");
   const mobile = await readFile(
     new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
     "utf8",
@@ -1048,13 +1279,19 @@ test("single-item submission fences exclude batch and refresh overlap on all sur
     "utf8",
   );
   assert.match(popup, /syncEligible[\s\S]*?submissions\.has[\s\S]*?submissions\.claim/);
-  assert.match(mobile, /selected = selected\.filter[\s\S]*?!syncingKeys\.has[\s\S]*?syncingKeys\.claim/);
-  assert.match(desktop, /const eligible = selected\.filter[\s\S]*?!desktopSyncingKeys\[listKind\]\.has[\s\S]*?desktopSyncingKeys\[listKind\]\.claim/);
+  assert.match(
+    mobile,
+    /selected = selected\.filter[\s\S]*?!syncingKeys\.has[\s\S]*?syncingKeys\.claim/,
+  );
+  assert.match(
+    desktop,
+    /const eligible = selected\.filter[\s\S]*?!desktopSyncingKeys\[listKind\]\.has[\s\S]*?desktopSyncingKeys\[listKind\]\.claim/,
+  );
 });
 
 test("pre-task reload stays busy and mobile failure rerenders retryable live status", async () => {
   const { readFile } = await import("node:fs/promises");
-  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const popup = await readFile(new URL("../popup/popup.ts", import.meta.url), "utf8");
   const mobile = await readFile(
     new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
     "utf8",
@@ -1081,12 +1318,18 @@ test("pre-task reload stays busy and mobile failure rerenders retryable live sta
 test("Task 8 save and sync controls reserve coarse-pointer size without label shift", async () => {
   const { readFile } = await import("node:fs/promises");
   const popupCss = await readFile(new URL("../popup/popup.html", import.meta.url), "utf8");
-  const desktopCss = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/css/app.css", import.meta.url), "utf8");
+  const desktopCss = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/css/app.css", import.meta.url),
+    "utf8",
+  );
   for (const css of [popupCss, desktopCss]) {
     assert.match(css, /\(pointer:\s*coarse\)[\s\S]*?(saved-toggle|watch-later-btn)[\s\S]*?44px/);
     assert.match(css, /(saved-sync-all|watchLaterSyncAll)[\s\S]*?min-inline-size/);
   }
-  const mobileCss = await readFile(new URL("../../src/openbiliclaw/web/css/app.css", import.meta.url), "utf8");
+  const mobileCss = await readFile(
+    new URL("../../src/openbiliclaw/web/css/app.css", import.meta.url),
+    "utf8",
+  );
   assert.match(popupCss, /saved-card-sync[\s\S]*?min-inline-size/);
   assert.match(mobileCss, /saved-card-sync[\s\S]*?min-inline-size/);
   assert.match(desktopCss, /saved-sync-one[\s\S]*?min-inline-size/);
@@ -1094,9 +1337,15 @@ test("Task 8 save and sync controls reserve coarse-pointer size without label sh
 
 test("saved task lifecycles dispose on page teardown and mobile binds visibility once", async () => {
   const { readFile } = await import("node:fs/promises");
-  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
-  const mobile = await readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8");
-  const desktop = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8");
+  const popup = await readFile(new URL("../popup/popup.ts", import.meta.url), "utf8");
+  const mobile = await readFile(
+    new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
+    "utf8",
+  );
+  const desktop = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+    "utf8",
+  );
   for (const source of [popup, mobile, desktop]) {
     assert.match(source, /addEventListener\("pagehide"[\s\S]*?\.dispose\(\)/);
   }
@@ -1117,19 +1366,34 @@ test("disposing a task tracker suppresses callbacks from an in-flight poll", asy
     let finishPoll: (task: any) => void = () => {};
     let callbacks = 0;
     const tracker = createTracker({
-      poll: () => new Promise((resolve) => { finishPoll = resolve; }),
+      poll: () =>
+        new Promise((resolve) => {
+          finishPoll = resolve;
+        }),
       now: () => 0,
-      schedule: (run: () => Promise<void>) => { scheduled = run; return 1; },
+      schedule: (run: () => Promise<void>) => {
+        scheduled = run;
+        return 1;
+      },
       cancel: () => {},
     });
-    tracker.track({
-      task_id: "dispose-task",
-      items: [{ item_key: "youtube:1", status: "syncing" }],
-    }, {
-      onProgress: () => { callbacks += 1; },
-      onTerminal: () => { callbacks += 1; },
-      onPollError: () => { callbacks += 1; },
-    });
+    tracker.track(
+      {
+        task_id: "dispose-task",
+        items: [{ item_key: "youtube:1", status: "syncing" }],
+      },
+      {
+        onProgress: () => {
+          callbacks += 1;
+        },
+        onTerminal: () => {
+          callbacks += 1;
+        },
+        onPollError: () => {
+          callbacks += 1;
+        },
+      },
+    );
     callbacks = 0;
     const inFlight = scheduled?.();
     tracker.dispose();

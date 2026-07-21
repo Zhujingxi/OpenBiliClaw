@@ -8,12 +8,7 @@ import {
   __resetBackendEndpointForTests,
   updateBackendEndpoint,
 } from "../popup/popup-backend-config.js";
-import {
-  fetchSavedItems,
-  removeSavedItem,
-  saveItem,
-  savedItemStatus,
-} from "../popup/popup-api.js";
+import { fetchSavedItems, removeSavedItem, saveItem, savedItemStatus } from "../popup/popup-api.js";
 import * as popupApi from "../popup/popup-api.js";
 
 function jsonResponse(res, status, payload) {
@@ -140,8 +135,8 @@ test("popup saved surfaces round-trip through the platform-neutral saved API", a
     assert.ok(requests.every((line) => !line.includes("/api/favorites")));
 
     const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-    const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-    const popupSavedSync = readFileSync(resolve("popup", "popup-saved-sync.js"), "utf8");
+    const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
+    const popupSavedSync = readFileSync(resolve("popup", "popup-saved-sync.ts"), "utf8");
     assert.match(popupHtml, /id="tabWatchLater"/);
     assert.match(popupHtml, /id="viewWatchLater"/);
     assert.match(popupHtml, /id="watchLaterList"/);

@@ -8,7 +8,7 @@ import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js
 
 test("scheduler toggles exist only in settings drawer, not in recommendation card", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // Runtime toggles removed from recommendation card
   for (const id of ["cfgRuntimePauseLlm", "cfgRuntimePauseOnDisconnect"]) {

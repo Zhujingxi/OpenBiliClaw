@@ -1,11 +1,3 @@
-// TODO(types): Replace this temporary stabilization boundary with explicit card types.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- tracked migration debt
-// @ts-nocheck
-/**
- * Recommend view — compact header, semantic pool status, delight tray,
- * recommendation cards with feedback, pull-to-refresh.
- */
-
 import {
   fetchRecommendations,
   reshuffleRecommendations,
@@ -22,7 +14,7 @@ import {
   fetchChatTurns,
   saveItem,
   removeSavedItem,
-  savedItemStatus,
+  savedItemStatus
 } from "../api.js";
 import { state, patchState } from "../state.js";
 import {
@@ -46,38 +38,36 @@ import {
   getCommentSubmitUiState,
   buildContentUrl,
   buildRecommendationClickPayload,
-  normalizeSourcePlatform,
   normalizeSavedIdentity,
   getSourceLabel,
   formatRelativeTimestamp,
   getPublishedTimeDisplay,
   getMobileChatSession,
-  shouldAutoAppendRecommendations,
+  shouldAutoAppendRecommendations
 } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
 import { createSavedMutationRegistry } from "../saved-sync-runtime.js";
-
 let $root = null;
 let loaded = false;
 let loading = false;
-let feedbackSheet = null; // { itemId, note, submitState }
-const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
+let feedbackSheet = null;
+const feedbackDone = /* @__PURE__ */ new Map();
 const savedMutations = createSavedMutationRegistry();
 const COVER_PRELOAD_BATCH_SIZE = 12;
-const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
+const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3e3;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
 const SCROLL_PREHEAT_LOOKAHEAD = 16;
 const SCROLL_PREHEAT_ROOT_MARGIN = "0px 0px 2400px 0px";
-const warmedCoverUrls = new Set();
-const decodedCoverUrls = new Set();
-const warmingImages = new Map();
+const warmedCoverUrls = /* @__PURE__ */ new Set();
+const decodedCoverUrls = /* @__PURE__ */ new Set();
+const warmingImages = /* @__PURE__ */ new Map();
 let autoAppendObserver = null;
 let scrollPreheatObserver = null;
 let autoAppendExhausted = false;
 let autoAppendUserArmed = false;
 let autoAppendTouchY = null;
 let autoAppendIntentInitialized = false;
-const RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+const RECOVERY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3];
 let recommendationLoadState = "idle";
 let runtimeStatusLoadState = "idle";
 let recommendationRecoveryAttempt = 0;
@@ -90,31 +80,24 @@ let recommendationRecoveryPending = false;
 let runtimeStatusRecoveryPending = false;
 let runtimeStatusGeneration = 0;
 let recommendationActionMessage = "";
-
-// Delight auto-advance
 let _delightAutoTimer = null;
 let _delightDragging = false;
 let _delightSwipeStartX = 0;
 let _delightNavTimer = null;
-
-// ── Escape helper ────────────────────────────────────────────
 function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
 }
-
 export function publishedTimeHtml(item) {
   const display = getPublishedTimeDisplay(item);
   if (!display) return "";
   const title = display.title ? ` title="${esc(display.title)}"` : "";
   return `<span class="card-published-time"${title}>${esc(display.text)}</span>`;
 }
-
 export function savedIdentity(item = {}) {
   return normalizeSavedIdentity(item);
 }
-
 function announceSavedAction(message, isError = false) {
   if (!$root) return;
   let status = $root.querySelector(".saved-action-status");
@@ -128,70 +111,45 @@ function announceSavedAction(message, isError = false) {
   else status.removeAttribute("role");
   status.textContent = message;
 }
-
 function isSavedLocally(listKind, itemKey) {
   return savedMutations.isSaved(listKind, itemKey);
 }
-
 function toggleSavedLocally(listKind, item) {
   return savedMutations.toggle(listKind, item.item_key, {
     add: () => saveItem(listKind, item),
-    remove: () => removeSavedItem(listKind, item.item_key),
+    remove: () => removeSavedItem(listKind, item.item_key)
   });
 }
-
 function hydrateSavedLocally(listKind, item, update) {
-  return savedMutations
-    .hydrate(listKind, item.item_key, () => savedItemStatus(listKind, item.item_key))
-    .then(() => update(isSavedLocally(listKind, item.item_key)));
+  return savedMutations.hydrate(listKind, item.item_key, () => savedItemStatus(listKind, item.item_key)).then(() => update(isSavedLocally(listKind, item.item_key)));
 }
-
-// ── Render ────────────────────────────────────────────────────
 function render() {
   if (!$root) return;
-
-  // Capture scroll position before replacing DOM.
   const scrollTop = $root.parentElement?.scrollTop ?? 0;
-
-  // Build everything into a fragment, then swap in one shot.
   const frag = document.createDocumentFragment();
-
-  // Pull indicator
   const pull = document.createElement("div");
   pull.className = "pull-indicator";
   pull.id = "pull-indicator";
-  pull.textContent = "\u2193 \u4E0B\u62C9\u5237\u65B0";
+  pull.textContent = "↓ 下拉刷新";
   frag.appendChild(pull);
-
-  // Header slot
   const headerSlot = document.createElement("div");
   headerSlot.id = "header-slot";
   frag.appendChild(headerSlot);
   renderInto(headerSlot, renderRecommendationHeader);
-
-  // Delight slot
   const delightSlot = document.createElement("div");
   delightSlot.id = "delight-slot";
   frag.appendChild(delightSlot);
   renderInto(delightSlot, renderDelightTray);
-
-  // Recommendation cards — hide disliked items
   const runtime = normalizeRuntimeStatus(state.runtimeStatus);
-  const initializationRequired =
-    runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized;
-  const recs = initializationRequired
-    ? []
-    : state.recommendations.filter(
-        (r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike",
-      );
+  const initializationRequired = runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized;
+  const recs = initializationRequired ? [] : state.recommendations.filter(
+    (r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike"
+  );
   if (recs.length === 0 && !loading) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(recommendationEmptyMessage())}</div>`;
-    if (
-      recommendationLoadState === "failed-exhausted" ||
-      runtimeStatusLoadState === "failed-exhausted"
-    ) {
+    empty.innerHTML = `<div class="empty-state-icon">🌊</div><div class="empty-state-text">${esc(recommendationEmptyMessage())}</div>`;
+    if (recommendationLoadState === "failed-exhausted" || runtimeStatusLoadState === "failed-exhausted") {
       const retry = document.createElement("button");
       retry.className = "btn btn-outline";
       retry.type = "button";
@@ -201,52 +159,38 @@ function render() {
     }
     frag.appendChild(empty);
   }
-
   for (const [index, item] of recs.entries()) {
     frag.appendChild(renderCard(item, index));
   }
-
   renderInto(frag, renderLoadMoreRow);
-
   if (loading) {
     const sp = document.createElement("div");
     sp.style.padding = "20px";
     sp.innerHTML = `<div class="spinner"></div>`;
     frag.appendChild(sp);
   }
-
   $root.replaceChildren(frag);
-
-  // Restore scroll position so the page doesn't jump to top.
   if ($root.parentElement) $root.parentElement.scrollTop = scrollTop;
-
-  // Feedback bottom sheet
   renderFeedbackSheet();
   void warmRecommendationCovers(recs);
   observeScrollPreheat();
   observeAutoAppendSentinel();
 }
-
-/** Run a sub-renderer with $root temporarily pointed at the given container. */
 function renderInto(container, fn) {
   const prev = $root;
   $root = container;
   fn();
   $root = prev;
 }
-
-// ── Recommendation Header ───────────────────────────────────
 function renderRecommendationHeader() {
   const headerState = getMobileRecommendationHeaderState({
     runtimeStatus: runtimeStatusLoadState === "ready" ? state.runtimeStatus : null,
     activityFeed: state.activityFeed,
     runtimeEvent: state.runtimeEvent,
-    activityExpanded: state.activityExpanded,
+    activityExpanded: state.activityExpanded
   });
-
   const header = document.createElement("section");
   header.className = "recommend-header-card";
-
   const top = document.createElement("div");
   top.className = "recommend-header-top";
   top.innerHTML = `
@@ -254,13 +198,10 @@ function renderRecommendationHeader() {
       <p class="recommend-kicker">${esc(headerState.kicker)}</p>
       <h2 class="recommend-title">${esc(headerState.title)}</h2>
     </div>`;
-
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "btn btn-outline recommend-refresh-btn";
   refreshBtn.type = "button";
-  refreshBtn.textContent = loading
-    ? "\u6B63\u5728\u6362\u4E00\u6279\u2026"
-    : headerState.primaryActionLabel;
+  refreshBtn.textContent = loading ? "正在换一批…" : headerState.primaryActionLabel;
   refreshBtn.disabled = loading;
   refreshBtn.addEventListener("click", () => {
     if (headerState.initializationRequired) {
@@ -271,14 +212,12 @@ function renderRecommendationHeader() {
   });
   top.appendChild(refreshBtn);
   header.appendChild(top);
-
   if (recommendationActionMessage) {
     const notice = document.createElement("div");
     notice.className = "recommend-action-note";
     notice.textContent = recommendationActionMessage;
     header.appendChild(notice);
   }
-
   if (headerState.poolChips.length > 0) {
     const grid = document.createElement("div");
     grid.className = "recommend-pool-grid";
@@ -294,7 +233,6 @@ function renderRecommendationHeader() {
     }
     header.appendChild(grid);
   }
-
   const activity = document.createElement("div");
   activity.className = "recommend-activity-line";
   activity.innerHTML = `<span class="recommend-activity-text">${esc(headerState.activityLine)}</span>`;
@@ -308,7 +246,6 @@ function renderRecommendationHeader() {
   });
   activity.appendChild(toggle);
   header.appendChild(activity);
-
   if (headerState.activityExpanded && headerState.activityItems.length > 0) {
     const list = document.createElement("div");
     list.className = "recommend-activity-list";
@@ -321,24 +258,20 @@ function renderRecommendationHeader() {
     if (headerState.activityHasMore) {
       const more = document.createElement("button");
       more.className = "load-more-btn";
-      more.textContent = "\u52A0\u8F7D\u66F4\u591A";
+      more.textContent = "加载更多";
       more.addEventListener("click", loadMoreActivity);
       list.appendChild(more);
     }
     header.appendChild(list);
   }
-
   $root.appendChild(header);
 }
-
-/** Re-render only the header without touching cards or delight. */
 function rerenderHeaderOnly() {
   const slot = document.getElementById("header-slot");
   if (!slot) return;
   slot.innerHTML = "";
   renderInto(slot, renderRecommendationHeader);
 }
-
 function rerenderRuntimeDependentChrome() {
   rerenderHeaderOnly();
   const emptyText = document.querySelector(".empty-state .empty-state-text");
@@ -346,7 +279,6 @@ function rerenderRuntimeDependentChrome() {
     emptyText.textContent = recommendationEmptyMessage();
   }
 }
-
 async function loadMoreActivity() {
   const feed = normalizeActivityFeed(state.activityFeed);
   if (!feed.next_cursor) return;
@@ -356,29 +288,23 @@ async function loadMoreActivity() {
     patchState({
       activityFeed: {
         ...next,
-        items: [...(state.activityFeed?.items || []), ...(merged.items || [])],
-      },
+        items: [...state.activityFeed?.items || [], ...merged.items || []]
+      }
     });
     rerenderHeaderOnly();
   } catch {
-    /* ignore */
   }
 }
-
-// ── Delight Inline Chat Helpers ──────────────────────────────
 const DELIGHT_POLL_INTERVAL_MS = 1200;
-const DELIGHT_POLL_DEADLINE_MS = 180_000;
-const activeDelightPolls = new Map(); // turnId -> timeoutId
-
+const DELIGHT_POLL_DEADLINE_MS = 18e4;
+const activeDelightPolls = /* @__PURE__ */ new Map();
 function createClientTurnId(prefix = "turn") {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   return `${prefix}-${String(random).replace(/[^a-zA-Z0-9_-]/g, "")}`;
 }
-
 function pollDelightTurn(turnId, bvid) {
   if (!turnId || activeDelightPolls.has(turnId)) return;
   const startedAt = Date.now();
-
   async function tick() {
     try {
       const turn = await fetchChatTurn(turnId);
@@ -388,7 +314,6 @@ function pollDelightTurn(turnId, bvid) {
         return;
       }
     } catch {
-      /* retry until deadline */
     }
     if (Date.now() - startedAt > DELIGHT_POLL_DEADLINE_MS) {
       activeDelightPolls.delete(turnId);
@@ -396,12 +321,9 @@ function pollDelightTurn(turnId, bvid) {
     }
     activeDelightPolls.set(turnId, setTimeout(tick, DELIGHT_POLL_INTERVAL_MS));
   }
-
   activeDelightPolls.set(turnId, 0);
   void tick();
 }
-
-/** Update a specific turn in a delight's turns array after polling completes. */
 function applyTurnResult(bvid, turnId, turn) {
   const updated = state.activeDelights.map((item) => {
     const norm = normalizeDelightCandidate(item);
@@ -415,24 +337,16 @@ function applyTurnResult(bvid, turnId, turn) {
       ...item,
       turns,
       state: lastCompleted ? "chatted" : turn.status === "failed" ? norm.state : "chatting",
-      response_message: lastCompleted
-        ? "这句已经记下，后面会更会试探。"
-        : turn.status === "failed"
-          ? "这句还没发出去，稍后再试。"
-          : norm.response_message,
-      chat_reply: lastCompleted ? turn.reply || "" : norm.chat_reply,
+      response_message: lastCompleted ? "这句已经记下，后面会更会试探。" : turn.status === "failed" ? "这句还没发出去，稍后再试。" : norm.response_message,
+      chat_reply: lastCompleted ? turn.reply || "" : norm.chat_reply
     };
   });
   patchState({ activeDelights: updated });
   rerenderDelightOnly();
 }
-
-/** Send a chat message for a delight inline chat turn. */
 async function sendDelightChat(d, message) {
   const turnId = createClientTurnId("delight");
   const userTurn = { turn_id: turnId, message, reply: "", status: "pending", error: "" };
-
-  // Optimistically append user+pending turn
   const updated = state.activeDelights.map((item) => {
     const norm = normalizeDelightCandidate(item);
     if (norm.bvid !== d.bvid) return item;
@@ -442,19 +356,18 @@ async function sendDelightChat(d, message) {
       draft: "",
       state: "chatting",
       response_message: "阿B 正在品你这句话。",
-      chat_turn_id: turnId,
+      chat_turn_id: turnId
     };
   });
   patchState({ activeDelights: updated });
   rerenderDelightOnly();
-
   try {
     const turn = await startChatTurn({
       turnId,
       ...getMobileChatSession("delight"),
       subjectId: d.bvid,
       subjectTitle: d.title,
-      message,
+      message
     });
     if (turn.status === "completed" || turn.status === "failed") {
       applyTurnResult(d.bvid, turnId, turn);
@@ -462,12 +375,9 @@ async function sendDelightChat(d, message) {
       pollDelightTurn(turnId, d.bvid);
     }
   } catch {
-    // Mark the turn as failed locally
     applyTurnResult(d.bvid, turnId, { reply: "", status: "failed", error: "网络错误" });
   }
 }
-
-// ── Delight Tray ─────────────────────────────────────────────
 function renderDelightTray() {
   const runtime = normalizeRuntimeStatus(state.runtimeStatus);
   if (runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized) {
@@ -475,89 +385,72 @@ function renderDelightTray() {
   }
   const delights = state.activeDelights;
   if (delights.length === 0) return;
-
   const idx = state.delightCurrentIndex;
   const d = normalizeDelightCandidate(delights[idx] || delights[0]);
   const uiState = getDelightUiState(d);
   if (!uiState.visible) return;
-
   const tray = document.createElement("div");
   tray.className = "delight-tray";
-
   const cover = getCoverImageAttrs(d.cover_url);
-  const coverHtml = cover
-    ? `<span class="delight-thumb"><img src="${esc(cover.src)}" alt="" loading="lazy" onerror="this.parentElement.classList.add('is-fallback');this.remove()"></span>`
-    : `<span class="delight-thumb is-fallback">\u2728</span>`;
+  const coverHtml = cover ? `<span class="delight-thumb"><img src="${esc(cover.src)}" alt="" loading="lazy" onerror="this.parentElement.classList.add('is-fallback');this.remove()"></span>` : `<span class="delight-thumb is-fallback">✨</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
   const statsText = recommendationStats(d);
   const publishedHtml = publishedTimeHtml(d);
-
   tray.innerHTML = `
-    ${
-      delights.length > 1
-        ? `
+    ${delights.length > 1 ? `
       <div class="delight-corner-nav">
-        <button class="delight-inline-nav" id="delight-prev" type="button" ${idx <= 0 ? "disabled" : ""}>\u2039</button>
+        <button class="delight-inline-nav" id="delight-prev" type="button" ${idx <= 0 ? "disabled" : ""}>‹</button>
         <span class="delight-inline-counter">${idx + 1}/${delights.length}</span>
-        <button class="delight-inline-nav" id="delight-next" type="button" ${idx >= delights.length - 1 ? "disabled" : ""}>\u203A</button>
+        <button class="delight-inline-nav" id="delight-next" type="button" ${idx >= delights.length - 1 ? "disabled" : ""}>›</button>
       </div>
-    `
-        : ""
-    }
-    ${!uiState.handled ? `<button class="delight-later-btn" id="delight-later" type="button" title="\u7A0D\u540E\u770B" aria-label="\u7A0D\u540E\u770B">\u00D7</button>` : ""}
+    ` : ""}
+    ${!uiState.handled ? `<button class="delight-later-btn" id="delight-later" type="button" title="稍后看" aria-label="稍后看">×</button>` : ""}
     <div class="delight-compact">
       <div class="delight-kicker-line">
-        <span class="delight-tag">\u60CA\u559C\u63A8\u8350</span>
+        <span class="delight-tag">惊喜推荐</span>
         ${d.delight_hook ? `<span class="delight-hook-badge">${esc(d.delight_hook)}</span>` : ""}
       </div>
       <div class="delight-feature-copy">
         <div class="delight-title">${esc(d.title)}</div>
         ${statsText ? `<div class="card-stats delight-stats">${esc(statsText)}</div>` : ""}
-        ${
-          reasonText
-            ? `
+        ${reasonText ? `
           <div class="delight-reason-wrap">
             ${coverHtml}
-            <div class="delight-reason"><span class="delight-reason-label">\u63A8\u8350\u539F\u56E0</span>${esc(reasonText)}</div>
+            <div class="delight-reason"><span class="delight-reason-label">推荐原因</span>${esc(reasonText)}</div>
             <div class="delight-meta">
               <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
               ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
               ${publishedHtml}
             </div>
           </div>
-        `
-            : `
+        ` : `
           <div class="delight-media-only">${coverHtml}</div>
           <div class="delight-meta">
             <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
             ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
             ${publishedHtml}
           </div>
-        `
-        }
+        `}
       </div>
     </div>`;
-
   if (uiState.show_status) {
     tray.innerHTML += `<div class="delight-result-state" data-tone="${esc(uiState.response_tone)}">${esc(uiState.response_message)}</div>`;
   }
   if (uiState.show_actions) {
-    // Action buttons
     const actions = document.createElement("div");
     actions.className = "delight-actions";
     const btns = [
-      { label: "\u770B\u770B", action: "view" },
-      { label: "\u559C\u6B22", action: "like" },
-      { label: "\u2606", action: "watch-later" },
-      { label: "\u2661", action: "favorite" },
-      { label: "\u4E0D\u611F\u5174\u8DA3", action: "reject" },
-      { label: "\u804A\u4E00\u804A", action: "chat" },
+      { label: "看看", action: "view" },
+      { label: "喜欢", action: "like" },
+      { label: "☆", action: "watch-later" },
+      { label: "♡", action: "favorite" },
+      { label: "不感兴趣", action: "reject" },
+      { label: "聊一聊", action: "chat" }
     ];
     for (const b of btns) {
       const btn = document.createElement("button");
       btn.className = `btn ${b.action === "view" ? "btn-brand" : "btn-outline"}`;
       btn.dataset.delightAction = b.action;
-      // 稍后再看 = 时钟 / 收藏 = 星星，紧凑 SVG 图标按钮，状态走 aria-pressed。
       if (b.action === "watch-later" || b.action === "favorite") {
         btn.classList.add("delight-save-toggle");
         btn.classList.add(b.action === "favorite" ? "favorite-btn" : "watch-later-btn");
@@ -578,9 +471,7 @@ function renderDelightTray() {
           try {
             await toggleSavedLocally("watch_later", savedItem);
             announceSavedAction(
-              wasSaved
-                ? "已从本地稍后再看移除；平台记录不变。"
-                : "已保存到本地，平台同步状态可在稍后页查看。",
+              wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。"
             );
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
@@ -606,9 +497,7 @@ function renderDelightTray() {
           try {
             await toggleSavedLocally("favorite", savedItem);
             announceSavedAction(
-              wasSaved
-                ? "已从本地收藏移除；平台记录不变。"
-                : "已保存到本地，平台同步状态可在收藏页查看。",
+              wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。"
             );
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
@@ -633,19 +522,15 @@ function renderDelightTray() {
     }
     tray.appendChild(actions);
   }
-
-  // ── Chat bubbles (turns history) ────────────────────────────
   const turns = d.turns || [];
   if (turns.length > 0) {
     const bubbleArea = document.createElement("div");
     bubbleArea.className = "delight-chat-area";
     for (const t of turns) {
-      // User bubble
       const userBubble = document.createElement("div");
       userBubble.className = "delight-chat-bubble user";
       userBubble.textContent = t.message;
       bubbleArea.appendChild(userBubble);
-      // AI bubble
       const aiBubble = document.createElement("div");
       if (t.status === "pending") {
         aiBubble.className = "delight-chat-bubble assistant thinking";
@@ -661,29 +546,24 @@ function renderDelightTray() {
     }
     tray.appendChild(bubbleArea);
   }
-
-  // ── Inline composer ─────────────────────────────────────────
   if (d.composer_open) {
     const composer = document.createElement("div");
     composer.className = "delight-composer";
     let sendInitiated = false;
-
     const input = document.createElement("textarea");
     input.className = "delight-composer-input";
     input.rows = 2;
-    input.placeholder = "\u804A\u804A\u8FD9\u6761\u63A8\u8350\u2026";
+    input.placeholder = "聊聊这条推荐…";
     input.value = d.draft || "";
     input.addEventListener("input", () => {
-      // Save draft in-place without re-rendering
       const cur = state.activeDelights[state.delightCurrentIndex];
       if (cur && normalizeDelightCandidate(cur).bvid === d.bvid) {
         cur.draft = input.value;
       }
     });
-
     const sendBtn = document.createElement("button");
     sendBtn.className = "btn btn-brand delight-composer-send";
-    sendBtn.textContent = "\u53D1\u51FA\u53BB";
+    sendBtn.textContent = "发出去";
     sendBtn.addEventListener("click", () => {
       const text = input.value.trim();
       if (!text) {
@@ -693,10 +573,6 @@ function renderDelightTray() {
       sendInitiated = true;
       sendDelightChat(d, text);
     });
-
-    // Collapse the composer back to the action buttons when focus leaves it (the
-    // user opened it then changed their mind). The draft is saved to state so
-    // reopening restores it; a real send is guarded so tapping send isn't lost.
     input.addEventListener("blur", (e) => {
       if (e.relatedTarget && composer.contains(e.relatedTarget)) return;
       setTimeout(() => {
@@ -713,27 +589,20 @@ function renderDelightTray() {
         rerenderDelightOnly();
       }, 120);
     });
-
-    // Allow Enter to send (Shift+Enter for newline)
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendBtn.click();
       }
     });
-
     composer.appendChild(input);
     composer.appendChild(sendBtn);
     tray.appendChild(composer);
-
-    // Focus the textarea after DOM insertion
     requestAnimationFrame(() => input.focus());
   }
-
   tray.querySelector("#delight-later")?.addEventListener("click", () => {
     skipDelightAt(idx);
   });
-
   if (delights.length > 1) {
     tray.querySelector("#delight-prev")?.addEventListener("click", () => {
       navigateDelight(idx <= 0 ? delights.length - 1 : idx - 1);
@@ -742,16 +611,11 @@ function renderDelightTray() {
       navigateDelight(idx >= delights.length - 1 ? 0 : idx + 1);
     });
   }
-
-  // 交互元素阻止事件冒泡，避免触发拖拽
-  tray
-    .querySelectorAll(
-      "button, [data-delight], input, select, textarea, .delight-composer, .delight-corner-nav, .delight-inline-nav",
-    )
-    .forEach((el) => {
-      el.addEventListener("pointerdown", (e) => e.stopPropagation());
-    });
-  // 指针拖拽切换
+  tray.querySelectorAll(
+    "button, [data-delight], input, select, textarea, .delight-composer, .delight-corner-nav, .delight-inline-nav"
+  ).forEach((el) => {
+    el.addEventListener("pointerdown", (e) => e.stopPropagation());
+  });
   tray.addEventListener("pointerdown", (e) => {
     _stopDelightAutoAdvance();
     _delightDragging = true;
@@ -765,9 +629,7 @@ function renderDelightTray() {
     const dx = e.clientX - _delightSwipeStartX;
     const maxDrag = tray.offsetWidth * 0.3;
     const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
-    const atEdge =
-      (dx > 0 && state.delightCurrentIndex === 0) ||
-      (dx < 0 && state.delightCurrentIndex >= delights.length - 1);
+    const atEdge = dx > 0 && state.delightCurrentIndex === 0 || dx < 0 && state.delightCurrentIndex >= delights.length - 1;
     const factor = atEdge ? 0.25 : 1;
     tray.style.setProperty("--drag-offset", `${clamped * factor}px`);
   });
@@ -780,11 +642,11 @@ function renderDelightTray() {
     if (Math.abs(dx) >= 50) {
       if (dx > 0) {
         navigateDelight(
-          state.delightCurrentIndex <= 0 ? delights.length - 1 : state.delightCurrentIndex - 1,
+          state.delightCurrentIndex <= 0 ? delights.length - 1 : state.delightCurrentIndex - 1
         );
       } else {
         navigateDelight(
-          state.delightCurrentIndex >= delights.length - 1 ? 0 : state.delightCurrentIndex + 1,
+          state.delightCurrentIndex >= delights.length - 1 ? 0 : state.delightCurrentIndex + 1
         );
       }
     } else {
@@ -797,14 +659,12 @@ function renderDelightTray() {
     tray.classList.remove("is-dragging");
     tray.style.removeProperty("--drag-offset");
   });
-
   $root.appendChild(tray);
   if (delights.length > 1) {
     _startDelightAutoAdvance();
     _initDelightVisibilityObserver();
   }
 }
-
 let _delightVisibilityObserver = null;
 function _initDelightVisibilityObserver() {
   if (_delightVisibilityObserver) return;
@@ -817,7 +677,7 @@ function _initDelightVisibilityObserver() {
         else _stopDelightAutoAdvance();
       }
     },
-    { threshold: 0.3 },
+    { threshold: 0.3 }
   );
   _delightVisibilityObserver.observe(slot);
   document.addEventListener("visibilitychange", () => {
@@ -828,8 +688,6 @@ function _initDelightVisibilityObserver() {
     }
   });
 }
-
-/** Navigate to a delight index with fade-out/in + height FLIP animation. */
 function navigateDelight(newIndex) {
   const slot = document.getElementById("delight-slot");
   if (!slot) return;
@@ -840,23 +698,18 @@ function navigateDelight(newIndex) {
     return;
   }
   const oldH = oldTray.offsetHeight;
-
-  // 取消上一次未完成的导航动画
   if (_delightNavTimer) {
     clearTimeout(_delightNavTimer);
     _delightNavTimer = null;
   }
-
-  // 仅文本内容渐入渐出，缩略图和按钮保持不动
   _stopDelightAutoAdvance();
   const textEls = oldTray.querySelectorAll(
-    ".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge",
+    ".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge"
   );
   textEls.forEach((el) => {
     el.style.transition = "opacity 200ms ease";
     el.style.opacity = "0";
   });
-
   _delightNavTimer = setTimeout(() => {
     _delightNavTimer = null;
     patchState({ delightCurrentIndex: newIndex });
@@ -865,10 +718,9 @@ function navigateDelight(newIndex) {
     const newTray = slot.querySelector(".delight-tray");
     if (!newTray) return;
     const newTextEls = newTray.querySelectorAll(
-      ".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge",
+      ".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge"
     );
     const newH = newTray.offsetHeight;
-
     newTextEls.forEach((el) => {
       el.style.opacity = "0";
       el.style.transition = "none";
@@ -935,7 +787,6 @@ function rerenderDelightOnly() {
     }
   }
 }
-
 function delightUserEngaged() {
   const active = state.activeDelights[state.delightCurrentIndex];
   const normalized = active ? normalizeDelightCandidate(active) : null;
@@ -944,7 +795,6 @@ function delightUserEngaged() {
   const draft = String(input?.value || normalized?.draft || "").trim();
   return Boolean(normalized?.composer_open || focused || draft);
 }
-
 function _startDelightAutoAdvance() {
   _stopDelightAutoAdvance();
   if (state.activeDelights.length < 2) return;
@@ -952,41 +802,34 @@ function _startDelightAutoAdvance() {
     if (delightUserEngaged()) return;
     const next = state.delightCurrentIndex + 1;
     navigateDelight(next >= state.activeDelights.length ? 0 : next);
-  }, 4000);
+  }, 4e3);
 }
-
 function _stopDelightAutoAdvance() {
   if (_delightAutoTimer !== null) {
     clearInterval(_delightAutoTimer);
     _delightAutoTimer = null;
   }
 }
-
 function skipDelightAt(index) {
   const filtered = state.activeDelights.filter((_, i) => i !== index);
   const newIdx = Math.min(index, Math.max(0, filtered.length - 1));
   patchState({ activeDelights: filtered, delightCurrentIndex: newIdx });
   rerenderDelightOnly();
 }
-
 async function handleDelightAction(d, action) {
   const { apiResponse, uiState, permanent } = getDelightActionState(action);
-
   if (action === "chat") {
-    // Toggle inline composer on the delight — never navigate to chat tab.
-    const updated = state.activeDelights.map((item) => {
+    const updated2 = state.activeDelights.map((item) => {
       const norm = normalizeDelightCandidate(item);
       if (norm.bvid === d.bvid) {
         return { ...item, composer_open: !norm.composer_open };
       }
       return item;
     });
-    patchState({ activeDelights: updated });
+    patchState({ activeDelights: updated2 });
     rerenderDelightOnly();
     return;
   }
-
-  // "view" / "like" / "reject" — call API with correct token
   if (apiResponse) {
     try {
       await respondToDelight(d.bvid, apiResponse, d.title);
@@ -995,41 +838,32 @@ async function handleDelightAction(d, action) {
         rerenderDelightOnly();
         return;
       }
-      /* Other legacy actions remain best-effort. */
     }
   }
   if (permanent) {
-    markDelightSent(d.bvid).catch(() => {});
+    markDelightSent(d.bvid).catch(() => {
+    });
   }
-
-  // Update local delight state for brief result display
-  const updated = state.activeDelights.map((item) =>
-    (item.bvid || normalizeDelightCandidate(item).bvid) === d.bvid
-      ? { ...item, state: uiState }
-      : item,
+  const updated = state.activeDelights.map(
+    (item) => (item.bvid || normalizeDelightCandidate(item).bvid) === d.bvid ? { ...item, state: uiState } : item
   );
   patchState({ activeDelights: updated });
   rerenderDelightOnly();
-
-  // Remove after brief display
   if (permanent) {
     setTimeout(() => {
       const filtered = state.activeDelights.filter(
-        (item) => (item.bvid || normalizeDelightCandidate(item).bvid) !== d.bvid,
+        (item) => (item.bvid || normalizeDelightCandidate(item).bvid) !== d.bvid
       );
       const newIdx = Math.min(state.delightCurrentIndex, Math.max(0, filtered.length - 1));
       patchState({ activeDelights: filtered, delightCurrentIndex: newIdx });
       rerenderDelightOnly();
     }, 1500);
   }
-
   if (action === "view") {
     const url = buildContentUrl(d);
     if (url) openContentUrl(url);
   }
 }
-
-// ── Load More ────────────────────────────────────────────────
 function renderLoadMoreRow() {
   const runtime = normalizeRuntimeStatus(state.runtimeStatus);
   if (runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized)
@@ -1044,36 +878,29 @@ function renderLoadMoreRow() {
   appendBtn.disabled = loading;
   appendBtn.addEventListener("click", handleAppend);
   actions.appendChild(appendBtn);
-
   $root.appendChild(actions);
 }
-
 function waitForCoverPreload(promises, timeoutMs) {
   if (promises.length === 0) return Promise.resolve();
   return Promise.race([
     Promise.all(promises),
-    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs))
   ]);
 }
-
-function warmRecommendationCovers(
-  items,
-  { start = 0, limit = COVER_PRELOAD_BATCH_SIZE, waitForDecode = false } = {},
-) {
+function warmRecommendationCovers(items, { start = 0, limit = COVER_PRELOAD_BATCH_SIZE, waitForDecode = false } = {}) {
   if (typeof Image === "undefined") return Promise.resolve();
   const urls = getRecommendationCoverPreloadUrls(items, { start, limit });
   const pending = [];
   for (const src of urls) {
     if (warmedCoverUrls.has(src)) continue;
     warmedCoverUrls.add(src);
-
     const img = new Image();
     const cleanup = () => warmingImages.delete(src);
     const markDecoded = () => {
       cleanup();
       decodedCoverUrls.add(src);
     };
-    const loaded = new Promise((resolve) => {
+    const loaded2 = new Promise((resolve) => {
       img.onload = () => {
         markDecoded();
         resolve();
@@ -1087,7 +914,7 @@ function warmRecommendationCovers(
     img.loading = "eager";
     warmingImages.set(src, img);
     img.src = src;
-    let ready = loaded;
+    let ready = loaded2;
     if (typeof img.decode === "function") {
       ready = img.decode().then(markDecoded).catch(cleanup);
     }
@@ -1096,31 +923,24 @@ function warmRecommendationCovers(
   if (!waitForDecode) return Promise.resolve();
   return waitForCoverPreload(pending, COVER_PRELOAD_WAIT_TIMEOUT_MS);
 }
-
 function disconnectScrollPreheatObserver() {
   if (!scrollPreheatObserver) return;
   scrollPreheatObserver.disconnect();
   scrollPreheatObserver = null;
 }
-
 function observeScrollPreheat() {
   disconnectScrollPreheatObserver();
   if (!$root || typeof IntersectionObserver === "undefined") return;
-
   const cards = $root.querySelectorAll(".card");
   if (!cards.length) return;
-
   scrollPreheatObserver = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         scrollPreheatObserver.unobserve(entry.target);
-
-        // Find this card's index and preheat the next batch ahead
         const allCards = Array.from($root.querySelectorAll(".card"));
         const idx = allCards.indexOf(entry.target);
         if (idx < 0) continue;
-
         const recs = state.recommendations || [];
         const start = Math.min(idx + 1, recs.length);
         if (start < recs.length) {
@@ -1131,36 +951,30 @@ function observeScrollPreheat() {
     {
       root: null,
       rootMargin: SCROLL_PREHEAT_ROOT_MARGIN,
-      threshold: 0,
-    },
+      threshold: 0
+    }
   );
-
   cards.forEach((card) => scrollPreheatObserver.observe(card));
 }
-
 function disconnectAutoAppendObserver() {
   if (!autoAppendObserver) return;
   autoAppendObserver.disconnect();
   autoAppendObserver = null;
 }
-
 function observeAutoAppendSentinel() {
   disconnectAutoAppendObserver();
   if (!$root || typeof IntersectionObserver === "undefined") return;
   const loadMoreRow = $root.querySelector(".load-more-row");
   if (!loadMoreRow) return;
-
   autoAppendObserver = new IntersectionObserver(
     (entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
-      if (
-        !shouldAutoAppendRecommendations({
-          loading,
-          autoAppendExhausted,
-          activeTab: state.activeTab,
-          userArmed: autoAppendUserArmed,
-        })
-      )
+      if (!shouldAutoAppendRecommendations({
+        loading,
+        autoAppendExhausted,
+        activeTab: state.activeTab,
+        userArmed: autoAppendUserArmed
+      }))
         return;
       autoAppendUserArmed = false;
       handleAppend();
@@ -1168,44 +982,38 @@ function observeAutoAppendSentinel() {
     {
       root: document.getElementById("app"),
       rootMargin: AUTO_APPEND_ROOT_MARGIN,
-      threshold: 0,
-    },
+      threshold: 0
+    }
   );
   autoAppendObserver.observe(loadMoreRow);
 }
-
 function resetAutoAppendIntent() {
   autoAppendUserArmed = false;
   autoAppendTouchY = null;
 }
-
 function armAutoAppendIntent() {
   if (state.activeTab !== "recommend") return;
   autoAppendUserArmed = true;
 }
-
 function initAutoAppendIntent() {
   if (autoAppendIntentInitialized) return;
   const container = document.getElementById("app");
   if (!container) return;
   autoAppendIntentInitialized = true;
-
   container.addEventListener(
     "wheel",
     (event) => {
       if (event.deltaY > 0) armAutoAppendIntent();
     },
-    { passive: true },
+    { passive: true }
   );
-
   container.addEventListener(
     "touchstart",
     (event) => {
       autoAppendTouchY = event.touches?.[0]?.clientY ?? null;
     },
-    { passive: true },
+    { passive: true }
   );
-
   container.addEventListener(
     "touchmove",
     (event) => {
@@ -1215,9 +1023,8 @@ function initAutoAppendIntent() {
       }
       autoAppendTouchY = y;
     },
-    { passive: true },
+    { passive: true }
   );
-
   window.addEventListener(
     "keydown",
     (event) => {
@@ -1225,11 +1032,9 @@ function initAutoAppendIntent() {
         armAutoAppendIntent();
       }
     },
-    { passive: true },
+    { passive: true }
   );
 }
-
-// ── Recommendation Card ──────────────────────────────────────
 function renderCard(rawItem, index = 0) {
   const item = normalizeRecommendation(rawItem);
   const card = document.createElement("div");
@@ -1238,19 +1043,13 @@ function renderCard(rawItem, index = 0) {
   const cardMedia = getRecommendationCardKind(item);
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
   const publishedHtml = publishedTimeHtml(item);
-
   let coverHtml;
   if (cardMedia.kind === "text") {
-    // No-cover text card for text-first sources (X tweet/thread): render
-    // the body text instead of a thumbnail — never an <img> node.
     coverHtml = `<div class="card-cover-frame is-text-card"><p class="card-cover-text">${esc(cardMedia.text)}</p></div>`;
   } else {
     const cover = getCoverImageAttrs(cardMedia.coverUrl);
-    coverHtml = cover
-      ? `<div class="card-cover-frame"><img class="card-cover" src="${esc(cover.src)}" alt="" loading="${esc(imageAttrs.loading)}" fetchpriority="${esc(imageAttrs.fetchPriority)}" decoding="async" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>`
-      : `<div class="card-cover-frame is-error"></div>`;
+    coverHtml = cover ? `<div class="card-cover-frame"><img class="card-cover" src="${esc(cover.src)}" alt="" loading="${esc(imageAttrs.loading)}" fetchpriority="${esc(imageAttrs.fetchPriority)}" decoding="async" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>` : `<div class="card-cover-frame is-error"></div>`;
   }
-
   card.innerHTML = `
     ${coverHtml}
     <div class="card-body">
@@ -1264,23 +1063,18 @@ function renderCard(rawItem, index = 0) {
       ${recommendationStats(item) ? `<div class="card-stats">${esc(recommendationStats(item))}</div>` : ""}
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}
     </div>`;
-
-  // Card actions — icon style with feedback state persistence
   const actionsRow = document.createElement("div");
   actionsRow.className = "card-actions";
   actionsRow.addEventListener("click", (e) => e.stopPropagation());
-
   const alreadyFeedback = feedbackDone.get(item.id);
-
   const openBtn = createCardAction(
     "打开",
     () => {
       reportClick(buildRecommendationClickPayload(item, url));
       if (url) openContentUrl(url);
     },
-    { ariaLabel: "打开", iconHtml: LINK_SVG_ICON, showText: true },
+    { ariaLabel: "打开", iconHtml: LINK_SVG_ICON, showText: true }
   );
-
   const likeBtn = createCardAction(
     "",
     async () => {
@@ -1297,11 +1091,10 @@ function renderCard(rawItem, index = 0) {
     },
     {
       ariaLabel: "喜欢",
-      iconHtml: alreadyFeedback === "like" ? CHECK_SVG_ICON : THUMBS_UP_SVG_ICON,
-    },
+      iconHtml: alreadyFeedback === "like" ? CHECK_SVG_ICON : THUMBS_UP_SVG_ICON
+    }
   );
   if (alreadyFeedback === "like") likeBtn.disabled = true;
-
   const dislikeBtn = createCardAction(
     "",
     async () => {
@@ -1310,7 +1103,6 @@ function renderCard(rawItem, index = 0) {
       try {
         await submitFeedback(buildFeedbackPayload(item.id, "dislike"));
         feedbackDone.set(item.id, "dislike");
-        // Remove the card from the list with a brief fade-out.
         card.style.transition = "opacity 0.3s ease, max-height 0.3s ease";
         card.style.opacity = "0";
         card.style.maxHeight = card.offsetHeight + "px";
@@ -1323,7 +1115,7 @@ function renderCard(rawItem, index = 0) {
         setTimeout(() => {
           card.remove();
           patchState({
-            recommendations: state.recommendations.filter((r) => r.id !== item.id),
+            recommendations: state.recommendations.filter((r) => r.id !== item.id)
           });
         }, 450);
       } catch {
@@ -1333,20 +1125,18 @@ function renderCard(rawItem, index = 0) {
     },
     {
       ariaLabel: "不感兴趣",
-      iconHtml: alreadyFeedback === "dislike" ? X_SVG_ICON : THUMBS_DOWN_SVG_ICON,
-    },
+      iconHtml: alreadyFeedback === "dislike" ? X_SVG_ICON : THUMBS_DOWN_SVG_ICON
+    }
   );
   if (alreadyFeedback === "dislike") dislikeBtn.disabled = true;
-
   const commentBtn = createCardAction(
     "",
     () => {
       feedbackSheet = { itemId: item.id, note: "", submitState: "idle" };
       renderFeedbackSheet();
     },
-    { ariaLabel: "聊一聊", iconHtml: MESSAGE_SVG_ICON },
+    { ariaLabel: "聊一聊", iconHtml: MESSAGE_SVG_ICON }
   );
-
   const savedItem = savedIdentity(item);
   const savedNow = isSavedLocally("watch_later", savedItem.item_key);
   const starBtn = createCoverChip(
@@ -1357,31 +1147,25 @@ function renderCard(rawItem, index = 0) {
       starBtn.disabled = true;
       const wasSaved = isSavedLocally("watch_later", savedItem.item_key);
       announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
-      // optimistic toggle
       setChipState(starBtn, !wasSaved, wasSaved ? "☆" : "★");
       try {
         await toggleSavedLocally("watch_later", savedItem);
         announceSavedAction(
-          wasSaved
-            ? "已从本地稍后再看移除；平台记录不变。"
-            : "已保存到本地，平台同步状态可在稍后页查看。",
+          wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。"
         );
       } catch {
-        // revert on failure
         setChipState(starBtn, wasSaved, wasSaved ? "★" : "☆");
         announceSavedAction("本地稍后再看操作失败，请重试。", true);
       } finally {
         starBtn.disabled = false;
       }
     },
-    { label: "稍后再看", pressedLabel: "取消稍后再看" },
+    { label: "稍后再看", pressedLabel: "取消稍后再看" }
   );
   setChipState(starBtn, savedNow, savedNow ? "★" : "☆");
-  // lazy-load real state from backend
   void hydrateSavedLocally("watch_later", savedItem, (saved) => {
     setChipState(starBtn, saved, saved ? "★" : "☆");
   });
-
   const favNow = isSavedLocally("favorite", savedItem.item_key);
   const favBtn = createCoverChip(
     STAR_SVG_ICON,
@@ -1395,9 +1179,7 @@ function renderCard(rawItem, index = 0) {
       try {
         await toggleSavedLocally("favorite", savedItem);
         announceSavedAction(
-          wasSaved
-            ? "已从本地收藏移除；平台记录不变。"
-            : "已保存到本地，平台同步状态可在收藏页查看。",
+          wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。"
         );
       } catch {
         setChipState(favBtn, wasSaved, wasSaved ? "♥" : "♡");
@@ -1406,15 +1188,12 @@ function renderCard(rawItem, index = 0) {
         favBtn.disabled = false;
       }
     },
-    { label: "收藏", pressedLabel: "取消收藏" },
+    { label: "收藏", pressedLabel: "取消收藏" }
   );
   setChipState(favBtn, favNow, favNow ? "♥" : "♡");
   void hydrateSavedLocally("favorite", savedItem, (saved) => {
     setChipState(favBtn, saved, saved ? "♥" : "♡");
   });
-
-  // Save chips overlay the cover top-right — keeps the bottom action bar light
-  // (看看 / 喜欢 / 不感兴趣 / 聊一聊) instead of cramming 6 buttons in one row.
   const coverFrame = card.querySelector(".card-cover-frame");
   if (coverFrame) {
     const coverActions = document.createElement("div");
@@ -1423,14 +1202,11 @@ function renderCard(rawItem, index = 0) {
     coverActions.appendChild(favBtn);
     coverFrame.appendChild(coverActions);
   }
-
   actionsRow.appendChild(openBtn);
   actionsRow.appendChild(likeBtn);
   actionsRow.appendChild(dislikeBtn);
   actionsRow.appendChild(commentBtn);
   card.appendChild(actionsRow);
-
-  // Whole card click (except action row)
   if (url) {
     card.style.cursor = "pointer";
     card.addEventListener("click", () => {
@@ -1438,15 +1214,9 @@ function renderCard(rawItem, index = 0) {
       openContentUrl(url);
     });
   }
-
   return card;
 }
-
-function createCardAction(
-  label,
-  handler,
-  { ariaLabel = "", iconHtml = "", showText = false } = {},
-) {
+function createCardAction(label, handler, { ariaLabel = "", iconHtml = "", showText = false } = {}) {
   const btn = document.createElement("button");
   btn.className = "card-action-btn";
   btn.type = "button";
@@ -1462,29 +1232,15 @@ function createCardAction(
   btn.addEventListener("click", handler);
   return btn;
 }
-
-const LINK_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"/></svg>';
-const THUMBS_UP_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
-const THUMBS_DOWN_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
-const MESSAGE_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
-const CHECK_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
-const X_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
-const MORE_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
-
-// 稍后再看 = 时钟（一眼看懂"待会看"）；收藏 = 星星。SVG 图标族统一，
-// 选中态由 aria-pressed + CSS 驱动（时钟变色、星星填充），不做字形替换。
-const CLOCK_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
-const STAR_SVG_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
-
+const LINK_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"/></svg>';
+const THUMBS_UP_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
+const THUMBS_DOWN_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
+const MESSAGE_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
+const CHECK_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+const X_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+const MORE_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
+const CLOCK_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+const STAR_SVG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
 function createCoverChip(iconHtml, cls, handler, { label = "", pressedLabel = "" } = {}) {
   const btn = document.createElement("button");
   btn.className = "cover-chip " + cls;
@@ -1503,7 +1259,6 @@ function createCoverChip(iconHtml, cls, handler, { label = "", pressedLabel = ""
   });
   return btn;
 }
-
 function setChipState(btn, pressed) {
   btn.setAttribute("aria-pressed", pressed ? "true" : "false");
   const label = pressed ? btn.dataset.pressedLabel : btn.dataset.label;
@@ -1512,15 +1267,12 @@ function setChipState(btn, pressed) {
     btn.title = label;
   }
 }
-
-// ── Feedback Bottom Sheet ────────────────────────────────────
 function renderFeedbackSheet() {
   let overlay = document.querySelector(".feedback-sheet");
   if (!feedbackSheet) {
     if (overlay) overlay.remove();
     return;
   }
-
   if (!overlay) {
     overlay = document.createElement("div");
     overlay.className = "feedback-sheet";
@@ -1532,29 +1284,24 @@ function renderFeedbackSheet() {
     });
     document.body.appendChild(overlay);
   }
-
   const uiState = getCommentSubmitUiState(feedbackSheet.submitState);
-
   overlay.innerHTML = `
     <div class="feedback-sheet-panel">
       <div class="messages-header">
-        <span class="messages-title">\u5199\u4E00\u53E5</span>
-        <button class="messages-close" id="feedback-close">\u2715</button>
+        <span class="messages-title">写一句</span>
+        <button class="messages-close" id="feedback-close">✕</button>
       </div>
-      <textarea class="feedback-input" id="feedback-note" placeholder="\u8BF4\u8BF4\u4F60\u7684\u60F3\u6CD5\u2026" rows="3">${esc(feedbackSheet.note)}</textarea>
+      <textarea class="feedback-input" id="feedback-note" placeholder="说说你的想法…" rows="3">${esc(feedbackSheet.note)}</textarea>
       ${uiState.statusMessage ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${esc(uiState.statusMessage)}</div>` : ""}
       <button class="btn btn-brand" id="feedback-submit" style="margin-top:8px;width:100%" ${uiState.disabled ? "disabled" : ""}>${esc(uiState.buttonLabel)}</button>
     </div>`;
-
   overlay.querySelector("#feedback-close").addEventListener("click", () => {
     feedbackSheet = null;
     renderFeedbackSheet();
   });
-
   overlay.querySelector("#feedback-note").addEventListener("input", (e) => {
     feedbackSheet.note = e.target.value;
   });
-
   overlay.querySelector("#feedback-submit").addEventListener("click", async () => {
     const validation = validateCommentInput(feedbackSheet.note);
     if (!validation.valid) {
@@ -1566,7 +1313,7 @@ function renderFeedbackSheet() {
     renderFeedbackSheet();
     try {
       await submitFeedback(
-        buildFeedbackPayload(feedbackSheet.itemId, "comment", feedbackSheet.note),
+        buildFeedbackPayload(feedbackSheet.itemId, "comment", feedbackSheet.note)
       );
       feedbackSheet.submitState = "success";
       renderFeedbackSheet();
@@ -1580,8 +1327,6 @@ function renderFeedbackSheet() {
     }
   });
 }
-
-// ── Actions ──────────────────────────────────────────────────
 async function handleReshuffle() {
   if (loading) return;
   loading = true;
@@ -1591,7 +1336,7 @@ async function handleReshuffle() {
     const result = await reshuffleRecommendations();
     const replacement = reconcileRecommendationReplacement(
       state.recommendations,
-      result.items || [],
+      result.items || []
     );
     if (replacement.preserved) {
       recommendationActionMessage = "这次暂时没换出新内容，已保留当前推荐。";
@@ -1601,29 +1346,23 @@ async function handleReshuffle() {
       applyRecommendationSnapshot(replacement.items, { replace: true });
     }
     const requestGeneration = runtimeStatusGeneration;
-    void fetchRuntimeStatus()
-      .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
-      .catch(() => {});
+    void fetchRuntimeStatus().then((status) => applyRuntimeStatusSnapshot(status, requestGeneration)).catch(() => {
+    });
   } catch {
-    /* ignore */
   }
   loading = false;
   render();
 }
-
 async function handleAppend() {
   if (loading) return;
   loading = true;
   let clearedActionMessage = false;
-
-  // Disable the button inline instead of full re-render.
   const loadMoreRow = $root.querySelector(".load-more-row");
   const appendBtnEl = loadMoreRow?.querySelector("button");
   if (appendBtnEl) {
     appendBtnEl.disabled = true;
-    appendBtnEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";
+    appendBtnEl.textContent = "加载中…";
   }
-
   try {
     const startIndex = state.recommendations.length;
     const existing = state.recommendations.map((i) => i.bvid).filter(Boolean);
@@ -1636,8 +1375,6 @@ async function handleAppend() {
     }
     await warmRecommendationCovers(newItems, { limit: newItems.length, waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
-
-    // Append new cards before the load-more row without rebuilding existing ones.
     if (loadMoreRow) {
       for (const [offset, item] of newItems.entries()) {
         const card = renderCard(item, startIndex + offset);
@@ -1648,10 +1385,8 @@ async function handleAppend() {
   } catch {
     autoAppendExhausted = true;
   }
-
   loading = false;
   if (clearedActionMessage) rerenderHeaderOnly();
-  // Restore button state.
   if (appendBtnEl) {
     appendBtnEl.disabled = false;
     const headerState = getMobileRecommendationHeaderState({ runtimeStatus: state.runtimeStatus });
@@ -1659,11 +1394,8 @@ async function handleAppend() {
   }
   observeAutoAppendSentinel();
 }
-
-// ── Pull-to-Refresh ──────────────────────────────────────────
 let pullStartY = 0;
 let pulling = false;
-
 function initPullRefresh() {
   const container = document.getElementById("app");
   container.addEventListener(
@@ -1674,9 +1406,8 @@ function initPullRefresh() {
         pulling = true;
       }
     },
-    { passive: true },
+    { passive: true }
   );
-
   container.addEventListener(
     "touchmove",
     (e) => {
@@ -1685,9 +1416,8 @@ function initPullRefresh() {
       const indicator = document.getElementById("pull-indicator");
       if (indicator) indicator.classList.toggle("visible", dy > 50);
     },
-    { passive: true },
+    { passive: true }
   );
-
   container.addEventListener(
     "touchend",
     () => {
@@ -1699,20 +1429,15 @@ function initPullRefresh() {
         handleReshuffle();
       }
     },
-    { passive: true },
+    { passive: true }
   );
 }
-
-// ── Delight Chat Hydration ───────────────────────────────────
-/** Fetch durable delight turns and backfill into each delight's turns array. */
 async function hydrateDelightTurns() {
   try {
     const payload = await fetchChatTurns({ ...getMobileChatSession("delight"), limit: 200 });
     const items = payload.items || [];
     if (items.length === 0) return;
-
-    // Group turns by subject_id (bvid)
-    const byBvid = new Map();
+    const byBvid = /* @__PURE__ */ new Map();
     for (const turn of items) {
       if (!turn.subject_id) continue;
       let arr = byBvid.get(turn.subject_id);
@@ -1725,24 +1450,20 @@ async function hydrateDelightTurns() {
         message: turn.message || "",
         reply: turn.reply || "",
         status: turn.status || "pending",
-        error: turn.error || "",
+        error: turn.error || ""
       });
     }
-
-    // Merge into existing delights
     let changed = false;
     const updated = state.activeDelights.map((item) => {
       const norm = normalizeDelightCandidate(item);
       const serverTurns = byBvid.get(norm.bvid);
       if (!serverTurns) return item;
       changed = true;
-      // Merge: keep local turns that aren't on server yet, then overlay server data
       const localIds = new Set((norm.turns || []).map((t) => t.turn_id));
       const merged = serverTurns.map((st) => {
         const local = (norm.turns || []).find((t) => t.turn_id === st.turn_id);
         return local ? { ...local, ...st } : st;
       });
-      // Append any local-only turns (optimistic sends not yet on server)
       for (const lt of norm.turns || []) {
         if (!serverTurns.some((st) => st.turn_id === lt.turn_id)) merged.push(lt);
       }
@@ -1750,24 +1471,18 @@ async function hydrateDelightTurns() {
       const lastReply = lastTurn?.status === "completed" ? lastTurn.reply : norm.chat_reply;
       return { ...item, turns: merged, chat_reply: lastReply || norm.chat_reply };
     });
-
     if (changed) {
       patchState({ activeDelights: updated });
       rerenderDelightOnly();
     }
-
-    // Resume polling for any pending turns
     for (const turn of items) {
       if (turn.status === "pending" && turn.subject_id) {
         pollDelightTurn(turn.turn_id, turn.subject_id);
       }
     }
   } catch {
-    /* best-effort hydration */
   }
 }
-
-// ── Load ─────────────────────────────────────────────────────
 function rememberRecommendationFeedback(normalizedRecs) {
   for (const rec of normalizedRecs) {
     if (rec.feedback_type && !feedbackDone.has(rec.id)) {
@@ -1775,7 +1490,6 @@ function rememberRecommendationFeedback(normalizedRecs) {
     }
   }
 }
-
 function recommendationEmptyMessage() {
   if (recommendationLoadState === "failed") {
     return "推荐加载失败，正在重试。";
@@ -1789,10 +1503,8 @@ function recommendationEmptyMessage() {
   if (runtimeStatusLoadState === "failed-exhausted") {
     return "库存状态同步失败，点一下重新加载。";
   }
-  return getReadyRecommendationHint(runtimeStatusLoadState === "ready" ? state.runtimeStatus : null)
-    .message;
+  return getReadyRecommendationHint(runtimeStatusLoadState === "ready" ? state.runtimeStatus : null).message;
 }
-
 function clearRecommendationRecovery(nextState) {
   if (recommendationRecoveryTimer !== null) {
     clearTimeout(recommendationRecoveryTimer);
@@ -1802,7 +1514,6 @@ function clearRecommendationRecovery(nextState) {
   recommendationRecoveryPending = false;
   recommendationLoadState = nextState;
 }
-
 function clearRuntimeStatusRecovery(nextState = "ready") {
   if (runtimeStatusRecoveryTimer !== null) {
     clearTimeout(runtimeStatusRecoveryTimer);
@@ -1812,7 +1523,6 @@ function clearRuntimeStatusRecovery(nextState = "ready") {
   runtimeStatusRecoveryPending = false;
   runtimeStatusLoadState = nextState;
 }
-
 function applyRecommendationSnapshot(recs, { replace = false } = {}) {
   const normalizedRecs = recs.map(normalizeRecommendation);
   if (normalizedRecs.length > 0) {
@@ -1828,7 +1538,6 @@ function applyRecommendationSnapshot(recs, { replace = false } = {}) {
   rememberRecommendationFeedback(normalizedRecs);
   patchState({ recommendations: normalizedRecs });
 }
-
 function applyRuntimeStatusSnapshot(status, requestGeneration) {
   if (requestGeneration !== runtimeStatusGeneration) return false;
   if (!status) throw new Error("runtime status unavailable");
@@ -1838,7 +1547,6 @@ function applyRuntimeStatusSnapshot(status, requestGeneration) {
   rerenderRuntimeDependentChrome();
   return true;
 }
-
 function scheduleRecommendationRecovery() {
   if (state.recommendations.length > 0) {
     clearRecommendationRecovery("ready");
@@ -1862,7 +1570,6 @@ function scheduleRecommendationRecovery() {
     void runRecommendationRecovery();
   }, delayMs);
 }
-
 async function runRecommendationRecovery() {
   if (state.recommendations.length > 0) {
     clearRecommendationRecovery("ready");
@@ -1886,7 +1593,6 @@ async function runRecommendationRecovery() {
     scheduleRecommendationRecovery();
   }
 }
-
 function scheduleRuntimeStatusRecovery() {
   if (runtimeStatusLoadState !== "failed") return;
   if (runtimeStatusRecoveryInFlight) {
@@ -1906,7 +1612,6 @@ function scheduleRuntimeStatusRecovery() {
     void runRuntimeStatusRecovery();
   }, delayMs);
 }
-
 async function runRuntimeStatusRecovery() {
   if (runtimeStatusLoadState !== "failed") return;
   if (runtimeStatusRecoveryInFlight) {
@@ -1927,14 +1632,10 @@ async function runRuntimeStatusRecovery() {
     rerenderRuntimeDependentChrome();
   }
 }
-
 function restartFailedRecoveries() {
   let recommendationRestarted = false;
   let runtimeRestarted = false;
-  if (
-    state.recommendations.length === 0 &&
-    (recommendationLoadState === "failed" || recommendationLoadState === "failed-exhausted")
-  ) {
+  if (state.recommendations.length === 0 && (recommendationLoadState === "failed" || recommendationLoadState === "failed-exhausted")) {
     if (recommendationRecoveryTimer !== null) clearTimeout(recommendationRecoveryTimer);
     recommendationRecoveryTimer = null;
     recommendationRecoveryAttempt = 0;
@@ -1953,7 +1654,6 @@ function restartFailedRecoveries() {
   if (recommendationRestarted) render();
   else if (runtimeRestarted) rerenderRuntimeDependentChrome();
 }
-
 async function loadData() {
   loading = true;
   recommendationLoadState = "loading";
@@ -1968,39 +1668,30 @@ async function loadData() {
   render();
   void hydrateRecommendSideChannels();
 }
-
 function hydrateRecommendSideChannels() {
   if (runtimeStatusLoadState !== "ready") runtimeStatusLoadState = "loading";
   const requestGeneration = runtimeStatusGeneration;
-  fetchRuntimeStatus()
-    .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
-    .catch(() => {
-      if (requestGeneration !== runtimeStatusGeneration) return;
-      runtimeStatusLoadState = "failed";
-      scheduleRuntimeStatusRecovery();
-      rerenderRuntimeDependentChrome();
+  fetchRuntimeStatus().then((status) => applyRuntimeStatusSnapshot(status, requestGeneration)).catch(() => {
+    if (requestGeneration !== runtimeStatusGeneration) return;
+    runtimeStatusLoadState = "failed";
+    scheduleRuntimeStatusRecovery();
+    rerenderRuntimeDependentChrome();
+  });
+  fetchActivityFeed({ limit: 5 }).then((activityFeed) => {
+    patchState({ activityFeed });
+    rerenderHeaderOnly();
+  }).catch(() => {
+  });
+  fetchDelightBatch().then((delights) => {
+    patchState({
+      activeDelights: delights.map(normalizeDelightCandidate),
+      delightCurrentIndex: 0
     });
-
-  fetchActivityFeed({ limit: 5 })
-    .then((activityFeed) => {
-      patchState({ activityFeed });
-      rerenderHeaderOnly();
-    })
-    .catch(() => {});
-
-  fetchDelightBatch()
-    .then((delights) => {
-      patchState({
-        activeDelights: delights.map(normalizeDelightCandidate),
-        delightCurrentIndex: 0,
-      });
-      rerenderDelightOnly();
-      void hydrateDelightTurns();
-    })
-    .catch(() => {});
+    rerenderDelightOnly();
+    void hydrateDelightTurns();
+  }).catch(() => {
+  });
 }
-
-// ── Public API ───────────────────────────────────────────────
 export function initRecommendView(root) {
   $root = root;
   if (!loaded) {
@@ -2011,20 +1702,13 @@ export function initRecommendView(root) {
   } else {
     restartFailedRecoveries();
   }
-  // Tab switch back preserves existing cards. Only failed empty resources
-  // start a fresh bounded recovery round.
 }
-
 export function onStreamConnect() {
   restartFailedRecoveries();
 }
-
 export function onStreamEvent(payload) {
   const type = payload?.type || payload?.event;
   if (type === "refresh.pool_updated") {
-    // Merge pool status only. Do not replace recommendation cards here:
-    // users may have appended older cards that /api/recommendations would not
-    // return in its latest top window.
     const poolEvent = payload.data || payload;
     patchState({ runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, poolEvent) });
     if (typeof poolEvent?.pool_available_count === "number") {
@@ -2043,16 +1727,15 @@ export function onStreamEvent(payload) {
     patchState({ runtimeEvent: payload.data || payload });
     rerenderRuntimeDependentChrome();
   } else if (type === "activity.added") {
-    // Prepend to activity feed
     const item = payload.data || payload;
     if (item?.summary) {
       const feed = state.activityFeed || {};
       patchState({
         activityFeed: {
           ...feed,
-          items: [item, ...(feed.items || [])],
-          live_summary: item.summary,
-        },
+          items: [item, ...feed.items || []],
+          live_summary: item.summary
+        }
       });
       rerenderHeaderOnly();
     }
@@ -2060,34 +1743,26 @@ export function onStreamEvent(payload) {
     const item = payload.data || payload;
     if (item?.title) {
       patchState({
-        activeDelights: [...state.activeDelights, normalizeDelightCandidate(item)],
+        activeDelights: [...state.activeDelights, normalizeDelightCandidate(item)]
       });
-      // 用户正在惊喜卡的输入框里打字时不重建 DOM——textarea 会失焦、手机
-      // 键盘收起（field report 2026-07-05）。draft 已实时存进 state，队列
-      // 数据照常更新，用户发送 / 收起后的下一次交互自然刷新。
-      const typingInComposer =
-        document.activeElement?.classList?.contains("delight-composer-input");
+      const typingInComposer = document.activeElement?.classList?.contains("delight-composer-input");
       if (!typingInComposer) rerenderDelightOnly();
     }
   } else if (type === "delight.liked") {
-    // Positive feedback should keep the card visible across clients.
     const data = payload.data || payload;
     const bvid = data?.bvid || data?.domain;
     if (bvid) {
-      const updated = state.activeDelights.map((d) =>
-        (d.bvid || normalizeDelightCandidate(d).bvid) === bvid
-          ? { ...d, state: "liked", response_message: data?.message || "好，这类多来点。" }
-          : d,
+      const updated = state.activeDelights.map(
+        (d) => (d.bvid || normalizeDelightCandidate(d).bvid) === bvid ? { ...d, state: "liked", response_message: data?.message || "好，这类多来点。" } : d
       );
       patchState({ activeDelights: updated });
       rerenderDelightOnly();
     }
   } else if (type === "delight.disliked") {
-    // Negative feedback from another client removes this delight locally.
     const bvid = (payload.data || payload)?.bvid || (payload.data || payload)?.domain;
     if (bvid) {
       const filtered = state.activeDelights.filter(
-        (d) => (d.bvid || normalizeDelightCandidate(d).bvid) !== bvid,
+        (d) => (d.bvid || normalizeDelightCandidate(d).bvid) !== bvid
       );
       if (filtered.length !== state.activeDelights.length) {
         const newIdx = Math.min(state.delightCurrentIndex, Math.max(0, filtered.length - 1));
@@ -2097,3 +1772,4 @@ export function onStreamEvent(payload) {
     }
   }
 }
+//# sourceMappingURL=recommend.js.map

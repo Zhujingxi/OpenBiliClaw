@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECOMMEND_JS = ROOT / "src/openbiliclaw/web/js/views/recommend.js"
+RECOMMEND_JS = ROOT / "src/openbiliclaw/web/js/views/recommend.ts"
 APP_CSS = ROOT / "src/openbiliclaw/web/css/app.css"
 
 
@@ -54,14 +54,14 @@ def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
 
 
 def test_mobile_failed_chat_turn_renders_durable_error() -> None:
-    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text()
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.ts").read_text()
 
     assert 'turn.status === "error" || turn.status === "failed"' in chat_js
     assert 'errBubble.textContent = turn.error || "\\u56DE\\u590D\\u5931\\u8D25"' in chat_js
 
 
 def test_mobile_inline_probe_failure_keeps_notification_and_renders_error() -> None:
-    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text()
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.ts").read_text()
     start = chat_js.index("function expandInlineChatOnCard")
     body = chat_js[start:]
 

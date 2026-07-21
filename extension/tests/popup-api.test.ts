@@ -143,7 +143,13 @@ test("checkBackendStatus falls back to /health when /ping is missing (older back
   globalThis.fetch = (async (url: string) => {
     calls.push(url);
     if (url.endsWith("/ping")) {
-      return { ok: false, status: 404, async json() { return { error: "not_found" }; } };
+      return {
+        ok: false,
+        status: 404,
+        async json() {
+          return { error: "not_found" };
+        },
+      };
     }
     return {
       ok: true,
@@ -157,10 +163,7 @@ test("checkBackendStatus falls back to /health when /ping is missing (older back
   const online = await checkBackendStatus();
 
   assert.equal(online, true);
-  assert.deepEqual(calls, [
-    "http://127.0.0.1:8420/api/ping",
-    "http://127.0.0.1:8420/api/health",
-  ]);
+  assert.deepEqual(calls, ["http://127.0.0.1:8420/api/ping", "http://127.0.0.1:8420/api/health"]);
 });
 
 test("checkBackendStatus reports offline when the ping request rejects", async () => {
@@ -451,7 +454,10 @@ test("backend update API helpers use backend-only update endpoints", async () =>
   assert.equal(calls[1].options.body, JSON.stringify({ include_backend: true }));
   assert.equal(calls[2].url, "http://127.0.0.1:8420/api/update/apply");
   assert.equal(calls[2].options.method, "POST");
-  assert.equal(calls[2].options.body, JSON.stringify({ target: "backend", tag: "backend-v0.3.92" }));
+  assert.equal(
+    calls[2].options.body,
+    JSON.stringify({ target: "backend", tag: "backend-v0.3.92" }),
+  );
 });
 
 test("fetchPendingDelight loads the current pending delight candidate", async () => {
@@ -527,7 +533,7 @@ test("fetchPendingDelightBatch still forwards an explicit limit override", async
 });
 
 test("popup delight queue fetches do not hardcode the old fixed batch size", () => {
-  const popupJs = readFileSync(resolve("popup/popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup/popup.ts"), "utf8");
 
   assert.doesNotMatch(popupJs, /fetchPendingDelightBatch\(20\)/);
   assert.match(popupJs, /fetchPendingDelightBatch\(\)/);
@@ -597,7 +603,7 @@ test("fetchConfig sends GET to /config without reveal_keys (masked secrets only)
 });
 
 test("popup-api source never requests revealed credentials or legacy saved routes", () => {
-  const source = readFileSync(resolve("popup/popup-api.js"), "utf8");
+  const source = readFileSync(resolve("popup/popup-api.ts"), "utf8");
 
   // Credential-revealing query param must not appear anywhere in popup code.
   assert.doesNotMatch(source, /reveal_keys=true/);
@@ -725,10 +731,10 @@ test("model-config api reads safe snapshots and descriptor groups without reveal
 
   assert.equal(modelSnapshot.revision, "revision-a");
   assert.deepEqual(descriptors.groups, []);
-  assert.deepEqual(calls.map((call) => call.url), [
-    "http://127.0.0.1:8420/api/model-config",
-    "http://127.0.0.1:8420/api/model-connection-types",
-  ]);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["http://127.0.0.1:8420/api/model-config", "http://127.0.0.1:8420/api/model-connection-types"],
+  );
   assert.ok(calls.every((call) => !call.url.includes("reveal_keys")));
   assert.ok(calls.every((call) => call.options.method === "GET"));
 });
@@ -852,10 +858,7 @@ test("fetchSourceShareSuggestion loads source-share recommendation", async () =>
   const result = await fetchSourceShareSuggestion();
 
   assert.equal(calls.length, 1);
-  assert.equal(
-    calls[0].url,
-    "http://127.0.0.1:8420/api/config/source-share-suggestion",
-  );
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config/source-share-suggestion");
   assert.equal(calls[0].options.method, "GET");
   assert.equal(result.suggested_shares.youtube, 5);
 });
@@ -892,10 +895,7 @@ test("fetchSourceShareSuggestion posts current settings overrides when provided"
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(
-    calls[0].url,
-    "http://127.0.0.1:8420/api/config/source-share-suggestion",
-  );
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config/source-share-suggestion");
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.headers["Content-Type"], "application/json");
   assert.deepEqual(JSON.parse(calls[0].options.body), {

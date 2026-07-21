@@ -1148,7 +1148,7 @@ class TestMobileWebViewModels:
 
     def test_profile_confirm_probe_actions_mark_profile_surface(self) -> None:
         api_js = Path("src/openbiliclaw/web/js/api.js").read_text()
-        profile_js = Path("src/openbiliclaw/web/js/views/profile.js").read_text()
+        profile_js = Path("src/openbiliclaw/web/js/views/profile.ts").read_text()
         desktop_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text()
 
         assert "export async function respondToProbe(domain, responseType, options = {})" in api_js
@@ -1208,7 +1208,7 @@ class TestMobileWebViewModels:
         assert "respondToAvoidanceProbe" in profile_js
 
     def test_mobile_avoidance_actions_do_not_bind_interest_handler(self) -> None:
-        profile_js = Path("src/openbiliclaw/web/js/views/profile.js").read_text()
+        profile_js = Path("src/openbiliclaw/web/js/views/profile.ts").read_text()
         interest_binder = (
             "function bindSpecInterestActions()"
             + profile_js.split("function bindSpecInterestActions()", 1)[1].split(

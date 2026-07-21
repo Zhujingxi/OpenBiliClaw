@@ -7,6 +7,7 @@
     "build:web": "node scripts/build-web.mjs",
     "check:web-build": "node scripts/build-web.mjs --check",
     "typecheck:web": "tsc -p src/openbiliclaw/web/tsconfig.json --noEmit",
+    "pretest:js": "node extension/scripts/build-popup.mjs",
     "test:js": "node --test tests/js/",
     "lint": "eslint .",
     "format:check": "prettier --check ."

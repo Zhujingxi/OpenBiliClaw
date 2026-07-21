@@ -24,7 +24,13 @@ test("createAuthApi.status fetches /api/auth/status", async () => {
   const calls: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     calls.push({ url, options });
-    return { ok: true, status: 200, async json() { return { enabled: true, can_manage: true }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { enabled: true, can_manage: true };
+      },
+    };
   };
   const api = createAuthApi({ getBaseUrl, fetchImpl });
   const s = await api.status();
@@ -36,7 +42,13 @@ test("createAuthApi.setEnabled posts to /api/auth/admin with CSRF header", async
   const calls: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     calls.push({ url, options });
-    return { ok: true, status: 200, async json() { return { ok: true, enabled: true }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, enabled: true };
+      },
+    };
   };
   const api = createAuthApi({ getBaseUrl, fetchImpl });
   const r = await api.setEnabled(true, "hunter2");
@@ -56,8 +68,11 @@ test("initAuthControl reflects status and disables control when not manageable",
   const saveBtn = fakeEl({ hidden: true });
   const hint = fakeEl({ textContent: "" });
   const fetchImpl = async () => ({
-    ok: true, status: 200,
-    async json() { return { enabled: true, can_manage: false, env_managed: false }; },
+    ok: true,
+    status: 200,
+    async json() {
+      return { enabled: true, can_manage: false, env_managed: false };
+    },
   });
   const ctl = initAuthControl({ checkbox, password, saveBtn, hint }, { getBaseUrl, fetchImpl });
   await ctl.reload();
@@ -75,13 +90,23 @@ test("initAuthControl enable flow posts password then reloads", async () => {
   const posts: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     if (String(url).endsWith("/auth/status")) {
-      return { ok: true, status: 200, async json() {
-        return { enabled: enabledState, can_manage: true, env_managed: false };
-      } };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { enabled: enabledState, can_manage: true, env_managed: false };
+        },
+      };
     }
     posts.push(JSON.parse(options.body));
     enabledState = true;
-    return { ok: true, status: 200, async json() { return { ok: true, enabled: true }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, enabled: true };
+      },
+    };
   };
   const ctl = initAuthControl({ checkbox, password, saveBtn, hint }, { getBaseUrl, fetchImpl });
   await ctl.reload();
@@ -111,13 +136,23 @@ test("initAuthControl unchecking disables immediately", async () => {
   const posts: any[] = [];
   const fetchImpl = async (url: string, options: any = {}) => {
     if (String(url).endsWith("/auth/status")) {
-      return { ok: true, status: 200, async json() {
-        return { enabled: enabledState, can_manage: true, env_managed: false };
-      } };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { enabled: enabledState, can_manage: true, env_managed: false };
+        },
+      };
     }
     posts.push(JSON.parse(options.body));
     enabledState = false;
-    return { ok: true, status: 200, async json() { return { ok: true, enabled: false }; } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, enabled: false };
+      },
+    };
   };
   const ctl = initAuthControl({ checkbox, password, saveBtn, hint }, { getBaseUrl, fetchImpl });
   await ctl.reload();
@@ -135,7 +170,7 @@ test("popup wires the auth control into the general settings panel", async () =>
   assert.match(html, /id="cfgAuthEnabled"/);
   assert.match(html, /id="cfgAuthPassword"/);
   assert.match(html, /id="cfgAuthSave"/);
-  const js = readFileSync(resolve("popup/popup.js"), "utf8");
+  const js = readFileSync(resolve("popup/popup.ts"), "utf8");
   assert.match(js, /initAuthControl/);
   assert.match(js, /getBackendBaseUrl/);
 });

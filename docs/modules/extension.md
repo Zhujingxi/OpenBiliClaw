@@ -2,7 +2,7 @@
 
 > popup 的模型 tab 直接编辑 revisioned Chat / Embedding route；Primary 与 fallback 是同一条最多 10 项的有序列表，Runtime tab 继续承载 Chat 总并发与超时。
 
-模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机 `popup/popup-model-config-state.js` 是 checked-in 运行时 artifact：`extension/scripts/sync-model-config-state.mjs` 从 TypeScript 源 `src/openbiliclaw/web/shared/model-config-state.ts` 经 `npm run build:web` 产生的同名 `.js` 模块逐字节生成它，公共 API 与 Web 端完全一致；Web 的同名 `.js` 也作为 checked-in distributable asset 进入所有无 Node 的后端安装包。漂移由 `npm run check:web-build`、`tests/js/model-config-parity.test.mjs` 的 byte-for-byte 守卫 + 14 个 web ↔ extension 行为对齐向量共同钉住。修改必须落在共享 `.ts` 源上，先构建 Web 产物再重新生成副本。
+模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。popup 的模型配置状态机以 `popup/popup-model-config-state.ts` 为严格 TypeScript 源，`build:popup` 在开发、测试和打包前生成忽略的同名 `.js` 运行时；Web 端仍以 `src/openbiliclaw/web/shared/model-config-state.ts` 为独立源并交付 checked-in `.js`。两份实现不再假装是逐字节副本，公共行为由 `tests/js/model-config-parity.test.mjs` 的 hydrate / append / remove / move / field update / conflict / probe 等行为向量钉住；extension 自身的 strict popup typecheck 与完整 Node 套件覆盖插件专属扩展能力。
 
 ## 模块范围
 
@@ -94,11 +94,11 @@ extension/
 │   └── chrome-webstore-upload.mjs
 ├── popup/
 │   ├── popup.html
-│   ├── popup.js
-│   ├── popup-autostart-control.js
-│   ├── popup-connection-poller.js # popup HTTP / runtime-stream 三态协调与离线 /api/ping 重探测
-│   ├── popup-saved-sync.js
-│   └── popup-helpers.js    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
+│   ├── popup.ts
+│   ├── popup-autostart-control.ts
+│   ├── popup-connection-poller.ts # popup HTTP / runtime-stream 三态协调与离线 /api/ping 重探测
+│   ├── popup-saved-sync.ts
+│   └── popup-helpers.ts    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
 ├── src/
 │   ├── background/
 │   │   ├── buffer.ts
@@ -473,8 +473,10 @@ CLI 入口：
 ### 构建链路
 
 - 运行时脚本不再直接把 `tsc` 的 ESM 产物交给 Chrome
+- `scripts/build-popup.mjs` 在测试与打包前把 `popup/*.ts` 原位发射为忽略的 `.js` 运行时；发射逐文件覆盖，不先删除整组输出，避免并行 Node 测试的懒加载竞态
 - `scripts/build.mjs` 使用 `esbuild` 将各 content entry 和 `service-worker.ts` bundle 为可直接加载的单文件
 - `tsc --emitDeclarationOnly` 继续负责类型声明产物
+- `npm run typecheck` 只严格检查 extension `src` 与 popup 两个生产 runtime project；既有测试文件由 Node `--experimental-strip-types` 执行，不被误纳入生产 strict project
 - 新增构建回归测试，确保 content script 不会再次产出浏览器无法执行的 `import` 语句
 
 ## 本地开发
@@ -487,6 +489,8 @@ npm test
 npm run typecheck
 npm run build
 ```
+
+`npm test` 的 `pretest` 会自动执行 `build:popup`；无需手工生成 popup `.js`，生成物也不应提交。
 
 `npm test` 现在会覆盖：
 

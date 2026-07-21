@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 test("popup-api exposes profile edit client hitting the right endpoints", () => {
-  const api = readFileSync(resolve("popup", "popup-api.js"), "utf8");
+  const api = readFileSync(resolve("popup", "popup-api.ts"), "utf8");
   assert.match(api, /export async function fetchEditState\(\)/);
   assert.match(api, /requestJson\("\/profile\/edit-state", \{ method: "GET" \}\)/);
   assert.match(api, /export async function submitProfileEdit\(/);
@@ -17,7 +17,7 @@ test("profile view exposes an edit toggle + panel and edit-mode wiring", () => {
   assert.match(html, /id="profileEditToggle"/);
   assert.match(html, /id="profileEditPanel"/);
 
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
   assert.match(js, /function renderEditPanel\(/);
   assert.match(js, /function enterProfileEditMode\(/);
   assert.match(js, /function applyProfileEdit\(/);
@@ -32,17 +32,23 @@ test("profile view exposes an edit toggle + panel and edit-mode wiring", () => {
 
 test("profile edit mode is a page-level replacement state", () => {
   const html = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
-  assert.match(html, /\.view\.is-profile-editing\s+#profileCard\s*\{[\s\S]*display:\s*none\s*!important/);
-  assert.match(html, /\.view\.is-profile-editing\s+#profileEditPanel\s*\{[\s\S]*display:\s*flex\s*!important/);
+  assert.match(
+    html,
+    /\.view\.is-profile-editing\s+#profileCard\s*\{[\s\S]*display:\s*none\s*!important/,
+  );
+  assert.match(
+    html,
+    /\.view\.is-profile-editing\s+#profileEditPanel\s*\{[\s\S]*display:\s*flex\s*!important/,
+  );
   assert.match(js, /function setProfileEditingLayout\(/);
   assert.match(js, /elements\.viewProfile\.classList\.toggle\("is-profile-editing", editing\)/);
   assert.match(js, /setProfileEditingLayout\(profileEditing\)/);
 });
 
 test("edit panel covers the un-truncated editable fields", () => {
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
   for (const path of [
     "personality_portrait",
     "core.core_traits",
@@ -55,7 +61,7 @@ test("edit panel covers the un-truncated editable fields", () => {
 });
 
 test("edit panel renders and submits interest specifics", () => {
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(js, /edit-specific-list/);
   assert.match(js, /添加二级兴趣/);
@@ -66,7 +72,7 @@ test("edit panel renders and submits interest specifics", () => {
 });
 
 test("edit panel renders scalar (slider) fields committing a 0..1 float", () => {
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
   for (const path of [
     "surface.exploration_openness",
     "surface.style.quality_sensitivity",
@@ -82,7 +88,7 @@ test("edit panel renders scalar (slider) fields committing a 0..1 float", () => 
 });
 
 test("profile probe rows expose defer with semantic copy", () => {
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
   assert.match(js, /probeActionDescriptors/);
   assert.match(js, /responseType, row/);
   assert.match(js, /"defer"/);
@@ -91,7 +97,7 @@ test("profile probe rows expose defer with semantic copy", () => {
 });
 
 test("standalone profile probe card uses all canonical descriptors", () => {
-  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const renderProbeCard = js.slice(
     js.indexOf("function renderProbeCard"),
     js.indexOf("async function handleProbeResponse"),

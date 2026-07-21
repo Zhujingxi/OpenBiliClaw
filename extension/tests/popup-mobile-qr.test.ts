@@ -43,7 +43,7 @@ test("mobile web QR SVG is generated locally without embedding a remote service 
 });
 
 test("mobile QR LAN-IP lookup uses the lightweight QR endpoint", () => {
-  const popupSource = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupSource = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const renderSource =
     popupSource.match(
       /async function renderMobileQrPanel\(\) \{[\s\S]*?\n\}\n\nasync function openMobileQrPanel/,

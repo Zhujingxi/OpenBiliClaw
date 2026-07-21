@@ -7,4 +7,7 @@ src/openbiliclaw/web/shared/saved-sync-core.ts
 src/openbiliclaw/web/shared/model-config-render.js
 src/openbiliclaw/web/shared/model-config-state.js
 src/openbiliclaw/web/shared/saved-sync-core.js
+# Phase C follows the same checked-in compiler-output contract for the mobile
+# runtime. The build checker, rather than Prettier, owns these generated files.
+src/openbiliclaw/web/js/**/*.js
 extension/popup/popup-model-config-state.js

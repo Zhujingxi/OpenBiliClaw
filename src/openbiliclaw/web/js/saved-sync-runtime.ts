@@ -15,6 +15,10 @@ import {
   isSavedTaskTerminal,
   restoreSavedFocus,
 } from "../shared/saved-sync-core.js";
+import type {
+  DialogFocusControllerOptions,
+  DurableTaskTrackerOptions,
+} from "../shared/saved-sync-core.js";
 
 export {
   createRetainedSavedListState,
@@ -26,15 +30,14 @@ export {
 };
 
 export const captureSavedFocus = (
-  root: unknown,
-  activeElement: unknown = globalThis.document?.activeElement,
-) =>
-  coreCaptureSavedFocus(root, activeElement);
+  root: Parameters<typeof coreCaptureSavedFocus>[0],
+  activeElement: Parameters<typeof coreCaptureSavedFocus>[1] = globalThis.document?.activeElement,
+) => coreCaptureSavedFocus(root, activeElement);
 
-export const createDialogFocusController = (options: ObscDialogFocusControllerOptions = {}) =>
+export const createDialogFocusController = (options: DialogFocusControllerOptions = {}) =>
   coreCreateDialogFocusController({ document: globalThis.document, ...options });
 
-export const createDurableTaskTracker = (options: ObscDurableTaskTrackerOptions = {}) =>
+export const createDurableTaskTracker = (options: DurableTaskTrackerOptions = {}) =>
   coreCreateDurableTaskTracker({
     now: Date.now,
     isVisible: () => typeof document === "undefined" || !document.hidden,

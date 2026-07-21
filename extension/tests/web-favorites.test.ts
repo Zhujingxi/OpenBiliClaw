@@ -61,10 +61,7 @@ test("mobile recommend cards have a favorite star toggle", () => {
 });
 
 test("desktop web exposes favorites page, badge, and delight star", () => {
-  const desktopHtml = readFileSync(
-    resolve("../src/openbiliclaw/web/desktop/index.html"),
-    "utf8",
-  );
+  const desktopHtml = readFileSync(resolve("../src/openbiliclaw/web/desktop/index.html"), "utf8");
   const desktopJs = readFileSync(
     resolve("../src/openbiliclaw/web/desktop/assets/js/app.js"),
     "utf8",
@@ -83,7 +80,7 @@ test("desktop web exposes favorites page, badge, and delight star", () => {
 
 test("extension popup has a favorites tab, list, and delight star", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupHtml, /id="tabFavorites"/);
   assert.match(popupHtml, /id="viewFavorites"/);
@@ -95,7 +92,7 @@ test("extension popup has a favorites tab, list, and delight star", () => {
 });
 
 test("extension popup recommendation cards have a favorite star toggle", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /toggleSavedWithFeedback\("收藏", item/);
   assert.match(popupJs, /bindFavoriteToggle\(btn, item\)/);

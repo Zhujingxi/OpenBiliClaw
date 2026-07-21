@@ -18,6 +18,7 @@ def test_extension_ci_typechecks_strict_runtime_projects_before_tests() -> None:
         "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.popup.json --noEmit"
     )
     assert scripts["test"] == "node --test --experimental-strip-types tests/*.test.ts"
+    assert scripts["pretest"] == "npm run build:popup"
 
     source_config = _json("extension/tsconfig.json")
     source_options = source_config["compilerOptions"]

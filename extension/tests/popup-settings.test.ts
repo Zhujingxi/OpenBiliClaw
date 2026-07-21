@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 test("settings page exposes advanced config fields from backend schema", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const expectedIds = [
     "cfgBackendScheme",
     "cfgBackendPort",
@@ -105,17 +105,14 @@ test("settings page exposes advanced config fields from backend schema", () => {
     popupJs,
     /setVal\("cfgRefreshCheckInterval", cfg\.scheduler\?\.refresh_check_interval_seconds\)/,
   );
-  assert.match(
-    popupJs,
-    /refresh_check_interval_seconds: getInt\("cfgRefreshCheckInterval", 60\)/,
-  );
+  assert.match(popupJs, /refresh_check_interval_seconds: getInt\("cfgRefreshCheckInterval", 60\)/);
   assert.match(popupJs, /function formatBackendUpdateError/);
   assert.match(popupJs, /github_rate_limited:\s*"GitHub API 限流，请稍后再试"/);
 });
 
 test("settings source tab separates every platform into its own block", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const sourcesPanel =
     popupHtml.match(/<div id="settingsPanelSources"[\s\S]*?<div id="settingsPanelGeneral"/)?.[0] ??
     "";
@@ -140,15 +137,21 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, /id="cfgBilibiliEnabled"/);
   assert.match(sourcesPanel, />启用 Bilibili discovery</);
   assert.match(sourcesPanel, />调试：B 站登录时显示浏览器窗口</);
-  assert.match(popupJs, /bilibiliEnabled\.checked = cfg\.sources\?\.bilibili\?\.enabled !== false/);
-  assert.match(popupJs, /xhsEnabled\.checked = cfg\.sources\?\.xiaohongshu\?\.enabled === true/);
+  assert.match(
+    popupJs,
+    /bilibiliEnabled[^\n]*\.checked = cfg\.sources\?\.bilibili\?\.enabled !== false/,
+  );
+  assert.match(
+    popupJs,
+    /xhsEnabled[^\n]*\.checked = cfg\.sources\?\.xiaohongshu\?\.enabled === true/,
+  );
   assert.match(popupJs, /bilibili:\s*\{\s*enabled: checked\("cfgBilibiliEnabled", true\)/);
   assert.match(popupJs, /xiaohongshu:\s*\{\s*enabled: checked\("cfgXhsEnabled"\)/);
 });
 
 test("settings logging tab edits a single full log path", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const loggingPanel =
     popupHtml.match(/<div id="settingsPanelLogging"[\s\S]*?<p class="settings-note">/)?.[0] ?? "";
 
@@ -161,8 +164,8 @@ test("settings logging tab edits a single full log path", () => {
     popupJs,
     /const logPath = splitLogPath\(getVal\("cfgLogPath"\), state\.runtimeConfig\?\.logging\)/,
   );
-  assert.match(popupJs, /base\.directory = logPath\.directory/);
-  assert.match(popupJs, /base\.filename = logPath\.filename/);
+  assert.match(popupJs, /base[^\n]*\.directory = logPath\.directory/);
+  assert.match(popupJs, /base[^\n]*\.filename = logPath\.filename/);
 });
 
 test("settings logging path uses explicit dirty intent, not final-value equality", () => {
@@ -172,7 +175,7 @@ test("settings logging path uses explicit dirty intent, not final-value equality
   // payload branch keyed off final string equality. The client must track
   // user intent with an explicit dirty flag: armed by a real "input" event,
   // reset on programmatic render (populateForm) and on save success.
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // 1. An explicit module-level dirty flag with mark/reset helpers exists.
   assert.match(popupJs, /let logPathDirty = false;/);
@@ -193,7 +196,8 @@ test("settings logging path uses explicit dirty intent, not final-value equality
 
   // 4. The flag is reset when the backend config is rendered into the form
   //    (populateForm) and after a successful save.
-  const populateBlock = popupJs.split('setVal("cfgLogPath", resolveLogPathFromConfig(cfg.logging));', 2)[1] ?? "";
+  const populateBlock =
+    popupJs.split('setVal("cfgLogPath", resolveLogPathFromConfig(cfg.logging));', 2)[1] ?? "";
   assert.match(populateBlock.slice(0, 300), /resetLogPathDirty\(\);/);
   const saveSuccessBlock = popupJs.split("applyRuntimeConfig(result.config);", 2)[1] ?? "";
   assert.match(saveSuccessBlock.slice(0, 400), /resetLogPathDirty\(\);/);
@@ -201,12 +205,12 @@ test("settings logging path uses explicit dirty intent, not final-value equality
   // 5. The payload branch still sends file_path only for pristine echoes
   //    and directory/filename for intentional edits.
   assert.match(popupJs, /if \(isLogPathUnmodified\(state\.runtimeConfig\?\.logging\)\) \{/);
-  assert.match(popupJs, /base\.file_path = getVal\("cfgLogPath"\);/);
+  assert.match(popupJs, /base[^\n]*\.file_path = getVal\("cfgLogPath"\);/);
 });
 
 test("settings page organizes backend config into tabs", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const tabsMarkup = popupHtml.match(/<div class="settings-tabs"[\s\S]*?<\/div>/)?.[0] ?? "";
   const panelNames = ["models", "sources", "scheduler", "general", "logging"];
 
@@ -230,7 +234,7 @@ test("settings page organizes backend config into tabs", () => {
 
 test("settings page exposes backend-only update controls and plugin release fallback", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupHtml, /版本与更新/);
   assert.match(popupHtml, /id="cfgAutoUpdate"/);
@@ -248,10 +252,13 @@ test("settings page exposes backend-only update controls and plugin release fall
 });
 
 test("settings backend update apply failures show backend reason and refresh status", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /dirty_worktree:\s*"代码目录有未提交改动，更新被阻止"/);
-  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）"/);
+  assert.match(
+    popupJs,
+    /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）"/,
+  );
   assert.match(popupJs, /docker_install_mode:\s*"Docker 安装通过拉取新镜像升级，无法就地自更新"/);
   assert.match(popupJs, /branch_not_fast_forwardable:\s*"本地代码与发布版本分叉，无法快进更新"/);
   assert.match(popupJs, /missing_target_tag:\s*"远端未找到目标版本标签"/);
@@ -263,7 +270,7 @@ test("settings backend update apply failures show backend reason and refresh sta
 });
 
 test("settings backend update actions require explicit install branch", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /const isGitInstall = installMode === "git"/);
   assert.match(popupJs, /const isFrozenInstall = installMode === "frozen"/);
@@ -283,7 +290,7 @@ test("settings backend update actions require explicit install branch", () => {
 
 test("settings page round-trips YouTube source budgets", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(
     popupJs,
@@ -326,7 +333,7 @@ test("settings page round-trips YouTube source budgets", () => {
 
 test("settings page round-trips Zhihu discovery source modes", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   for (const id of [
     "cfgZhihuModeSearch",
@@ -345,7 +352,7 @@ test("settings page round-trips Zhihu discovery source modes", () => {
 
 test("settings page round-trips Reddit discovery config", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   for (const id of [
     "cfgRedditEnabled",
@@ -373,12 +380,15 @@ test("settings page round-trips Reddit discovery config", () => {
   assert.match(popupJs, /daily_search_budget: getInt\("cfgRedditDailySearchBudget", 300\)/);
   assert.match(popupJs, /reddit: getInt\("cfgPoolShareReddit", 1\)/);
   assert.match(popupJs, /reddit: checked\("cfgRedditEnabled"\)/);
-  assert.match(popupJs, /if \(shares\.reddit !== undefined\) setVal\("cfgPoolShareReddit", shares\.reddit\)/);
+  assert.match(
+    popupJs,
+    /if \(shares\.reddit !== undefined\) setVal\("cfgPoolShareReddit", shares\.reddit\)/,
+  );
 });
 
 test("settings page round-trips multimodal discovery evaluation controls", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   for (const id of [
     "cfgCandidateEvalConcurrency",
@@ -421,11 +431,11 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds\)/,
   );
-  assert.match(popupJs, /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/);
   assert.match(
     popupJs,
-    /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
+    /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/,
   );
+  assert.match(popupJs, /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
@@ -437,7 +447,7 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
 
 test("settings source cookie fields are write-only with masked status", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // Plaintext cookie textareas, same shape as the bilibili card.
   assert.match(popupHtml, /<textarea id="cfgBiliCookie"/);
@@ -453,8 +463,14 @@ test("settings source cookie fields are write-only with masked status", () => {
   assert.doesNotMatch(popupJs, /setVal\("cfgDouyinCookie"/);
   assert.doesNotMatch(popupJs, /setVal\("cfgTwitterCookie"/);
   assert.match(popupJs, /setCredentialInput\("cfgBiliCookie", cfg\.bilibili\?\.cookie\)/);
-  assert.match(popupJs, /setCredentialInput\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
-  assert.match(popupJs, /setCredentialInput\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
+  assert.match(
+    popupJs,
+    /setCredentialInput\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/,
+  );
+  assert.match(
+    popupJs,
+    /setCredentialInput\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/,
+  );
   assert.match(popupJs, /function setCredentialInput\(/);
   assert.match(popupJs, /已保存/);
   assert.match(popupJs, /未保存/);
@@ -483,7 +499,7 @@ test("settings source cookie fields are write-only with masked status", () => {
 
 test("settings general tab exposes and wires the network proxy field (aligned with desktop web)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // Field + probe control + copy stating CN requests stay direct.
   assert.match(popupHtml, /id="cfgNetworkProxyMode"/);
@@ -496,24 +512,30 @@ test("settings general tab exposes and wires the network proxy field (aligned wi
   // Restore mode + proxy, collect both into payload.network, probe wired.
   assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "direct"\)/);
   assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
-  assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
+  assert.match(
+    popupJs,
+    /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/,
+  );
   assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
   assert.match(popupJs, /function runNetworkProxyConfigProbe/);
 });
 
 test("source-share suggestion button uses settings-scope helpers and form switches", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const bindSettingsBlock =
-    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ?? "";
+    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ??
+    "";
   const populateFormIndex = bindSettingsBlock.indexOf("function populateForm");
   const collectFormIndex = bindSettingsBlock.indexOf("function collectForm");
   const populateFormBlock = bindSettingsBlock.slice(populateFormIndex, collectFormIndex);
   const beforePopulate = bindSettingsBlock.slice(0, populateFormIndex);
   const suggestionBlock =
-    bindSettingsBlock.match(/suggestBtn\.addEventListener\("click"[\s\S]*?\n  \}\n\n  saveBtn/)?.[0] ?? "";
+    bindSettingsBlock.match(
+      /suggestBtn\.addEventListener\("click"[\s\S]*?\n  \}\n\n  saveBtn/,
+    )?.[0] ?? "";
 
-  assert.match(beforePopulate, /const setVal = \(id, val\) => \{/);
-  assert.doesNotMatch(populateFormBlock, /const setVal = \(id, val\) => \{/);
+  assert.match(beforePopulate, /const setVal = \(id[^,]*, val[^)]*\) => \{/);
+  assert.doesNotMatch(populateFormBlock, /const setVal = \(id[^,]*, val[^)]*\) => \{/);
   assert.match(suggestionBlock, /fetchSourceShareSuggestion\(\{/);
   assert.match(suggestionBlock, /enabled_sources:\s*\{/);
   assert.match(suggestionBlock, /bilibili:\s*checked\("cfgBilibiliEnabled", true\)/);
@@ -523,11 +545,11 @@ test("source-share suggestion button uses settings-scope helpers and form switch
 });
 
 test("settings save renders structured config validation errors inline", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const bindSettingsBlock =
-    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ?? "";
-  const saveBlock =
-    popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
+    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ??
+    "";
+  const saveBlock = popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
   const structuredErrorBlock =
     bindSettingsBlock.match(/function renderStructuredConfigError[\s\S]*?\n  \}/)?.[0] ?? "";
 
@@ -540,11 +562,10 @@ test("settings save renders structured config validation errors inline", () => {
 });
 
 test("settings save renders timeout warning before structured or generic errors", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-  const saveBlock =
-    popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
+  const saveBlock = popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
 
-  const abortIndex = saveBlock.indexOf('err?.name === "AbortError"');
+  const abortIndex = saveBlock.indexOf('?.name === "AbortError"');
   const structuredIndex = saveBlock.indexOf("renderStructuredConfigError(err)");
   const genericIndex = saveBlock.indexOf("保存失败");
   const successIndex = saveBlock.indexOf("applyRuntimeConfig(result.config)");
@@ -556,13 +577,13 @@ test("settings save renders timeout warning before structured or generic errors"
   assert.ok(abortIndex < genericIndex, "AbortError should not fall through to generic error toast");
   assert.ok(abortIndex > successIndex, "AbortError branch should wrap the updateConfig call");
   assert.match(saveBlock, /return;/);
-  assert.match(saveBlock, /finally[\s\S]*saveBtn\.disabled = false/);
+  assert.match(saveBlock, /finally[\s\S]*saveBtn[^\n]*\.disabled = false/);
   assert.match(saveBlock, /finally[\s\S]*setSaveButtonMode/);
 });
 
 test("settings page wires offline cache and degraded-mode banners", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   for (const id of ["cfgBannerOffline", "cfgBannerDegraded", "cfgBannerNoCache"]) {
     assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
@@ -582,8 +603,7 @@ test("settings page shows the budget-semantics hint for every per-source budget 
 
   // The hint must match the desktop web wording so users learn budget is a
   // per-day cap, not an on/off toggle.
-  const baseNote =
-    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。";
+  const baseNote = "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。";
   const redditNote =
     "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。";
 
@@ -611,7 +631,7 @@ test("settings page shows the budget-semantics hint for every per-source budget 
 
 test("settings page wires the keyword generation mode selector (matches desktop web)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   // Select + the three options — values/labels byte-identical to desktop web.
   assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
@@ -639,7 +659,7 @@ test("settings page wires the keyword generation mode selector (matches desktop 
 });
 
 test("settings source status labels distinguish local readiness", () => {
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
   assert.match(popupJs, /ready: "凭据已就绪"/);
   assert.match(popupJs, /unverified: "状态待验证"/);

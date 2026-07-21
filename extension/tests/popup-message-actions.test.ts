@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 // messages container, dispatched by data-msg-action — immune to child
 // re-renders. These static guards lock that wiring in place.
 
-const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
 const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
 // Body of buildMessageCard (the inbox probe card) — scoped so assertions
@@ -40,10 +40,7 @@ test("message card action buttons carry delegated semantic actions", () => {
 
 test("probe action groups wrap their semantic buttons", () => {
   for (const selector of ["probe-actions", "spec-actions", "message-actions"]) {
-    assert.match(
-      popupHtml,
-      new RegExp(`\\.${selector}[^\\{]*\\{[^\\}]*flex-wrap:\\s*wrap`),
-    );
+    assert.match(popupHtml, new RegExp(`\\.${selector}[^\\{]*\\{[^\\}]*flex-wrap:\\s*wrap`));
   }
   assert.match(popupHtml, /\.probe-btn:focus-visible/);
   assert.match(popupHtml, /box-shadow:\s*var\(--focus-ring\)/);
@@ -87,7 +84,7 @@ test("messages container binds ONE delegated action handler that survives re-ren
   assert.match(handler, /expandInlineChat\(/);
   assert.match(handler, /handleMessageResponse\(/);
   // Disabled buttons (pending chat) and double-clicks are guarded.
-  assert.match(handler, /btn\.disabled/);
+  assert.match(handler, /btn[^\n]*\.disabled/);
   assert.match(handler, /dataset\.responding/);
 });
 
@@ -96,8 +93,5 @@ test("delegated message handler submits defer like confirm and reject", () => {
     popupJs.indexOf("function onMessageActionClick"),
     popupJs.indexOf("function renderMessagesList"),
   );
-  assert.match(
-    handler,
-    /action === "confirm" \|\| action === "defer" \|\| action === "reject"/,
-  );
+  assert.match(handler, /action === "confirm" \|\| action === "defer" \|\| action === "reject"/);
 });

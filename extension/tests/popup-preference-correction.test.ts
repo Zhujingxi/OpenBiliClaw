@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const html = readFileSync(resolve("popup", "popup.html"), "utf8");
-const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+const js = readFileSync(resolve("popup", "popup.ts"), "utf8");
 
 test("recommendation card has no preference correction entry", () => {
   const cardStart = html.indexOf('<div class="recommendation-header-card">');

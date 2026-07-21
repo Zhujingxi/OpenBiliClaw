@@ -16,10 +16,11 @@ test("popup header keeps compact status inline with brand row", () => {
 
 test("popup separates backend reachability from runtime stream reconnects", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const streamBlock =
-    popupJs.match(/function connectRuntimeStream\(\) \{[\s\S]*?\n\}\n\nfunction renderActivityHistory/)?.[0] ??
-    "";
+    popupJs.match(
+      /function connectRuntimeStream\(\) \{[\s\S]*?\n\}\n\nfunction renderActivityHistory/,
+    )?.[0] ?? "";
 
   assert.match(popupJs, /createBackendConnectionCoordinator/);
   assert.match(popupJs, /markHttpReachable\(\)/);
@@ -33,14 +34,17 @@ test("popup separates backend reachability from runtime stream reconnects", () =
 
 test("popup header exposes a local mobile web QR entry", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const popupMarkup = popupHtml.match(/<header class="hero">[\s\S]*?<\/header>/)?.[0] ?? "";
   const overlayMarkup =
     popupHtml.match(/<div id="mobileQrOverlay"[\s\S]*?<!-- ── Messages overlay ── -->/)?.[0] ?? "";
 
   assert.match(popupMarkup, /id="mobileQrButton"/);
   assert.match(popupMarkup, /aria-label="手机版入口：显示移动端二维码"/);
-  assert.match(popupMarkup, /id="mobileQrButton"[\s\S]*id="messagesButton"[\s\S]*id="settingsGear"/);
+  assert.match(
+    popupMarkup,
+    /id="mobileQrButton"[\s\S]*id="messagesButton"[\s\S]*id="settingsGear"/,
+  );
   assert.match(overlayMarkup, /id="mobileQrCode"/);
   assert.match(overlayMarkup, /id="mobileQrCopy"/);
   assert.match(overlayMarkup, /id="mobileQrOpen"/);
@@ -73,7 +77,7 @@ test("popup header stays a single row with inline icons at narrow side-panel wid
 
 test("popup shows a GitHub Star button (icon + label, no live count)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const heroSub = popupHtml.match(/<div class="hero-sub">[\s\S]*?<\/div>\s*<\/header>/)?.[0] ?? "";
   const heroActions = popupHtml.match(/<div class="hero-actions">[\s\S]*?<\/div>/)?.[0] ?? "";
 
@@ -98,19 +102,13 @@ test("popup shows a GitHub Star button (icon + label, no live count)", () => {
 
 test("recommendation header uses a compact top row with status chips", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const headerCardBlock =
-    popupHtml.match(/\.recommendation-header-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const headerCardBlock = popupHtml.match(/\.recommendation-header-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const topBlock = popupHtml.match(/\.recommendation-header-top\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const introBlock =
-    popupHtml.match(/\.recommendation-header-intro\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const titleBlock =
-    popupHtml.match(/\.recommendation-header-title\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const summaryRowBlock =
-    popupHtml.match(/\.recommendation-summary-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const statusRowBlock =
-    popupHtml.match(/\.recommendation-status-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const statusChipBlock =
-    popupHtml.match(/\.recommendation-status-chip\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const introBlock = popupHtml.match(/\.recommendation-header-intro\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const titleBlock = popupHtml.match(/\.recommendation-header-title\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const summaryRowBlock = popupHtml.match(/\.recommendation-summary-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const statusRowBlock = popupHtml.match(/\.recommendation-status-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const statusChipBlock = popupHtml.match(/\.recommendation-status-chip\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const recommendMarkup =
     popupHtml.match(/<section id="viewRecommend"[\s\S]*?<div id="emptyState"/)?.[0] ?? "";
 
@@ -141,9 +139,13 @@ test("recommendation header uses a compact top row with status chips", () => {
 test("recommendation header keeps its compact inline layout until very narrow widths", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const narrowHeaderQuery =
-    popupHtml.match(/@media \(max-width: 360px\)\s*\{[\s\S]*?\.recommendation-status-chip[\s\S]*?\}/)?.[0] ?? "";
+    popupHtml.match(
+      /@media \(max-width: 360px\)\s*\{[\s\S]*?\.recommendation-status-chip[\s\S]*?\}/,
+    )?.[0] ?? "";
   const mediumHeaderQuery =
-    popupHtml.match(/@media \(max-width: 520px\)\s*\{[\s\S]*?\.recommendation-header-top[\s\S]*?\}/)?.[0] ?? "";
+    popupHtml.match(
+      /@media \(max-width: 520px\)\s*\{[\s\S]*?\.recommendation-header-top[\s\S]*?\}/,
+    )?.[0] ?? "";
 
   assert.match(narrowHeaderQuery, /\.recommendation-header-top\s*\{/);
   assert.match(narrowHeaderQuery, /\.recommendation-status-chip\s*\{/);
@@ -153,19 +155,24 @@ test("recommendation header keeps its compact inline layout until very narrow wi
 
 test("recommend tab reserves a dedicated delight slot above the recommendation list", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const delightSlotBlock = popupHtml.match(/#delightSlot[\s\S]*?\{[\s\S]*?\}/)?.[0] ?? "";
   const delightCardBlock = popupHtml.match(/\.delight-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const delightActionsBlock = popupHtml.match(/\.delight-actions\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const delightMarkup =
-    popupHtml.match(/<section id="viewRecommend"[\s\S]*?<div id="recommendationList" class="recommendation-list"><\/div>/)?.[0] ?? "";
+    popupHtml.match(
+      /<section id="viewRecommend"[\s\S]*?<div id="recommendationList" class="recommendation-list"><\/div>/,
+    )?.[0] ?? "";
 
   assert.match(delightSlotBlock, /display:\s*grid;/);
   assert.match(delightCardBlock, /border-radius:\s*20px;/);
   assert.match(delightActionsBlock, /display:\s*flex;/);
   assert.match(delightMarkup, /id="delightSlot"/);
   assert.match(delightMarkup, /id="recommendationList"/);
-  assert.match(delightMarkup, /id="delightSlot"[\s\S]*id="emptyState"[\s\S]*id="recommendationList"/);
+  assert.match(
+    delightMarkup,
+    /id="delightSlot"[\s\S]*id="emptyState"[\s\S]*id="recommendationList"/,
+  );
   assert.match(popupJs, /"看看"/);
   assert.match(popupJs, /"不感兴趣"/);
   assert.match(popupJs, /"聊一聊"/);
@@ -174,7 +181,7 @@ test("recommend tab reserves a dedicated delight slot above the recommendation l
 
 test("recommendation cards use explicit editorial content sections", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const previewBlock = popupHtml.match(/\.recommendation-preview\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const contentBlock = popupHtml.match(/\.recommendation-content\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const copyBlock = popupHtml.match(/\.recommendation-copy-block\s*\{[\s\S]*?\}/)?.[0] ?? "";
@@ -232,8 +239,7 @@ test("settings tabs use stable compact panels", () => {
   const tabBlock = popupHtml.match(/\.settings-tab\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const activeTabBlock = popupHtml.match(/\.settings-tab\.is-active\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const panelBlock = popupHtml.match(/\.settings-panel\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const hiddenPanelBlock =
-    popupHtml.match(/\.settings-panel\[hidden\]\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const hiddenPanelBlock = popupHtml.match(/\.settings-panel\[hidden\]\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
   assert.match(tabsBlock, /display:\s*grid;/);
   assert.match(tabsBlock, /grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\);/);
@@ -259,7 +265,7 @@ test("recommendation card layout reserves a media cover slot", () => {
 
 test("saved cards reserve a thumbnail slot and load covers through the backend proxy", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const coverBlock = popupHtml.match(/\.saved-card-cover\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const coverImageBlock = popupHtml.match(/\.saved-card-cover img\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
@@ -280,8 +286,10 @@ test("footer activity card keeps two lines and expandable history area", () => {
   const footerHeadlineBlock = popupHtml.match(/\.footer-headline\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const footerHistoryBlock = popupHtml.match(/\.footer-history\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const footerMarkup = popupHtml.match(/<footer id="footerHintBar"[\s\S]*?<\/footer>/)?.[0] ?? "";
-  const successBlock = popupHtml.match(/\.footer\[data-tone="success"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
-  const errorBlock = popupHtml.match(/\.footer\[data-tone="error"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
+  const successBlock =
+    popupHtml.match(/\.footer\[data-tone="success"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
+  const errorBlock =
+    popupHtml.match(/\.footer\[data-tone="error"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
 
   assert.match(footerMarkup, /data-tone="info"/);
   assert.match(footerMarkup, /id="headlineText"/);
@@ -301,7 +309,10 @@ test("profile cognition cards reserve separate rows for context and explicit sta
   const cardBlock = popupHtml.match(/\.cognition-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const headerBlock = popupHtml.match(/\.cognition-header\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const metaBlock = popupHtml.match(/\.cognition-meta\s*\{[\s\S]*?\}/)?.[0] ?? "";
-  const markup = popupHtml.match(/<div id="profileRecentMemory" class="cognition-list"><\/div>[\s\S]*?id="profileRecentMemoryMore"/)?.[0] ?? "";
+  const markup =
+    popupHtml.match(
+      /<div id="profileRecentMemory" class="cognition-list"><\/div>[\s\S]*?id="profileRecentMemoryMore"/,
+    )?.[0] ?? "";
 
   assert.match(cardBlock, /border-radius:\s*18px;/);
   assert.match(headerBlock, /gap:\s*8px;/);
@@ -319,7 +330,7 @@ test("profile summary includes an explicit dislike chip group", () => {
 
 test("profile summary reserves dedicated sections for layered cognition", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.ts"), "utf8");
   const markup = popupHtml.match(/<div id="profileCard"[\s\S]*?<\/div>\s*<\/section>/)?.[0] ?? "";
 
   // Core layer
