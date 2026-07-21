@@ -96,6 +96,9 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
                 reply_count=3,
                 retweet_count=2,
                 bookmark_count=1,
+                rating_score=9.2,
+                rating_count=9959,
+                source_rank=1,
                 tags=["tag-a", "tag-b"],
                 source_context="feed",
                 candidate_tier="backfill",
@@ -122,6 +125,9 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
     assert item.reply_count == 3
     assert item.retweet_count == 2
     assert item.bookmark_count == 1
+    assert item.rating_score == 9.2
+    assert item.rating_count == 9959
+    assert item.source_rank == 1
 
 
 def test_discovery_candidate_row_defaults_missing_platform_to_bilibili() -> None:
@@ -134,6 +140,31 @@ def test_discovery_candidate_row_defaults_missing_platform_to_bilibili() -> None
     )
 
     assert item.source_platform == "bilibili"
+
+
+def test_catalog_metrics_round_trip_through_content_cache(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    item = DiscoveredContent(
+        bvid="326",
+        content_id="326",
+        content_url="https://bgm.tv/subject/326",
+        source_platform="bangumi",
+        source_strategy="bangumi-ranked",
+        content_type="subject",
+        title="攻壳机动队",
+        rating_score=9.2,
+        rating_count=9959,
+        source_rank=1,
+    )
+
+    db.cache_content(item.bvid, **item.to_cache_kwargs())
+
+    row = db.conn.execute(
+        "SELECT rating_score, rating_count, source_rank FROM content_cache WHERE item_key = ?",
+        ("bangumi:326",),
+    ).fetchone()
+    assert dict(row) == {"rating_score": 9.2, "rating_count": 9959, "source_rank": 1}
 
 
 def test_enqueue_discovery_candidates_replaces_invalid_json_payload(

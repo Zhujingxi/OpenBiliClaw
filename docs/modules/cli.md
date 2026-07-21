@@ -45,6 +45,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `fetch-zhihu` | 单独触发知乎事件拉取（默认 smoke；可选写入 memory / 重建画像） | ✅ |
 | `fetch-x` | 单独触发 X（Twitter）点赞 / 收藏拉取（服务端 cookie 重放，无扩展任务，不需 daemon；`--dry-run` 只打印不入库） | ✅ |
 | `fetch-reddit` | 单独触发 Reddit 插件 bootstrap 或搜索 smoke（默认不写 memory、不重建画像） | ✅ |
+| `fetch-bangumi` | 读取 Bangumi 公开收藏（默认只读，不写 memory、不调用 LLM） | ✅ |
 | `import-youtube <path>` | 从 Google Takeout 导入 YouTube 历史 / 订阅 / 点赞 | ✅ |
 | `setup-embedding` | 配置本地 Ollama 作为独立 embedding provider（可选） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
@@ -65,6 +66,9 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-reddit-hot` | 单独触发 Reddit 热门 discovery，并把候选写入待评估池 | ✅ |
 | `discover-reddit-subreddit` | 单独触发指定 subreddit discovery，并把候选写入待评估池 | ✅ |
 | `discover-reddit-related` | 单独触发 Reddit 相关内容 discovery，并把候选写入待评估池 | ✅ |
+| `discover-bangumi <keyword>` | 只读验证 Bangumi Subject 搜索 | ✅ |
+| `discover-bangumi-ranked` | 只读验证 Bangumi 排名浏览 | ✅ |
+| `discover-bangumi-latest` | 只读验证 Bangumi 按日期浏览（可能含未播条目） | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
 | `chat` | 苏格拉底式对话 | ✅ |
 | `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
@@ -521,9 +525,11 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 5. best-effort 等待插件导入抖音初始化信号
 6. best-effort 等待插件导入 YouTube 初始化信号
 7. best-effort 等待插件导入知乎初始化信号
-8. 写入事件层并分析偏好
-9. 生成、校验并保存完整初始画像
-10. 严格使用该画像执行发现、个性化评估和推荐文案生成，至少验证一条 canonical 推荐可直接浏览
+8. best-effort 等待插件导入 Reddit 初始化信号
+9. 若提供公开用户名，读取 Bangumi 公开收藏初始化信号
+10. 写入事件层并分析偏好
+11. 生成、校验并保存完整初始画像
+12. 严格使用该画像执行发现、个性化评估和推荐文案生成，至少验证一条 canonical 推荐可直接浏览
 
 > v0.3.118+：B 站不再是必选基座——`--no-bilibili`（或 `OPENBILICLAW_NO_BILIBILI=1`）可跳过 B 站，
 > 但 init **至少需要一个数据来源**：全部来源都关闭时命令直接报错退出（exit 1）。
@@ -533,11 +539,13 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 
 > Issue #113（v0.3.168+）：共享流水线仅在阶段 2 偏好分析和阶段 3 画像任务的 task-local scope 内绕过库存敏感的后台 admission，避免首次空库存与画像生成互相等待；阶段 4 只在完整画像落盘后开始且不继承 bypass，并同步完成发现、评估、推荐文案与 canonical 可用性校验。正向兴趣 / 避雷探针移到 init wrapper 恢复 runtime 后调度，普通后台任务、LLM 总并发 gate 及 Soul 公开 API 不变。
 
-> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批` 和实际 LLM 并发上限，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。默认墙钟预算按并发执行波次自适应：每波 300 秒，再固定预留 300 秒给一次 reasoning-only / 临时限流恢复；1100 条事件拆成 6 批时，并发 1 / 2 / 3 分别允许 2100 / 1200 / 900 秒，最小单波预算 600 秒。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时、限流重试和取消记录写入 `openbiliclaw.log`。
+> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批` 和实际 LLM 并发上限，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时、限流重试和取消记录写入 `openbiliclaw.log`。
+>
+> **进度感知期限（v0.3.179+）**：阶段 2 不再使用开跑前算死的固定墙钟——墙钟分不清“卡死”和“慢但在出结果”，健康但慢的服务商会在出结果的途中被杀。`_await_with_progress_deadline` 改为同时施加两个限制：**空闲期限**（`_INIT_PROGRESS_IDLE_SECONDS = 600s`，只有真实分片完成回调会刷新“上次进展”时间戳，心跳 tick 不算）与**绝对上限**（`_INIT_PROGRESS_ABSOLUTE_SECONDS = 2700s`，与按并发波次自适应算出的旧预算取较大值）。两种超时抛出可区分的 `_InitIdleTimeoutError` / `_InitAbsoluteTimeoutError`（均为 `TimeoutError` 子类），对应两条不同的可操作文案：空闲超时指向 Base URL / 模型名 / 代理排查，绝对超时提示换更快的模型并附上已完成批次。显式传入 `profile_analysis_timeout_seconds` 时仍是精确的纯墙钟（`<=0` 表示不限）。阶段 4 有真实进度信号，同样启用双限制（空闲 900s / 绝对 2700s）；阶段 3 是单次 LLM 调用、无分片进度可读，空闲判定天然失真，因此**只有绝对兜底**（1800s）。所有上限均为**卡死兜底、不是性能预期**；`CancelledError` 一律向上传播，被中断的初始化仍记为 `cancelled`。GUI 的 `stages[].progress.max_seconds` 发布的就是这个绝对上限。
 
 安装渠道里的首选路径是 `scripts/agent_bootstrap.py` 自动运行 init：Bash / PowerShell 人类一行安装会先在终端向导里按顺序确认 LLM、embedding、B 站 Cookie 和各来源 opt-in；Docker / AI agent / CI 非交互安装则通过显式 flags 和 `BOOTSTRAP_STATUS` 推进，不会阻塞读 stdin。bootstrap 随后会对默认 LLM provider 与 embedding 服务各做一次轻量真实调用；两者都可用才触发本命令。若 bootstrap 返回 `service_check_failed`，说明 `openbiliclaw init` 尚未运行，应先修 API key / base_url / model / Ollama，再重跑 bootstrap。直接执行 `openbiliclaw init` 仍保留为高级手动 fallback 和重复初始化入口。
 
-默认初始化信号上限：B 站观看历史最多 500 条、收藏最多 500 条（跨收藏夹总预算，单个收藏夹会按页补齐）、关注 UP 最多 100 人；小红书 / 抖音 / YouTube 的 `bootstrap_profile` 每个 scope 默认最多 300 条；知乎 `bootstrap_events` 的浏览历史、收藏夹条目、动态点赞、动态收藏四个分支默认各最多 300 条；Reddit `bootstrap_events` 的 saved、upvoted、subscribed 三个分支默认各最多 300 条。交互式 `init` 会让用户确认 B 站收藏 / 关注上限，收藏回车使用 500、关注回车使用 100；脚本化场景可传 `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`，传 `0` 表示跳过对应信号。
+默认初始化信号上限：B 站观看历史最多 500 条、收藏最多 500 条（跨收藏夹总预算，单个收藏夹会按页补齐）、关注 UP 最多 100 人；小红书 / 抖音 / YouTube 的 `bootstrap_profile` 每个 scope 默认最多 300 条；知乎 `bootstrap_events` 的浏览历史、收藏夹条目、动态点赞、动态收藏四个分支默认各最多 300 条；Reddit `bootstrap_events` 的 saved、upvoted、subscribed 三个分支默认各最多 300 条；Bangumi 公开收藏使用 `[sources.bangumi].bootstrap_limit`，默认 300、最大 1000。交互式 `init` 会让用户确认 B 站收藏 / 关注上限，收藏回车使用 500、关注回车使用 100；脚本化场景可传 `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`，传 `0` 表示跳过对应信号。
 
 v0.3.95+：交互式 `init` 的 embedding 配置阶段（`_interactive_embedding_setup(auto_if_ready=True)`）会先探测本机 Ollama——若 Ollama 已运行且装有 `bge-m3`，直接写入 `provider=ollama, model=bge-m3` 并跳过选项菜单，避免「确认用 Ollama 当聊天模型、却把语义去重所需的 embedding 留空」导致推荐刷到换皮重复。显式 `setup-embedding` 命令不走自动跳过，始终展示完整菜单以便切换 provider。
 
@@ -585,6 +593,8 @@ YouTube 导入依赖浏览器插件在用户已登录的 `https://www.youtube.co
 
 Reddit 导入也复用 `bootstrap_events` 任务。后端入队 `reddit_tasks(type="bootstrap_events")`，插件在用户已登录的 `https://www.reddit.com` 页面里先读取 `/api/me.json` 识别当前用户，再读取 saved、upvoted 和 subscribed subreddit，同步回写 `/api/sources/reddit/task-result`。`init --yes-reddit` 会把 saved → `favorite`、upvoted → `like`、subscribed → `follow` 的统一事件加入 `analyze_events()` / `build_initial_profile()`，同时把 `[sources.reddit].enabled=true` 写回配置；Reddit 可以作为唯一初始化来源，只要真实拉到至少一条信号。后台会复用 6 小时内近期 Reddit `bootstrap_events` 任务；三个分支各自独立使用单分支上限 300。
 
+Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。`init --yes-bangumi --bangumi-token <token>` 走个人令牌通道：令牌先经 `GET /v0/me` 实测校验（被拒绝时当场退出并指引到 https://next.bgm.tv/demo/access-token 重新生成），解析出的用户名覆盖显式填写值（不一致时提示），随后带 Bearer 读取该账号收藏（含私密行）；校验通过的令牌与用户名一并写回 `[sources.bangumi]`。令牌与显式用户名皆缺时，init 会回退浏览器扩展自动识别的账号（扩展在已登录的 bgm.tv 页面读取公开 `CHOBITS_UID` + 导航 `/user/<username>` 链接并上报后端持久化；优先级：令牌 `/v0/me` > 显式用户名 > 扩展上报用户名），命中时输出"使用浏览器扩展识别到的账号"。Bangumi 作为唯一来源时三者至少满足一个（报错文案："提供 --bangumi-token（推荐，自动识别当前用户）或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别"）；与其它画像来源混用但全部缺失时，初始化会明确警告并只启用后续 Bangumi discovery。匿名路径私有收藏不可见，`updated_at` 不作为收藏行为时间。
+
 X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**。X 的发现走服务端 cookie 重放，行为采集走浏览器扩展 MAIN-world tap，两者都在 init 之后才生效，所以 `init --yes-x` **只翻转 `[sources.twitter].enabled = true`**，不会在 init 期间打开 x.com 前台 tab 或拉取数据。启用后，用户登录 x.com → 扩展自动把 `auth_token` + `ct0` 同步到 `data/x_cookie.json` → 后台 `XDiscoveryProducer` 在下一个 refresh tick 按预算补 X 候选。非交互式终端默认跳过 X。
 
 源开关：
@@ -596,8 +606,11 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--yes-x` / `--no-x`：跳过 X (Twitter) 交互式提问，直接启用或跳过。只翻转 `[sources.twitter].enabled`，不在 init 期间拉取数据；非交互式终端默认跳过 X，脚本化 init 应显式传其中一个。
 - `--yes-zhihu` / `--no-zhihu`：跳过知乎交互式提问，直接启用或跳过。`--yes-zhihu` 会执行 `bootstrap_events` 并把结果纳入本轮首版画像；非交互式终端默认跳过知乎，脚本化 init 应显式传其中一个。
 - `--yes-reddit` / `--no-reddit`：跳过 Reddit 交互式提问，直接启用或跳过。`--yes-reddit` 会执行 `bootstrap_events` 并把 saved / upvoted / subscribed 结果纳入本轮首版画像，同时开启后续 Reddit discovery；非交互式终端默认跳过 Reddit。
+- `--yes-bangumi` / `--no-bangumi`：跳过 Bangumi 交互式提问，直接启用或跳过；非交互式终端默认跳过 Bangumi。
+- `--bangumi-username <name>`：本次初始化读取的公开用户名，并在启用时写回配置；不提供时可回退 `[sources.bangumi].username`。
+- `--bangumi-token <token>`：Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；不提供时可回退 `[sources.bangumi].access_token`。经 `/v0/me` 校验通过后写回配置；坏令牌当场拒绝。
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
-- `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1`：永久跳过对应源。
+- `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_ZHIHU_BOOTSTRAP_DEDUPE_HOURS`：知乎 `bootstrap_events` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
@@ -619,16 +632,19 @@ OpenBiliClaw 需要一个语言模型来理解你的兴趣、写推荐文案。
  4   Gemini 官方                           默认 gemini-2.5-flash (稳定 / 便宜)。Google AI Studio 申请 Key,免费档每天 1500 次够用
  5   Claude 官方                           默认 claude-sonnet-4-6。Anthropic console,按 token 付费,质量高
  6   OpenRouter 聚合                       默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费
- 7   本地 Ollama（完全离线）                默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s
 
-Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。
+Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容)。本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;如需本地聊天模型请到设置页手动配置。
 
 请输入序号或名称（默认 1=DeepSeek） [1]:
 
 # (随后只问被选中那一项实际需要的字段——
 #  例如选 1/3/4/5/6: 只问 API Key + 模型名；
-#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名；
-#  选 7: 只问模型名，并自动安装 / 启动 Ollama)
+#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名)
+#
+# 注意（v0.3.176+）：本地 Ollama 已不再出现在聊天 provider 菜单里——随装的
+# Ollama 只带 embedding 模型（bge-m3），小体积本地聊天模型达不到内容管线质量线。
+# 后端注册表 / 桌面设置页仍支持 ollama 聊天；`ollama` 作为来自既有配置或
+# 显式 flag 的 default_provider 依然被接受，只是不再交互式「提供」它。
 
 Embedding(向量化)服务
 把视频标题/简介压成向量,跨视频做相似度对比 —— 决定"这条和你之前喜欢的那条是不是同一类"。和聊天 LLM 是分开的。
@@ -670,7 +686,9 @@ Cookie 只存在你本机 data/bilibili_cookie.json，不会上传任何地方�
 
 > **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义），按所选 preset 写入 `[llm.openai]` 段。两者底层走的是同一个 OpenAI 协议家族，但用户视角分得很清楚。
 >
-> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。Ollama 仍保留为完全离线选项，但需要本机算力，首次响应会慢。
+> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。
+>
+> **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 ollama 聊天，供进阶用户使用；来自既有 `config.toml` 或显式 flag 的 `default_provider = "ollama"` 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。
 
 首次 `init` 的 discover 阶段可能持续几分钟，因为它会真实访问 B 站接口并调用当前 provider 进行候选打分与表达生成。
 当前实现已经对首轮 discover 做了保守受控并发优化，但默认并发上限仍偏保守，优先减少 B 站和 LLM 限流风险。
@@ -786,6 +804,8 @@ $ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点�
 
 ### `openbiliclaw fetch-douyin`
 
+`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
+
 单独触发抖音 `bootstrap_profile` 拉取，适合 smoke 测试扩展和补拉抖音信号。它只执行“入队 → 唤醒扩展 → 等结果 → 打印 scope counts”，不跑 B 站认证检查、不跑 `analyze_events()` / `build_initial_profile()` / discovery。事件由 daemon 在接收 `/api/sources/dy/task-result` partial 时写入 memory，CLI 自身不会再传播一次，避免重复入库。
 
 ```bash
@@ -856,7 +876,7 @@ $ openbiliclaw fetch-x -n 50
   已写入 memory：73 条事件。 跑 `openbiliclaw rebuild-profile` 让画像吃进新信号。
 ```
 
-`--limit/-n` 控制每类最多拉取条数（默认 50，`init` 回填用 200）；`--dry-run` 只拉取并打印、不写 memory。点赞 → `event_type="like"`、收藏 → `event_type="favorite"`（均为显式正向信号）。cookie 未同步时静默跳过（0 条事件、退出码 0），不报错；拉取本身 best-effort，单类失败（cookie 过期 / 限流 / 偶发 TLS）只打印告警、不中断。
+`--limit/-n` 控制每类最多拉取条数（默认 50，`init` 回填用 200）；`--dry-run` 只拉取并打印、不写 memory。点赞 → `event_type="like"`、收藏 → `event_type="favorite"`（均为显式正向信号）。cookie 未同步时静默跳过（0 条事件、退出码 0），不报错；拉取本身 best-effort，单类失败（cookie 过期 / 限流 / 偶发 TLS）只打印告警、不中断。每个真实请求无论成功或失败都会更新共享 `XSourceHealthStore`（证据绑定当前 Cookie 指纹），所以 dry-run 成功后来源状态能立即显示「请求反馈」验证，401/403/429 也会给设置页留下可定位的健康状态；dry-run 仍然不会写画像事件。
 
 ### `openbiliclaw import-youtube <path>`
 
@@ -876,7 +896,7 @@ $ openbiliclaw import-youtube ~/Downloads/takeout.zip --dry-run
 
 ### `openbiliclaw discover`
 
-读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery 或 Reddit discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务并进入统一待评估池；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选；命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务。Reddit 候选只入 `discovery_candidates`，评估由后台统一 evaluator 处理。
+读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery、Reddit discovery 或 Bangumi 官方 API discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务并进入统一待评估池；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选，命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务；Bangumi 正式流程复用 `BangumiDiscoveryProducer`，按 `[sources.bangumi].source_modes`、subject types、分支预算、cursor 与 cooldown 直连官方匿名 API。Reddit、知乎和 Bangumi 候选都只写 `discovery_candidates`，评估由后台统一 evaluator 处理。
 
 ```bash
 # 默认：Bilibili 全策略
@@ -934,14 +954,25 @@ Reddit 内容发现
   来源分布: reddit-hot:2, reddit-related:15, reddit-search:4, reddit-subreddit:10
   分支: search, hot, subreddit, related
   后端: rdt
+
+# 触发 Bangumi 正式 discovery（匿名只读取数，候选进入待评估池）
+$ openbiliclaw discover --source bangumi --limit 20
+Bangumi 内容发现
+发现摘要
+  发现条数: 20
+  入池候选: 20
+  来源: bangumi
+  分支: search, ranked, latest
 ```
+
+显式 Bangumi discover 要求 `[sources.bangumi].enabled=true`，但即使 `[scheduler].enabled=false` 也会执行；scheduler 总开关只暂停后台自动任务。producer 返回 disabled 或画像尚未初始化时，CLI 会显示对应修复提示，而不是回落为通用“未产出内容”。
 
 选项：
 
-- `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu` 或 `reddit`
+- `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu`、`reddit` 或 `bangumi`
 - `--strategy, -S`：仅对 Bilibili 生效，可多次传或逗号分隔，取值 `search` / `trending` / `explore` / `related_chain`
 - `--limit, -n`：发现结果条数上限，默认 `30`
-- `--force`：xiaohongshu 专用，忽略 `XhsTaskProducer` 的 4 小时节流
+- `--force`：xiaohongshu / Bangumi 可用；忽略本地最小调度间隔，但 Bangumi 仍遵循持久化 `429` cooldown
 
 抖音 discovery 需要 `[sources.douyin].enabled = true`。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。
 
@@ -1022,6 +1053,39 @@ openbiliclaw discover-reddit-related https://www.reddit.com/r/LocalLLaMA/comment
 ```
 
 `discover-reddit` 默认走 search；`discover-reddit-hot` 默认 `r/all`，rdt 路径实际调用 `rdt all --json`；`discover-reddit-subreddit` 需要一个或多个 subreddit 名，rdt 路径实际调用 `rdt sub <name> --json`；`discover-reddit-related` 需要一个或多个 Reddit 内容 URL，rdt 路径会抽取 `/comments/<id>/` 后调用 `rdt read <id> --json`。命令默认 `--backend rdt`，优先使用插件同步的 rdt credential；插件不可用时可手动运行 `rdt login`。需要强制插件登录态链路时加 `--backend extension --wait-seconds 180`。若 rdt 路径不可用或未登录，CLI 会自动 fallback 到插件；若插件路径返回 `login_required`，请在安装了 OpenBiliClaw 插件的浏览器里正常登录 Reddit。
+
+### `openbiliclaw fetch-bangumi`
+
+通过 Bangumi 官方 API 读取收藏。默认只打印统计，不写 memory、不重建画像、也不调用 LLM：
+
+```bash
+openbiliclaw fetch-bangumi --username sai --limit 20
+openbiliclaw fetch-bangumi --token <personal-access-token> --limit 20
+openbiliclaw fetch-bangumi --username sai --limit 100 --write-memory
+openbiliclaw fetch-bangumi --username sai --limit 100 --write-memory --rebuild-profile
+```
+
+- `--username, -u`：公开用户名；省略时读取 `[sources.bangumi].username`。
+- `--token`：个人令牌；省略时读取 `[sources.bangumi].access_token`。命中令牌时优先于用户名：先经 `GET /v0/me` 自动识别当前用户，再带 Bearer 读取该账号收藏（含私密行）；令牌被拒绝（401）时报"个人令牌被拒绝（缺失、错误或已过期）"并指引到 https://next.bgm.tv/demo/access-token 重新生成。
+- `--limit, -n`：最多读取条目数；`0` 使用配置的 `bootstrap_limit`。
+- `--write-memory`：显式把转换后的收藏事件写入本地 memory。
+- `--rebuild-profile`：在写入后用本批事件重建画像，会真实调用当前 LLM；该选项会隐含启用 `--write-memory`。
+
+令牌与用户名皆缺时报错提示"通过 --token（推荐，自动识别当前用户）或 --username 提供访问方式"。该命令始终只读，不会修改用户的 Bangumi 收藏、评分或进度。
+
+### `openbiliclaw discover-bangumi*`
+
+三个独立命令是官方 API 的安全只读 smoke，不写候选池、memory 或画像：
+
+```bash
+openbiliclaw discover-bangumi "攻壳机动队" --limit 10
+openbiliclaw discover-bangumi-ranked --limit 10
+openbiliclaw discover-bangumi-latest --limit 10
+```
+
+搜索使用配置中的 `subject_types`；ranked/latest 会按配置类型分配结果窗口。`discover-bangumi-latest` 对应官方 `sort=date`，响应可能含未来或未播条目，因此 CLI 不把它表述为实时更新。单次 `--limit` 限制在 `1..50`。
+
+要让结果进入正式推荐链，使用 `openbiliclaw discover --source bangumi`；它会写 `discovery_candidates(pending_eval)`，由共享 evaluator/admission 决定是否进入可推荐池。每日分支预算按跨分支去重和最终 limit 后实际保留的候选计数，重复/截断条目不扣额度。
 
 ### `openbiliclaw search-douyin`
 

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from openbiliclaw.bilibili.api import FavoriteFolder, FavoriteFolderWithItems, FollowingUser
+from openbiliclaw.bilibili.api import (
+    BilibiliAPIError,
+    FavoriteFolder,
+    FavoriteFolderWithItems,
+    FollowingUser,
+)
+from openbiliclaw.llm.base import LLMProviderError, LLMResponseError
 
 
 class _FakeMemoryManager:
@@ -381,6 +390,13 @@ async def test_account_sync_returns_partial_success_when_one_source_fails() -> N
     assert result["synced"] is True
     assert result["new_event_count"] == 2
     assert "favorites boom" in str(memory.state["last_sync_error"])
+    assert memory.state["last_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "unexpected_error"}
+    ]
+    status = service.get_runtime_status()
+    assert "B 站收藏夹未同步" in str(status["last_account_sync_message"])
+    assert "未分类异常" in str(status["last_account_sync_message"])
+    assert "已成功的环节已保留" in str(status["last_account_sync_message"])
     assert {event["event_type"] for event in memory.events} == {"view", "follow"}
 
 
@@ -415,6 +431,9 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
     assert "画像分析失败" in str(memory.state["last_sync_error"])
     assert "找不到所配置的模型" in str(memory.state["last_sync_error"])
     assert "ollama pull" in str(memory.state["last_sync_error"])
+    # The LLM-unavailability classification rides along so the status surface
+    # can render actionable copy instead of a false "稍后会自动重试" promise.
+    assert memory.state["last_sync_error_kind"] == "model_not_found"
     # Cursor / throttle are NOT advanced → next tick retries the same events.
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
@@ -423,6 +442,36 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
     # the failed analyze means _auto_bootstrap_soul_profile never runs.)
     assert soul.bootstrap_calls == []
     assert soul.ready_checks == 1
+
+
+@pytest.mark.asyncio
+async def test_account_sync_persists_no_provider_kind_on_profile_analysis() -> None:
+    """An empty LLM registry surfaces as no_provider, not a generic error."""
+    from openbiliclaw.llm.base import LLMFallbackError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _NoProviderSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise LLMFallbackError("No provider was available to process the request.")
+
+    memory = _FakeMemoryManager()
+    soul = _NoProviderSoul(ready=False)
+    client = _FakeClient(
+        history_items=[_history_item("BVNOLLM", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    with pytest.raises(LLMFallbackError):
+        await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == "no_provider"
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    status = service.get_runtime_status()
+    assert "设置" in str(status["last_account_sync_message"])
+    assert "稍后会自动重试" not in str(status["last_account_sync_message"])
 
 
 @pytest.mark.asyncio
@@ -466,6 +515,134 @@ async def test_account_sync_bounds_hung_profile_analysis_and_records_reason() ->
     assert "模型名" in str(memory.state["last_sync_error"])
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
+    assert memory.state["last_sync_error_kind"] == "profile_analysis_timeout"
+    assert memory.state["last_sync_issues"] == [{"stage": "profile_analysis", "kind": "timeout"}]
+    status = service.get_runtime_status()
+    assert "AI 画像分析超过 6 分钟" in str(status["last_account_sync_message"])
+    assert "模型设置" in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "status_kind", "issue_kind", "message_fragment"),
+    [
+        (
+            RuntimeError("401 Unauthorized"),
+            "llm_auth_failed",
+            "auth_failed",
+            "AI 服务鉴权失败",
+        ),
+        (
+            RuntimeError("connection refused"),
+            "llm_connection",
+            "connection",
+            "无法连接 AI 服务",
+        ),
+        (
+            LLMProviderError("upstream error: insufficient_quota"),
+            "llm_quota_exhausted",
+            "quota_exhausted",
+            "额度不足或已用尽",
+        ),
+        (
+            LLMProviderError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            "llm_ssl",
+            "ssl",
+            "SSL 证书验证失败",
+        ),
+        (
+            RuntimeError("HTTP 503"),
+            "llm_server_error",
+            "server_error",
+            "AI 服务返回服务器错误",
+        ),
+        (
+            LLMResponseError("empty response"),
+            "llm_invalid_response",
+            "invalid_response",
+            "空内容或无法解析",
+        ),
+        (
+            LLMProviderError(
+                "Error code: 500 - 根据相关法律法规，无法提供关于该内容的答案 (10013)"
+            ),
+            "llm_moderation",
+            "moderation",
+            "内容合规策略拒绝",
+        ),
+        (
+            RuntimeError("opaque provider failure"),
+            "profile_analysis_error",
+            "unexpected_error",
+            "画像分析遇到未分类异常",
+        ),
+    ],
+)
+async def test_account_sync_classifies_profile_analysis_failure(
+    exc: Exception,
+    status_kind: str,
+    issue_kind: str,
+    message_fragment: str,
+) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise exc
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(
+            history_items=[_history_item("BVPROFILEFAIL", 101)],
+            favorites=[],
+            following=[],
+        ),
+        soul_engine=_FailingAnalyzeSoul(ready=False),
+    )
+
+    with pytest.raises(type(exc)):
+        await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_error_kind"] == status_kind
+    assert status["last_account_sync_issues"] == [{"stage": "profile_analysis", "kind": issue_kind}]
+    assert message_fragment in str(status["last_account_sync_message"])
+    assert status["last_account_sync_severity"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_profile_failure_preserves_source_stage_issues_from_same_cycle() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise RuntimeError("HTTP 503")
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(
+            history_items=[_history_item("BVMIXEDFAIL", 101)],
+            favorites_exc=BilibiliAPIError("upstream failed", code=-500),
+        ),
+        soul_engine=_FailingAnalyzeSoul(ready=False),
+    )
+
+    with pytest.raises(RuntimeError):
+        await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "api_error"},
+        {"stage": "profile_analysis", "kind": "server_error"},
+    ]
+    message = str(status["last_account_sync_message"])
+    assert "B 站收藏夹" in message
+    assert "AI 服务返回服务器错误" in message
+    assert "2 类问题" in message
 
 
 @dataclass
@@ -1241,6 +1418,98 @@ async def test_account_sync_records_generic_error_kind() -> None:
     await service.sync_now()
 
     assert memory.state["last_sync_error_kind"] == "error"
+    assert memory.state["last_sync_issues"] == [
+        {"stage": "bilibili_history", "kind": "unexpected_error"}
+    ]
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == memory.state["last_sync_issues"]
+    assert "B 站观看历史未同步" in str(status["last_account_sync_message"])
+    assert "未分类异常" in str(status["last_account_sync_message"])
+    assert "账号同步出错" not in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "issue_kind", "message_fragment", "severity"),
+    [
+        (
+            BilibiliAPIError("rate limited", code=-429),
+            "rate_limited",
+            "B 站接口限流",
+            "warning",
+        ),
+        (
+            BilibiliAPIError("upstream failed", code=-500),
+            "api_error",
+            "B 站接口返回异常",
+            "error",
+        ),
+        (
+            httpx.ConnectError("connection refused"),
+            "network",
+            "无法连接 B 站",
+            "error",
+        ),
+        (
+            TimeoutError("request timed out"),
+            "timeout",
+            "请求超时",
+            "error",
+        ),
+    ],
+)
+async def test_account_sync_classifies_bilibili_failure_reason(
+    exc: Exception,
+    issue_kind: str,
+    message_fragment: str,
+    severity: str,
+) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(favorites_exc=exc),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": issue_kind}
+    ]
+    assert message_fragment in str(status["last_account_sync_message"])
+    assert status["last_account_sync_severity"] == severity
+
+
+@pytest.mark.asyncio
+async def test_account_sync_message_lists_multiple_failed_stages() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(
+            favorites_exc=RuntimeError("favorites boom"),
+            following_exc=TimeoutError("following timed out"),
+        ),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_issues"] == [
+        {"stage": "bilibili_favorites", "kind": "unexpected_error"},
+        {"stage": "bilibili_following", "kind": "timeout"},
+    ]
+    message = str(status["last_account_sync_message"])
+    assert "2 类问题" in message
+    assert "收藏夹" in message
+    assert "关注列表" in message
+    assert "未分类异常" in message
+    assert "请求超时" in message
 
 
 @pytest.mark.asyncio
@@ -1267,7 +1536,13 @@ async def test_account_sync_auth_expired_kind_wins_over_generic() -> None:
 async def test_account_sync_clean_sync_clears_error_kind() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
-    memory = _FakeMemoryManager({**_FakeMemoryManager().state, "last_sync_error_kind": "error"})
+    memory = _FakeMemoryManager(
+        {
+            **_FakeMemoryManager().state,
+            "last_sync_error_kind": "error",
+            "last_sync_issues": [{"stage": "bilibili_history", "kind": "unexpected_error"}],
+        }
+    )
     service = AccountSyncService(
         memory_manager=memory,
         bilibili_client=_KindClient(history_items=[_history_item("BVOK", 100)]),
@@ -1277,6 +1552,7 @@ async def test_account_sync_clean_sync_clears_error_kind() -> None:
     await service.sync_now()
 
     assert memory.state["last_sync_error_kind"] == ""
+    assert memory.state["last_sync_issues"] == []
 
 
 @pytest.mark.asyncio
@@ -1327,6 +1603,31 @@ class _FakeXClient:
         if self.bookmarks_exc is not None:
             raise self.bookmarks_exc
         return self._bookmarks[:limit]
+
+
+class _FakeXHealth:
+    def __init__(self, *, state: str = "ok", ready: bool = True) -> None:
+        self.state = state
+        self.ready = ready
+        self.successes: list[str] = []
+        self.errors: list[tuple[BaseException, str]] = []
+
+    def is_ready(self) -> bool:
+        return self.ready
+
+    def get(self) -> dict[str, Any]:
+        return {"state": self.state}
+
+    def record_success(self, *, strategy: str = "") -> None:
+        self.successes.append(strategy)
+        self.state = "ok"
+        self.ready = True
+
+    def record_error(self, exc: BaseException, *, strategy: str = "") -> str:
+        self.errors.append((exc, strategy))
+        self.state = "rate_limited"
+        self.ready = False
+        return self.state
 
 
 def _tweet(tid: str, *, text: str = "hello world", screen: str = "alice") -> dict[str, Any]:
@@ -1492,6 +1793,111 @@ async def test_x_fetch_error_records_error_and_preserves_bilibili(caplog) -> Non
     assert "x boom" in str(memory.state["last_sync_error"])
     assert memory.state["last_sync_error_kind"] == "error"
     assert "x likes" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_x_account_sync_honors_existing_source_cooldown(tmp_path: Path) -> None:
+    """A source-level 429 cooldown must gate likes/bookmarks too, not just discovery."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XRateLimitError
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
+
+    memory = _FakeMemoryManager()
+    x_client = _FakeXClient(likes=[_tweet("100")], bookmarks=[_tweet("200")])
+    db = Database(tmp_path / "x-health.db")
+    db.initialize()
+    health = XSourceHealthStore(db)
+    health.record_error(XRateLimitError("429 Too Many Requests"), strategy="search")
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+        x_health_store=health,
+    )
+
+    result = await service.sync_now()
+
+    assert x_client.likes_calls == 0
+    assert x_client.bookmarks_calls == 0
+    assert memory.state["last_sync_error_kind"] == "x_rate_limited"
+    assert "X 账号喜好同步因来源限流冷却而跳过" in result["errors"]
+    status = service.get_runtime_status()
+    assert status["last_account_sync_severity"] == "warning"
+    assert "X 暂时限流" in str(status["last_account_sync_message"])
+    assert "B 站等其他来源不受影响" in str(status["last_account_sync_message"])
+    assert "无需操作" in str(status["last_account_sync_message"])
+    assert "账号同步出错" not in str(status["last_account_sync_message"])
+
+
+@pytest.mark.asyncio
+async def test_x_live_rate_limit_opens_shared_cooldown_and_skips_second_request() -> None:
+    """The first 429 in a pair records health and prevents an immediate second hit."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XRateLimitError
+
+    memory = _FakeMemoryManager()
+    x_client = _FakeXClient(
+        likes_exc=XRateLimitError("429 Too Many Requests"),
+        bookmarks=[_tweet("200")],
+    )
+    health = _FakeXHealth()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+        x_health_store=health,
+    )
+
+    await service.sync_now()
+
+    assert x_client.likes_calls == 1
+    assert x_client.bookmarks_calls == 0
+    assert [(strategy, type(exc).__name__) for exc, strategy in health.errors] == [
+        ("likes", "XRateLimitError")
+    ]
+    assert memory.state["last_sync_error_kind"] == "x_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_x_success_updates_shared_health_for_both_account_paths() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    health = _FakeXHealth()
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=_FakeXClient(likes=[], bookmarks=[]),
+        x_health_store=health,
+    )
+
+    await service.sync_now()
+
+    assert health.successes == ["likes", "bookmarks"]
+
+
+@pytest.mark.asyncio
+async def test_non_x_error_prevents_misleading_x_only_status_copy() -> None:
+    """Do not claim other sources were unaffected when Bilibili also failed."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.sources.x_client import XAuthError
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_exc=RuntimeError("bilibili boom")),
+        soul_engine=_FakeSoulEngine(),
+        x_client=_FakeXClient(likes_exc=XAuthError("401 Unauthorized")),
+    )
+
+    await service.sync_now()
+
+    status = service.get_runtime_status()
+    assert status["last_account_sync_error_kind"] == "error"
+    assert "其他来源不受影响" not in str(status["last_account_sync_message"])
 
 
 @pytest.mark.asyncio
@@ -1725,3 +2131,195 @@ async def test_account_sync_following_partial_page_failure_still_imports() -> No
     assert memory.state["last_sync_error_kind"] == "auth_expired"
     assert "logged out" in str(memory.state["last_sync_error"])
     assert memory.state["last_account_sync_at"]
+
+
+def test_merge_stage_errors_drops_repeated_cause() -> None:
+    """One expired cookie fails three stages with the same message.
+
+    history hits /x/web-interface/history/cursor; favorites and following each
+    call get_nav_info() for the mid, so users saw one cause joined three times.
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    expired = "Bilibili session expired on /x/web-interface/nav (-101)."
+    cursor = "Bilibili session expired on /x/web-interface/history/cursor (-101)."
+
+    merged = AccountSyncService._merge_stage_errors([cursor, expired, expired])
+
+    assert merged == f"{cursor} | {expired}"
+
+
+def test_user_facing_sync_message_guides_relogin_for_expired_cookie() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    message = AccountSyncService._user_facing_sync_message(
+        "auth_expired",
+        "Bilibili session expired on /x/web-interface/nav (-101).",
+    )
+
+    # Actionable Chinese copy, not the provider's English error.
+    assert "重新登录" in message
+    assert "-101" not in message
+    assert "expired" not in message
+
+
+def test_user_facing_sync_message_empty_when_healthy() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    assert AccountSyncService._user_facing_sync_message("", "") == ""
+
+
+def test_user_facing_sync_message_labels_legacy_unclassified_state_honestly() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    message = AccountSyncService._user_facing_sync_message("error", "opaque legacy detail")
+
+    assert "旧版或未分类异常" in message
+    assert "无法确定具体环节" in message
+    assert "账号同步出错" not in message
+
+
+def test_runtime_status_normalizes_unknown_persisted_issue_codes() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager(
+        {
+            **_FakeMemoryManager().state,
+            "last_sync_error": "legacy detail",
+            "last_sync_error_kind": "error",
+            "last_sync_issues": [{"stage": "future_stage", "kind": "future_kind"}],
+        }
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    status = service.get_runtime_status()
+
+    assert status["last_account_sync_issues"] == [{"stage": "unknown", "kind": "unexpected_error"}]
+    assert "未分类异常" in str(status["last_account_sync_message"])
+
+
+def test_user_facing_sync_message_actionable_for_llm_unavailability() -> None:
+    """no_provider / model_not_found never promise an automatic retry.
+
+    Nothing recovers until the user fixes the model configuration, so the copy
+    must point at settings instead of the generic "稍后会自动重试"."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    no_provider = AccountSyncService._user_facing_sync_message(
+        "no_provider", "画像分析失败：AI 服务未配置"
+    )
+    assert "设置" in no_provider
+    assert "稍后会自动重试" not in no_provider
+
+    model_missing = AccountSyncService._user_facing_sync_message(
+        "model_not_found", "画像分析失败：找不到所配置的模型"
+    )
+    assert "模型名" in model_missing
+    assert "稍后会自动重试" not in model_missing
+
+    # Rate limiting IS transient — the loop genuinely retries next cycle.
+    rate_limited = AccountSyncService._user_facing_sync_message(
+        "rate_limited", "画像分析失败：AI 服务限流"
+    )
+    assert "自动重试" in rate_limited
+
+    x_rate_limited = AccountSyncService._user_facing_sync_message("x_rate_limited", "X 429")
+    assert "X 暂时限流" in x_rate_limited
+    assert "其他来源不受影响" in x_rate_limited
+    assert "无需操作" in x_rate_limited
+
+
+def test_runtime_status_severity_for_llm_kinds() -> None:
+    """rate_limited reads as a warning (backoff), config faults as errors."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_BootstrapSoulEngine(ready=True),
+    )
+
+    for kind, expected in (
+        ("rate_limited", "warning"),
+        ("x_rate_limited", "warning"),
+        ("x_auth_expired", "warning"),
+        ("x_blocked", "error"),
+        ("no_provider", "error"),
+        ("model_not_found", "error"),
+    ):
+        memory.state["last_sync_error"] = "画像分析失败：x"
+        memory.state["last_sync_error_kind"] = kind
+        status = service.get_runtime_status()
+        assert status["last_account_sync_severity"] == expected, kind
+        assert status["last_account_sync_message"]
+
+
+def test_exclusive_file_lock_is_non_blocking_for_second_holder(tmp_path: Path) -> None:
+    from openbiliclaw.memory.json_state import exclusive_file_lock
+
+    lock_path = tmp_path / "account_sync.run.lock"
+    with exclusive_file_lock(lock_path, blocking=False) as first:
+        assert first is True
+        # Same process, same file: a second non-blocking attempt from another
+        # holder must lose rather than wait.
+        import subprocess
+        import sys
+
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys;"
+                    "from pathlib import Path;"
+                    "from openbiliclaw.memory.json_state import exclusive_file_lock;"
+                    f"p=Path({str(lock_path)!r});"
+                    "ctx=exclusive_file_lock(p, blocking=False);"
+                    "acquired=ctx.__enter__();"
+                    "print('acquired' if acquired else 'busy');"
+                    "ctx.__exit__(None, None, None)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        )
+        assert probe.stdout.strip() == "busy", probe.stderr
+
+    # After the holder releases, the lock is free again.
+    with exclusive_file_lock(lock_path, blocking=False) as reacquired:
+        assert reacquired is True
+
+
+def test_exclusive_file_lock_released_when_holder_process_dies(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from openbiliclaw.memory.json_state import exclusive_file_lock
+
+    lock_path = tmp_path / "account_sync.run.lock"
+    # A crashed holder must not strand the lock — the kernel releases it.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path;"
+                "from openbiliclaw.memory.json_state import exclusive_file_lock;"
+                f"p=Path({str(lock_path)!r});"
+                "ctx=exclusive_file_lock(p, blocking=False);"
+                "ctx.__enter__();"
+                "import os; os._exit(1)"
+            ),
+        ],
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+
+    with exclusive_file_lock(lock_path, blocking=False) as acquired:
+        assert acquired is True

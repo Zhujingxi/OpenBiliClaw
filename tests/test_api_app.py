@@ -2272,6 +2272,35 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"lan_ip": "192.168.1.7"}
 
+    def test_qr_info_endpoint_detects_lan_ip_fresh_on_every_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Wi-Fi switch must reach the QR panel at once, not after the TTL.
+
+        ``/api/health`` caches ``lan_ip`` for 30s. If the QR endpoint shared
+        that cache, a code scanned right after a network change would still
+        encode the old, phone-unreachable host.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        addresses = iter(["192.168.1.7", "192.168.31.98"])
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: next(addresses))
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        first = client.get("/api/qr-info")
+        second = client.get("/api/qr-info")
+
+        assert first.json() == {"lan_ip": "192.168.1.7"}
+        assert second.json() == {"lan_ip": "192.168.31.98"}
+        # The fresh probe also refreshes the cache /api/health serves, so health
+        # never regresses to the superseded address (a third _detect_lan_ip call
+        # would exhaust the iterator and raise).
+        assert client.get("/api/health").json()["lan_ip"] == "192.168.31.98"
+
     def test_sources_status_returns_every_source(self) -> None:
         """Unified /api/sources/status reports a status item per source."""
         from fastapi.testclient import TestClient
@@ -2284,7 +2313,16 @@ class TestBackendAPI:
         assert response.status_code == 200
         body = response.json()
         # One status item per source, each with the unified shape.
-        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"):
+        for key in (
+            "bilibili",
+            "xiaohongshu",
+            "douyin",
+            "youtube",
+            "twitter",
+            "zhihu",
+            "reddit",
+            "bangumi",
+        ):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
             assert set(item) >= {"enabled", "state", "detail", "logged_in"}
@@ -2302,6 +2340,149 @@ class TestBackendAPI:
             "stale",
             "error",
         }
+        # Bangumi is now on the contract: anonymous-public, so state is always
+        # no_auth and logged_in True (discovery-health rides detail, not state,
+        # and the enable switch stays its own field).
+        assert body["bangumi"]["state"] == "no_auth"
+        assert body["bangumi"]["logged_in"] is True
+        assert body["bangumi"]["auth"] is not None
+        assert body["bangumi"]["auth"]["auth_required"] is False
+
+    def test_bangumi_status_is_no_auth_with_discovery_health_in_detail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """On the contract, Bangumi's auth verdict is fixed; discovery rides detail.
+
+        It used to fold discovery readiness into ``state`` (``unverified`` →
+        ``ready``) and derive ``logged_in`` from it — the D1 conflation the
+        contract removes. Now ``state`` is always ``no_auth`` (anonymous-public)
+        and ``logged_in`` always True; a completed discovery run moves the
+        *detail*, not the auth verdict.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-source-status.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        before = client.get("/api/sources/status").json()["bangumi"]
+
+        assert before["state"] == "no_auth"
+        assert before["logged_in"] is True
+        assert before["detail"] == "尚未运行 Bangumi 内容发现。"
+        assert before["auth"]["auth_required"] is False
+        assert before["auth"]["verify_method"] == "none"  # no token configured
+
+        database.conn.execute(
+            "INSERT INTO bangumi_discovery_runs(mode, units, discovered, reason) "
+            "VALUES ('search', 1, 1, 'ok')"
+        )
+        database.conn.commit()
+        after = client.get("/api/sources/status").json()["bangumi"]
+
+        # Auth verdict unchanged; only the discovery-health detail moved.
+        assert after["state"] == "no_auth"
+        assert after["logged_in"] is True
+        assert after["detail"] != before["detail"]
+
+    def test_bangumi_status_exposes_token_state_three_states(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _token_fingerprint,
+        )
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-token-state.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        # No token configured: the token_state dimension stays empty.
+        no_token = client.get("/api/sources/status").json()["bangumi"]
+        assert no_token["token_state"] == ""
+
+        # Token configured, no rejection marker: ok.
+        cfg.sources.bangumi.access_token = "tok"
+        ok = client.get("/api/sources/status").json()["bangumi"]
+        assert ok["token_state"] == "ok"
+        assert "无需登录" not in ok["detail"]
+
+        # A persisted rejection marker surfaces the actionable warning.
+        BangumiDiscoveryProducer(
+            database=database,
+            soul_engine=object(),
+            client=object(),
+            enabled=True,
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("tok"))
+        rejected = client.get("/api/sources/status").json()["bangumi"]
+        assert rejected["token_state"] == "rejected"
+        assert "已被拒绝" in rejected["detail"]
+
+    def test_bangumi_disabled_status_surfaces_a_saved_credential(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A saved-but-unused credential is a state, not silence.
+
+        The settings page validates the token and echoes the resolved account
+        back, so the user believes Bangumi is configured; only the enable
+        switch is still off. ``/api/sources/status`` has to say so.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = False
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-disabled-credential.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        bare = client.get("/api/sources/status").json()["bangumi"]
+        # state is the auth verdict (no_auth) now, never the enable switch (D12);
+        # "off" lives in ``enabled``, and the saved-but-idle credential in detail.
+        assert bare["state"] == "no_auth"
+        assert bare["enabled"] is False
+        assert bare["token_state"] == ""
+        assert bare["detail"] == "Bangumi 来源未启用。"
+
+        cfg.sources.bangumi.access_token = "tok"
+        with_token = client.get("/api/sources/status").json()["bangumi"]
+        assert with_token["state"] == "no_auth"
+        assert with_token["enabled"] is False
+        assert with_token["logged_in"] is True
+        # "ok" (not "rejected") so the desktop / popup renderers keep the
+        # neutral "来源未启用" tone instead of the red token warning.
+        assert with_token["token_state"] == "ok"
+        assert "已保存个人令牌" in with_token["detail"]
+
+        cfg.sources.bangumi.access_token = ""
+        cfg.sources.bangumi.username = "215952"
+        with_username = client.get("/api/sources/status").json()["bangumi"]
+        assert with_username["token_state"] == ""
+        assert "已保存公开用户名" in with_username["detail"]
 
     def test_sources_credentials_returns_current_local_credentials(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2334,18 +2515,25 @@ class TestBackendAPI:
 
         body = client.get("/api/sources/credentials?reveal_keys=true").json()
 
-        assert body["bilibili"]["value"] == "SESSDATA=bili; bili_jct=jct; DedeUserID=1;"
-        assert body["douyin"]["value"] == "msToken=dy; ttwid=tw;"
-        assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
+        # The legacy reveal flag is intentionally a no-op: settings snapshots
+        # report presence with a mask and never export the stored credential.
+        assert "SESSDATA=bili" not in body["bilibili"]["value"]
+        assert "msToken=dy" not in body["douyin"]["value"]
+        assert "auth_token=x" not in body["twitter"]["value"]
+        assert "*" in body["bilibili"]["value"]
+        assert "*" in body["douyin"]["value"]
+        assert "*" in body["twitter"]["value"]
         assert body["xiaohongshu"]["label"] == "xsec_token"
-        assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert body["xiaohongshu"]["value"] != "xhs-token"
+        assert "*" in body["xiaohongshu"]["value"]
         assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
+        assert body["bangumi"]["available"] is False
+        assert body["bangumi"]["label"] == "可选个人令牌"
 
         masked = client.get("/api/sources/credentials").json()
-        assert masked["bilibili"]["value"] != body["bilibili"]["value"]
-        assert "*" in masked["bilibili"]["value"]
+        assert masked["bilibili"]["value"] == body["bilibili"]["value"]
 
     def test_sources_status_xhs_recent_login_state_ready_without_tokens(
         self, tmp_path: Path
@@ -3376,10 +3564,29 @@ class TestBackendAPI:
 
         from fastapi.testclient import TestClient
 
+        from openbiliclaw.api.source_auth import verify
         from openbiliclaw.config import Config, save_config
 
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
         save_config(Config(), tmp_path / "config.toml")
+
+        # Douyin cookies are now live-checked before they land — the endpoint
+        # used to store whatever arrived, on the strength of a docstring claim
+        # that no clean login probe existed (refuted in spec D11). Stub the one
+        # shared probe so this test stays offline.
+        probed: list[str] = []
+
+        async def _probe(slug, *, cfg, cookie=None, probes=None, record=True):
+            probed.append(str(cookie or ""))
+            return verify.LiveProbeOutcome(
+                slug=slug,
+                has_credential=True,
+                authenticated=True,
+                network_error=False,
+                message="stubbed probe",
+            )
+
+        monkeypatch.setattr(verify, "run_live_probe", _probe)
 
         app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
@@ -3402,6 +3609,7 @@ class TestBackendAPI:
         assert payload["cookie"] == cookie_value
         assert payload["source"] == "extension"
         assert cookie_value not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert probed == [cookie_value]
 
     def test_events_endpoint_persists_batch(self) -> None:
         from fastapi.testclient import TestClient
@@ -4542,6 +4750,30 @@ class TestBackendAPI:
         assert data["items"][0]["up_mid"] == 112233
         assert_publication(data["items"][0])
 
+    def test_recommendations_endpoint_coalesces_immediate_duplicate_reads(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def get_recommendations(
+                self, limit: int = 20, *, exclude_processed: bool = False
+            ) -> list[dict[str, object]]:
+                assert limit == 40
+                assert exclude_processed is True
+                self.reads += 1
+                return []
+
+        database = FakeDatabase()
+        app = create_app(database=database)
+        client = TestClient(app)
+
+        assert client.get("/api/recommendations").status_code == 200
+        assert client.get("/api/recommendations").status_code == 200
+
+        assert database.reads == 1
+
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
         franchise_key column, the API trims down to ``max_per_franchise=2``
@@ -4724,6 +4956,11 @@ class TestBackendAPI:
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
             "last_account_sync_error_kind": "",
+            "last_account_sync_issues": [],
+            # Display copy is rendered backend-side so every surface shows the
+            # same sentence; the raw error above stays for diagnostics.
+            "last_account_sync_message": "",
+            "last_account_sync_severity": "",
             "auto_update_enabled": False,
             # The shared fixture points OPENBILICLAW_PROJECT_ROOT at a tmp dir
             # without .git, so the real AutoUpdateService reports unsupported.
@@ -4754,6 +4991,11 @@ class TestBackendAPI:
                     "last_account_sync_at": "2026-03-14T18:00:00+00:00",
                     "last_account_sync_error": "logged out",
                     "last_account_sync_error_kind": "auth_expired",
+                    "last_account_sync_issues": [
+                        {"stage": "bilibili_history", "kind": "auth_expired"}
+                    ],
+                    "last_account_sync_message": "B 站登录已失效，请重新登录。",
+                    "last_account_sync_severity": "warning",
                 }
 
         app = create_app(
@@ -4768,7 +5010,14 @@ class TestBackendAPI:
         response = client.get("/api/runtime-status")
 
         assert response.status_code == 200
-        assert response.json()["last_account_sync_error_kind"] == "auth_expired"
+        payload = response.json()
+        assert payload["last_account_sync_error_kind"] == "auth_expired"
+        assert payload["last_account_sync_issues"] == [
+            {"stage": "bilibili_history", "kind": "auth_expired"}
+        ]
+        # Surfaces render this instead of the provider's raw English error.
+        assert payload["last_account_sync_message"] == "B 站登录已失效，请重新登录。"
+        assert payload["last_account_sync_severity"] == "warning"
 
     def test_runtime_status_endpoint_includes_backend_update_summary(self) -> None:
         from fastapi.testclient import TestClient
@@ -5592,6 +5841,9 @@ class TestBackendAPI:
                     "danmaku_count": 890,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 987654321,
                     "published_at": "2026-07-08T06:30:00Z",
                     "published_label": "3 days ago",
@@ -5618,6 +5870,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -5839,6 +6094,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -6178,6 +6436,150 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
         assert "在B 站忽略了" in str(memory.events[0]["context"])
+
+    def test_feedback_endpoint_preserves_bangumi_source_platform(self) -> None:
+        """Bangumi recommendation feedback (点赞 like + 不感兴趣 dismiss) must
+        carry ``source_platform='bangumi'`` onto the propagated event so profile
+        signals stay attributed to Bangumi rather than the bilibili default, and
+        the context string renders the Bangumi platform label."""
+        from fastapi.testclient import TestClient
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class FakeDatabase:
+            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+                return {
+                    "id": recommendation_id,
+                    "bvid": "326",
+                    "title": "Cowboy Bebop",
+                    "source_platform": "bangumi",
+                }
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                return None
+
+        for feedback_type, verb in (("like", "点赞了"), ("dismiss", "忽略了")):
+            memory = FakeMemoryManager()
+            client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+            response = client.post(
+                "/api/feedback",
+                json={"recommendation_id": 11, "feedback_type": feedback_type, "note": ""},
+            )
+            assert response.status_code == 200, response.text
+            event = memory.events[0]
+            assert event["metadata"]["source_platform"] == "bangumi"
+            assert event["metadata"]["feedback_type"] == feedback_type
+            assert f"在Bangumi{verb}" in str(event["context"])
+
+    def test_saved_endpoint_round_trips_bangumi_item_key(self, tmp_path: Path) -> None:
+        """A Bangumi card saved via /api/saved canonicalizes to item_key
+        'bangumi:<id>' and passes item-key validation on the status read-back —
+        proving the saved surface accepts the Bangumi platform end-to-end."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "saved-bangumi.db")
+        database.initialize()
+        app = create_app(
+            memory_manager=SimpleNamespace(
+                load_discovery_runtime_state=lambda: {},
+                load_cognition_updates=lambda: [],
+            ),
+            database=database,
+            soul_engine=SimpleNamespace(get_profile=lambda: None),
+        )
+        # Bangumi is read-only (no native write-back adapter); the local save
+        # still commits and canonicalizes the item_key.
+        app.state.runtime_context.saved_sync_service = SavedSyncService(
+            database, NativeSaveRouter([])
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/saved/favorite",
+            json={
+                "source_platform": "bangumi",
+                "content_id": "326",
+                "content_url": "https://bgm.tv/subject/326",
+                "content_type": "anime",
+                "title": "攻壳机动队",
+                "author_name": "",
+                "cover_url": "",
+                "note": "",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["item_key"] == "bangumi:326"
+        assert database.get_saved_membership("favorite", "bangumi:326") is not None
+
+        status = client.get("/api/saved/favorite/status", params={"item_key": "bangumi:326"})
+        assert status.status_code == 200, status.text
+        assert status.json()["saved"] is True
+
+    def test_chat_turn_endpoint_accepts_bangumi_delight_subject(self, tmp_path: Path) -> None:
+        """The 聊一聊 delight entry must accept a Bangumi card payload (subject_id
+        + subject_title) without erroring; the dialogue receives the context and
+        the turn completes with the Bangumi subject echoed back."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            async def respond(self, user_message: str) -> str:
+                self.messages.append(user_message)
+                await asyncio.sleep(0.01)
+                return "这部番像是从另一个角度补上你的口味。"
+
+        db = Database(tmp_path / "chat-bangumi.db")
+        db.initialize()
+        dialogue = FakeDialogue()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=dialogue,
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-bangumi-1",
+                    "session": "popup",
+                    "scope": "delight",
+                    "subject_id": "326",
+                    "subject_title": "Cowboy Bebop",
+                    "message": "为什么这部番会推荐给我",
+                },
+            )
+            assert response.status_code == 200, response.text
+            turn = response.json()
+            for _ in range(50):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-bangumi-1").json()
+                if turn["status"] == "completed":
+                    break
+            assert turn["status"] == "completed"
+            assert turn["scope"] == "delight"
+            assert turn["subject_id"] == "326"
+            assert dialogue.messages  # bangumi subject payload reached the dialogue
+            assert "Cowboy Bebop" in dialogue.messages[0]
 
     def test_feedback_endpoint_rejects_unknown_feedback_type(self) -> None:
         from fastapi.testclient import TestClient
@@ -9211,6 +9613,19 @@ class TestBackendAPI:
         assert signal.payload["source_platform"] == "reddit"
         assert signal.payload["content_url"] == "https://www.reddit.com/comments/abc123/"
 
+    def test_recommendation_click_builds_bangumi_fallback_url(self) -> None:
+        """Bangumi subjects must never fall back to a Bilibili video URL."""
+        from openbiliclaw.api.app import _fallback_recommendation_click_url
+
+        assert (
+            _fallback_recommendation_click_url(
+                source_platform="bangumi",
+                content_id="326",
+                bvid="326",
+            )
+            == "https://bgm.tv/subject/326"
+        )
+
     def test_recommendation_click_endpoint_persists_dwell_fields(self) -> None:
         """When the extension reports dwell on the click-through, those
         fields flow into the persisted click event so storage can classify
@@ -10049,7 +10464,8 @@ class TestBackendAPI:
         assert data["llm"]["default_provider"] == "gemini"
         assert data["llm"]["fallback_provider"] == "openai"
         assert "fallback_enabled" not in data["llm"]  # removed legacy flag
-        assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
+        assert data["llm"]["gemini"]["api_key"] != "test-gemini-key"
+        assert "*" in data["llm"]["gemini"]["api_key"]
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
         # Embedding fields
@@ -10270,6 +10686,244 @@ class TestBackendAPI:
         assert data["config"]["sources"]["reddit"]["enabled"] is True
         assert data["config"]["sources"]["reddit"]["daily_subreddit_budget"] == 4
         assert data["config"]["scheduler"]["pool_source_shares"]["reddit"] == 3
+
+    def test_put_config_persists_and_validates_bangumi_source(self, monkeypatch, tmp_path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "bangumi": {
+                        "enabled": True,
+                        "username": " sai ",
+                        "subject_types": ["anime", "book", "music"],
+                        "source_modes": ["search", "ranked", "latest"],
+                        "daily_search_budget": 21,
+                        "daily_ranked_budget": 8,
+                        "daily_latest_budget": 5,
+                        "request_interval_seconds": 2,
+                        "min_interval_minutes": 30,
+                        "bootstrap_limit": 250,
+                    }
+                },
+                "scheduler": {"pool_source_shares": {"bilibili": 8, "bangumi": 3}},
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.enabled is True
+        assert cfg.sources.bangumi.username == "sai"
+        assert cfg.sources.bangumi.subject_types == ("anime", "book", "music")
+        assert cfg.sources.bangumi.source_modes == ("search", "ranked", "latest")
+        assert cfg.sources.bangumi.bootstrap_limit == 250
+        assert cfg.scheduler.pool_source_shares["bangumi"] == 3
+        assert response.json()["config"]["sources"]["bangumi"]["username"] == "sai"
+
+        invalid = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"username": "bad/name"}}},
+        )
+        assert invalid.status_code == 400
+        assert "username" in invalid.json()["detail"].lower()
+
+        invalid_mode = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"source_modes": ["hot"]}}},
+        )
+        assert invalid_mode.status_code == 400
+        assert "source_modes" in invalid_mode.json()["detail"]
+
+    def _bangumi_token_put_app(self, monkeypatch, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        cfg.sources.bangumi.enabled = True
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        database = Database(tmp_path / "bangumi-token-put.db")
+        database.initialize()
+        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        return cfg, database, TestClient(app)
+
+    def test_put_config_bangumi_token_validates_live_and_writes_username(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _read_token_rejection,
+            _token_fingerprint,
+        )
+
+        cfg, database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _fake_resolve(token, **_kw):
+            assert token == "live-token"
+            return "resolveduser"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        # Pre-seed a stale rejection marker; a successful save must clear it.
+        BangumiDiscoveryProducer(
+            database=database, soul_engine=object(), client=object(), enabled=True
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("old-token"))
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "live-token"}}},
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.access_token == "live-token"
+        # /v0/me is the source of truth for the username.
+        assert cfg.sources.bangumi.username == "resolveduser"
+        assert _read_token_rejection(database) is None
+
+    def test_put_config_bangumi_token_401_rejected(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _reject(_token, **_kw):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _reject,
+        )
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "bad-token"}}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_bangumi_access_token"
+        # A rejected token is never persisted.
+        assert cfg.sources.bangumi.access_token == ""
+
+    def test_put_config_bangumi_token_check_failed_on_network(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _down(_token, **_kw):
+            raise BangumiAPIError("network_error", "unreachable")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _down,
+        )
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "some-token"}}},
+        )
+
+        assert response.status_code == 502
+        assert response.json()["error"] == "bangumi_token_check_failed"
+        assert cfg.sources.bangumi.access_token == ""
+
+    def test_put_config_bangumi_clear_token_is_offline_and_clears_marker(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _read_token_rejection,
+            _token_fingerprint,
+        )
+
+        cfg, database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+        cfg.sources.bangumi.access_token = "existing"
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("clearing a token must not hit the network")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _boom,
+        )
+        BangumiDiscoveryProducer(
+            database=database, soul_engine=object(), client=object(), enabled=True
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("existing"))
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": ""}}},
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.access_token == ""
+        assert _read_token_rejection(database) is None
+
+    def test_put_config_bangumi_masked_or_omitted_token_no_network(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+        cfg.sources.bangumi.access_token = "keepme"
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("unchanged token must not trigger a /v0/me call")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _boom,
+        )
+
+        # Omitted key: token untouched.
+        omitted = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"username": "sai"}}},
+        )
+        assert omitted.status_code == 200, omitted.text
+        assert cfg.sources.bangumi.access_token == "keepme"
+
+        # Masked echo (contains the **** mask marker): treated as unchanged.
+        masked = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "keep****eep"}}},
+        )
+        assert masked.status_code == 200, masked.text
+        assert cfg.sources.bangumi.access_token == "keepme"
 
     def test_put_config_updates_embedding_credentials(
         self,
@@ -10532,10 +11186,10 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in emb["api_key"]
         assert "sk-embed-secret-1234567890" not in emb["api_key"]
 
-    def test_get_config_with_reveal_keys_returns_raw_secrets(self, monkeypatch, tmp_path) -> None:
-        """``GET /api/config?reveal_keys=true`` returns unmasked keys
-        for both new fields (openai_compatible.api_key + embedding.api_key).
-        Used by the popup when the user clicks "show" to edit."""
+    def test_get_config_reveal_keys_compat_flag_still_masks_secrets(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Legacy reveal requests remain compatible but never export secrets."""
         from openbiliclaw.config import (
             Config,
             EmbeddingConfig,
@@ -10555,8 +11209,10 @@ class TestEmbeddingAndCompatProviderE2E:
         client = self._make_client(monkeypatch, tmp_path, cfg)
 
         revealed = client.get("/api/config", params={"reveal_keys": "true"}).json()
-        assert revealed["llm"]["openai_compatible"]["api_key"] == "gsk-raw-1234567890"
-        assert revealed["llm"]["embedding"]["api_key"] == "sk-emb-raw-1234567890"
+        assert revealed["llm"]["openai_compatible"]["api_key"] != "gsk-raw-1234567890"
+        assert revealed["llm"]["embedding"]["api_key"] != "sk-emb-raw-1234567890"
+        assert "*" in revealed["llm"]["openai_compatible"]["api_key"]
+        assert "*" in revealed["llm"]["embedding"]["api_key"]
 
     # ── PUT round-trip: openai_compatible ───────────────────────────
 
@@ -10887,12 +11543,18 @@ class TestEmbeddingAndCompatProviderE2E:
         cfg.sources.twitter.daily_search_budget = 7
         cfg.sources.twitter.daily_feed_budget = 14
         cfg.sources.twitter.daily_creator_budget = 5
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "sai"
+        cfg.sources.bangumi.subject_types = ("anime", "book")
+        cfg.sources.bangumi.source_modes = ("search", "ranked")
+        cfg.sources.bangumi.daily_search_budget = 23
         cfg.scheduler.pool_source_shares = {
             "bilibili": 6,
             "xiaohongshu": 2,
             "douyin": 2,
             "youtube": 1,
             "twitter": 3,
+            "bangumi": 4,
         }
         cfg.scheduler.account_sync_interval_hours = 9
         cfg.scheduler.refresh_check_interval_seconds = 75
@@ -10963,6 +11625,19 @@ class TestEmbeddingAndCompatProviderE2E:
             "subreddit",
             "related",
         ]
+        assert data["sources"]["bangumi"] == {
+            "enabled": True,
+            "username": "sai",
+            "subject_types": ["anime", "book"],
+            "source_modes": ["search", "ranked"],
+            "daily_search_budget": 23,
+            "daily_ranked_budget": 100,
+            "daily_latest_budget": 100,
+            "request_interval_seconds": 1,
+            "min_interval_minutes": 60,
+            "bootstrap_limit": 300,
+            "access_token_set": False,
+        }
         assert data["scheduler"]["pool_source_shares"] == {
             "bilibili": 6,
             "xiaohongshu": 2,
@@ -10971,6 +11646,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 3,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 4,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
@@ -11359,6 +12035,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.signal_event_threshold == 9
@@ -11497,6 +12174,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11506,6 +12184,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": False,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -11583,6 +12262,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11592,6 +12272,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": True,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 6,
@@ -11972,9 +12653,17 @@ def test_cap_keeping_user_added_keeps_manual_entries_past_limit() -> None:
 class _FakeInitPrereqs:
     """Controllable stand-in for InitPrereqs (E2 endpoint tests)."""
 
-    def __init__(self, *, bili: str = "ok", chat: bool = True, platforms=None) -> None:
+    def __init__(
+        self,
+        *,
+        bili: str = "ok",
+        chat: bool = True,
+        platforms=None,
+        chat_detail: str = "",
+    ) -> None:
         self._bili = bili
         self._chat = chat
+        self._chat_detail = chat_detail
         self._platforms = list(platforms or [])
         self.bilibili_check_calls = 0
         self.chat_ready_calls = 0
@@ -11995,6 +12684,9 @@ class _FakeInitPrereqs:
 
     def peek_chat(self) -> bool:
         return self._chat
+
+    def peek_chat_detail(self) -> str:
+        return self._chat_detail
 
     def has_cached_readiness(self) -> bool:
         return True
@@ -12178,6 +12870,35 @@ class TestGuidedInitEndpoints:
         assert db.get_latest_init_run()["status"] == "idle"
         assert app.state.runtime_context.init_coordinator.init_active() is False
 
+    def test_init_llm_not_ready_propagates_classified_detail(self, tmp_path: Path) -> None:
+        """The 409 must carry the probe's classified cause (defect 3) so the
+        user can tell an invalid API key from an unreachable service."""
+        from fastapi.testclient import TestClient
+
+        detail = "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "llm_not_ready"
+        assert resp.json()["detail"] == detail
+
+    def test_init_status_llm_not_ready_surfaces_classified_detail(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        detail = "无法连接到 AI 服务（网络连接失败）。请检查网络与代理设置后重试。"
+        prereqs = _FakeInitPrereqs(
+            bili="ok", chat=False, platforms=["bilibili"], chat_detail=detail
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        assert body["reason"] == "llm_not_ready"
+        assert body["detail"] == detail
+
     def test_init_missing_configured_embedding_resets_to_idle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12287,6 +13008,943 @@ class TestGuidedInitEndpoints:
         assert captured["include_bili"] is False
         assert captured["include_reddit"] is True
         assert db.get_latest_init_run() is not None
+
+    def test_init_rejects_bangumi_only_without_public_username(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bangumi"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "no_profile_signal_sources"
+        assert db.get_latest_init_run() is None
+
+    def test_init_accepts_scoped_bangumi_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"username": " sai "}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "sai"
+
+    def test_init_mixed_sources_allow_discovery_only_bangumi(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "mixed-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "previous-user"
+        app.state.runtime_context.config = cfg
+        app.state.runtime_context.degraded = True
+        saved_usernames: list[str] = []
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda saved: saved_usernames.append(saved.sources.bangumi.username),
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["reddit", "bangumi"],
+                    "source_options": {"bangumi": {"username": ""}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            assert resp.json()["warnings"]
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_reddit"] is True
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == ""
+        assert cfg.sources.bangumi.username == ""
+        assert saved_usernames == [""]
+
+    def test_init_uses_configured_bangumi_username_when_option_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "configured-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "configured-user"
+        app.state.runtime_context.config = cfg
+        captured = self._capture_run_guided_init(monkeypatch)
+
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "configured-user"
+
+    def test_init_accepts_bangumi_access_token_and_resolves_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "token-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        app.state.runtime_context.config = cfg
+        app.state.runtime_context.degraded = True
+
+        async def _fake_resolve(token, **kwargs):
+            assert token == "tok-123"
+            return "token-owner"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        saved: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda cfg: saved.append(
+                (cfg.sources.bangumi.username, cfg.sources.bangumi.access_token)
+            ),
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    # A username differing from /v0/me should be overridden.
+                    "source_options": {
+                        "bangumi": {"username": "typed-name", "access_token": " tok-123 "}
+                    },
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            assert any("token-owner" in w for w in resp.json().get("warnings", []))
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "token-owner"
+        assert captured["bangumi_token"] == "tok-123"
+        # The validated token + resolved username are persisted for later syncs.
+        assert saved and saved[-1] == ("token-owner", "tok-123")
+
+    def test_init_rejects_invalid_bangumi_access_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+
+        async def _fake_resolve(token, **kwargs):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"access_token": "expired"}},
+                },
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_bangumi_access_token"
+        assert db.get_latest_init_run() is None
+
+    def _install_fake_bangumi_user_api(self, monkeypatch, users: dict[str, dict] | Exception):
+        """Stub BangumiClient.get_user for the identity-verify path.
+
+        ``users`` maps lookup (username or uid string) → user object; a missing
+        key raises ``not_found``. Passing an Exception makes every lookup fail
+        with it (network-failure path).
+        """
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        lookups: list[str] = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def get_user(self, username: str):
+                lookups.append(username)
+                if isinstance(users, Exception):
+                    raise users
+                if username not in users:
+                    raise BangumiAPIError("not_found", "missing", status_code=404)
+                return users[username]
+
+        monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+        return lookups
+
+    def _identity_state_app(self, tmp_path: Path):
+        app, _ = self._make_app(tmp_path)
+        saved_states: list[dict[str, object]] = []
+        state: dict[str, object] = {}
+
+        def _update(mutator):
+            mutator(state)
+            saved_states.append(dict(state))
+            return state
+
+        app.state.runtime_context.runtime_controller = SimpleNamespace(
+            memory_manager=SimpleNamespace(
+                load_discovery_runtime_state=lambda: dict(state),
+                update_discovery_runtime_state=_update,
+            )
+        )
+        return app, state, saved_states
+
+    def test_bangumi_identity_endpoint_persists_public_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"sai": {"id": 123456, "username": "sai", "nickname": "Sai"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": " sai "},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123456",
+                "username": "sai",
+                "verified": True,
+            }
+            # Re-reporting the same identity is value-idempotent. It does cost
+            # one rewrite: deciding "unchanged" without the lock would mean
+            # answering from a snapshot a concurrent writer can already have
+            # invalidated, so the atomic section is always entered.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "sai"},
+            )
+            assert resp2.status_code == 200
+            # Missing / non-positive uid is rejected outright.
+            assert (
+                client.post("/api/sources/bangumi/identity", json={"username": "sai"}).status_code
+                == 422
+            )
+            assert (
+                client.post(
+                    "/api/sources/bangumi/identity", json={"uid": 0, "username": "sai"}
+                ).status_code
+                == 422
+            )
+
+        verified_sai = {"uid": "123456", "username": "sai", "verified": True}
+        assert saved_states[0]["bangumi_self_info"] == verified_sai
+        # Every write carries the same value — idempotent in content.
+        assert all(saved["bangumi_self_info"] == verified_sai for saved in saved_states)
+        assert state["bangumi_self_info"] == verified_sai
+
+    def test_bangumi_identity_discards_username_belonging_to_another_uid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: DOM scrape once reported a timeline stranger's username."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            # The stranger from the real E2E: yuzzyu belongs to uid 1216399.
+            {"yuzzyu": {"id": 1216399, "username": "yuzzyu"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999001, "username": "yuzzyu"},
+            )
+            assert resp.status_code == 200
+            # Username discarded, uid kept — never persist a stranger identity.
+            # NOT verified: bgm.tv refuted the username, it never told us who
+            # uid 999999001 actually is, so nothing about this identity is
+            # confirmed and sticky-true must not be able to pin it.
+            assert resp.json() == {
+                "ok": True,
+                "uid": "999999001",
+                "username": "",
+                "verified": False,
+            }
+            # A username that doesn't exist at all is discarded too.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999001, "username": "ghost-user"},
+            )
+            assert resp2.json()["username"] == ""
+            assert resp2.json()["verified"] is False
+        assert state["bangumi_self_info"] == {
+            "uid": "999999001",
+            "username": "",
+            "verified": False,
+        }
+
+    def test_bangumi_identity_uid_only_resolves_username_from_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default-slug users resolve from a bare uid (username == str(uid))."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"474349": {"id": 474349, "username": "474349", "nickname": "玉之米"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 474349})
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "ok": True,
+                "uid": "474349",
+                "username": "474349",
+                "verified": True,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "474349",
+            "username": "474349",
+            "verified": True,
+        }
+
+    def test_bangumi_identity_uid_only_custom_slug_stays_uid_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/v0/users/{uid} 404s for custom-slug users; keep the uid, no junk."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 1})
+            assert resp.status_code == 200
+            # A uid-only lookup that 404s checked nothing about this uid's
+            # owner, so it is NOT verified despite bgm.tv having answered.
+            assert resp.json() == {"ok": True, "uid": "1", "username": "", "verified": False}
+            # A structurally malformed username normalizes to missing first,
+            # then follows the same uid-only path.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 1, "username": "bad/name"},
+            )
+            assert resp2.json() == {"ok": True, "uid": "1", "username": "", "verified": False}
+        assert state["bangumi_self_info"] == {"uid": "1", "username": "", "verified": False}
+
+    def test_bangumi_identity_network_failure_accepts_dom_report(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Upstream unavailability degrades to best-effort, never a hard fail.
+
+        Staying fail-open is deliberate (bgm.tv sits behind overseas CF, and
+        under the default ``[network] mode=system`` a CN machine without a
+        working proxy still cannot reach it, so fail-closed would break every
+        such zero-config user). The honesty has to come from elsewhere: a
+        WARNING carrying the real cause, and a ``verified: false`` flag on the
+        stored record so no consumer mistakes it for a checked identity.
+        """
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch, BangumiAPIError("timeout", "Bangumi API request timed out")
+        )
+        with caplog.at_level(logging.DEBUG), TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123, "username": "maybe-me"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123",
+                "username": "maybe-me",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "123",
+            "username": "maybe-me",
+            "verified": False,
+        }
+        # Diagnosable at WARNING (was DEBUG-only), with the real cause.
+        failures = [
+            record
+            for record in caplog.records
+            if "bangumi identity" in record.getMessage()
+            and "could not verify" in record.getMessage()
+        ]
+        assert failures, "verify failure must be logged"
+        assert all(record.levelno >= logging.WARNING for record in failures)
+        assert "timeout" in failures[0].getMessage()
+        assert "UNVERIFIED" in failures[0].getMessage()
+
+    def test_bangumi_identity_unexpected_error_logs_warning_and_marks_unverified(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A non-BangumiAPIError (DNS, TLS, proxy) takes the same honest path."""
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, OSError("proxy refused"))
+        with caplog.at_level(logging.DEBUG), TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123, "username": "maybe-me"},
+            )
+            assert resp.json()["verified"] is False
+        assert state["bangumi_self_info"]["verified"] is False
+        failures = [
+            record for record in caplog.records if "could not verify" in record.getMessage()
+        ]
+        assert failures and all(record.levelno >= logging.WARNING for record in failures)
+        assert "OSError" in failures[0].getMessage()
+
+    def test_bangumi_identity_reverify_upgrades_unverified_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later successful report replaces a fail-open record in place."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            client.post("/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"})
+            assert state["bangumi_self_info"]["verified"] is False
+            # bgm.tv reachable again on the next page view → record upgrades.
+            self._install_fake_bangumi_user_api(
+                monkeypatch, {"sai": {"id": 123456, "username": "sai"}}
+            )
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.json()["verified"] is True
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        assert len(saved_states) == 2  # the flag change is a real write
+
+    def test_bangumi_identity_verified_flag_survives_a_later_network_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a flaky re-report must not erase proof we already hold.
+
+        ``verified`` used to be overwritten with whatever this round produced,
+        so one bgm.tv timeout downgraded a genuinely confirmed identity to
+        ``false`` — and guided init then told the user their real account was
+        "未经 bgm.tv 校验". The flag records a confirmation of a uid↔username
+        pair; it ratchets up and is never downgraded for the same identity.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.json()["verified"] is True
+
+            # bgm.tv goes down; the extension re-reports the same identity.
+            self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+            resp2 = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp2.json()["verified"] is True, "a timeout must not downgrade the flag"
+
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        # Rewrites are allowed (the atomic section is always entered), but the
+        # value must never flap: every write carries verified=True.
+        assert all(saved["bangumi_self_info"]["verified"] is True for saved in saved_states)
+
+    def test_bangumi_identity_verified_flag_does_not_carry_to_a_different_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sticky-true is per identity: a new uid/username starts from scratch.
+
+        The old evidence says nothing about a pair we have never checked, so
+        carrying the flag across would be exactly the plausible-but-wrong claim
+        the whole guard exists to prevent.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app) as client:
+            client.post("/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"})
+            assert state["bangumi_self_info"]["verified"] is True
+
+            # Same uid, DIFFERENT username, and bgm.tv is unreachable.
+            self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "someone-else"}
+            )
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123456",
+                "username": "someone-else",
+                "verified": False,
+            }
+            assert state["bangumi_self_info"]["verified"] is False
+
+            # A different uid under a previously verified username, likewise.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 999, "username": "sai"}
+            )
+            assert resp2.json()["verified"] is False
+
+        assert state["bangumi_self_info"] == {"uid": "999", "username": "sai", "verified": False}
+        assert len(saved_states) == 3  # each identity change is a real write
+
+    def test_bangumi_identity_sticky_flag_reads_the_live_state_under_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: an unlocked snapshot must never decide the answer.
+
+        There used to be a write-avoidance fast path that read state outside
+        the lock and, when it looked unchanged, returned that snapshot's flag
+        without entering the atomic section. A concurrent request confirming
+        the identity in between made the snapshot stale, so the response said
+        ``false`` while the disk said ``true``.
+
+        Here the unlocked view deliberately disagrees with the locked truth:
+        ``load_discovery_runtime_state`` reports the identity as unverified —
+        exactly what the old fast path would have echoed — while the state the
+        mutator sees under the lock already carries the confirmation. Only an
+        answer derived inside the atomic section can be right.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+
+        confirmed = {"uid": "123456", "username": "sai", "verified": True}
+        state["bangumi_self_info"] = dict(confirmed)
+        # Stale unlocked view: same identity, but still flagged unverified. The
+        # old fast path compared against this and returned False from it.
+        manager.load_discovery_runtime_state = lambda: {
+            "bangumi_self_info": {"uid": "123456", "username": "sai", "verified": False}
+        }
+
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["verified"] is True, "answered from the stale unlocked snapshot"
+
+        # And what the response claimed is what a later read actually returns.
+        assert state["bangumi_self_info"] == confirmed
+        assert saved_states[-1]["bangumi_self_info"] == confirmed
+
+    def test_bangumi_identity_does_not_inherit_a_superseded_verified_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sticky-true must not resurrect a record the old rules produced.
+
+        The superseded 404 path wrote ``{"username": "", "verified": true}``.
+        Re-reporting that same 404 user matches on uid and on username (both
+        ``""``), so plain sticky inheritance carried the stale ``true``
+        forward forever — contradicting the invariant that a confirmed record
+        names someone. Inheritance now requires the previous record to be one
+        the current rules could have produced.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        # Exactly what the previous release persisted for a 404 lookup.
+        state["bangumi_self_info"] = {"uid": "123456", "username": "", "verified": True}
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "does-not-exist"},
+            )
+            assert resp.json()["verified"] is False, "inherited a superseded verified record"
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "",
+            "verified": False,
+        }
+
+    def test_bangumi_identity_read_normalises_a_superseded_verified_record(
+        self, tmp_path: Path
+    ) -> None:
+        """The same bad record also reads back as unverified.
+
+        Fixing only the write path would leave an installation that never
+        revisits bgm.tv reporting the stale claim indefinitely, so the read
+        boundary normalises it too.
+        """
+        app, state, _ = self._identity_state_app(tmp_path)
+        state["bangumi_self_info"] = {"uid": "123456", "username": "", "verified": True}
+
+        assert app.state.load_bangumi_identity() == ("", False)
+
+        # A legal confirmed record still reads back as confirmed.
+        state["bangumi_self_info"] = {"uid": "123456", "username": "sai", "verified": True}
+        assert app.state.load_bangumi_identity() == ("sai", True)
+
+    def test_bangumi_identity_404_is_not_a_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: bgm.tv answering is not bgm.tv confirming.
+
+        ``verified: true`` means "bgm.tv positively confirmed this
+        uid↔username pair". A 404 refutes the reported username; it says
+        nothing about who the uid belongs to. Recording that as verified let
+        sticky-true pin an identity we had never established — a later
+        uid-only report during an outage would keep it ``true`` forever.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999, "username": "does-not-exist"},
+            )
+            assert resp.json() == {
+                "ok": True,
+                "uid": "999999",
+                "username": "",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"]["verified"] is False
+
+        # ...and the never-confirmed record cannot be locked in by a later
+        # outage: sticky-true has nothing to preserve.
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            resp2 = client.post("/api/sources/bangumi/identity", json={"uid": 999999})
+            assert resp2.json()["verified"] is False
+        assert state["bangumi_self_info"]["verified"] is False
+
+    def test_bangumi_identity_verified_implies_a_non_empty_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A confirmed *pair* needs both halves.
+
+        When bgm.tv matches the uid but hands back an unusable username there
+        is no pair to have confirmed, so the flag stays False rather than
+        asserting a confirmation of nothing.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"474349": {"id": 474349, "username": ""}})
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 474349})
+            assert resp.json() == {
+                "ok": True,
+                "uid": "474349",
+                "username": "",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "474349",
+            "username": "",
+            "verified": False,
+        }
+
+    def test_bangumi_identity_reports_a_failed_persist_instead_of_a_phantom_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 must never describe a state that was not stored.
+
+        The response used to be built from this round's raw verification
+        result, so a persistence failure still returned ``{"ok": true, …}``
+        with a flag nothing had written — the next read contradicted it.
+        Rule 7: propagate the real failure instead of appearing to work.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+
+        def _explode(_mutator):  # type: ignore[no-untyped-def]
+            raise OSError("disk full")
+
+        manager.update_discovery_runtime_state = _explode
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            # Verification succeeded, but the write did not: no phantom 200.
+            assert resp.status_code == 500, resp.text
+            assert "verified" not in resp.text
+        assert "bangumi_self_info" not in state
+
+    def test_bangumi_identity_failed_persist_does_not_downgrade_the_stored_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirror case: disk says true, this round fails to write, response
+        must not answer ``false`` off its own round result."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+        confirmed = {"uid": "123456", "username": "sai", "verified": True}
+        state["bangumi_self_info"] = dict(confirmed)
+
+        def _explode(_mutator):  # type: ignore[no-untyped-def]
+            raise OSError("disk full")
+
+        manager.update_discovery_runtime_state = _explode
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.status_code == 500, resp.text
+        # Disk untouched, and the response never claimed otherwise.
+        assert state["bangumi_self_info"] == confirmed
+
+    def test_bangumi_identity_without_a_memory_manager_reports_not_stored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No persistence backend → the report is dropped, so say so.
+
+        This path used to answer ``{"ok": true, "verified": true}`` while
+        storing nothing at all; every later read returned ``("", False)``.
+        """
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        app.state.runtime_context.runtime_controller = SimpleNamespace(memory_manager=None)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+        assert resp.status_code == 500, resp.text
+        assert '"ok":true' not in resp.text.replace(" ", "")
+
+    def test_bangumi_identity_persisted_during_active_init(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guided init is exactly when the three-tier account ladder needs the
+        extension's freshly-reported identity, so the init write-guard must let
+        POST /api/sources/bangumi/identity through (never 409 init_running)."""
+        from fastapi.testclient import TestClient
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"sai": {"id": 123456, "username": "sai", "nickname": "Sai"}},
+        )
+        with TestClient(app) as client:
+            app.state.runtime_context.init_coordinator.try_start("active")
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "sai"},
+            )
+        # Not gated by the init write-guard, and the identity still persists.
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "ok": True,
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        verified_sai = {"uid": "123456", "username": "sai", "verified": True}
+        assert saved_states[0]["bangumi_self_info"] == verified_sai
+        assert state["bangumi_self_info"] == verified_sai
+
+    def test_init_falls_back_to_extension_reported_bangumi_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity = lambda: ("ext-user", True)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            warnings = resp.json().get("warnings", [])
+            assert any("ext-user" in w for w in warnings)
+            # A cross-checked identity keeps the plain, confident wording.
+            assert not any("未经" in w for w in warnings)
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "ext-user"
+        assert captured["bangumi_token"] == ""
+
+    def test_init_flags_unverified_extension_bangumi_identity_in_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fail-open identity is still usable, but the warning says so.
+
+        The old copy claimed "Bangumi 使用浏览器扩展识别到的账号 X。" for both
+        verified and never-checked reports, so a DOM drift (or a stranger's
+        username scraped off a timeline) read as confirmed fact.
+        """
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity = lambda: ("ext-user", False)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            warnings = resp.json().get("warnings", [])
+            assert any("ext-user" in w and "未经 bgm.tv 校验" in w for w in warnings)
+            self._drive_until(client, captured, key="include_bangumi")
+
+        # Still runs with the identity — fail-open behaviour is unchanged.
+        assert captured["bangumi_username"] == "ext-user"
+
+    def test_init_bangumi_username_priority_ladder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """token /v0/me > explicit username > extension-reported username."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity = lambda: ("ext-user", True)
+
+        async def _fake_resolve(token, **kwargs):
+            return "token-owner"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            # 1) token + explicit username + extension → token identity wins.
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {
+                        "bangumi": {"username": "typed-name", "access_token": "tok"}
+                    },
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+            assert captured["bangumi_username"] == "token-owner"
+
+        # 2) explicit username + extension (no token) → explicit wins.
+        app2, _ = self._make_app(tmp_path / "second", prereqs=prereqs)
+        app2.state.load_bangumi_identity = lambda: ("ext-user", True)
+        captured2 = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app2) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"username": "typed-name"}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured2, key="include_bangumi")
+            assert captured2["bangumi_username"] == "typed-name"
+
+    def test_init_rejects_unknown_source_options(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={"sources": ["reddit"], "source_options": {"weibo": {}}},
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_source_options"
+        assert db.get_latest_init_run() is None
 
     def _capture_run_guided_init(self, monkeypatch):
         """Replace the shared pipeline with an async capture of its kwargs.
@@ -13058,16 +14716,19 @@ class TestRecommendationsFirstPageTopUp:
         assert resp.status_code == 200
         assert served == []
 
-    def test_empty_history_bootstrap_is_not_debounced(self, tmp_path: Path) -> None:
+    def test_empty_history_bootstrap_is_coalesced_inside_snapshot_window(
+        self, tmp_path: Path
+    ) -> None:
         from fastapi.testclient import TestClient
 
-        # Fresh-install bootstrap keeps its original semantics: while the
-        # history stays empty every GET may retry the bootstrap serve.
+        # A restored browser session can reopen dozens of empty dashboards at
+        # once. They share one short snapshot window instead of each calling
+        # the side-effecting bootstrap serve path.
         app, served = self._make_app(tmp_path, history_rows=0)
         with TestClient(app) as client:
             client.get("/api/recommendations")
             client.get("/api/recommendations")
-        assert served == [10, 10]
+        assert served == [10]
 
 
 class TestEmbeddingDiagnosisAndRepair:
@@ -13205,14 +14866,16 @@ class TestEmbeddingDiagnosisAndRepair:
         assert "正在下载" in response.json().get("detail", "")
         assert pulled == ["bge-m3"]
 
-    def test_init_autostart_skips_not_running_diagnosis(
+    def test_init_autostart_skips_not_running_when_management_disallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import ollama_supervisor as sup
 
         pulled: list[str] = []
+        started: list[str] = []
 
         async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
             return od.DIAG_NOT_RUNNING, "Ollama is down"
@@ -13223,6 +14886,9 @@ class TestEmbeddingDiagnosisAndRepair:
 
         monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
         monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        # We are not allowed to manage this endpoint → no start, no pull.
+        monkeypatch.setattr(sup, "may_manage_ollama_endpoint", lambda endpoint: False)
+        monkeypatch.setattr(sup, "ensure_managed_ollama", lambda endpoint: started.append(endpoint))
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
         app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
 
@@ -13232,6 +14898,52 @@ class TestEmbeddingDiagnosisAndRepair:
         assert response.status_code == 409
         assert response.json()["detail"].startswith("向量模型还没就绪")
         assert pulled == []
+        assert started == []
+
+    def test_init_autostart_starts_managed_ollama_when_not_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DIAG_NOT_RUNNING is self-healed: the auto path starts managed Ollama
+        (same helper the manual repair uses) then re-diagnoses so a missing
+        model still gets auto-pulled (defect 4)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        pulled: list[str] = []
+        started: list[str] = []
+        diagnoses = iter([od.DIAG_NOT_RUNNING, od.DIAG_MODEL_MISSING])
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return next(diagnoses, od.DIAG_MODEL_MISSING), "state"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        def fake_ensure(endpoint: str) -> bool:
+            started.append(endpoint)
+            return True
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        monkeypatch.setattr(sup, "may_manage_ollama_endpoint", lambda endpoint: True)
+        monkeypatch.setattr(sup, "ollama_required", lambda cfg: True)
+        monkeypatch.setattr(sup, "ensure_managed_ollama", fake_ensure)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+            deadline = time.monotonic() + 1.0
+            while not pulled and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert response.status_code == 409
+        assert "正在下载" in response.json().get("detail", "")
+        assert started  # managed Ollama was started before pulling
+        assert pulled == ["bge-m3"]
 
     def test_init_autostart_skips_non_ollama_provider(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
@@ -14753,6 +16465,327 @@ def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
     ]
 
 
+def test_successful_reshuffle_records_one_batch_event_and_empty_result_records_none() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.discovery.engine import DiscoveredContent
+    from openbiliclaw.recommendation.engine import Recommendation
+
+    class FakeRuntimeController:
+        event_hub = None
+
+        def get_runtime_status(self) -> dict[str, object]:
+            return {
+                "initialized": True,
+                "pool_available_count": 3,
+                "pool_pending_count": 0,
+            }
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"profile": "ok"}
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def reshuffle_recommendations(
+            self,
+            *,
+            profile: object,
+            limit: int = 10,
+            excluded_bvids: list[str] | None = None,
+        ) -> list[Recommendation]:
+            del profile, limit, excluded_bvids
+            self.calls += 1
+            if self.calls > 1:
+                return []
+            return [
+                Recommendation(
+                    content=DiscoveredContent(
+                        bvid="BV1NEWBATCH",
+                        title="新批次",
+                        up_name="UP",
+                        cover_url="",
+                    ),
+                    recommendation_id=91,
+                    expression="这是一条新推荐。",
+                    topic_label="换批测试",
+                    confidence=0.9,
+                    presented=False,
+                )
+            ]
+
+    memory = FakeMemoryManager()
+    app = create_app(
+        memory_manager=memory,
+        database=object(),
+        soul_engine=FakeSoulEngine(),
+        recommendation_engine=FakeRecommendationEngine(),
+        runtime_controller=FakeRuntimeController(),
+    )
+    client = TestClient(app)
+
+    success = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1CURRENT", " BV1CURRENT ", "BV2CURRENT"]},
+    )
+    empty = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1NEWBATCH"]},
+    )
+
+    assert success.status_code == 200
+    assert empty.status_code == 200
+    assert len(memory.events) == 1
+    event = memory.events[0]
+    assert event["event_type"] == "reshuffle"
+    assert event["context"] == "你在推荐页换了一批内容。"
+    assert event["metadata"] == {
+        "recommendation_source_platform": "all",
+        "excluded_item_ids": ["BV1CURRENT", "BV2CURRENT"],
+        "returned_item_ids": ["BV1NEWBATCH"],
+        "batch_size": 1,
+        "source_platform": "web",
+        "signal_strength": 0.1,
+    }
+
+
+# ── Platform-scoped recommendation requests ─────────────────────────
+
+
+class _ScopedFakeSoulEngine:
+    async def get_profile(self) -> dict[str, object]:
+        return {"profile": "ok"}
+
+
+class _ScopedFakeRuntimeController:
+    event_hub = None
+
+    def __init__(self, available: int = 5) -> None:
+        self.available = available
+        self.requests: list[tuple[str, bool]] = []
+
+    def get_runtime_status(self) -> dict[str, object]:
+        return {
+            "initialized": True,
+            "pool_available_count": self.available,
+            "pool_pending_count": 0,
+        }
+
+    async def request_replenishment(self, *, reason: str, force: bool = False) -> dict[str, object]:
+        self.requests.append((reason, force))
+        return {"accepted": True, "state": "running", "reason": reason}
+
+
+class _ScopedResultEngine:
+    """Engine exposing the modern ``*_with_result`` surface."""
+
+    def __init__(self, items: list[object] | None = None) -> None:
+        self.reshuffle_kwargs: list[dict[str, object]] = []
+        self.append_kwargs: list[dict[str, object]] = []
+        self._items = items or []
+
+    def _result(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            items=list(self._items),
+            pool_counts_after={"available": 5, "raw": 5, "pending": 0},
+            timings=None,
+        )
+
+    async def reshuffle_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.reshuffle_kwargs.append(dict(kwargs))
+        return self._result()
+
+    async def append_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.append_kwargs.append(dict(kwargs))
+        return self._result()
+
+
+def _scoped_app(engine: object, runtime: object, database: object | None = None) -> object:
+    return create_app(
+        memory_manager=object(),
+        database=database if database is not None else object(),
+        soul_engine=_ScopedFakeSoulEngine(),
+        recommendation_engine=engine,
+        runtime_controller=runtime,
+    )
+
+
+def test_reshuffle_and_append_forward_canonical_source_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    reshuffle = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+    append = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+
+    assert reshuffle.status_code == 200
+    assert append.status_code == 200
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "zhihu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_recommendation_requests_normalize_platform_aliases() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    assert (
+        client.post(
+            "/api/recommendations/reshuffle",
+            json={"source_platform": "xhs"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/recommendations/append",
+            json={"excluded_bvids": [], "source_platform": " ZH "},
+        ).status_code
+        == 200
+    )
+
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "xiaohongshu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_omitted_platform_preserves_the_legacy_engine_call_shape() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    client.post("/api/recommendations/reshuffle", json={"excluded_bvids": []})
+    client.post("/api/recommendations/append", json={"excluded_bvids": []})
+    client.post("/api/recommendations/reshuffle", json={"source_platform": ""})
+
+    for call in (*engine.reshuffle_kwargs, *engine.append_kwargs):
+        assert "source_platform" not in call
+
+
+def test_recommendation_requests_reject_unknown_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    for path in ("/api/recommendations/reshuffle", "/api/recommendations/append"):
+        for bogus in ("weibo", "'; DROP TABLE content_cache; --", "bilibili2"):
+            response = client.post(path, json={"excluded_bvids": [], "source_platform": bogus})
+            assert response.status_code == 422, (path, bogus)
+
+    # A rejected request must never reach the engine or silently mean "全部".
+    assert engine.reshuffle_kwargs == []
+    assert engine.append_kwargs == []
+
+
+def test_scoped_short_batch_wakes_existing_replenishment_path() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": [], "source_platform": "zhihu"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    # Pool-wide inventory is healthy, so only the scoped shortfall can explain
+    # this; it must wake the existing forced replenishment path.
+    assert runtime.requests and runtime.requests[0][1] is True
+
+
+def test_unscoped_short_batch_with_healthy_pool_does_not_force_replenishment() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post("/api/recommendations/append", json={"excluded_bvids": []})
+
+    assert response.status_code == 200
+    assert runtime.requests == []
+
+
+class _AvailabilityDatabase:
+    def __init__(self, snapshot: object | None = None, error: Exception | None = None) -> None:
+        self._snapshot = snapshot
+        self._error = error
+        self.calls = 0
+
+    async def load_pool_platform_availability_async(self, **_kwargs: object) -> object:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._snapshot
+
+
+def test_platform_availability_endpoint_returns_canonical_map() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.storage.database import PoolPlatformAvailability
+
+    database = _AvailabilityDatabase(
+        PoolPlatformAvailability(
+            total_available=37,
+            by_platform={"bilibili": 18, "zhihu": 7, "xiaohongshu": 5, "reddit": 7},
+        )
+    )
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database)
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_available"] == 37
+    assert payload["by_platform"] == {
+        "bilibili": 18,
+        "zhihu": 7,
+        "xiaohongshu": 5,
+        "reddit": 7,
+    }
+    assert sum(payload["by_platform"].values()) == payload["total_available"]
+
+
+def test_platform_availability_read_failure_is_a_diagnosable_5xx() -> None:
+    """A failed read must not be published as an all-zero snapshot."""
+    from fastapi.testclient import TestClient
+
+    database = _AvailabilityDatabase(error=RuntimeError("database is locked"))
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code >= 500
+    assert "0" not in str(response.json().get("total_available", ""))
+    assert database.calls == 1
+
+
 def test_apply_retraction_db_marks_marks_matching_positive(tmp_path: Path) -> None:
     """The /api/events DB hook discounts stored positives undone by a retraction."""
     from openbiliclaw.api.app import apply_retraction_db_marks
@@ -14812,3 +16845,35 @@ def test_apply_retraction_db_marks_skips_out_of_whitelist_action(
             ],
         )
     assert marked == 0
+
+
+class TestRootRedirectLanding:
+    """`GET /` mirrors packaging/entry.py's landing decision for browsers
+    that reach the port without the packaged launcher."""
+
+    def _client(self, soul_engine):
+        from fastapi.testclient import TestClient
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=soul_engine)
+        return TestClient(app)
+
+    def test_root_redirects_to_web_when_initialized(self) -> None:
+        client = self._client(SimpleNamespace(is_profile_ready=lambda: True))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web"
+
+    def test_root_redirects_to_setup_when_uninitialized(self) -> None:
+        client = self._client(SimpleNamespace(is_profile_ready=lambda: False))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/setup/"
+
+    def test_root_falls_back_to_web_when_readiness_unknown(self) -> None:
+        def _boom() -> bool:
+            raise RuntimeError("probe failed")
+
+        client = self._client(SimpleNamespace(is_profile_ready=_boom))
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/web"

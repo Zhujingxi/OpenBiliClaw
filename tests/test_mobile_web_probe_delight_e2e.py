@@ -58,7 +58,7 @@ class MobileWebStub:
         self.delight_posts: list[dict[str, Any]] = []
         self.delight_post_received = threading.Event()
         self.recommendations: list[dict[str, Any]] = []
-        self.reshuffle_posts = 0
+        self.reshuffle_posts: list[dict[str, Any]] = []
         self.runtime_status: dict[str, Any] = {
             "initialized": True,
             "pool_available_count": 0,
@@ -167,7 +167,7 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
                 return _json_response(self, {"ok": status < 400}, status)
             if path == "/api/recommendations/reshuffle":
                 with state.lock:
-                    state.reshuffle_posts += 1
+                    state.reshuffle_posts.append(payload)
                 return _json_response(self, {"items": []})
             probe_type = {
                 "/api/interest-probes/respond": "interest.probe",
@@ -317,7 +317,7 @@ def test_mobile_empty_reshuffle_preserves_visible_recommendations(
     )
     expect(cards).to_have_count(2)
     assert cards.locator(".card-title").all_inner_texts() == titles_before
-    assert stub.reshuffle_posts == 1
+    assert stub.reshuffle_posts == [{"excluded_bvids": ["BV1KEEP1", "BV1KEEP2"]}]
 
 
 @pytest.mark.parametrize(

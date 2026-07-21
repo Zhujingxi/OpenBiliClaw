@@ -73,6 +73,13 @@ def margin_server() -> tuple[str, MarginStub]:
 
         def do_GET(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path.startswith("/shared/"):
+                # The desktop page and the setup wizard both load the shared
+                # source-status module from the backend's /shared mount. Without
+                # this route it 404s, app.js dies on the missing global, and the
+                # failure surfaces as an unrelated test timing out.
+                rel = path.removeprefix("/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / rel)
             if path in {"/web", "/web/", "/web/index.html"}:
                 return self._serve_file(
                     ROOT / "src/openbiliclaw/web/desktop/index.html", "text/html"
@@ -223,6 +230,11 @@ def _scroll_sentinel_to_gap(page: Page, gap: float) -> float:
           const r = s.getBoundingClientRect();
           const delta = r.top - window.innerHeight - gap;  // 需要额外下滚的量
           window.scrollTo({ top: window.scrollY + delta, behavior: 'instant' });
+          // Programmatic instant scrolls can be coalesced by a busy headless
+          // Chromium. Dispatch the same event a real scroll gesture delivers
+          // so this contract deterministically exercises the production
+          // scroll-listener + geometry fallback path.
+          window.dispatchEvent(new Event('scroll'));
           const after = s.getBoundingClientRect();
           return after.top - window.innerHeight;
         }""",

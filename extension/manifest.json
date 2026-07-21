@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "OpenBiliClaw",
-    "version": "0.3.173",
+    "version": "0.3.182",
     "description": "跨平台内容发现 AI Agent — 行为采集、画像与智能推荐",
     "permissions": [
         "activeTab",
@@ -22,6 +22,8 @@
         "*://*.redd.it/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
+        "*://*.bgm.tv/*",
+        "*://*.bangumi.tv/*",
         "http://127.0.0.1/*",
         "http://localhost/*"
     ],
@@ -129,6 +131,27 @@
                 "dist/main/x-graphql-tap.js"
             ],
             "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "dist/content/bangumi.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "dist/main/bgm-identity-bridge.js"
+            ],
+            "run_at": "document_idle",
             "world": "MAIN"
         }
     ],

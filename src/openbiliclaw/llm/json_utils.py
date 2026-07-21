@@ -344,7 +344,12 @@ def _iter_list_candidates(
                         if nested_key in nested:
                             candidates.append(nested[nested_key])
         if allow_singleton:
-            candidates.append(value)
+            # A root object is one list item, not itself a list candidate.
+            # Keeping the wrapper explicit also handles pretty-printed JSON:
+            # the JSONL fallback only happened to rescue one-line singleton
+            # objects, masking this contract bug until a real provider emitted
+            # the same valid object across multiple lines.
+            candidates.append([value])
     return candidates
 
 
@@ -493,3 +498,30 @@ def _remaining_closers(partial: str) -> str | None:
     if in_string:
         return None
     return "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+
+
+def validated_text_field(
+    value: object,
+    *,
+    field: str,
+    content_key: str,
+) -> str | None:
+    """Return a stripped string, or ``None`` when the LLM sent a non-string.
+
+    Structured-output responses occasionally nest a whole batch under a
+    scalar field (``{"reason": [{...}, {...}]}``). An unconditional ``str()``
+    turns that into its Python repr, which is non-empty and therefore passes
+    naive truthiness checks — it then reaches users as recommendation copy.
+    Callers must treat ``None`` as "field unusable" rather than persisting it.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        logger.warning(
+            "Discarding non-string LLM field %s for %s (type=%s)",
+            field,
+            content_key,
+            type(value).__name__,
+        )
+        return None
+    return value.strip()

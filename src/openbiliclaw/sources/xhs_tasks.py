@@ -130,12 +130,16 @@ def _merge_result_payload(
                 merged_counts[scope] = max(current_count, count)
             else:
                 merged_counts[scope] = count
+    note_counts: dict[str, int] = {}
     for note in merged_notes:
         scope = str(note.get("scope", "")).strip()
-        if scope and scope not in merged_counts:
-            merged_counts[scope] = sum(
-                1 for item in merged_notes if str(item.get("scope", "")).strip() == scope
-            )
+        if scope:
+            note_counts[scope] = note_counts.get(scope, 0) + 1
+    for scope, note_count in note_counts.items():
+        reported_count = merged_counts.get(scope, 0)
+        merged_counts[scope] = (
+            max(reported_count, note_count) if isinstance(reported_count, int) else note_count
+        )
     if merged_counts:
         merged["scope_counts"] = merged_counts
 

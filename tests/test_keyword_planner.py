@@ -44,6 +44,7 @@ _YOUTUBE = "youtube"
 _TWITTER = "twitter"
 _ZHIHU = "zhihu"
 _REDDIT = "reddit"
+_BANGUMI = "bangumi"
 _SEARCH_PLATFORMS = (_BILI, _XHS, _DOUYIN, _YOUTUBE, _TWITTER, _ZHIHU, _REDDIT)
 # ── fakes ────────────────────────────────────────────────────────────────
 
@@ -660,6 +661,21 @@ async def test_zhihu_deficit_is_included_in_unified_keyword_generation(db: Datab
     user = llm.calls[0]["user"]
     assert _ZHIHU in user
     assert _pending(db, _ZHIHU, digest) == ["认知科学 经验", "职场沟通 问答"]
+
+
+async def test_bangumi_deficit_is_included_in_unified_keyword_generation(db: Database) -> None:
+    profile = _profile(("赛博朋克动画", 0.93), ("独立游戏", 0.81))
+    digest = profile_kw_digest(profile)
+    llm = _FakeLLM(payload={_BANGUMI: ["赛博朋克 动画", "时间循环 独立游戏"]})
+    deficit = _FakeDeficitSource(deficits={_BANGUMI: 20})
+    planner = _make_planner(db, llm=llm, profile=profile, deficit=deficit)
+
+    ledger = await planner.run_once()
+
+    assert ledger == {_BANGUMI: 2}
+    assert len(llm.calls) == 1
+    assert _BANGUMI in llm.calls[0]["user"]
+    assert _pending(db, _BANGUMI, digest) == ["赛博朋克 动画", "时间循环 独立游戏"]
 
 
 async def test_keyword_planner_uses_layered_profile_prefix(db: Database) -> None:

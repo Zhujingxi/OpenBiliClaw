@@ -149,6 +149,28 @@ def rdt_credential_cookie_names() -> tuple[str, ...]:
     return tuple(sorted(str(name) for name, value in cookies.items() if str(name) and value))
 
 
+def rdt_credential_saved_at() -> str:
+    """When rdt-cli last wrote its credential file, ISO-8601 (empty if unknown).
+
+    The source-auth contract needs a timestamp behind every TTL-bearing verdict
+    (``verified_at``): "ready" for Reddit means "this file is younger than
+    ``_RDT_CREDENTIAL_TTL_SECONDS``", and a freshness claim the user cannot date
+    is not checkable. Lives next to the other credential-file readers so the
+    file keeps exactly one reading family (invariant I1).
+    """
+
+    try:
+        data = json.loads(_rdt_credential_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    saved_at = _optional_float(data.get("saved_at"))
+    if saved_at is None:
+        return ""
+    return datetime.fromtimestamp(saved_at, tz=UTC).isoformat()
+
+
 def _parse_cookie_header(cookie: str) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for part in cookie.split(";"):

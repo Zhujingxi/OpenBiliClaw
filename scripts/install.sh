@@ -445,6 +445,17 @@ PY
         fi
     fi
 
+    # Graphical setup wizard — the same guided page the desktop app and
+    # docker-deployment.md advertise. A human can open it to configure
+    # LLM / embedding and run the real prerequisite checks, instead of
+    # hand-editing config.toml or crafting bootstrap flags.
+    local setup_url
+    if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
+        setup_url="http://127.0.0.1:${PORT}/setup/"
+    else
+        setup_url="http://${HOST}:${PORT}/setup/"
+    fi
+
     # Distinguish "only Bilibili cookie missing" (the expected state for
     # users on the recommended browser-extension auto-sync path) from
     # "still need an LLM key" (a genuinely missing prerequisite). The
@@ -507,6 +518,9 @@ PY
         esac
     fi
     echo "Health URL:  $health_url"
+    echo "Setup wizard: $setup_url"
+    echo "             (open in a browser to configure LLM / embedding and"
+    echo "              run prerequisite checks — same guided page as the desktop app)"
     if [ -n "$missing" ]; then
         echo "Missing:     $missing"
     else
@@ -607,8 +621,9 @@ PY
     elif [ -n "$missing" ]; then
         echo "Next steps (credentials are missing):"
         echo ""
-        echo "  1. Choose your LLM provider (default: deepseek):"
-        echo "     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
+        echo "  1. Choose your LLM chat provider (default: deepseek):"
+        echo "     Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible"
+        echo "     (Local Ollama is embedding-only here — not offered as a chat provider.)"
         echo ""
         echo "  2. Ask which embedding service to use:"
         echo "     Default: local Ollama bge-m3 (free/offline/no extra API key)."
@@ -629,7 +644,6 @@ PY
                 echo "         DeepSeek:   https://platform.deepseek.com/api_keys"
                 echo "         Claude:     https://console.anthropic.com/settings/keys"
                 echo "         OpenRouter: https://openrouter.ai/keys"
-                echo "         Ollama:     (no key needed, just install and run)"
                 ;;
         esac
         case "$missing" in

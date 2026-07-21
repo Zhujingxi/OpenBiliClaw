@@ -4,6 +4,9 @@ import {
   fetchSavedItems,
   pollSavedSyncTask,
   removeSavedItem,
+  saveItem,
+  savedItemStatus,
+  sendBehaviorEvents,
   syncSavedItems,
 } from "../api.js";
 import { getCoverImageAttrs, buildContentUrl } from "../view-models.js";
@@ -12,12 +15,14 @@ import {
   captureSavedFocus,
   createDurableTaskTracker,
   createRetainedSavedListState,
+  createSavedMutationRegistry,
   createSavedSubmissionFence,
   createSavedTaskCoordinator,
   restoreSavedFocus,
 } from "../saved-sync-runtime.js";
 
 const PAGE_SIZE = 50;
+const savedMutations = createSavedMutationRegistry();
 const PRESENTATION = {
   not_started: ["待同步", "neutral", false],
   pending: ["待同步", "neutral", false],
@@ -32,7 +37,7 @@ const PRESENTATION = {
 };
 const PLATFORM_NAMES = {
   bilibili: "B站", youtube: "YouTube", twitter: "X", xiaohongshu: "小红书",
-  douyin: "抖音", zhihu: "知乎", reddit: "Reddit",
+  douyin: "抖音", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi",
 };
 
 function esc(s) {
@@ -43,6 +48,85 @@ function esc(s) {
 
 function safeText(value, maxLength = 240) {
   return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
+}
+
+function createCardAction(label, handler, { ariaLabel = "", iconHtml = "" } = {}) {
+  const btn = document.createElement("button");
+  btn.className = "card-action-btn";
+  btn.type = "button";
+  if (ariaLabel) {
+    btn.setAttribute("aria-label", ariaLabel);
+    btn.title = ariaLabel;
+  }
+  if (iconHtml) btn.innerHTML = iconHtml;
+  else btn.textContent = label;
+  btn.addEventListener("click", () => void handler());
+  return btn;
+}
+
+function setChipState(btn, pressed) {
+  btn.setAttribute("aria-pressed", pressed ? "true" : "false");
+  const label = pressed ? btn.dataset.pressedLabel : btn.dataset.label;
+  if (label) {
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+  }
+}
+
+function postSavedFeedback(item, feedbackType, note = "") {
+  const contentId = item.content_id || item.bvid || "";
+  return sendBehaviorEvents([{
+    type: "feedback",
+    source_platform: item.source_platform || "bilibili",
+    title: item.title || "",
+    url: item.content_url || "",
+    timestamp: Date.now(),
+    metadata: {
+      feedback_type: feedbackType,
+      bvid: contentId,
+      content_id: contentId,
+      feedback_note: note,
+      saved_feedback: true,
+    },
+  }]).then((res) => {
+    if (!res || res.accepted < 1) {
+      const reason = res?.rejected?.[0]?.reason;
+      throw new Error(reason === "not_initialized"
+        ? "画像尚未就绪，暂时无法记录反馈。"
+        : "反馈未被接受，请稍后重试。");
+    }
+    return res;
+  });
+}
+
+async function handleSavedCardFeedback(item, feedbackType, clicked, other, announce) {
+  if (clicked.disabled) return;
+  const snapshot = [clicked, other].map((button) => (
+    button.getAttribute("aria-pressed") === "true"
+  ));
+  clicked.setAttribute("aria-pressed", "true");
+  other.setAttribute("aria-pressed", "false");
+  clicked.disabled = true;
+  other.disabled = true;
+  announce(
+    feedbackType === "like" ? "正在记录喜欢…" : "正在记录不感兴趣…",
+  );
+  try {
+    await postSavedFeedback(item, feedbackType);
+    announce(
+      feedbackType === "like"
+        ? "已记录喜欢，会用于优化画像。"
+        : "已记录不感兴趣，会用于优化画像。",
+    );
+  } catch (error) {
+    [clicked, other].forEach((button, index) => {
+      button.setAttribute("aria-pressed", snapshot[index] ? "true" : "false");
+    });
+    announce(error?.message || "反馈提交失败，请稍后重试。", true);
+  } finally {
+    clicked.disabled = false;
+    other.disabled = false;
+  }
 }
 
 export function normalizeSavedListItem(item = {}) {
@@ -222,6 +306,16 @@ function createSavedView(cfg) {
     });
   }
 
+  function announceAction(nextMessage, isError = false) {
+    message = nextMessage;
+    messageIsError = isError;
+    const status = $root?.querySelector(".saved-sync-message");
+    if (!status) return;
+    status.textContent = nextMessage;
+    if (isError) status.setAttribute("role", "alert");
+    else status.removeAttribute("role");
+  }
+
   async function runSync(selected, activeButton, confirmBatch = false) {
     selected = selected.filter((item) => (
       eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
@@ -283,6 +377,103 @@ function createSavedView(cfg) {
         renderList();
       }
     }
+  }
+
+  function wireSavedCardActions(card, item) {
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "card-actions saved-card-feedback";
+    actionsRow.setAttribute("aria-label", "反馈与保存操作");
+    actionsRow.addEventListener("click", (event) => event.stopPropagation());
+
+    // The card already lives in cfg.listKind (managed by 移除), so we only expose
+    // the CROSS-list toggle: watch_later list → 收藏; favorite list → 稍后再看.
+    const crossKind = cfg.listKind === "watch_later" ? "favorite" : "watch_later";
+    const crossIsFavorite = crossKind === "favorite";
+
+    const likeBtn = createCardAction(
+      "",
+      () => handleSavedCardFeedback(item, "like", likeBtn, dislikeBtn, announceAction),
+      { ariaLabel: "喜欢", iconHtml: THUMBS_UP_SVG_ICON },
+    );
+    likeBtn.dataset.savedAction = "like";
+    likeBtn.setAttribute("aria-pressed", "false");
+
+    const dislikeBtn = createCardAction(
+      "",
+      () => handleSavedCardFeedback(item, "dislike", dislikeBtn, likeBtn, announceAction),
+      { ariaLabel: "不感兴趣", iconHtml: THUMBS_DOWN_SVG_ICON },
+    );
+    dislikeBtn.dataset.savedAction = "dislike";
+    dislikeBtn.setAttribute("aria-pressed", "false");
+
+    const commentBtn = createCardAction(
+      "",
+      async () => {
+        const draft = window.prompt("想围绕这条聊什么？");
+        if (draft === null) return;
+        const note = safeText(draft, 1000);
+        if (!note) {
+          announceAction("先写一句想聊的内容，再提交这条反馈。", true);
+          return;
+        }
+        commentBtn.disabled = true;
+        announceAction("正在提交聊天线索…");
+        try {
+          await postSavedFeedback(item, "comment", note);
+          announceAction("已提交聊天线索。");
+        } catch (error) {
+          announceAction(error?.message || "反馈提交失败，请稍后重试。", true);
+        } finally {
+          commentBtn.disabled = false;
+        }
+      },
+      { ariaLabel: "聊一聊", iconHtml: MESSAGE_SVG_ICON },
+    );
+    commentBtn.dataset.savedAction = "comment";
+
+    async function toggleCross() {
+      if (savedMutations.isBusy(crossKind, item.item_key)) return;
+      crossBtn.disabled = true;
+      const wasSaved = savedMutations.isSaved(crossKind, item.item_key);
+      setChipState(crossBtn, !wasSaved);
+      try {
+        await savedMutations.toggle(crossKind, item.item_key, {
+          add: () => saveItem(crossKind, item),
+          remove: () => removeSavedItem(crossKind, item.item_key),
+        });
+        const saved = savedMutations.isSaved(crossKind, item.item_key);
+        setChipState(crossBtn, saved);
+        announceAction(
+          crossIsFavorite
+            ? (saved ? "已加入本地收藏。" : "已从本地收藏移除；平台记录不变。")
+            : (saved ? "已加入本地稍后再看。" : "已从本地稍后再看移除；平台记录不变。"),
+        );
+      } catch (error) {
+        setChipState(crossBtn, savedMutations.isSaved(crossKind, item.item_key));
+        announceAction(error?.message || "本地保存操作失败，请重试。", true);
+      } finally {
+        crossBtn.disabled = false;
+      }
+    }
+
+    const crossBtn = createCardAction("", toggleCross, {
+      ariaLabel: crossIsFavorite ? "收藏" : "稍后再看",
+      iconHtml: crossIsFavorite ? STAR_SVG_ICON : CLOCK_SVG_ICON,
+    });
+    crossBtn.classList.add("cross-toggle", crossIsFavorite ? "favorite-btn" : "watch-later-btn");
+    crossBtn.dataset.savedAction = crossIsFavorite ? "favorite" : "watch-later";
+    crossBtn.dataset.label = crossIsFavorite ? "收藏" : "稍后再看";
+    crossBtn.dataset.pressedLabel = crossIsFavorite ? "取消收藏" : "取消稍后再看";
+    crossBtn.setAttribute("aria-pressed", "false");
+
+    actionsRow.append(likeBtn, dislikeBtn, commentBtn, crossBtn);
+    card.querySelector(".saved-card-body")?.appendChild(actionsRow);
+
+    void savedMutations.hydrate(crossKind, item.item_key, () => (
+      savedItemStatus(crossKind, item.item_key)
+    )).then(() => {
+      setChipState(crossBtn, savedMutations.isSaved(crossKind, item.item_key));
+    });
   }
 
   function renderList() {
@@ -347,6 +538,7 @@ function createSavedView(cfg) {
           renderList();
         }
       });
+      wireSavedCardActions(card, item);
     }
     if (restoreSavedFocus($root, focusToken)) pendingFocus = null;
   }
@@ -388,6 +580,17 @@ function createSavedView(cfg) {
     void load();
   };
 }
+
+const THUMBS_UP_SVG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
+const THUMBS_DOWN_SVG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
+const MESSAGE_SVG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
+const CLOCK_SVG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+const STAR_SVG_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
 
 const CLOCK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
 const STAR_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';

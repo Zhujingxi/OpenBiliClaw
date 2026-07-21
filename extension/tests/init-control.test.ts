@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// Publish the shared roster on globalThis BEFORE popup-init-control evaluates,
+// so INIT_SOURCE_OPTIONS derives from SourceStatus.SOURCE_KEYS exactly as it
+// does in the side panel (this import must stay first — ESM evaluates imports
+// in source order). Without it the module falls back to its local key list.
+import "../../src/openbiliclaw/web/shared/source-status.js";
+
 import {
   buildInitChecklist,
   describeInitFailure,
@@ -241,8 +247,11 @@ test("progress view advances through the sequential full-profile stage", () => {
   assert.equal(view.active, true);
   assert.equal(view.doneCount, 2);
   assert.ok(view.stageLabel.includes("生成并保存完整画像"));
-  // 2 done + 0.5 in-flight over 4 → ~63%.
-  assert.ok(view.pct > 50 && view.pct < 75);
+  // 2 done + nothing invented for the running stage → exactly 50%. The stage
+  // has no per-unit progress signal (one LLM call), so the bar reports what is
+  // actually finished and goes indeterminate rather than faking a half-step.
+  assert.equal(view.pct, 50);
+  assert.equal(view.indeterminate, true);
   assert.equal(view.failed, false);
 });
 
@@ -280,13 +289,33 @@ test("idle status is not terminal", () => {
 test("reason + start-error text mapping", () => {
   assert.ok(describeInitReason("bilibili_not_logged_in").includes("B 站"));
   assert.equal(describeInitReason("none"), "");
-  assert.equal(describeInitReason("no_profile_signal_sources"), "");
+  assert.ok(describeInitReason("no_profile_signal_sources").includes("Bangumi"));
   assert.equal(describeInitReason("totally_unknown"), "");
   const err = Object.assign(new Error("boom"), {
     status: 409,
     details: { error: "already_running" },
   });
   assert.ok(describeInitStartError(err).includes("进行中"));
+});
+
+test("a Bangumi-only 409 names all three account tiers", () => {
+  // The popup used to refuse this run client-side, which hid the third tier
+  // (extension-reported bgm.tv identity) from zero-config users. The guard is
+  // gone, so the backend's 409 body is now the user's only feedback and it has
+  // to arrive as readable text rather than a silent no-op.
+  const rejected = Object.assign(new Error("/api/init request failed: 409"), {
+    status: 409,
+    details: {
+      error: "no_profile_signal_sources",
+      detail: "只选择 Bangumi 初始化时，需提供个人令牌…",
+    },
+  });
+  const text = describeInitStartError(rejected);
+  assert.ok(text.includes("个人令牌"));
+  assert.ok(text.includes("公开用户名"));
+  // The tier that needs no typing at all must be named, otherwise the copy
+  // still tells a logged-in bgm.tv user to go fetch a token.
+  assert.ok(text.includes("bgm.tv"));
 });
 
 test("failure text appends backend detail so internal_error is diagnosable", () => {
@@ -354,9 +383,32 @@ test("init source options: bilibili is default-checked but deselectable, others 
   assert.ok(bili && bili.defaultChecked === true);
   assert.ok(!("required" in bili), "bilibili must no longer be marked required");
   const optional = INIT_SOURCE_OPTIONS.filter((o) => !o.defaultChecked).map((o) => o.key);
-  assert.deepEqual(optional, ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"]);
+  assert.deepEqual(optional, [
+    "xiaohongshu",
+    "douyin",
+    "youtube",
+    "twitter",
+    "zhihu",
+    "reddit",
+    "bangumi",
+  ]);
   // The login reminder copy mentions logging in on this browser.
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
+});
+
+test("init source roster derives from the shared SourceStatus.SOURCE_KEYS (drift lock)", () => {
+  const shared = (globalThis as Record<string, any>).OpenBiliClawSourceStatus;
+  assert.ok(shared, "shared source-status module must be loaded for this test");
+  // Same keys, same order — the picker is a projection of the shared roster,
+  // not a parallel hardcoded list that can drift when a platform is added.
+  assert.deepEqual(
+    INIT_SOURCE_OPTIONS.map((o) => o.key),
+    [...shared.SOURCE_KEYS],
+  );
+  // Labels come from the shared module too.
+  for (const opt of INIT_SOURCE_OPTIONS) {
+    assert.equal(opt.label, shared.sourceLabel(opt.key));
+  }
 });
 
 test("init source options: X (twitter) is present, opt-in, labelled X", () => {
@@ -380,6 +432,14 @@ test("init source options: Reddit is present, opt-in, labelled Reddit", () => {
   assert.equal(reddit?.label, "Reddit");
 });
 
+test("init source options: Bangumi is anonymous and opt-in", () => {
+  const bangumi = INIT_SOURCE_OPTIONS.find((o) => o.key === "bangumi");
+  assert.ok(bangumi, "bangumi option must exist");
+  assert.ok(!bangumi?.defaultChecked);
+  assert.equal(bangumi?.label, "Bangumi");
+  assert.ok(INIT_SOURCE_LOGIN_HINT.includes("无需登录"));
+});
+
 test("start button allows Reddit as the only profile signal source", () => {
   const state = initStartButtonState(
     statusWith({
@@ -401,11 +461,12 @@ test("start button allows Reddit as the only profile signal source", () => {
 });
 
 test("initSourceLabels maps known keys and passes unknowns through", () => {
-  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "weibo"]), [
+  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "bangumi", "weibo"]), [
     "B 站",
     "小红书",
     "知乎",
     "Reddit",
+    "Bangumi",
     "weibo",
   ]);
   assert.deepEqual(initSourceLabels(undefined as unknown as string[]), []);
@@ -522,9 +583,11 @@ test("embedding row becomes a hard prereq when the backend requires it", () => {
 
 import {
   INIT_EXPECTATION_HINT,
+  INIT_PROGRESS_STALL_FLOOR_SECONDS,
   INIT_STALL_THRESHOLD_SECONDS,
   resetInitProgressViewState,
-  stageEtaText,
+  stageDetailText,
+  INIT_RUNNING_HINT,
   stalenessView,
 } from "../popup/popup-init-control.js";
 
@@ -576,21 +639,10 @@ test("running stage label appends the sub-progress note", () => {
   assert.equal(view.stageLabel, "2/4 分析偏好 · 第 3/8 批");
 });
 
-test("eta-based pseudo progress advances with elapsed time and caps at 0.95", () => {
+test("legacy status without new fields no longer fakes a half-step", () => {
   resetInitProgressViewState();
-  const t0 = 2_000_000;
-  const status = () => stage2With(null, 180, "run-eta");
-  const first = initProgressView(status(), t0);
-  assert.equal(first.pct, 25); // elapsed 0 → fraction 0
-  const later = initProgressView(status(), t0 + 180_000); // one eta → 1-1/e ≈ .63
-  assert.ok(later.pct >= 40 && later.pct <= 41, `got ${later.pct}`);
-  const capped = initProgressView(status(), t0 + 3_600_000);
-  assert.equal(capped.pct, 49); // (1 + 0.95) / 4 → never claims the stage done
-});
-
-test("legacy status without new fields keeps the historic static ticks", () => {
-  resetInitProgressViewState();
-  // No run_id, no progress, no eta_seconds → the old 0.5 half-step (38%).
+  // No run_id, no progress → the stage contributes nothing (25%) instead of
+  // the old flat 0.5 half-step, which implied progress it had not made.
   const legacy = statusWith({
     running: true,
     current_stage: 2,
@@ -601,7 +653,7 @@ test("legacy status without new fields keeps the historic static ticks", () => {
       { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
   });
-  assert.equal(initProgressView(legacy).pct, 38);
+  assert.equal(initProgressView(legacy).pct, 25);
 });
 
 test("pct is monotonic per run_id even when statuses regress out of order", () => {
@@ -699,16 +751,55 @@ test("stalenessView distinguishes a live backend from stalled substantive work",
   const fresh = stalenessView(status("2026-07-10 08:00:00", 7), t0);
   assert.equal(fresh.fresh, true);
   assert.ok(fresh.text.includes("后端在线"));
-  // Heartbeat advances, but progress_sequence does not: connected yet stalled.
-  const stalled = stalenessView(status("2026-07-10 08:01:31", 10), t0 + 91_000);
+  // A slow-but-healthy work unit (91s — past the heartbeat threshold) must NOT
+  // read as stalled: only the connection check uses the 90s beat window.
+  const slowButHealthy = stalenessView(status("2026-07-10 08:01:31", 10), t0 + 91_000);
+  assert.equal(slowButHealthy.fresh, true);
+  assert.ok(slowButHealthy.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
+  // Past the work-unit floor with no milestone: connected yet genuinely stuck.
+  const stalled = stalenessView(
+    status("2026-07-10 08:05:10", 17),
+    t0 + (INIT_PROGRESS_STALL_FLOOR_SECONDS + 10) * 1000,
+  );
   assert.equal(stalled.fresh, false);
-  assert.ok(stalled.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
+  assert.ok(stalled.staleSeconds > INIT_PROGRESS_STALL_FLOOR_SECONDS);
   assert.ok(stalled.text.includes("后端在线"));
-  assert.ok(stalled.text.includes("没有完成新的工作单元"));
   assert.ok(stalled.text.includes("取消"));
   // A substantive milestone advances independently and clears the warning.
-  const revived = stalenessView(status("2026-07-10 08:01:35", 11, 11), t0 + 95_000);
+  const revived = stalenessView(
+    status("2026-07-10 08:05:15", 18, 18),
+    t0 + (INIT_PROGRESS_STALL_FLOOR_SECONDS + 15) * 1000,
+  );
   assert.equal(revived.fresh, true);
+});
+
+test("progress-stall threshold adapts to the pace this run demonstrates", () => {
+  resetInitProgressViewState();
+  const t0 = 9_000_000;
+  // The heartbeat keeps advancing throughout (the connection is fine); only
+  // the work-unit marker stalls, which is what the adaptive threshold judges.
+  let beat = 0;
+  const status = (progressSequence: number, progressAt: string) =>
+    runningStage2Status({
+      run_id: "run-slow-model",
+      last_activity: `2026-07-10 09:00:${String((beat += 1) % 60).padStart(2, "0")}`,
+      last_heartbeat_at: `2026-07-10 09:00:${String(beat % 60).padStart(2, "0")}`,
+      last_progress_at: progressAt,
+      progress_sequence: progressSequence,
+      sequence: 100 + beat,
+    });
+  // Two work units, each ~280s: slower than the floor, but a steady pace.
+  stalenessView(status(1, "2026-07-10 09:00:00"), t0);
+  stalenessView(status(2, "2026-07-10 09:04:40"), t0 + 280_000);
+  stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 560_000);
+  // 330s into the next unit: past the 300s floor, but well within 1.5× the
+  // 280s pace this run has shown → still healthy, no alarm.
+  const withinPace = stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 890_000);
+  assert.equal(withinPace.fresh, true);
+  // 450s: beyond 1.5 × 280s → now genuinely slower than its own rhythm.
+  const beyondPace = stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 1_010_000);
+  assert.equal(beyondPace.fresh, false);
+  assert.ok(beyondPace.text.includes("比本轮此前的节奏慢"));
 });
 
 test("stalenessView reports a missing backend heartbeat separately", () => {
@@ -773,26 +864,70 @@ test("stalenessView is inert for non-running statuses", () => {
   assert.equal(idle.text, "");
 });
 
-test("stageEtaText rounds up to half minutes and expectation copy exists", () => {
-  assert.equal(stageEtaText({ eta_seconds: 180 }), "本阶段通常约 3 分钟");
-  assert.equal(stageEtaText({ eta_seconds: 70 }), "本阶段通常约 1.5 分钟");
-  assert.equal(stageEtaText({ eta_seconds: 120 }), "本阶段通常约 2 分钟");
+test("stageDetailText reports observed facts and never a forecast", () => {
+  // Elapsed alone for a stage with no sub-progress (stage 3, one LLM call).
+  assert.equal(stageDetailText({ progress: { elapsed_seconds: 360 } }), "已用时 6 分钟");
+  // Elapsed + real counts when the backend publishes them.
   assert.equal(
-    stageEtaText({
-      eta_seconds: 180,
-      progress: { elapsed_seconds: 181, max_seconds: 900 },
-    }),
-    "已超常见用时；本轮上限 15 分钟",
+    stageDetailText({ progress: { elapsed_seconds: 720, done: 3, total: 6 } }),
+    "已用时 12 分钟 · 已完成 3/6",
   );
+  // Sub-minute waits do not round to a misleading "0 分钟".
+  assert.equal(stageDetailText({ progress: { elapsed_seconds: 20 } }), "已用时不到 1 分钟");
+  // done is clamped to total; a stage with no progress payload says nothing.
   assert.equal(
-    stageEtaText({ eta_seconds: 180, progress: { elapsed_seconds: 181 } }),
-    "已超常见用时；AI 或平台仍可能在处理",
+    stageDetailText({ progress: { done: 9, total: 4 } }),
+    "已完成 4/4",
   );
-  assert.equal(stageEtaText({}), "");
-  assert.equal(stageEtaText(null), "");
+  assert.equal(stageDetailText({}), "");
+  assert.equal(stageDetailText(null), "");
   assert.ok(INIT_EXPECTATION_HINT.includes("严格按顺序生成"));
-  assert.ok(INIT_EXPECTATION_HINT.includes("4–20 分钟"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("不预估时间"));
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
+  assert.ok(INIT_RUNNING_HINT.includes("只要还在出结果就不会被打断"));
+});
+
+test("progress bar is driven only by real counts, never by a hidden eta", () => {
+  resetInitProgressViewState();
+  const base = {
+    running: true,
+    run_id: "run-eta-free",
+    total_stages: 4,
+    current_stage: 2,
+  };
+  // Stage 2 running with NO sub-progress: contributes nothing to the bar and
+  // renders indeterminate rather than a faked elapsed-based fill.
+  const blind = initProgressView({
+    ...base,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok" },
+      { n: 2, label: "分析偏好", status: "running" },
+      { n: 3, label: "生成并保存完整画像", status: "pending" },
+      { n: 4, label: "生成首轮可用推荐", status: "pending" },
+    ],
+  });
+  assert.equal(blind.indeterminate, true);
+  assert.equal(blind.pct, 25);
+
+  // Real counts move it; the monotonic clamp still holds afterwards.
+  const real = initProgressView({
+    ...base,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok" },
+      {
+        n: 2,
+        label: "分析偏好",
+        status: "running",
+        progress: { done: 3, total: 6, mode: "determinate" },
+      },
+      { n: 3, label: "生成并保存完整画像", status: "pending" },
+      { n: 4, label: "生成首轮可用推荐", status: "pending" },
+    ],
+  });
+  assert.equal(real.indeterminate, false);
+  assert.equal(real.pct, 38);
+  assert.equal(real.stageDetailText, "已完成 3/6");
+  assert.equal(initProgressView({ ...base, stages: blind.stages || [] }).pct >= 38, true);
 });
 
 test("shouldAttachRunningInitProgress: boot re-attach only when a run is live", () => {

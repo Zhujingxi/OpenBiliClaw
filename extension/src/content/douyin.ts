@@ -27,7 +27,7 @@ import type {
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
-import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
+import { runtimeAssetCandidates } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
 import { registerE2EExecutor } from "./e2e-executor.ts";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
@@ -95,11 +95,20 @@ function debugLog(event: string, data?: unknown): void {
  */
 function reinjectFetchTap(): void {
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.getURL) return;
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL(`${ASSET_PREFIX}main/dy-fetch-tap.js`);
-  script.onload = () => script.remove();
-  script.onerror = () => script.remove();
-  (document.head || document.documentElement).appendChild(script);
+  const candidates = runtimeAssetCandidates("main/dy-fetch-tap.js");
+  const injectCandidate = (index: number): void => {
+    const file = candidates[index];
+    if (!file) return;
+    const script = document.createElement("script");
+    script.src = chrome.runtime.getURL(file);
+    script.onload = () => script.remove();
+    script.onerror = () => {
+      script.remove();
+      injectCandidate(index + 1);
+    };
+    (document.head || document.documentElement).appendChild(script);
+  };
+  injectCandidate(0);
 }
 
 // Dynamic import for the chrome-lifecycle code path so node:test's
@@ -119,6 +128,7 @@ async function loadTaskExecutorHelpers(): Promise<{
 async function loadDomExtractor(): Promise<{
   extractDouyinItemsFromDocument: typeof import("./dy/dom-extractor.js").extractDouyinItemsFromDocument;
   extractDouyinSearchItemsFromDocument: typeof import("./dy/dom-extractor.js").extractDouyinSearchItemsFromDocument;
+  pickSearchScrollTarget: typeof import("./dy/dom-extractor.js").pickSearchScrollTarget;
 }> {
   return await import("./dy/dom-extractor.js");
 }
@@ -201,6 +211,8 @@ interface SearchResultPayload {
     ui_triggered?: boolean;
     search_navigation_ok?: boolean;
     search_submit_method?: string;
+    passive_items_harvested?: number;
+    scroll_rounds?: number;
     inject_status?: string;
     page_url?: string;
   };
@@ -545,16 +557,62 @@ export function douyinDiscoveryExecutionPolicy(): {
   };
 }
 
-function attachPassiveDiscoveryCollector(allItems: DouyinSearchItem[]): () => void {
+interface PassiveDiscoveryCollector {
+  detach: () => void;
+  /** How many items arrived passively (page-issued responses via fetch-tap). */
+  passiveCount: () => number;
+}
+
+function attachPassiveDiscoveryCollector(
+  allItems: DouyinSearchItem[],
+): PassiveDiscoveryCollector {
+  let passiveCount = 0;
   const onMessage = (event: MessageEvent): void => {
     const data = event?.data as Record<string, unknown> | null;
     if (!data || typeof data !== "object") return;
     if (data.type !== "OPENBILICLAW_DOUYIN_SEARCH_PAGE") return;
     if (!Array.isArray(data.items)) return;
+    passiveCount += data.items.length;
     allItems.push(...(data.items as DouyinSearchItem[]));
   };
   window.addEventListener("message", onMessage);
-  return () => window.removeEventListener("message", onMessage);
+  return {
+    detach: () => window.removeEventListener("message", onMessage),
+    passiveCount: () => passiveCount,
+  };
+}
+
+/**
+ * Pure round-budget controller for the adaptive search scroll loop.
+ *
+ * Call `shouldContinue(count)` with the current (deduped) item count
+ * before each round. It stops when: the count reached `maxItems`, the
+ * round cap was hit, or `stagnantLimit` consecutive rounds ended
+ * without the count growing.
+ */
+export function createScrollRoundController(opts: {
+  roundCap: number;
+  stagnantLimit: number;
+  maxItems: number;
+}): { shouldContinue(count: number): boolean; roundsExecuted(): number } {
+  let rounds = 0;
+  let stagnantRounds = 0;
+  let lastCount: number | null = null;
+  return {
+    shouldContinue(count: number): boolean {
+      if (lastCount !== null) {
+        if (count <= lastCount) stagnantRounds += 1;
+        else stagnantRounds = 0;
+      }
+      lastCount = count;
+      if (count >= opts.maxItems) return false;
+      if (stagnantRounds >= opts.stagnantLimit) return false;
+      if (rounds >= opts.roundCap) return false;
+      rounds += 1;
+      return true;
+    },
+    roundsExecuted: () => rounds,
+  };
 }
 
 export function isDouyinSearchResultUrl(href: string, keyword?: string): boolean {
@@ -1326,18 +1384,28 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
   }
 }
 
+// Adaptive search-scroll loop budget: up to 10 rounds, stop after 2
+// consecutive rounds without item growth. Each round polls for growth
+// every 250ms up to 3s instead of always burning a fixed sleep.
+const SEARCH_SCROLL_ROUND_CAP = 10;
+const SEARCH_SCROLL_STAGNANT_LIMIT = 2;
+const SEARCH_SCROLL_GROWTH_POLL_INTERVAL_MS = 250;
+const SEARCH_SCROLL_GROWTH_POLL_TIMEOUT_MS = 3_000;
+
 async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload> {
-  const { extractDouyinSearchItemsFromDocument } = await loadDomExtractor();
+  const { extractDouyinSearchItemsFromDocument, pickSearchScrollTarget } =
+    await loadDomExtractor();
   const maxItems = Math.max(1, Math.floor(msg.max_items));
   let apiPagesFetched = 0;
   let apiItemsHarvested = 0;
   let domItemsHarvested = 0;
+  let scrollRounds = 0;
   let apiError = "";
   let uiTriggered = false;
   let searchNavigationOk = false;
   let searchSubmitMethod = "none";
   const allItems: DouyinSearchItem[] = [];
-  const detachPassiveCollector = attachPassiveDiscoveryCollector(allItems);
+  const passiveCollector = attachPassiveDiscoveryCollector(allItems);
 
   try {
     reinjectFetchTap();
@@ -1349,7 +1417,19 @@ async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload
     debugLog("search_ui_triggered", { keyword: msg.keyword, ...triggerResult });
     await sleep(2_000);
 
-    for (let round = 0; round < 4 && allItems.length < maxItems; round += 1) {
+    // Passive-first pagination: scroll the REAL results container so the
+    // page itself issues properly-signed page-2..N search requests, and
+    // harvest them via the passive fetch-tap. Raw allItems re-accumulates
+    // the same DOM cards every round, so growth is measured on the
+    // deduped in-scope count.
+    const dedupedCount = (): number =>
+      filterDiscoveryItemsForScope(allItems, "dy_search", maxItems).length;
+    const roundController = createScrollRoundController({
+      roundCap: SEARCH_SCROLL_ROUND_CAP,
+      stagnantLimit: SEARCH_SCROLL_STAGNANT_LIMIT,
+      maxItems,
+    });
+    while (roundController.shouldContinue(dedupedCount())) {
       const domItems = extractDouyinSearchItemsFromDocument(
         document,
         location.origin,
@@ -1357,8 +1437,25 @@ async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload
       );
       domItemsHarvested = Math.max(domItemsHarvested, domItems.length);
       allItems.push(...domItems);
-      window.scrollBy({ top: window.innerHeight * 2, behavior: "auto" });
-      await sleep(1_000);
+      const countAtScroll = dedupedCount();
+      // Re-pick the scroll target each round — the SPA can re-render the
+      // results container. Fall back to window scrolling when no inner
+      // scrollable container is found.
+      const scrollTarget = pickSearchScrollTarget(document);
+      if (scrollTarget) {
+        scrollTarget.scrollTop = scrollTarget.scrollHeight;
+      } else {
+        window.scrollBy({ top: window.innerHeight * 2, behavior: "auto" });
+      }
+      for (
+        let waited = 0;
+        waited < SEARCH_SCROLL_GROWTH_POLL_TIMEOUT_MS;
+        waited += SEARCH_SCROLL_GROWTH_POLL_INTERVAL_MS
+      ) {
+        await sleep(SEARCH_SCROLL_GROWTH_POLL_INTERVAL_MS);
+        if (dedupedCount() > countAtScroll) break;
+      }
+      scrollRounds = roundController.roundsExecuted();
     }
 
     let items = filterDiscoveryItemsForScope(allItems, "dy_search", maxItems);
@@ -1389,6 +1486,8 @@ async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload
         ui_triggered: uiTriggered,
         search_navigation_ok: searchNavigationOk,
         search_submit_method: searchSubmitMethod,
+        passive_items_harvested: passiveCollector.passiveCount(),
+        scroll_rounds: scrollRounds,
         inject_status: msg.debug_inject_status,
         page_url: location.href,
       },
@@ -1411,12 +1510,14 @@ async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload
         ui_triggered: uiTriggered,
         search_navigation_ok: searchNavigationOk,
         search_submit_method: searchSubmitMethod,
+        passive_items_harvested: passiveCollector.passiveCount(),
+        scroll_rounds: scrollRounds,
         inject_status: msg.debug_inject_status,
         page_url: location.href,
       },
     };
   } finally {
-    detachPassiveCollector();
+    passiveCollector.detach();
   }
 }
 
@@ -1431,7 +1532,7 @@ async function runHot(msg: HotExecuteMessage): Promise<HotResultPayload> {
   let uiTriggered = false;
   const fallbackSeedAwemeId = String(msg.seed_aweme_id ?? "").trim();
   const allItems: DouyinSearchItem[] = [];
-  const detachPassiveCollector = attachPassiveDiscoveryCollector(allItems);
+  const detachPassiveCollector = attachPassiveDiscoveryCollector(allItems).detach;
 
   try {
     reinjectFetchTap();
@@ -1544,7 +1645,7 @@ async function runFeed(msg: FeedExecuteMessage): Promise<FeedResultPayload> {
   let domItemsHarvested = 0;
   let apiError = "";
   const allItems: DouyinSearchItem[] = [];
-  const detachPassiveCollector = attachPassiveDiscoveryCollector(allItems);
+  const detachPassiveCollector = attachPassiveDiscoveryCollector(allItems).detach;
 
   try {
     reinjectFetchTap();

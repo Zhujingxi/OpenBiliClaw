@@ -1583,6 +1583,8 @@ def test_merged_keywords_system_prompt_carries_supply_advantage_table() -> None:
     assert "zhihu" in sys_prompt
     assert "subreddit" in sys_prompt and "经验讨论" in sys_prompt  # reddit
     assert "reddit" in sys_prompt
+    assert "动画 / 书籍 / 游戏" in sys_prompt  # bangumi catalog
+    assert "bangumi" in sys_prompt
 
 
 def test_merged_keywords_system_prompt_permits_decline() -> None:

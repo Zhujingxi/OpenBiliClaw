@@ -39,6 +39,8 @@ function normalizeSourcePlatform(value, url = "") {
     zhihu: "zhihu",
     rd: "reddit",
     reddit: "reddit",
+    bgm: "bangumi",
+    bangumi: "bangumi",
   };
   if (aliases[key]) return aliases[key];
   if (key) return key;
@@ -50,6 +52,7 @@ function normalizeSourcePlatform(value, url = "") {
   if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
   if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
   if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
+  if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
   return "";
 }
 
@@ -156,11 +159,34 @@ const PLATFORM_DISPLAY_NAMES = {
   x: "X",
   zhihu: "知乎",
   reddit: "Reddit",
+  bgm: "Bangumi",
+  bangumi: "Bangumi",
 };
 
 export function platformDisplayName(value) {
   const key = normalizeText(value).toLowerCase();
   return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
+}
+
+/**
+ * Build the author line shown on a recommendation card.
+ *
+ * "UP 主" is Bilibili-specific jargon, so the warm "这位 UP：" prefix only
+ * applies to Bilibili content. Every other source carries a creator whose
+ * role differs per platform (Bangumi ships directors / studios, Zhihu ships
+ * answer authors, YouTube ships channels), so prefixing them with "UP" is
+ * simply wrong. Those fall back to the bare name — which is what desktop web
+ * (`recommendationMetaHtml`) and mobile web (`views/recommend.js`) already
+ * render, so this keeps the three surfaces consistent.
+ *
+ * @param {{ up_name?: string, author_name?: string, source_platform?: string }} [item]
+ * @returns {string} display text, or "" when there is no creator to show
+ */
+export function formatRecommendationAuthorLine(item) {
+  const name = normalizeText(item?.up_name) || normalizeText(item?.author_name);
+  if (!name) return "";
+  const platform = normalizeSourcePlatform(item?.source_platform) || "bilibili";
+  return platform === "bilibili" ? `这位 UP：${name}` : name;
 }
 
 export function buildVideoUrl(bvid) {
@@ -177,6 +203,7 @@ export function buildContentUrl(item) {
   const vid = normalizeText(item?.content_id || item?.bvid);
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
+  if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }
@@ -246,6 +273,19 @@ export function getHintBannerState(tone) {
   return { tone: "info" };
 }
 
+// Decide what Bangumi username guided init should send, or null to omit it so
+// the backend keeps the configured value (an omitted username means "keep
+// existing"). Only a deliberately typed value, or an explicit clear of a value
+// a successful /api/config prefill put in the field, is sent — an empty field
+// we never prefilled (config fetch pending/failed, or never touched) must NOT
+// erase a configured username with "".
+export function resolveInitBangumiUsername({ touched, prefilled, value } = {}) {
+  const trimmed = String(value ?? "").trim();
+  if (!touched) return null;
+  if (!trimmed && !prefilled) return null;
+  return trimmed;
+}
+
 export function normalizeRecommendation(item) {
   const bvid = normalizeText(item?.bvid);
   const sourcePlatform = normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili";
@@ -255,7 +295,7 @@ export function normalizeRecommendation(item) {
     id: Number(item?.id ?? 0),
     bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
-    up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
+    up_name: normalizeText(item?.up_name) || (sourcePlatform === "bangumi" ? "" : DEFAULT_UP_NAME),
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
@@ -276,6 +316,9 @@ export function normalizeRecommendation(item) {
     comment_count: Number(item?.comment_count ?? 0) || 0,
     favorite_count: Number(item?.favorite_count ?? 0) || 0,
     danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+    rating_score: Number(item?.rating_score ?? 0) || 0,
+    rating_count: Number(item?.rating_count ?? 0) || 0,
+    source_rank: Number(item?.source_rank ?? 0) || 0,
   };
 }
 
@@ -384,6 +427,9 @@ export function normalizeDelightCandidate(item) {
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+    rating_score: Number(item?.rating_score ?? 0),
+    rating_count: Number(item?.rating_count ?? 0),
+    source_rank: Number(item?.source_rank ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),
@@ -1214,6 +1260,49 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   }
 
   if (error) {
+    // A degraded backend answers every business route with a 503 envelope
+    // ({status:"degraded", issues:[...]}) that requestJson preserves on
+    // error.details. Lumping it into the generic error copy ("接口这会儿没回")
+    // hides the only actionable fact — the LLM config is broken and the
+    // settings panel can repair it — so surface it as its own state.
+    const details = typeof error === "object" && error !== null ? error.details : null;
+    if (details && typeof details === "object" && details.status === "degraded") {
+      const issueMessages = (Array.isArray(details.issues) ? details.issues : [])
+        .map((issue) => normalizeText(issue?.message))
+        .filter(Boolean);
+      const degradedMessage =
+        issueMessages.join("；") || "后端的 AI 服务配置有问题，修复并重启后恢复。";
+      // A degraded backend that was NEVER initialized should still land the
+      // user in the guided-init journey — its first step IS configuring the
+      // LLM provider, and the init checklist surfaces the degraded blocker
+      // from /api/init-status (allow-listed while degraded). Reserve the pure
+      // repair state for an initialized backend that degraded later.
+      // /api/runtime-status is also allow-listed, so the snapshot is available
+      // here; without it we cannot rule out an initialized backend and fall
+      // through to the repair state.
+      const degradedRuntime = runtimeStatus == null ? null : normalizeRuntimeStatus(runtimeStatus);
+      const neverInitialized =
+        degradedRuntime !== null &&
+        !degradedRuntime.initialized &&
+        degradedRuntime.recommendation_count === 0 &&
+        degradedRuntime.pool_available_count === 0 &&
+        degradedRuntime.pool_pending_count === 0 &&
+        degradedRuntime.last_replenished_count === 0 &&
+        degradedRuntime.last_discovered_count === 0;
+      if (neverInitialized) {
+        return {
+          kind: "uninitialized",
+          degraded: true,
+          message: degradedMessage,
+          items: [],
+        };
+      }
+      return {
+        kind: "degraded",
+        message: degradedMessage,
+        items: [],
+      };
+    }
     return {
       kind: "error",
       message: "推荐暂时没刷出来，稍后再试",
@@ -1260,7 +1349,9 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
     if (!runtime.initialized && !hasPostInitRuntimeSignals) {
       return {
         kind: "uninitialized",
-        message: "还没完成初始化，先运行 openbiliclaw init",
+        // Button-driven copy, consistent with the rendered card in popup.js:
+        // guided init runs from the「开始初始化」button, not a CLI command.
+        message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
         items: [],
       };
     }

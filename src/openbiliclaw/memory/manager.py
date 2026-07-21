@@ -36,6 +36,7 @@ _EVENT_TYPES = {
     "scroll",
     "hover",
     "snapshot",
+    "reshuffle",
     "feedback",
     "follow",
     "share",
@@ -278,6 +279,8 @@ class MemoryManager:
             "following_mids": [],
             "last_account_sync_at": "",
             "last_sync_error": "",
+            "last_sync_error_kind": "",
+            "last_sync_issues": [],
         }
         if not self._account_sync_state_path.exists():
             return default_state
@@ -299,6 +302,11 @@ class MemoryManager:
             "following_mids": self._as_str_list(loaded.get("following_mids", [])),
             "last_account_sync_at": str(loaded.get("last_account_sync_at", "")),
             "last_sync_error": str(loaded.get("last_sync_error", "")),
+            # Drives the UI's "re-login needed" branch. Missing from this
+            # whitelist since the field was introduced, so the desktop's
+            # auth_expired copy was unreachable and users saw raw English.
+            "last_sync_error_kind": str(loaded.get("last_sync_error_kind", "")),
+            "last_sync_issues": self._as_sync_issue_list(loaded.get("last_sync_issues", [])),
         }
 
     def save_account_sync_state(self, state: dict[str, object]) -> None:
@@ -318,6 +326,8 @@ class MemoryManager:
             "following_mids": self._as_str_list(state.get("following_mids", [])),
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             "last_sync_error": str(state.get("last_sync_error", "")),
+            "last_sync_error_kind": str(state.get("last_sync_error_kind", "")),
+            "last_sync_issues": self._as_sync_issue_list(state.get("last_sync_issues", [])),
         }
         with open(self._account_sync_state_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -748,6 +758,28 @@ class MemoryManager:
         if not isinstance(raw_value, list):
             return []
         return [item for item in raw_value if isinstance(item, dict)]
+
+    @staticmethod
+    def _as_sync_issue_list(raw_value: object) -> list[dict[str, str]]:
+        """Normalize bounded account-sync diagnostics without stringifying junk."""
+        if not isinstance(raw_value, list):
+            return []
+        issues: list[dict[str, str]] = []
+        for raw in raw_value[:8]:
+            if not isinstance(raw, dict):
+                continue
+            stage = raw.get("stage")
+            kind = raw.get("kind")
+            if not isinstance(stage, str) or not isinstance(kind, str):
+                continue
+            stage = stage.strip()[:64]
+            kind = kind.strip()[:64]
+            if not stage or not kind:
+                continue
+            issue = {"stage": stage, "kind": kind}
+            if issue not in issues:
+                issues.append(issue)
+        return issues
 
     @staticmethod
     def _to_float(raw_value: object) -> float:

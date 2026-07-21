@@ -20,7 +20,12 @@ def test_scrollbar_gutter_and_page_enter_animation_are_declared() -> None:
 
     assert "html { min-width: 0; background: var(--bg); scrollbar-gutter: stable; }" in app_css
     assert "@keyframes page-enter" in app_css
-    assert "translate: 0 6px" in app_css
+    # Page entry is intentionally opacity-only. Translating the whole page
+    # changes card geometry while Playwright/the user is targeting controls,
+    # which can move buttons under the pointer during initial hydration.
+    assert "from { opacity: 0; }" in app_css
+    assert "to { opacity: 1; }" in app_css
+    assert "translate: 0 6px" not in app_css
     assert (
         "#homePage, #watchLaterPage, #favoritesPage, #profilePage, #chatPage, #settingsPage"
         in app_css

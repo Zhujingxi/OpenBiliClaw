@@ -38,16 +38,21 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
+    shared = (ROOT / "src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
+
     assert 'data-source-status="reddit"' in html
     assert 'data-source-credential="reddit"' in html
     assert '"redditEnabled"' in js
+    # The roster lives once, in the module all three settings surfaces load;
+    # this page had two identical copies of it and the side panel a third.
     assert (
-        'const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", '
-        '"youtube", "twitter", "zhihu", "reddit"]'
-    ) in js
-    assert (
-        'const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", '
-        '"youtube", "twitter", "zhihu", "reddit"]'
-    ) in js
+        'const SOURCE_KEYS = Object.freeze([\n    "bilibili", "xiaohongshu", '
+        '"douyin", "youtube", "twitter", "zhihu", "reddit",\n'
+    ) in shared
+    # Bangumi is in the roster even though it has no auth contract yet — the
+    # roster answers "which sources exist", so dropping it would hide the
+    # platform from all three settings surfaces at once.
+    assert '"bangumi",\n  ]);' in shared
+    assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js

@@ -12,8 +12,13 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     install_ps1 = _read("scripts/install.ps1")
     config_example = _read("config.example.toml")
 
-    expected_default = "Choose your LLM provider (default: deepseek):"
+    expected_default = "Choose your LLM chat provider (default: deepseek):"
     expected_supported = (
+        "Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible"
+    )
+    # Local Ollama is embedding-only in onboarding (v0.3.177); the chat menu
+    # must not offer it, and both shell installers must say so identically.
+    retired_supported = (
         "Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
     )
 
@@ -21,6 +26,8 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     assert expected_default in install_ps1
     assert expected_supported in install_sh
     assert expected_supported in install_ps1
+    assert retired_supported not in install_sh
+    assert retired_supported not in install_ps1
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_sh
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_ps1
     config_lines = {

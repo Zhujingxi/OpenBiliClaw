@@ -82,6 +82,7 @@
       /* ─── ⑩ 第三方平台色 ─── */
       --platform-zhihu: #0f88eb;
       --platform-reddit: #ff4500;
+      --platform-bangumi: #6950a1;
       --platform-bilibili: #fb7299;
       --platform-xiaohongshu: #ff2442;
       --source-pending: #3898ec;
@@ -185,6 +186,7 @@
       --message-shadow: rgba(0, 0, 0, 0.28) 0 10px 28px;
       --platform-zhihu: #70bdfb;
       --platform-reddit: #ff8a5c;
+      --platform-bangumi: #a99ad5;
       --platform-bilibili: #fc9eb9;
       --platform-xiaohongshu: #ff6b7f;
       --source-pending: #70bdfb;
@@ -237,8 +239,9 @@
         --message-shadow: rgba(0, 0, 0, 0.28) 0 10px 28px;
         --platform-zhihu: #70bdfb;
         --platform-reddit: #ff8a5c;
-      --platform-bilibili: #fc9eb9;
-      --platform-xiaohongshu: #ff6b7f;
+        --platform-bangumi: #a99ad5;
+        --platform-bilibili: #fc9eb9;
+        --platform-xiaohongshu: #ff6b7f;
         --source-pending: #70bdfb;
         --source-pending-fg: #a9d8ff;
         --star-active: #f2bf5b;
@@ -404,7 +407,10 @@
     button.side-drawer-btn { background: color-mix(in oklab, var(--accent), transparent 78%); border-color: var(--accent); color: var(--accent); }
     button.side-drawer-btn:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     button.side-drawer-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
-    .side-drawer { width: var(--side-drawer-width); min-width: var(--side-drawer-width); position: sticky; top: var(--topbar-height); align-self: flex-start; z-index: 15; height: calc(100vh - var(--topbar-height)); transition: margin var(--motion-base) var(--ease-standard), transform var(--motion-base) var(--ease-standard); margin-left: 0; transform: translateX(0); }
+    /* The flex allocation must follow the open state immediately. Animating the
+       margin makes the main container depend on animation-frame scheduling and
+       can leave it at the closed width even though ARIA/class state is open. */
+    .side-drawer { width: var(--side-drawer-width); min-width: var(--side-drawer-width); position: sticky; top: var(--topbar-height); align-self: flex-start; z-index: 15; height: calc(100vh - var(--topbar-height)); transition: transform var(--motion-base) var(--ease-standard); margin-left: 0; transform: translateX(0); }
     .side-drawer.is-open { margin-left: 0; transform: translateX(0); }
     .side-drawer:not(.is-open) { margin-left: calc(-1 * var(--side-drawer-width)); transform: translateX(calc(-1 * var(--side-drawer-width))); }
     .side-drawer-scrim { display: none; }
@@ -475,7 +481,10 @@
     .hero-status-grid strong, .hero-topics span { min-width: 0; color: var(--surface); font-weight: 650; overflow-wrap: anywhere; }
     .hero-topics { padding-top: var(--space-1); }
     .account-sync-status { margin-top: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
-    .account-sync-status.is-auth-expired { color: var(--surface); background: color-mix(in oklab, var(--danger, #e5484d), transparent 12%); border: 1px solid color-mix(in oklab, var(--danger, #e5484d), transparent 40%); }
+    /* Expected lifecycle/cooldown states carry instructions and read as
+       warnings; auth-expired keeps its legacy class for old snapshots/tests. */
+    .account-sync-status.is-warning,
+    .account-sync-status.is-auth-expired { color: var(--warn-fg, var(--surface)); background: color-mix(in oklab, var(--warn, #e5a11d), transparent 82%); border: 1px solid color-mix(in oklab, var(--warn, #e5a11d), transparent 55%); }
     .account-sync-status.is-error { color: color-mix(in oklab, var(--surface), var(--meta) 18%); background: color-mix(in oklab, var(--surface), transparent 90%); border: 1px solid color-mix(in oklab, var(--surface), transparent 82%); font-weight: 500; }
     .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
     .metric { padding: var(--space-3); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), transparent 90%); border: 1px solid color-mix(in oklab, var(--surface), transparent 85%); }
@@ -502,6 +511,22 @@
     .chip:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .chip:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .chip.is-active { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+    /* 平台 Tab：标签 + 紧凑库存计数。计数用 tabular numerals 且预留固定宽度，
+       数字从 7 变 12 时不推挤同排 chip。 */
+    .filter-row .chip { display: inline-flex; align-items: baseline; gap: 6px; }
+    .filter-row .chip .chip-count { font-variant-numeric: tabular-nums; font-size: 12px; line-height: 1.2; min-width: 2ch; text-align: right; opacity: 0.78; }
+    .filter-row .chip .chip-count[data-state="unknown"] { opacity: 0.55; }
+    /* hover 不做位移，避免鼠标划过整排 Tab 时抖动；按下的 scale 反馈保留。 */
+    .filter-row .chip:hover { transform: none; }
+    .filter-row .chip:active { transform: scale(0.97); }
+    /* 选中态不能只靠颜色：字重 + 内描边同时表达。描边跟随文字色，
+       accent / classic 两套主题下都与自身底色形成对比。 */
+    .filter-row .chip[aria-selected="true"] { font-weight: 650; box-shadow: inset 0 0 0 2px color-mix(in oklab, currentColor, transparent 55%); }
+    .filter-row .chip[aria-selected="true"] .chip-count { opacity: 1; }
+    /* focus ring 必须压过选中态描边（同特异度，靠顺序），否则选中的那个 Tab
+       上就看不到键盘焦点了。 */
+    .filter-row .chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .filter-row .chip[aria-selected="true"]:focus-visible { box-shadow: var(--focus-ring), inset 0 0 0 2px color-mix(in oklab, currentColor, transparent 55%); }
         .delight {
             position: relative;
             display: grid;
@@ -660,6 +685,7 @@
     .cover[data-platform="twitter"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--fg), var(--surface) 82%)); }
     .cover[data-platform="zhihu"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-zhihu), var(--surface-warm) 62%)); }
     .cover[data-platform="reddit"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-reddit), var(--surface-warm) 62%)); }
+    .cover[data-platform="bangumi"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-bangumi), var(--surface-warm) 62%)); }
     .cover[data-platform="bilibili"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-bilibili), var(--surface-warm) 60%)); }
     .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .video-card.is-skeleton { pointer-events: none; }
@@ -686,6 +712,7 @@
     .platform[data-platform="zhihu"] { background: var(--platform-zhihu); color: var(--accent-on); }
     .platform[data-platform="xiaohongshu"] { background: var(--platform-xiaohongshu); color: var(--accent-on); }
     .platform[data-platform="reddit"] { background: var(--platform-reddit); color: var(--accent-on); }
+    .platform[data-platform="bangumi"] { background: var(--platform-bangumi); color: #fff; }
     .platform[data-platform="youtube"] { background: var(--danger); color: var(--accent-on); }
     .platform[data-platform="douyin"] { background: var(--fg); color: var(--surface); }
     .platform[data-platform="twitter"] { background: var(--fg); color: var(--surface); }
@@ -755,8 +782,12 @@
     .feedback-undo-btn { min-height: 28px; padding: 2px var(--space-3); border: 1px solid currentColor; border-radius: var(--radius-pill); background: transparent; color: var(--accent); font: inherit; font-weight: 750; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
     .feedback-undo-btn:hover { background: var(--accent-subtle); }
     .feedback-undo-btn:active { transform: scale(0.97); }
+    .video-card.is-feedback-pending,
+    .video-card.is-feedback-saving { align-self: start; transition: box-shadow var(--motion-fast) var(--ease-standard), opacity var(--motion-base) var(--ease-standard); }
     .video-card.is-feedback-pending { box-shadow: inset 0 0 0 1px var(--accent-strong); }
     .video-card.is-feedback-saving { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--muted), transparent 65%); }
+    .video-card.is-feedback-pending:hover,
+    .video-card.is-feedback-saving:hover { transform: none; }
     .rail { min-width: 0; display: grid; gap: var(--space-5); align-content: start; order: 2; }
     .panel { min-width: 0; border: 1px solid var(--border); border-radius: 24px; background: var(--surface); padding: var(--space-5); box-shadow: var(--elev-ring); }
     .panel, .video-card, .activity-item, .profile-item, .message-item { overflow-wrap: anywhere; }
@@ -822,8 +853,8 @@
     #homePage, #watchLaterPage, #favoritesPage, #profilePage, #chatPage, #settingsPage { animation: page-enter 160ms var(--ease-standard); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
     @keyframes page-enter {
-      from { opacity: 0; translate: 0 6px; }
-      to { opacity: 1; translate: 0 0; }
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
     @keyframes drawer-panel-in {
       from { transform: translateX(100%); }
@@ -1073,6 +1104,16 @@
     .settings-probe-status { flex: 1 1 240px; min-width: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
     .settings-probe-status[data-tone="success"] { color: var(--success); }
     .settings-probe-status[data-tone="error"] { color: var(--danger); }
+    /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
+       closed browser, a throttled platform, YouTube needing no login at all — is
+       not a failure, and painting it red sends users off to delete a cookie that
+       was working fine. It also must not reuse the muted "pending" gray, or a
+       final verdict becomes indistinguishable from "still probing". */
+    .settings-probe-status[data-tone="neutral"] { color: var(--source-pending); }
+    .source-verify-row { align-items: center; }
+    .source-verify-btn { min-height: 30px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+    .source-verify-btn:disabled { opacity: 0.55; cursor: default; }
+    .source-verify-btn:disabled:hover { background: var(--surface); color: var(--fg-2); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
     .settings-section-title { grid-column: 1 / -1; margin: var(--space-2) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-soft); color: var(--fg); font-weight: 750; }
     .settings-panel .settings-section-title:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .settings-switch-field { align-items: start; grid-template-columns: minmax(180px, 1fr) auto; gap: var(--space-2) var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 42%); }
@@ -1095,7 +1136,22 @@
     .source-source-badge[data-tone="pending"], .source-access-badge[data-tone="pending"] { border-color: color-mix(in oklab, var(--source-pending), var(--border-soft) 45%); background: color-mix(in oklab, var(--surface), var(--source-pending) 10%); color: var(--source-pending-fg); }
     .source-access-badge[data-tone="warning"] { border-color: color-mix(in oklab, var(--warn), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--warn) 16%); color: color-mix(in oklab, var(--warn-fg), var(--fg) 18%); }
     .source-access-badge[data-tone="danger"] { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--danger) 10%); color: var(--danger); }
+    /* Evidence strength, beside the verdict rather than inside it: two sources
+       can honestly both be 已验证 while resting on very different evidence, and
+       collapsing that into the verdict's colour is what let a live probe and a
+       week-old local file wear the same green (spec D2). Deliberately carries
+       no tone of its own — the glyph (◆ / ◇ / —), the method名 and the border
+       treatment each encode `rank` on their own, so the distinction survives
+       greyscale, colour blindness and a screen reader alike. */
+    .source-evidence-badge { max-width: 100%; display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 2px 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), var(--bg) 40%); color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+    .source-evidence-badge[hidden] { display: none; }
+    .source-evidence-badge[data-rank="direct"] { border-style: solid; border-color: color-mix(in oklab, var(--fg-2), var(--border-soft) 45%); color: var(--fg-2); font-weight: 700; }
+    .source-evidence-badge[data-rank="indirect"] { border-style: dashed; }
+    .source-evidence-badge[data-rank="unknown"] { border-style: dashed; }
+    .source-evidence-badge[data-rank="unable"] { border-style: dotted; }
     .source-status-row .src-detail { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
+    /* Overseas-egress advisory (backend-authored). Warning-toned so it reads as actionable, not as one more muted status line. */
+    .source-status-row .source-network-hint { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); border: 1px solid color-mix(in oklab, var(--warn), var(--border-soft) 55%); background: color-mix(in oklab, var(--surface), var(--warn) 8%); color: var(--text); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
     .source-credential-list { grid-column: 1 / -1; display: grid; gap: var(--space-2); }
     .source-credential-row { min-width: 0; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 42%); overflow: hidden; }
     .source-credential-row summary { cursor: pointer; display: grid; grid-template-columns: minmax(96px, 1fr) auto; align-items: center; gap: var(--space-2); min-width: 0; padding: 10px var(--space-3); color: var(--fg); }
@@ -1345,6 +1401,17 @@
 .saved-sync-status { min-height: 20px; margin: 0 0 var(--space-3); color: var(--fg-2); font-size: 12px; }
 #watchLaterSyncAll, #favoritesSyncAll { min-inline-size: 190px; }
 .saved-card-actions { display: flex; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+/* Saved-card feedback stays a light icon row; the current list is managed by
+   移除, so the lone save control on the right is always the cross-list toggle. */
+.saved-page .saved-card .saved-feedback-bar { display: flex; align-items: center; justify-content: flex-start; gap: 2px; border: 0; padding: 0; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn { flex: 0 0 auto; width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 7px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); box-shadow: none; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn svg { width: 18px; height: 18px; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn[aria-pressed="true"] { background: transparent; color: var(--accent); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn:hover { background: var(--accent-subtle); color: var(--accent); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn:active { background: var(--accent-subtle); color: var(--accent); transform: scale(0.94); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle { margin-left: auto; margin-right: 0; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle.favorite-btn[aria-pressed="true"] { color: #e8a33d; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
 .saved-page .saved-sync-one { min-inline-size: 76px; }
 .saved-sync-line { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); font-size: 11px; }
 .saved-sync-line > :last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

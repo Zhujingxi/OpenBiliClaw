@@ -19,6 +19,10 @@ const REASON_TEXT = {
   already_initialized: "已经初始化过了；如需重建，请到设置页。",
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
+  no_profile_signal_sources:
+    "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+  invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+  bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   analyze_failed: "偏好分析未完成。",
   profile_failed: "画像生成未完成。",
   discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -234,20 +238,38 @@ export function getEnabledPlatforms(status) {
 // Platform sources the user can include in a guided-init run. Bilibili is
 // selectable like every other source (v0.3.118+): default checked
 // (recommended) but no longer forced — at least one source must stay checked.
-export const INIT_SOURCE_OPTIONS = [
-  { key: "bilibili", label: "B 站", defaultChecked: true },
-  { key: "xiaohongshu", label: "小红书" },
-  { key: "douyin", label: "抖音" },
-  { key: "youtube", label: "YouTube" },
-  { key: "twitter", label: "X" },
-  { key: "zhihu", label: "知乎" },
-  { key: "reddit", label: "Reddit" },
-];
+//
+// WHICH sources exist comes from the shared roster (shared/source-status.js,
+// published on globalThis before this module evaluates in the side panel), the
+// same list the desktop page and the setup wizard build their pickers from —
+// a hardcoded copy here is what let the three surfaces drift. Labels come from
+// the shared module too, with a local fallback map so an unrecognised key still
+// renders; defaultChecked stays local first-run policy.
+const INIT_SOURCE_LABEL_FALLBACK = {
+  bilibili: "B 站",
+  xiaohongshu: "小红书",
+  douyin: "抖音",
+  youtube: "YouTube",
+  twitter: "X",
+  zhihu: "知乎",
+  reddit: "Reddit",
+  bangumi: "Bangumi",
+};
+const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+  ? [..._initSourceStatus.SOURCE_KEYS]
+  : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+export const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+  key,
+  label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+  ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {}),
+}));
 
 // Reminder under the source checkboxes: each selected platform is pulled THROUGH
 // this browser, so the user must be logged into it here.
 export const INIT_SOURCE_LOGIN_HINT =
-  "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号——否则这个来源拿不到你的数据。勾选会同时开启该来源。";
+  "勾选要纳入初始化的平台。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
 
 // Human labels for a list of platform keys (unknown keys pass through).
 export function initSourceLabels(keys) {
@@ -323,13 +345,41 @@ function stageList(status) {
 const STAGE_FRACTION_CAP = 0.95;
 // Legacy half-step for statuses without progress/eta fields (old backends):
 // preserves the historic 13/38/63/88 ticks exactly.
-const STAGE_FRACTION_FALLBACK = 0.5;
+// A stage with no real done/total contributes NOTHING to the bar. It used to
+// contribute a flat half-step (0.5), which implied progress the stage had not
+// made; such stages now render indeterminate instead.
+const STAGE_FRACTION_UNKNOWN = 0;
 // Stall threshold. Calibration: backend heartbeat period 30s × 3 missed beats
 // (api/app.py _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+// This governs the CONNECTION check only.
 export const INIT_STALL_THRESHOLD_SECONDS = 90;
+// Work-unit stall floor. A heartbeat period says nothing about how long ONE
+// unit of work legitimately takes: an analysis batch on a slow/remote chat
+// model routinely runs minutes (field report 2026-07-20: 280s for 2 batches,
+// i.e. ~140s each — healthy, yet the old shared 90s threshold cried "stalled"
+// the whole way and read as a failure). Floor generously, then adapt below to
+// the cadence THIS run actually demonstrates.
+export const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+// Slack over the slowest work unit observed so far in this run: a stage is
+// only "stuck" once it exceeds its own demonstrated pace by half again.
+const PROGRESS_STALL_SLACK = 1.5;
+
+// How long without a completed work unit counts as stalled for THIS run.
+// max(floor, 1.5 × slowest unit seen), then capped by the backend's own hard
+// ceiling for the stage so the warning still precedes a real timeout.
+function _progressStallThreshold(st, stage) {
+  const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+  const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+  const maxSeconds = Number((stage && stage.progress && stage.progress.max_seconds) || 0);
+  return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+}
 // Expectation copy shared by the idle checklist and the start-button area.
 export const INIT_EXPECTATION_HINT =
-  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+  "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+
+// Said ONCE while the user waits, not repeated on every stage row.
+export const INIT_RUNNING_HINT =
+  "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
 // Per-run client view state: elapsed-based pseudo-progress anchors (first
 // client observation of each running stage) + the monotonic pct clamp + the
@@ -341,12 +391,14 @@ function _viewState(runId) {
   let st = _runViewState.get(runId);
   if (!st) {
     st = {
-      stageStartMs: new Map(),
       maxPct: 0,
       lastHeartbeatMark: null,
       lastHeartbeatChangeMs: 0,
       lastProgressMark: null,
       lastProgressChangeMs: 0,
+      // Slowest gap between two completed work units seen in this run; drives
+      // the adaptive progress-stall threshold.
+      slowestProgressIntervalSeconds: 0,
     };
     _runViewState.set(runId, st);
     if (_runViewState.size > 8) {
@@ -364,64 +416,48 @@ export function resetInitProgressViewState() {
   _runViewState.clear();
 }
 
-// Fraction of a RUNNING stage: real sub-progress (done/total) when the backend
-// exposes it; otherwise an elapsed/eta pseudo-progress (1 - e^-t/eta) anchored
-// at the first client observation of the stage running; otherwise the legacy
-// half-step. ``st`` is null when the status carries no run_id (legacy) — then
-// only the stateless paths apply.
-function _runningStageFraction(stage, st, nowMs) {
-  const prog = stage && stage.progress;
-  if (prog && prog.mode === "indeterminate") {
-    const eta = Number((stage && stage.eta_seconds) || 0);
-    if (eta > 0 && st) {
-      let startMs = st.stageStartMs.get(stage.n);
-      if (startMs === undefined) {
-        startMs = nowMs;
-        st.stageStartMs.set(stage.n, startMs);
-      }
-      return Math.min(
-        STAGE_FRACTION_CAP,
-        1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta),
-      );
-    }
-    return STAGE_FRACTION_FALLBACK;
+// Fraction of a RUNNING stage: ONLY real sub-progress (done/total) moves the
+// bar. The old elapsed/eta pseudo-progress (1 - e^-t/eta) is gone along with
+// the forecasts that fed it — faking a moving bar from a made-up duration is
+// the same lie in another shape. A stage without done/total contributes
+// nothing and is rendered indeterminate by ``initProgressView``.
+function _runningStageFraction(stage) {
+  const total = Number((stage && stage.progress && stage.progress.total) || 0);
+  if (total > 0) {
+    const done = Math.max(0, Math.min(Number(stage.progress.done || 0), total));
+    return Math.min(STAGE_FRACTION_CAP, done / total);
   }
-  const progTotal = prog ? Number(prog.total || 0) : 0;
-  if (progTotal > 0) {
-    const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-    return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-  }
-  const eta = Number((stage && stage.eta_seconds) || 0);
-  if (eta > 0 && st) {
-    let startMs = st.stageStartMs.get(stage.n);
-    if (startMs === undefined) {
-      startMs = nowMs;
-      st.stageStartMs.set(stage.n, startMs);
-    }
-    const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-    return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-  }
-  return STAGE_FRACTION_FALLBACK;
+  return STAGE_FRACTION_UNKNOWN;
 }
 
-// Show the calibrated duration before it elapses; afterwards stop repeating an
-// already-broken estimate and surface the real hard ceiling instead.
-export function stageEtaText(stage) {
-  const eta = Number((stage && stage.eta_seconds) || 0);
-  if (eta <= 0) {
+// A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+// duration we cannot honour is worse than none: every wrong estimate reads as
+// "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and stage 4
+// announced 5, both legitimately ran far longer). The running row therefore
+// reports only observed facts the backend already publishes: how long this
+// stage has been running, and real sub-progress counts when they exist. No
+// estimate, no ceiling, no extrapolation.
+function formatElapsedText(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+}
+
+export function stageDetailText(stage) {
+  const progress = stage && stage.progress;
+  if (!progress) {
     return "";
   }
-  const progress = stage && stage.progress;
-  const elapsed = Number((progress && progress.elapsed_seconds) || 0);
-  if (elapsed > eta) {
-    const maxSeconds = Number((progress && progress.max_seconds) || 0);
-    if (maxSeconds > 0) {
-      return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-    }
-    return "已超常见用时；AI 或平台仍可能在处理";
+  const parts = [];
+  const elapsed = Number(progress.elapsed_seconds || 0);
+  if (elapsed > 0) {
+    parts.push(formatElapsedText(elapsed));
   }
-  const halfMinutes = Math.ceil(eta / 30) / 2;
-  return `本阶段通常约 ${halfMinutes} 分钟`;
+  const total = Number(progress.total || 0);
+  if (total > 0) {
+    const done = Math.max(0, Math.min(Number(progress.done || 0), total));
+    parts.push(`已完成 ${done}/${total}`);
+  }
+  return parts.join(" · ");
 }
 
 // Track backend heartbeat and substantive progress separately. The heartbeat
@@ -445,6 +481,15 @@ export function stalenessView(status, nowMs = Date.now()) {
   }
   const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
   if (st.lastProgressMark !== progressMark) {
+    // Learn this run's pace from every completed unit (skip the first mark,
+    // which measures "since we started watching", not a unit's duration).
+    if (st.lastProgressMark !== null && st.lastProgressChangeMs) {
+      const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+      st.slowestProgressIntervalSeconds = Math.max(
+        st.slowestProgressIntervalSeconds || 0,
+        interval,
+      );
+    }
     st.lastProgressMark = progressMark;
     st.lastProgressChangeMs = nowMs;
   }
@@ -464,12 +509,15 @@ export function stalenessView(status, nowMs = Date.now()) {
       text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`,
     };
   }
-  if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+  const runningStage = Array.isArray(status.stages)
+    ? status.stages.find((stage) => stage && stage.status === "running")
+    : null;
+  if (progressStale > _progressStallThreshold(st, runningStage)) {
     const minutes = Math.max(1, Math.round(progressStale / 60));
     return {
       fresh: false,
       staleSeconds: progressStale,
-      text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`,
+      text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`,
     };
   }
   return {
@@ -494,8 +542,14 @@ export function initProgressView(status, nowMs = Date.now()) {
   const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
   const current = (status && status.current_stage) || 0;
   const currentStage = stages.find((s) => s.n === current);
+  // Indeterminate covers both the backend's explicit flag and any running
+  // stage with no real done/total — with the eta gone there is nothing honest
+  // left to fill such a bar with.
   const indeterminate = Boolean(
-    running && currentStage && currentStage.progress?.mode === "indeterminate",
+    running &&
+      currentStage &&
+      (currentStage.progress?.mode === "indeterminate" ||
+        !(Number(currentStage.progress?.total || 0) > 0)),
   );
   let stageLabel = currentStage
     ? `${currentStage.n}/${total} ${currentStage.label}`
@@ -506,7 +560,7 @@ export function initProgressView(status, nowMs = Date.now()) {
   }
   const runningStages = stages.filter((s) => s.status === "running");
   const inFlight = runningStages.length
-    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s), 0) /
       runningStages.length
     : 0;
   const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
@@ -524,7 +578,7 @@ export function initProgressView(status, nowMs = Date.now()) {
     doneCount,
     current,
     stageLabel,
-    etaText: running ? stageEtaText(currentStage) : "",
+    stageDetailText: running ? stageDetailText(currentStage) : "",
     pct,
     indeterminate,
     failed: Boolean(failedStage),

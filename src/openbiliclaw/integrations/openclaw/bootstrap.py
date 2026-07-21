@@ -54,25 +54,39 @@ class OpenClawAdapterServices:
     account_sync_service: AccountSyncService | Any
 
 
-def _build_account_sync_x_client(config: Config | Any) -> Any | None:
-    """Build an ``XClient`` for scheduled X sync when a cookie resolves.
+def _build_account_sync_x_components(
+    config: Config | Any,
+    database: Database | Any,
+) -> tuple[Any | None, Any | None]:
+    """Build the client and shared health store for scheduled X sync.
 
-    Reuses ``resolve_x_cookie`` exactly as init does; returns ``None`` when no
-    cookie is available so account_sync's X path stays fully inert.
+    Reuses ``resolve_x_cookie`` exactly as init does; returns ``(None, None)``
+    when the source is disabled or no cookie is available so account_sync's X
+    path stays fully inert.
     """
     try:
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
         from openbiliclaw.sources.x_auth import resolve_x_cookie
         from openbiliclaw.sources.x_client import XClient
+        from openbiliclaw.storage.x_health import XSourceHealthStore
 
         twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+        if twitter_cfg is None or not bool(getattr(twitter_cfg, "enabled", False)):
+            return None, None
         cookie_env = str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
         cookie = resolve_x_cookie(data_dir=config.data_path, cookie_env=cookie_env)
         if not cookie:
-            return None
-        return XClient(cookie=cookie)
+            return None, None
+        return (
+            XClient(cookie=cookie),
+            XSourceHealthStore(
+                database,
+                credential_fingerprint=credential_fingerprint("twitter", cookie),
+            ),
+        )
     except Exception:
-        logger.debug("account_sync: X client construction skipped", exc_info=True)
-        return None
+        logger.debug("account_sync: X components construction skipped", exc_info=True)
+        return None, None
 
 
 def build_openclaw_adapter_services() -> OpenClawAdapterServices:
@@ -361,13 +375,18 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     if callable(set_pool_commit_callback):
         set_pool_commit_callback(runtime_controller._pool_readiness_counts)  # noqa: SLF001
     runtime_controller.run_startup_maintenance()
+    account_sync_x_client, account_sync_x_health = _build_account_sync_x_components(
+        config,
+        database,
+    )
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,
         bilibili_client=bilibili_client,
         soul_engine=soul_engine,
         sync_interval_hours=config.scheduler.account_sync_interval_hours,
         database=database,
-        x_client=_build_account_sync_x_client(config),
+        x_client=account_sync_x_client,
+        x_health_store=account_sync_x_health,
     )
 
     return OpenClawAdapterServices(

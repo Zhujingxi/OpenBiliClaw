@@ -116,6 +116,34 @@ def resolve_chrome_executable(explicit_path: str | None = None) -> Path:
     )
 
 
+def is_branded_chrome(chrome_path: Path) -> bool:
+    """Whether this is branded Google Chrome rather than Chrome for Testing.
+
+    Branded Chrome cannot run this harness at all: Chrome 137+ gates
+    ``--load-extension`` behind the ``DisableLoadExtensionCommandLineSwitch``
+    feature, and recent builds removed that escape hatch outright. Chrome for
+    Testing (and plain Chromium) keep the automation switch working, which is
+    why ``resolve_chrome_executable`` prefers them. This predicate exists only
+    to explain the failure, never to change how the browser is launched.
+
+    Deliberately absent: we do NOT pass
+    ``--disable-features=DisableLoadExtensionCommandLineSwitch``. Measured
+    2026-07-18 on macOS — Chrome for Testing 151 loads the extension with no
+    flag at all, while branded Chrome 150 fails to load it with the flag, with
+    a preseeded ``extensions.ui.developer_mode`` pref, and with both together.
+    So the flag buys nothing, and it costs something real: Chrome honours only
+    the *last* ``--disable-features`` occurrence, so adding ours silently
+    discards the list Playwright injects (HttpsUpgrades, Translate,
+    PaintHolding, DestroyProfileOnBrowserClose, …). Re-enabling Translate in a
+    browser this repo drives is a known hazard — machine-translated UI text has
+    already been persisted into config once. If you arrived here intending to
+    "just add the flag": that experiment is done, and the answer was no.
+    """
+
+    name = chrome_path.name.lower()
+    return "for testing" not in name and "chromium" not in name
+
+
 def choose_bili_service_worker_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
     """Pick the OpenBiliClaw MV3 service worker target from CDP /json/list."""
 
@@ -243,9 +271,10 @@ def _start_playwright_extension(*, host: str, port: int) -> _PlaywrightExtension
     (async () => {
       const { chromium } = require("playwright");
       const fs = require("fs");
-      const [extensionPath, executablePath, userDataDir, doneFile, host, rawPort] =
+      const [extensionPath, executablePath, userDataDir, doneFile, host, rawPort, branded] =
         process.argv.slice(1);
       const port = Number(rawPort);
+      // No --disable-features here on purpose; see is_branded_chrome().
       const context = await chromium.launchPersistentContext(userDataDir, {
         headless: false,
         executablePath,
@@ -260,7 +289,24 @@ def _start_playwright_extension(*, host: str, port: int) -> _PlaywrightExtension
         worker.url().includes("/dist/background/service-worker.js")
       );
       if (!sw) {
-        sw = await context.waitForEvent("serviceworker", { timeout: 15000 });
+        try {
+          sw = await context.waitForEvent("serviceworker", { timeout: 15000 });
+        } catch (cause) {
+          // Silence here almost always means the extension was never loaded,
+          // not that the worker is slow. Say so instead of leaking a bare
+          // timeout.
+          throw new Error(
+            "MV3 service worker never appeared, so the extension was not loaded. " +
+            "Branded Google Chrome 137+ refuses --load-extension, and on recent " +
+            "builds the DisableLoadExtensionCommandLineSwitch escape hatch no " +
+            "longer revives it -- we measured that it does not help, so this " +
+            "harness deliberately does not pass it (see is_branded_chrome). " +
+            "Point the harness at Chrome for Testing via " +
+            "BILI_EXTENSION_E2E_CHROME=/path/to/Google Chrome for Testing. " +
+            `Browser: ${executablePath} (branded Chrome: ${branded === "1"}). ` +
+            `Underlying: ${cause}`
+          );
+        }
       }
       const setup = await sw.evaluate(async ({ host, port }) => {
         await chrome.storage.local.set({ popup_backend_endpoint: { host, port } });
@@ -302,6 +348,7 @@ def _start_playwright_extension(*, host: str, port: int) -> _PlaywrightExtension
             str(done_file),
             host,
             str(port),
+            "1" if is_branded_chrome(chrome_path) else "0",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

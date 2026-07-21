@@ -6,6 +6,7 @@ content cache, and recommendation history.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -51,6 +52,9 @@ from openbiliclaw.saved_sync.models import (
     SavedListKind,
 )
 from openbiliclaw.sources.platforms import (
+    PLATFORM_BANGUMI as _BANGUMI_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_BILIBILI as _BILIBILI_SOURCE_FAMILY,
 )
 from openbiliclaw.sources.platforms import (
@@ -79,6 +83,36 @@ if TYPE_CHECKING:
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
+
+
+# Cap the probe so a long legitimate blurb never costs a full parse. Real
+# copy is a sentence or two; a serialized batch payload is far longer than
+# this, but the prefix alone is enough to identify one.
+_LLM_PAYLOAD_PROBE_MAX_CHARS = 512
+_LLM_PAYLOAD_MARKERS = ("expression", "topic_label", "reason", "topic_group")
+
+
+def _looks_like_serialized_llm_payload(value: str) -> bool:
+    """True when ``value`` is a serialized dict/list of LLM result fields.
+
+    Prefix matching alone both over- and under-fires: legitimate copy may open
+    with a code snippet, while a poisoned value may carry leading whitespace or
+    use JSON rather than Python repr. Parse instead, and only reject when the
+    result is a container carrying the fields the pipeline emits.
+    """
+    probe = value.strip()[:_LLM_PAYLOAD_PROBE_MAX_CHARS]
+    if not probe.startswith(("{", "[")):
+        return False
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(probe)
+        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+            continue
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if isinstance(item, dict) and any(marker in item for marker in _LLM_PAYLOAD_MARKERS):
+                return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -147,9 +181,24 @@ class PoolServeSnapshot:
     candidate_rows: tuple[dict[str, Any], ...]
     loaded_count: int
     platform_topups: tuple[tuple[str, int], ...]
-    recent_viewed_bvids: frozenset[str]
+    seen_bvids: frozenset[str]
     curator_signals: tuple[dict[str, Any], ...]
     feedback_signals: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PoolPlatformAvailability:
+    """Canonical servable inventory, split by source family.
+
+    ``total_available`` always equals ``sum(by_platform.values())`` because
+    both come from one isolated read of the same canonical available set
+    (the one ``count_pool_candidates`` counts and ``serve()`` can load).
+    Platforms holding nothing are absent from ``by_platform``; callers that
+    need an explicit ``0`` supply it from their own enabled-source list.
+    """
+
+    total_available: int
+    by_platform: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -648,18 +697,34 @@ _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = DEFAULT_ADMISSION_MIN_SCORE
 
 
+# A row cannot enter delight scoring until the same user-facing copy gate as
+# the regular feed has completed. Keeping this predicate explicit prevents a
+# relevance evaluator's internal ``reason`` from becoming either delight state
+# or card copy while ``pool_expression`` is still pending.
+def _delight_ready_copy_sql() -> str:
+    return """
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+    """
+
+
 # Rows claimed by the surprise (delight) channel: already delivered as a
-# delight, or currently delight-eligible (the pending-queue predicate). The
-# regular feed's servable gate excludes them so the same content never shows
-# up in both the recommendation list and the surprise tray.
+# delight, or scored above the current threshold with its formal pool copy
+# synchronized into the delight snapshot. Requiring the exact snapshot keeps
+# stale evaluator reasons from claiming rows and preserves the profile-aware
+# scorer decision (for example the conservative 0.80 threshold).
 def _delight_claim_guard_sql() -> str:
     return """
                   AND NOT (
                     COALESCE(delight_notified, 0) = 1
                     OR (
                       COALESCE(delight_score, 0.0) >= ?
-                      AND COALESCE(delight_reason, '') != ''
-                      AND COALESCE(delight_hook, '') != ''
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+                      AND TRIM(COALESCE(delight_reason, '')) =
+                          TRIM(COALESCE(pool_expression, ''))
+                      AND TRIM(COALESCE(delight_hook, '')) =
+                          TRIM(COALESCE(pool_topic_label, ''))
                     )
                   )
 """
@@ -722,6 +787,27 @@ CREATE TABLE IF NOT EXISTS events (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Durable source-aware identities extracted from every view event. This is
+-- the recommendation/discovery hard-dedup source of truth; unlike the legacy
+-- event scan it has no "latest N events" window.
+CREATE TABLE IF NOT EXISTS seen_items (
+    item_key        TEXT PRIMARY KEY,
+    source_platform TEXT NOT NULL,
+    content_id      TEXT NOT NULL,
+    first_event_id  INTEGER NOT NULL,
+    last_event_id   INTEGER NOT NULL,
+    first_seen_at   TIMESTAMP NOT NULL,
+    last_seen_at    TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seen_items_platform_content
+    ON seen_items(source_platform, content_id);
+CREATE TABLE IF NOT EXISTS seen_items_backfill_state (
+    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_scanned_event_id INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO seen_items_backfill_state (singleton, last_scanned_event_id)
+VALUES (1, 0);
+
 -- Content cache (discovered/evaluated content)
 CREATE TABLE IF NOT EXISTS content_cache (
     bvid        TEXT PRIMARY KEY,
@@ -748,6 +834,9 @@ CREATE TABLE IF NOT EXISTS content_cache (
     reply_count INTEGER DEFAULT 0,
     retweet_count INTEGER DEFAULT 0,
     bookmark_count INTEGER DEFAULT 0,
+    rating_score REAL DEFAULT 0.0,
+    rating_count INTEGER DEFAULT 0,
+    source_rank INTEGER DEFAULT 0,
     relevance_score REAL DEFAULT 0.0,
     relevance_reason TEXT DEFAULT '',
     pool_expression TEXT DEFAULT '',
@@ -803,6 +892,9 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     reply_count           INTEGER NOT NULL DEFAULT 0,
     retweet_count         INTEGER NOT NULL DEFAULT 0,
     bookmark_count        INTEGER NOT NULL DEFAULT 0,
+    rating_score          REAL NOT NULL DEFAULT 0.0,
+    rating_count          INTEGER NOT NULL DEFAULT 0,
+    source_rank           INTEGER NOT NULL DEFAULT 0,
     tags                  TEXT NOT NULL DEFAULT '[]',
     candidate_tier        TEXT NOT NULL DEFAULT 'primary',
     score_threshold       REAL NOT NULL DEFAULT 0.0,
@@ -832,6 +924,26 @@ CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_status
     ON discovery_candidates(source_platform, status);
 CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
     ON discovery_candidates(source_platform, content_id);
+
+-- Bangumi anonymous API discovery pacing, cursors and diagnostics.
+CREATE TABLE IF NOT EXISTS bangumi_discovery_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode        TEXT NOT NULL,
+    units       INTEGER NOT NULL DEFAULT 0,
+    discovered  INTEGER NOT NULL DEFAULT 0,
+    reason      TEXT NOT NULL DEFAULT 'ok',
+    error_code  TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_bangumi_runs_mode_created
+    ON bangumi_discovery_runs(mode, created_at);
+CREATE TABLE IF NOT EXISTS bangumi_discovery_state (
+    state_key       TEXT PRIMARY KEY,
+    cursor          INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cooldown_until  TEXT NOT NULL DEFAULT '',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Recommendation history
 CREATE TABLE IF NOT EXISTS recommendations (
@@ -1185,13 +1297,12 @@ class Database:
         self._worker_init_lock = threading.Lock()
         self._maintenance_executor: ThreadPoolExecutor | None = None
         self._serve_executor: ThreadPoolExecutor | None = None
-        # Recent-view identity extraction parses up to 2,000 event payloads.
-        # Cache immutable snapshots by latest view-event id and share the cache
-        # with isolated worker wrappers; one cheap MAX(id) query keeps external
-        # writers visible without repeating JSON/URL parsing on every request.
-        self._recent_view_state_lock = threading.Lock()
-        self._recent_view_state_cache: dict[
-            tuple[int, int],
+        # The durable seen-item ledger avoids reparsing arbitrary event-history
+        # windows on recommendation reads. Cache immutable identity snapshots by
+        # the newest ledger event id and share them with isolated workers.
+        self._seen_state_lock = threading.Lock()
+        self._seen_state_cache: dict[
+            int,
             tuple[frozenset[str], frozenset[str]],
         ] = {}
 
@@ -1216,6 +1327,7 @@ class Database:
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
         self._ensure_content_identity_columns()
+        self._ensure_seen_items_ledger()
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
@@ -1329,6 +1441,7 @@ class Database:
         limit: int,
         xhs_self_nickname: str = "",
         curator_history_limit: int = 30,
+        source_platform: str = "",
     ) -> PoolServeSnapshot:
         """Load a recommendation snapshot on the interactive SQLite worker."""
         loop = asyncio.get_running_loop()
@@ -1340,6 +1453,7 @@ class Database:
                 limit=limit,
                 xhs_self_nickname=xhs_self_nickname,
                 curator_history_limit=curator_history_limit,
+                source_platform=source_platform,
             ),
         )
 
@@ -1386,8 +1500,8 @@ class Database:
         isolated = Database(self._db_path)
         isolated._conn = conn
         isolated._admission_min_score = self._admission_min_score
-        isolated._recent_view_state_lock = self._recent_view_state_lock
-        isolated._recent_view_state_cache = self._recent_view_state_cache
+        isolated._seen_state_lock = self._seen_state_lock
+        isolated._seen_state_cache = self._seen_state_cache
         return isolated
 
     def load_pool_serve_snapshot(
@@ -1396,63 +1510,105 @@ class Database:
         limit: int,
         xhs_self_nickname: str = "",
         curator_history_limit: int = 30,
+        source_platform: str = "",
     ) -> PoolServeSnapshot:
-        """Load all hot-path pool state through one isolated read snapshot."""
+        """Load all hot-path pool state through one isolated read snapshot.
+
+        ``source_platform`` narrows the candidate rows to a single canonical
+        family for platform-scoped requests. Only the candidate set changes:
+        ``readiness`` stays pool-wide (it is the inventory the API reports and
+        replenishes against), and every downstream ranking, persistence and
+        shown-commit step is shared with the cross-platform path. Strict mode
+        also skips the platform floor — topping a scoped batch up with another
+        platform is exactly the leak the scope exists to prevent.
+        """
+        scope = normalize_source_platform(source_platform)
         isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
         isolated._preserve_read_transaction = True
         try:
             isolated.conn.execute("BEGIN")
-            # View history is the most CPU-heavy part of a pool read: extracting
-            # source-aware identities parses up to 2,000 JSON events and URLs.
-            # Every helper below used to repeat that work, turning one snapshot
-            # into five identical scans and holding the GIL for hundreds of ms.
-            viewed_content_keys, recent_viewed_bvids = isolated._recent_viewed_state_on(
-                isolated.conn
-            )
+            # Materialize the canonical all-time seen ledger once and reuse it
+            # across every availability/candidate helper in this transaction.
+            viewed_content_keys, seen_bvids = isolated._seen_state_on(isolated.conn)
             readiness = isolated.count_pool_readiness(
                 xhs_self_nickname=xhs_self_nickname,
                 _viewed_content_keys=viewed_content_keys,
             )
-            rows = isolated.get_pool_candidates(
-                limit=max(0, int(limit)),
-                xhs_self_nickname=xhs_self_nickname,
-                _viewed_content_keys=viewed_content_keys,
-            )
-            loaded_count = len(rows)
-
-            platforms = isolated.list_servable_pool_platforms(
-                xhs_self_nickname=xhs_self_nickname,
-                _viewed_content_keys=viewed_content_keys,
-            )
-            present = {
-                str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
-                for row in rows
-            }
-            seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
-            topups: list[tuple[str, int]] = []
-            if len(platforms) > 1:
-                for platform in platforms:
-                    token = str(platform).strip().lower()
-                    if not token or token in present:
-                        continue
-                    added = 0
-                    for row in isolated.get_pool_candidates_for_platform(
-                        token,
-                        limit=5,
+            if scope:
+                # Take the platform's whole available set, then apply the same
+                # topic round-robin ``get_pool_candidates`` uses. Truncating by
+                # relevance instead would fill the window with a few dominant
+                # topic_groups, leaving the downstream MMR/diversity stages a
+                # far narrower window than the mixed feed gets — a platform tab
+                # would read as visibly more repetitive than "全部" for no
+                # reason other than how its candidates were loaded.
+                rows = Database._balance_pool_rows(
+                    isolated._available_platform_rows_on(
+                        isolated.conn,
+                        scope,
                         xhs_self_nickname=xhs_self_nickname,
                         _viewed_content_keys=viewed_content_keys,
-                    ):
-                        bvid = str(row.get("bvid", ""))
-                        if bvid and bvid in seen:
-                            continue
-                        if bvid:
-                            seen.add(bvid)
-                        rows.append(row)
-                        added += 1
-                    if added:
-                        topups.append((token, added))
+                    ),
+                    limit=max(0, int(limit)),
+                )
+            else:
+                rows = isolated.get_pool_candidates(
+                    limit=max(0, int(limit)),
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+            loaded_count = len(rows)
 
-            viewed = frozenset(recent_viewed_bvids)
+            topups: list[tuple[str, int]] = []
+            if not scope:
+                present = {
+                    str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
+                    for row in rows
+                }
+                platforms = isolated.list_servable_pool_platforms(
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+                missing = [
+                    token
+                    for token in (str(name).strip().lower() for name in platforms)
+                    if token and token not in present
+                ]
+                seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
+                if len(platforms) > 1 and missing:
+                    # Materialize the canonical available set once and share it
+                    # across every top-up. Reading it per platform turned an
+                    # all-bilibili window with seven stocked platforms into
+                    # seven full-row scans (~35ms each) on the serve hot path;
+                    # the cheap platform list above keeps that scan off the
+                    # common case where no platform is missing at all.
+                    available_rows = isolated._load_available_pool_candidate_rows_on(
+                        isolated.conn,
+                        xhs_self_nickname=xhs_self_nickname,
+                        _viewed_content_keys=viewed_content_keys,
+                        full_rows=True,
+                    )
+                    for token in missing:
+                        added = 0
+                        for row in isolated._available_platform_rows_on(
+                            isolated.conn,
+                            token,
+                            limit=5,
+                            xhs_self_nickname=xhs_self_nickname,
+                            _viewed_content_keys=viewed_content_keys,
+                            _available_rows=available_rows,
+                        ):
+                            bvid = str(row.get("bvid", ""))
+                            if bvid and bvid in seen:
+                                continue
+                            if bvid:
+                                seen.add(bvid)
+                            rows.append(row)
+                            added += 1
+                        if added:
+                            topups.append((token, added))
+
+            viewed = frozenset(seen_bvids)
             history_limit = max(1, int(curator_history_limit))
             curator_signals = isolated.get_recent_recommendation_signals(limit=history_limit)
             feedback_signals = isolated.get_feedback_signals(limit=history_limit)
@@ -1462,7 +1618,7 @@ class Database:
                 candidate_rows=tuple(rows),
                 loaded_count=loaded_count,
                 platform_topups=tuple(topups),
-                recent_viewed_bvids=viewed,
+                seen_bvids=viewed,
                 curator_signals=tuple(curator_signals),
                 feedback_signals=tuple(feedback_signals),
             )
@@ -1500,6 +1656,64 @@ class Database:
             return isolated.count_pool_readiness(xhs_self_nickname=xhs_self_nickname)
         finally:
             isolated.close()
+
+    def load_pool_platform_availability(
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+    ) -> PoolPlatformAvailability:
+        """Read total and per-platform servable inventory in one transaction.
+
+        Both numbers derive from a single materialization of the canonical
+        available set, so ``total_available == sum(by_platform.values())`` is
+        structural rather than a coincidence of two independent queries that
+        could observe different WAL states. Runs on a short-lived connection
+        so a tab-count refresh never contends with the process-shared one.
+        """
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        isolated._preserve_read_transaction = True
+        try:
+            isolated.conn.execute("BEGIN")
+            viewed_content_keys, _ = isolated._seen_state_on(isolated.conn)
+            rows = isolated._load_available_pool_candidate_rows_on(
+                isolated.conn,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            isolated.conn.commit()
+        except Exception:
+            isolated.conn.rollback()
+            raise
+        finally:
+            isolated._preserve_read_transaction = False
+            isolated.close()
+        counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            counts[_pool_source_family(row["source"], row["source_platform"])] += 1
+        return PoolPlatformAvailability(
+            total_available=len(rows),
+            by_platform=dict(counts),
+        )
+
+    async def load_pool_platform_availability_async(
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+    ) -> PoolPlatformAvailability:
+        """Read platform inventory on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.load_pool_platform_availability,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+            ),
+        )
 
     def _ensure_fresh_read(self) -> None:
         """Close any implicit transaction so the next SELECT sees the latest WAL state.
@@ -1579,14 +1793,45 @@ class Database:
         Returns:
             Inserted row ID.
         """
-        cursor = self._execute_write(
-            "INSERT INTO events "
-            "(event_type, url, title, context, metadata, "
-            " inferred_satisfaction, satisfaction_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            self._event_insert_params(event_type, kwargs),
-        )
-        return cursor.lastrowid or 0
+        params = self._event_insert_params(event_type, kwargs)
+        attempts = _LOCK_RETRY_ATTEMPTS
+        self._ensure_fresh_read()
+        while True:
+            try:
+                cursor = self.conn.execute(
+                    "INSERT INTO events "
+                    "(event_type, url, title, context, metadata, "
+                    " inferred_satisfaction, satisfaction_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                event_id = int(cursor.lastrowid or 0)
+                seen_changed = False
+                if event_type == "view" and event_id > 0:
+                    seen_changed = self._upsert_seen_items_from_view_event_on(
+                        self.conn,
+                        event_id=event_id,
+                        row={"url": params[1], "metadata": params[4]},
+                    )
+                self._advance_seen_items_cursor_on(self.conn, event_id)
+                self.conn.commit()
+                if seen_changed:
+                    self._invalidate_seen_state_cache()
+                return event_id
+            except sqlite3.OperationalError as exc:
+                self.conn.rollback()
+                message = str(exc).lower()
+                if "database is locked" not in message or attempts <= 1:
+                    raise
+                attempts -= 1
+                logger.warning(
+                    "SQLite event+seen write locked, retrying (%s attempts left)",
+                    attempts,
+                )
+                time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+            except Exception:
+                self.conn.rollback()
+                raise
 
     @staticmethod
     def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1640,16 +1885,35 @@ class Database:
         if not rows:
             return 0
         conn = self.open_connection()
+        seen_changed = False
+        last_event_id = 0
         try:
-            conn.executemany(
-                "INSERT INTO events "
-                "(event_type, url, title, context, metadata, "
-                " inferred_satisfaction, satisfaction_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
+            for params in rows:
+                cursor = conn.execute(
+                    "INSERT INTO events "
+                    "(event_type, url, title, context, metadata, "
+                    " inferred_satisfaction, satisfaction_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                last_event_id = int(cursor.lastrowid or last_event_id)
+                if params[0] == "view" and last_event_id > 0:
+                    seen_changed = (
+                        self._upsert_seen_items_from_view_event_on(
+                            conn,
+                            event_id=last_event_id,
+                            row={"url": params[1], "metadata": params[4]},
+                        )
+                        or seen_changed
+                    )
+            self._advance_seen_items_cursor_on(conn, last_event_id)
             conn.commit()
+            if seen_changed:
+                self._invalidate_seen_state_cache()
             return len(rows)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -2735,12 +2999,15 @@ class Database:
                 author_name,
                 body_text,
                 content_type,
-                source_keyword_id
+                source_keyword_id,
+                rating_score,
+                rating_count,
+                source_rank
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
+                CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
                 title = excluded.title,
@@ -2870,7 +3137,10 @@ class Database:
                 source_keyword_id = COALESCE(
                     excluded.source_keyword_id,
                     content_cache.source_keyword_id
-                )
+                ),
+                rating_score = excluded.rating_score,
+                rating_count = excluded.rating_count,
+                source_rank = excluded.source_rank
             """,
             (
                 bvid,
@@ -2911,6 +3181,9 @@ class Database:
                 kwargs.get("body_text", ""),
                 kwargs.get("content_type", "video") or "video",
                 self._coerce_source_keyword_id(kwargs.get("source_keyword_id")),
+                float(kwargs.get("rating_score", 0.0) or 0.0),
+                max(0, int(kwargs.get("rating_count", 0) or 0)),
+                max(0, int(kwargs.get("source_rank", 0) or 0)),
                 EXPLORE_STRATEGY,
                 EXPLORE_ADMISSION_MIN_SCORE,
                 self._pool_admission_min_score(),
@@ -3020,11 +3293,14 @@ class Database:
                     candidate_tier,
                     score_threshold,
                     raw_payload,
-                    source_keyword_id
+                    source_keyword_id,
+                    rating_score,
+                    rating_count,
+                    source_rank
                 )
                 VALUES (
                     ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -3063,6 +3339,9 @@ class Database:
                     self._coerce_source_keyword_id(
                         self._candidate_value(candidate, "source_keyword_id", None)
                     ),
+                    float(self._candidate_value(candidate, "rating_score", 0.0) or 0.0),
+                    max(0, int(self._candidate_value(candidate, "rating_count", 0) or 0)),
+                    max(0, int(self._candidate_value(candidate, "source_rank", 0) or 0)),
                 ),
             )
             if source_platform:
@@ -3075,10 +3354,20 @@ class Database:
                 UPDATE discovery_candidates
                 SET last_seen_at = CURRENT_TIMESTAMP,
                     published_at = COALESCE(NULLIF(?, ''), published_at, ''),
-                    published_label = COALESCE(NULLIF(?, ''), published_label, '')
+                    published_label = COALESCE(NULLIF(?, ''), published_label, ''),
+                    rating_score = ?,
+                    rating_count = ?,
+                    source_rank = ?
                 WHERE candidate_key = ?
                 """,
-                (published.published_at, published.published_label, candidate_key),
+                (
+                    published.published_at,
+                    published.published_label,
+                    float(self._candidate_value(candidate, "rating_score", 0.0) or 0.0),
+                    max(0, int(self._candidate_value(candidate, "rating_count", 0) or 0)),
+                    max(0, int(self._candidate_value(candidate, "source_rank", 0) or 0)),
+                    candidate_key,
+                ),
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
@@ -3197,24 +3486,46 @@ class Database:
         *,
         limit: int,
         claim_token: str | None = None,
+        preferred_source_platforms: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Claim a mixed-source batch of pending candidates for evaluation."""
+        """Claim a mixed-source batch of pending candidates for evaluation.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): when
+        ``preferred_source_platforms`` is given (under-share sources), those
+        rows are pulled into the peek window ahead of the FIFO order AND drained
+        first in the round-robin, so an over-supplied backlog cannot burn the
+        evaluator on rows that share-aware admission won't even seat. Omitting it
+        keeps the legacy round-robin over the FIFO window byte-for-byte.
+        """
 
         claim_limit = max(0, int(limit))
         if claim_limit <= 0:
             return []
         self._ensure_fresh_read()
+        platforms = [
+            str(platform).strip()
+            for platform in (preferred_source_platforms or [])
+            if str(platform).strip()
+        ]
+        window_limit = max(claim_limit * 4, claim_limit)
         # Peek a bounded window and round-robin in Python so one noisy source
         # cannot monopolize a mixed evaluator batch.
+        if platforms:
+            placeholders = ", ".join("?" for _ in platforms)
+            order_prefix = f"CASE WHEN source_platform IN ({placeholders}) THEN 0 ELSE 1 END, "
+            window_params: tuple[Any, ...] = (*platforms, window_limit)
+        else:
+            order_prefix = ""
+            window_params = (window_limit,)
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT *
             FROM discovery_candidates
             WHERE status = 'pending_eval'
-            ORDER BY last_seen_at ASC, id ASC
+            ORDER BY {order_prefix}last_seen_at ASC, id ASC
             LIMIT ?
             """,
-            (max(claim_limit * 4, claim_limit),),
+            window_params,
         )
         pending = [dict(row) for row in cursor.fetchall()]
         if not pending:
@@ -3229,18 +3540,28 @@ class Database:
                 by_source[source] = []
             by_source[source].append(row)
 
+        # Two-tier round-robin: drain preferred (under-share) sources first, then
+        # the rest. With no preferred list this is a single tier == legacy order.
+        preferred_set = set(platforms)
+        tiers = (
+            [source for source in source_order if source in preferred_set],
+            [source for source in source_order if source not in preferred_set],
+        )
         selected: list[dict[str, Any]] = []
-        while len(selected) < claim_limit:
-            added = False
-            for source in source_order:
-                rows = by_source[source]
-                if not rows:
-                    continue
-                selected.append(rows.pop(0))
-                added = True
-                if len(selected) >= claim_limit:
+        for tier in tiers:
+            while len(selected) < claim_limit:
+                added = False
+                for source in tier:
+                    rows = by_source[source]
+                    if not rows:
+                        continue
+                    selected.append(rows.pop(0))
+                    added = True
+                    if len(selected) >= claim_limit:
+                        break
+                if not added:
                     break
-            if not added:
+            if len(selected) >= claim_limit:
                 break
 
         ids = [int(row["id"]) for row in selected]
@@ -3277,22 +3598,42 @@ class Database:
         self,
         *,
         limit: int,
+        preferred_source_platforms: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return evaluated candidates still waiting for content-cache admission."""
+        """Return evaluated candidates still waiting for content-cache admission.
+
+        Pool-share fairness (spec 2026-07-20, Phase 2): when
+        ``preferred_source_platforms`` is given, under-share sources sort ahead
+        of the FIFO order so a fixed admission window is not monopolized by an
+        over-supplied source's backlog. Omitting it keeps the legacy
+        ``evaluated_at ASC`` ordering byte-for-byte (invariant 5).
+        """
 
         admission_limit = max(0, int(limit))
         if admission_limit <= 0:
             return []
         self._ensure_fresh_read()
+        platforms = [
+            str(platform).strip()
+            for platform in (preferred_source_platforms or [])
+            if str(platform).strip()
+        ]
+        if platforms:
+            placeholders = ", ".join("?" for _ in platforms)
+            order_prefix = f"CASE WHEN source_platform IN ({placeholders}) THEN 0 ELSE 1 END, "
+            params: tuple[Any, ...] = (*platforms, admission_limit)
+        else:
+            order_prefix = ""
+            params = (admission_limit,)
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT *
             FROM discovery_candidates
             WHERE status = 'evaluated'
-            ORDER BY evaluated_at ASC, last_seen_at ASC, id ASC
+            ORDER BY {order_prefix}evaluated_at ASC, last_seen_at ASC, id ASC
             LIMIT ?
             """,
-            (admission_limit,),
+            params,
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -4013,8 +4354,53 @@ class Database:
         """
         return clause, (pool_status, *admission_params, *guard_params, delight_threshold)
 
-    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
-        return self._pool_servable_where_clause_on(self.conn, xhs_self_nickname)
+    def _available_platform_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        platform: str,
+        *,
+        limit: int | None = None,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+        _available_rows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return canonical available rows belonging to one source family.
+
+        The platform filter is applied in Python on ``_pool_source_family``
+        rather than in SQL: a row's family also derives from legacy
+        ``source`` strategy prefixes (``zhihu-hot``, ``xhs-extension-task``)
+        when ``source_platform`` is blank, so a raw column comparison would
+        silently drop stocked legacy rows and break the
+        ``total == sum(by_platform)`` invariant the tab counts rely on.
+
+        Materializing the canonical set costs a full-row scan, so callers
+        that need several platforms from one read (the serve window's
+        platform floor) pass ``_available_rows`` to share a single load
+        instead of paying that scan once per platform.
+        """
+        canonical = normalize_source_platform(platform)
+        if not canonical:
+            return []
+        rows = (
+            _available_rows
+            if _available_rows is not None
+            else self._load_available_pool_candidate_rows_on(
+                conn,
+                max_per_topic_group=max_per_topic_group,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=_viewed_content_keys,
+                full_rows=True,
+            )
+        )
+        selected: list[dict[str, Any]] = []
+        for row in rows:
+            if _pool_source_family(row["source"], row["source_platform"]) != canonical:
+                continue
+            selected.append(row)
+            if limit is not None and len(selected) >= limit:
+                break
+        return selected
 
     def get_pool_candidates_for_platform(
         self,
@@ -4024,60 +4410,38 @@ class Database:
         xhs_self_nickname: str = "",
         _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch up to ``limit`` servable pool rows for one platform token.
+        """Fetch up to ``limit`` servable pool rows for one canonical platform.
 
-        Companion to ``get_pool_candidates`` powering the recommendation serve
-        window's platform floor: when a relevance-ordered window happens to be
-        all-bilibili, this back-fills a stocked non-bilibili platform so it
-        can't be silently dropped for hours. Applies the exact servability
-        guards and relevance ordering of ``get_pool_candidates`` plus a
-        ``source_platform`` filter (``COALESCE(NULLIF(source_platform, ''),
-        'bilibili')``), and drops recently-viewed / non-linkable rows so every
-        returned row is one ``serve()`` can actually load.
+        Two callers share this reader, so it must never diverge from the
+        counted inventory:
+
+        * the serve window's platform floor, which back-fills a stocked
+          non-bilibili platform an all-bilibili relevance window would
+          otherwise drop for hours;
+        * platform-scoped recommendation requests from PC Web, where every
+          returned item has to belong to the requested platform.
+
+        Rows come straight out of the canonical available set backing
+        ``count_pool_candidates`` / ``load_pool_platform_availability`` — same
+        servability, recently-viewed, linkability, delight-claim and
+        topic-window guards, same relevance ordering — so
+        ``strict_platform_candidates(p) ⊆ available_candidates_for(p)`` holds
+        and a tab can never advertise stock this reader refuses to serve.
+        ``platform`` is canonicalized (``xhs`` → ``xiaohongshu``); an empty
+        value keeps the historical bilibili default.
         """
-        token = str(platform or "").strip().lower() or "bilibili"
+        token = normalize_source_platform(platform) or _BILIBILI_SOURCE_FAMILY
         fetch_limit = max(0, int(limit))
         if fetch_limit <= 0:
             return []
         self._ensure_fresh_read()
-        where_clause, where_params = self._pool_servable_where_clause(xhs_self_nickname)
-        sql = f"""
-            SELECT *
-            FROM content_cache
-            WHERE {where_clause}
-              AND LOWER(COALESCE(NULLIF(source_platform, ''), 'bilibili')) = ?
-            ORDER BY
-                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                relevance_score DESC,
-                last_scored_at DESC,
-                view_count DESC,
-                bvid ASC
-            LIMIT ?
-        """
-        # Over-fetch so viewed / non-linkable drops still leave up to `limit`.
-        cursor = self.conn.execute(sql, (*where_params, token, fetch_limit * 4 + 8))
-        viewed_content_keys = (
-            self.get_recent_viewed_content_keys()
-            if _viewed_content_keys is None
-            else _viewed_content_keys
+        return self._available_platform_rows_on(
+            self.conn,
+            token,
+            limit=fetch_limit,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
         )
-        rows: list[dict[str, Any]] = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            if not str(row_dict.get("bvid", "")).strip():
-                continue
-            if self._is_viewed_row(row_dict, viewed_content_keys):
-                continue
-            if not _is_linkable_pool_source(
-                row_dict.get("source"),
-                row_dict.get("source_platform"),
-                row_dict.get("content_url"),
-            ):
-                continue
-            rows.append(row_dict)
-            if len(rows) >= fetch_limit:
-                break
-        return rows
 
     def list_servable_pool_platforms(
         self,
@@ -4158,12 +4522,18 @@ class Database:
         max_per_topic_group: int = 3,
         xhs_self_nickname: str = "",
         _viewed_content_keys: set[str] | None = None,
+        full_rows: bool = False,
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
         Applies the delight claim guard like ``get_pool_candidates`` so
         the availability count never includes surprise-channel rows serve()
         would refuse to load.
+
+        ``full_rows=True`` widens the projection to whole ``content_cache``
+        rows without touching the gate or ordering, so platform-scoped serve
+        reads can hand complete candidates to the recommendation path while
+        still coming from the exact set the counts report.
         """
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
@@ -4172,12 +4542,19 @@ class Database:
             conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
+        projection = (
+            "*"
+            if full_rows
+            else (
+                "bvid, source, source_platform, content_url, topic_group, "
+                "candidate_tier, relevance_score, last_scored_at, view_count"
+            )
+        )
         if max_per_topic_group > 0:
             cursor = conn.execute(
                 f"""
                 WITH ranked AS (
-                    SELECT bvid, source, source_platform, content_url, topic_group,
-                           candidate_tier, relevance_score, last_scored_at, view_count,
+                    SELECT {projection},
                            ROW_NUMBER() OVER (
                                PARTITION BY topic_group
                                ORDER BY
@@ -4206,8 +4583,7 @@ class Database:
                         WHERE r.bvid = content_cache.bvid
                       )
                 )
-                SELECT bvid, source, source_platform, content_url, topic_group,
-                       candidate_tier, relevance_score, last_scored_at, view_count
+                SELECT {projection}
                 FROM ranked
                 WHERE group_rank <= ?
                 ORDER BY
@@ -4222,8 +4598,7 @@ class Database:
         else:
             cursor = conn.execute(
                 f"""
-                SELECT bvid, source, source_platform, content_url, topic_group,
-                       candidate_tier, relevance_score, last_scored_at, view_count
+                SELECT {projection}
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
@@ -4386,6 +4761,112 @@ class Database:
             source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
             counts[source_family] += int(row["count"])
         return dict(counts)
+
+    def count_evaluated_discovery_candidates_by_source(self) -> dict[str, int]:
+        """Return ``evaluated`` (admission-waiting) candidates grouped by family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): the rebalancer only
+        evicts over-share rows when an under-share source actually has supply
+        sitting in ``evaluated`` ready to take the freed slot.
+        """
+        self._ensure_fresh_read()
+        counts: dict[str, int] = defaultdict(int)
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status = 'evaluated'
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
+        return dict(counts)
+
+    def count_admission_waiting_discovery_candidates_by_source(self) -> dict[str, int]:
+        """Return admission-waiting candidates (any non-terminal stage) per family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): the rebalancer's
+        "does an under-share source have supply waiting?" test must count
+        ``pending_eval`` and ``evaluating`` too, not only ``evaluated`` —
+        otherwise an orphan occupier pins the pool full, the under-share source
+        never gets evaluated (coordinator idles at target), so its supply never
+        reaches ``evaluated`` and eviction never fires (third chicken-and-egg).
+        Counting the earlier stages breaks the loop; the second-round admission
+        backfill keeps the global cap intact if a demoted row later fails eval.
+        """
+        self._ensure_fresh_read()
+        counts: dict[str, int] = defaultdict(int)
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
+        return dict(counts)
+
+    def demote_lowest_ranked_pool_rows(self, *, source_family: str, limit: int) -> int:
+        """Mark the *limit* lowest-ranked fresh visible rows of one family stale.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3): a gentle, per-tick
+        rebalance frees a few slots held by an over-supplied source so an
+        under-share source can be seated. Selection is the lowest
+        ``relevance_score`` then oldest ``last_scored_at`` (quality never
+        regresses — the best rows stay). Only ``fresh``, non-disliked,
+        not-yet-recommended rows are touched, and they are set to the existing
+        ``'stale'`` status (no new enum). Returns the number of rows demoted.
+        """
+        demote_limit = max(0, int(limit))
+        family = str(source_family or "").strip()
+        if demote_limit <= 0 or not family:
+            return 0
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT bvid, source, source_platform, relevance_score, last_scored_at
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND NOT EXISTS (
+                SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+              )
+            """
+        )
+        candidates: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            bvid = str(row_dict.get("bvid", "")).strip()
+            if not bvid:
+                continue
+            if _pool_source_family(row_dict["source"], row_dict["source_platform"]) != family:
+                continue
+            candidates.append(row_dict)
+        candidates.sort(
+            key=lambda r: (
+                float(r.get("relevance_score") or 0.0),
+                str(r.get("last_scored_at") or ""),
+            )
+        )
+        victims = [str(r["bvid"]) for r in candidates[:demote_limit]]
+        if not victims:
+            return 0
+        placeholders = ", ".join("?" for _ in victims)
+        result = self._execute_write(
+            f"""
+            UPDATE content_cache
+            SET pool_status = 'stale'
+            WHERE bvid IN ({placeholders})
+              AND COALESCE(pool_status, 'fresh') = 'fresh'
+            """,
+            victims,
+        )
+        return result.rowcount
 
     def count_pool_readiness(
         self,
@@ -6206,32 +6687,164 @@ class Database:
                 break
         return balanced[:limit]
 
-    def get_recent_viewed_bvids(self, limit: int = 2000) -> set[str]:
-        """Return recently viewed BVIDs from view events."""
-        cursor = self.conn.execute(
+    @staticmethod
+    def _advance_seen_items_cursor_on(conn: sqlite3.Connection, event_id: int) -> None:
+        if event_id <= 0:
+            return
+        conn.execute(
             """
-            SELECT url, metadata
-            FROM events
-            WHERE event_type = 'view'
-            ORDER BY id DESC
-            LIMIT ?
+            INSERT INTO seen_items_backfill_state (singleton, last_scanned_event_id)
+            VALUES (1, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                last_scanned_event_id = MAX(
+                    seen_items_backfill_state.last_scanned_event_id,
+                    excluded.last_scanned_event_id
+                )
             """,
-            (limit,),
+            (event_id,),
         )
-        viewed_bvids: set[str] = set()
-        for row in cursor.fetchall():
-            bvid = self._extract_bvid_from_view_event(dict(row))
-            if bvid:
-                viewed_bvids.add(bvid)
-        return viewed_bvids
+
+    def _invalidate_seen_state_cache(self) -> None:
+        with self._seen_state_lock:
+            self._seen_state_cache.clear()
+
+    @classmethod
+    def _upsert_seen_items_from_view_event_on(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        event_id: int,
+        row: dict[str, Any],
+        seen_at: str = "",
+    ) -> bool:
+        """Upsert every canonical identity carried by one view event."""
+        if event_id <= 0:
+            return False
+        keys, _ = cls._extract_view_event_identities(row)
+        canonical_rows: set[tuple[str, str, str]] = set()
+        for key in keys:
+            if ":" not in key:
+                continue
+            source_platform, content_id = key.split(":", 1)
+            platform = canonical_source_platform(source_platform)
+            content_id = content_id.strip()
+            if not platform or not content_id:
+                continue
+            try:
+                item_key = make_item_key(platform, content_id)
+            except ValueError:
+                continue
+            canonical_rows.add((item_key, platform, content_id))
+        for item_key, platform, content_id in canonical_rows:
+            conn.execute(
+                """
+                INSERT INTO seen_items (
+                    item_key,
+                    source_platform,
+                    content_id,
+                    first_event_id,
+                    last_event_id,
+                    first_seen_at,
+                    last_seen_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?,
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP),
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
+                )
+                ON CONFLICT(item_key) DO UPDATE SET
+                    first_event_id = MIN(
+                        seen_items.first_event_id,
+                        excluded.first_event_id
+                    ),
+                    last_event_id = MAX(
+                        seen_items.last_event_id,
+                        excluded.last_event_id
+                    ),
+                    first_seen_at = CASE
+                        WHEN excluded.first_event_id < seen_items.first_event_id
+                            THEN excluded.first_seen_at
+                        ELSE seen_items.first_seen_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN excluded.last_event_id >= seen_items.last_event_id
+                            THEN excluded.last_seen_at
+                        ELSE seen_items.last_seen_at
+                    END
+                """,
+                (
+                    item_key,
+                    platform,
+                    content_id,
+                    event_id,
+                    event_id,
+                    seen_at,
+                    seen_at,
+                ),
+            )
+        return bool(canonical_rows)
+
+    def get_seen_bvids(self) -> set[str]:
+        """Return every Bilibili identity recorded in the durable seen ledger."""
+        _, seen_bvids = self._seen_state_on(self.conn)
+        return seen_bvids
+
+    def get_seen_content_keys(self) -> set[str]:
+        """Return all source-aware content identities ever recorded as viewed."""
+        return self._seen_content_keys_on(self.conn)
+
+    def _seen_content_keys_on(self, conn: sqlite3.Connection) -> set[str]:
+        seen_keys, _ = self._seen_state_on(conn)
+        return seen_keys
+
+    def _seen_state_on(
+        self,
+        conn: sqlite3.Connection,
+    ) -> tuple[set[str], set[str]]:
+        """Materialize canonical seen keys and BVIDs from the durable ledger."""
+        latest_row = conn.execute(
+            "SELECT COALESCE(MAX(last_event_id), 0) AS latest_id FROM seen_items"
+        ).fetchone()
+        latest_id = int(latest_row["latest_id"] if latest_row else 0)
+        with self._seen_state_lock:
+            cached = self._seen_state_cache.get(latest_id)
+        if cached is not None:
+            cached_keys, cached_bvids = cached
+            return set(cached_keys), set(cached_bvids)
+
+        rows = conn.execute(
+            """
+            SELECT item_key, source_platform, content_id
+            FROM seen_items
+            ORDER BY item_key
+            """
+        ).fetchall()
+        seen_keys = {str(row["item_key"]) for row in rows if str(row["item_key"] or "")}
+        seen_bvids = {
+            str(row["content_id"])
+            for row in rows
+            if canonical_source_platform(str(row["source_platform"] or ""))
+            == _BILIBILI_SOURCE_FAMILY
+            and str(row["content_id"] or "").startswith("BV")
+        }
+        seen_keys.update(seen_bvids)
+        with self._seen_state_lock:
+            self._seen_state_cache.clear()
+            self._seen_state_cache[latest_id] = (
+                frozenset(seen_keys),
+                frozenset(seen_bvids),
+            )
+        return seen_keys, seen_bvids
+
+    def get_recent_viewed_bvids(self, limit: int = 2000) -> set[str]:
+        """Compatibility alias for the unbounded durable Bilibili seen set."""
+        del limit
+        return self.get_seen_bvids()
 
     def get_recent_viewed_content_keys(self, limit: int = 2000) -> set[str]:
-        """Return recently viewed content identities across supported sources.
-
-        Keys are source-aware (``source_platform:content_id``) and include
-        raw BVIDs for legacy Bilibili callers.
-        """
-        return self._recent_viewed_content_keys_on(self.conn, limit=limit)
+        """Compatibility alias for the unbounded durable canonical seen set."""
+        del limit
+        return self.get_seen_content_keys()
 
     def _recent_viewed_content_keys_on(
         self,
@@ -6239,9 +6852,9 @@ class Database:
         *,
         limit: int = 2000,
     ) -> set[str]:
-        """Connection-aware recent viewed identity extraction."""
-        viewed_keys, _ = self._recent_viewed_state_on(conn, limit=limit)
-        return viewed_keys
+        """Compatibility alias for connection-aware durable seen identities."""
+        del limit
+        return self._seen_content_keys_on(conn)
 
     def _recent_viewed_state_on(
         self,
@@ -6249,47 +6862,9 @@ class Database:
         *,
         limit: int = 2000,
     ) -> tuple[set[str], set[str]]:
-        """Return source-aware identities and BVIDs from one event scan."""
-        clean_limit = max(0, int(limit))
-        latest_row = conn.execute(
-            """
-            SELECT COALESCE(MAX(id), 0) AS latest_id
-            FROM events
-            WHERE event_type = 'view'
-            """
-        ).fetchone()
-        latest_id = int(latest_row["latest_id"] if latest_row else 0)
-        cache_key = (latest_id, clean_limit)
-        with self._recent_view_state_lock:
-            cached = self._recent_view_state_cache.get(cache_key)
-        if cached is not None:
-            cached_keys, cached_bvids = cached
-            return set(cached_keys), set(cached_bvids)
-
-        cursor = conn.execute(
-            """
-            SELECT url, metadata
-            FROM events
-            WHERE event_type = 'view'
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (clean_limit,),
-        )
-        viewed_keys: set[str] = set()
-        viewed_bvids: set[str] = set()
-        for row in cursor.fetchall():
-            keys, bvid = self._extract_view_event_identities(dict(row))
-            viewed_keys.update(keys)
-            if bvid:
-                viewed_bvids.add(bvid)
-        with self._recent_view_state_lock:
-            self._recent_view_state_cache.clear()
-            self._recent_view_state_cache[cache_key] = (
-                frozenset(viewed_keys),
-                frozenset(viewed_bvids),
-            )
-        return viewed_keys, viewed_bvids
+        """Compatibility alias for the connection-aware durable seen state."""
+        del limit
+        return self._seen_state_on(conn)
 
     @staticmethod
     def _explore_risk_cluster(row: dict[str, Any]) -> str:
@@ -6548,6 +7123,12 @@ class Database:
         topic_label: str,
     ) -> None:
         """Persist precomputed popup copy for one pooled candidate."""
+        if _looks_like_serialized_llm_payload(expression):
+            # Sink defense only — the upstream validators are what actually
+            # keep repr'd payloads out. This exists so a future parsing
+            # regression cannot silently reach users as card copy again.
+            logger.error("Refusing to persist serialized LLM payload as pool copy for %s", bvid)
+            return
         self._execute_write(
             """
             UPDATE content_cache
@@ -6859,6 +7440,9 @@ class Database:
                 COALESCE(c.danmaku_count, 0) AS danmaku_count,
                 COALESCE(c.favorite_count, 0) AS favorite_count,
                 COALESCE(c.comment_count, 0) AS comment_count,
+                COALESCE(c.rating_score, 0.0) AS rating_score,
+                COALESCE(c.rating_count, 0) AS rating_count,
+                COALESCE(c.source_rank, 0) AS source_rank,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
             LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
@@ -7214,6 +7798,9 @@ class Database:
             # P1.8 yield provenance: the discovery_keywords.id that produced this
             # row (NULL for legacy / non-search / flag-off). Nullable, additive.
             "source_keyword_id": "INTEGER",
+            "rating_score": "REAL DEFAULT 0.0",
+            "rating_count": "INTEGER DEFAULT 0",
+            "source_rank": "INTEGER DEFAULT 0",
         }
         added = False
         for column_name, column_type in required_columns.items():
@@ -7320,6 +7907,71 @@ class Database:
         if index_needs_rebuild:
             logger.info(
                 "Made content-cache identity index compatible with legacy blank-key writers"
+            )
+
+    def _ensure_seen_items_ledger(self) -> None:
+        """Create and incrementally backfill the all-time canonical seen ledger."""
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS seen_items (
+                item_key        TEXT PRIMARY KEY,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                first_event_id  INTEGER NOT NULL,
+                last_event_id   INTEGER NOT NULL,
+                first_seen_at   TIMESTAMP NOT NULL,
+                last_seen_at    TIMESTAMP NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_seen_items_platform_content
+                ON seen_items(source_platform, content_id);
+            CREATE TABLE IF NOT EXISTS seen_items_backfill_state (
+                singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+                last_scanned_event_id INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT OR IGNORE INTO seen_items_backfill_state (
+                singleton, last_scanned_event_id
+            ) VALUES (1, 0);
+            """
+        )
+        state = self.conn.execute(
+            """
+            SELECT last_scanned_event_id
+            FROM seen_items_backfill_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        last_scanned_event_id = int(state["last_scanned_event_id"] if state else 0)
+        rows = self.conn.execute(
+            """
+            SELECT id, url, metadata, created_at
+            FROM events
+            WHERE event_type = 'view' AND id > ?
+            ORDER BY id ASC
+            """,
+            (last_scanned_event_id,),
+        ).fetchall()
+        backfilled = 0
+        for row in rows:
+            if self._upsert_seen_items_from_view_event_on(
+                self.conn,
+                event_id=int(row["id"]),
+                row=dict(row),
+                seen_at=str(row["created_at"] or ""),
+            ):
+                backfilled += 1
+        latest = self.conn.execute(
+            "SELECT COALESCE(MAX(id), 0) AS latest_id FROM events"
+        ).fetchone()
+        self._advance_seen_items_cursor_on(
+            self.conn,
+            int(latest["latest_id"] if latest else 0),
+        )
+        if rows:
+            self._invalidate_seen_state_cache()
+        if backfilled:
+            logger.info(
+                "Backfilled %d legacy view event(s) into the durable seen-item ledger",
+                backfilled,
             )
 
     @staticmethod
@@ -7462,6 +8114,9 @@ class Database:
             "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
             "source_keyword_id": "INTEGER",
+            "rating_score": "REAL NOT NULL DEFAULT 0.0",
+            "rating_count": "INTEGER NOT NULL DEFAULT 0",
+            "source_rank": "INTEGER NOT NULL DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
@@ -10580,9 +11235,22 @@ class Database:
                 i.content_id,
                 i.content_url,
                 i.content_type,
-                i.title,
-                i.author_name,
-                i.cover_url,
+                COALESCE(NULLIF(i.title, ''), (
+                    SELECT cc.title FROM content_cache cc
+                    WHERE cc.bvid = i.content_id OR cc.content_id = i.content_id
+                    LIMIT 1
+                ), i.title) AS title,
+                COALESCE(NULLIF(i.author_name, ''), (
+                    SELECT COALESCE(NULLIF(cc.up_name, ''), cc.author_name)
+                    FROM content_cache cc
+                    WHERE cc.bvid = i.content_id OR cc.content_id = i.content_id
+                    LIMIT 1
+                ), i.author_name) AS author_name,
+                COALESCE(NULLIF(i.cover_url, ''), (
+                    SELECT cc.cover_url FROM content_cache cc
+                    WHERE cc.bvid = i.content_id OR cc.content_id = i.content_id
+                    LIMIT 1
+                ), '') AS cover_url,
                 i.created_at,
                 i.updated_at,
                 m.note,
@@ -12078,19 +12746,44 @@ class Database:
 
         No init task survives a process restart, so a persisted active status
         is necessarily stale. Returns the number of rows reconciled (spec §5a).
+
+        Mirrors ``InitCoordinator.reconcile_orphaned_run``: besides flipping the
+        row status, it downgrades any ``running``/``pending`` stage inside
+        ``stages_json`` to ``failed``/``interrupted`` and writes a user-facing
+        Chinese ``error_detail`` so ``GET /api/init-status`` no longer reports a
+        phantom "running" stage with an empty detail after a mid-init restart.
         """
-        cursor = self._execute_write(
-            """
-            UPDATE init_runs
-               SET status = 'failed', error_reason = 'interrupted',
-                   sequence = sequence + 1,
-                   progress_sequence = sequence + 1,
-                   progress_at = CURRENT_TIMESTAMP,
-                   finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-             WHERE status IN ('starting','running')
-            """
-        )
-        return cursor.rowcount
+        rows = self.conn.execute(
+            "SELECT run_id, stages_json FROM init_runs WHERE status IN ('starting','running')"
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            stages_raw = row["stages_json"]
+            stages = json.loads(stages_raw) if stages_raw else []
+            for stage in stages:
+                if stage.get("status") in ("running", "pending"):
+                    stage["status"] = "failed"
+                    stage["reason"] = "interrupted"
+                    stage.pop("progress", None)
+            self._execute_write(
+                """
+                UPDATE init_runs
+                   SET status = 'failed', error_reason = 'interrupted',
+                       error_detail = ?, stages_json = ?,
+                       sequence = sequence + 1,
+                       progress_sequence = sequence + 1,
+                       progress_at = CURRENT_TIMESTAMP,
+                       finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                 WHERE run_id = ?
+                """,
+                (
+                    "初始化后台任务已结束，但未能写入终态；已自动释放运行锁。",
+                    json.dumps(stages, ensure_ascii=False),
+                    row["run_id"],
+                ),
+            )
+        return len(rows)
 
     def get_auth_epoch(self) -> int:
         """Return the current revocation epoch. Reads fresh WAL state.
@@ -12609,12 +13302,13 @@ class Database:
         floor = min(1.0, max(0.0, floor))
 
         cursor = conn.execute(
-            """
+            f"""
             SELECT COALESCE(delight_score, 0.0) AS score
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
               AND COALESCE(feedback_type, '') != 'dislike'
               AND COALESCE(delight_score, 0.0) > 0.0
+              {_delight_ready_copy_sql()}
             ORDER BY score DESC
             """
         )
@@ -12656,6 +13350,12 @@ class Database:
     ) -> list[dict[str, Any]]:
         """Return up to ``limit`` un-notified delight candidates ordered by score.
 
+        Queue readiness is stricter than merely having a score and arbitrary
+        non-empty metadata: ``pool_expression`` / ``pool_topic_label`` must be
+        ready, and the persisted delight copy must be their synchronized
+        snapshot.  This keeps evaluator-only ``relevance_reason`` text off all
+        delight API and runtime-stream surfaces.
+
         Restricts to ``pool_status IN ('fresh', 'shown')`` —  ``suppressed``
         items have been trimmed out of the active pool by topic-group cap
         or source-share quota and shouldn't reappear as delights. Without
@@ -12685,8 +13385,11 @@ class Database:
             WHERE COALESCE(delight_score, 0.0) >= ?
               AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
-              AND COALESCE(delight_reason, '') != ''
-              AND COALESCE(delight_hook, '') != ''
+              {_delight_ready_copy_sql()}
+              AND TRIM(COALESCE(delight_reason, '')) =
+                  TRIM(COALESCE(pool_expression, ''))
+              AND TRIM(COALESCE(delight_hook, '')) =
+                  TRIM(COALESCE(pool_topic_label, ''))
               AND {feedback_clause}
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
             ORDER BY delight_score DESC, relevance_score DESC, discovered_at DESC
@@ -12715,25 +13418,52 @@ class Database:
         delight_score: float,
         delight_reason: str,
         delight_hook: str = "",
-    ) -> None:
-        """Persist the computed delight score and explanation for a pool item."""
-        self._execute_write(
+    ) -> bool:
+        """Persist delight state only after formal recommendation copy is ready.
+
+        Non-empty display metadata must be the exact current
+        ``pool_expression`` / ``pool_topic_label`` snapshot. The conditional
+        write is the durable admission boundary: an evaluator reason or an
+        uncopied row cannot become delight state even if an upstream caller
+        regresses.
+        """
+        reason = str(delight_reason or "").strip()
+        hook = str(delight_hook or "").strip()
+        if bool(reason) != bool(hook):
+            logger.warning("Refusing partial delight copy for %s", bvid)
+            return False
+
+        snapshot_guard = ""
+        params: tuple[Any, ...]
+        if reason:
+            snapshot_guard = """
+              AND TRIM(COALESCE(pool_expression, '')) = ?
+              AND TRIM(COALESCE(pool_topic_label, '')) = ?
             """
+            params = (delight_score, reason, hook, bvid, reason, hook)
+        else:
+            params = (delight_score, reason, hook, bvid)
+
+        cursor = self._execute_write(
+            f"""
             UPDATE content_cache
             SET delight_score = ?,
                 delight_reason = ?,
                 delight_hook = ?
             WHERE bvid = ?
+              {_delight_ready_copy_sql()}
+              {snapshot_guard}
             """,
-            (delight_score, delight_reason, delight_hook, bvid),
+            params,
         )
+        return cursor.rowcount > 0
 
     def count_delight_candidates(
         self,
         *,
         min_delight_score: float = 0.85,
     ) -> int:
-        """Return the number of un-notified delight candidates."""
+        """Return the number of copy-ready, un-notified delight candidates."""
         admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
             f"""
@@ -12742,8 +13472,11 @@ class Database:
             WHERE COALESCE(delight_score, 0.0) >= ?
               AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
-              AND COALESCE(delight_reason, '') != ''
-              AND COALESCE(delight_hook, '') != ''
+              {_delight_ready_copy_sql()}
+              AND TRIM(COALESCE(delight_reason, '')) =
+                  TRIM(COALESCE(pool_expression, ''))
+              AND TRIM(COALESCE(delight_hook, '')) =
+                  TRIM(COALESCE(pool_topic_label, ''))
               AND COALESCE(feedback_type, '') = ''
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
             """,
@@ -12760,13 +13493,15 @@ class Database:
         min_relevance_score: float = 0.55,
         xhs_self_nickname: str = "",
     ) -> list[dict[str, Any]]:
-        """Return pool candidates that still need delight backfill or copy.
+        """Return copy-ready pool candidates that still need delight synchronization.
 
         Two-stage retrieval: ``relevance_score >= min_relevance_score``
         is the cheap pre-filter (the discovery LLM already judged user-
         content fit during ``evaluate_batch``), then the caller reuses that
         Evo relevance result to populate delight fields only on this
-        shortlist.
+        shortlist. Rows with unfinished ``pool_expression`` /
+        ``pool_topic_label`` stay exclusively in the copy backlog and are not
+        assigned any delight state.
 
         Default 0.55 is calibrated to the discovery rubric:
           0.6+ strong fit, 0.5-0.6 moderate, <0.5 weak fit.
@@ -12786,6 +13521,7 @@ class Database:
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(delight_score, 0.0) = 0.0
                   AND COALESCE(relevance_score, 0.0) >= ?
+                  {_delight_ready_copy_sql()}
                   {guard_sql}
                 ORDER BY relevance_score DESC, discovered_at DESC
                 LIMIT ?
@@ -12804,16 +13540,28 @@ class Database:
                 WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(relevance_score, 0.0) >= ?
+                  {_delight_ready_copy_sql()}
                   AND (
                     COALESCE(delight_score, 0.0) = 0.0
                     OR ABS(
                       COALESCE(delight_score, 0.0) - COALESCE(relevance_score, 0.0)
                     ) > ?
                     OR (
-                      COALESCE(delight_score, 0.0) >= ?
+                      COALESCE(delight_score, 0.0) < ?
                       AND (
-                        COALESCE(delight_reason, '') = ''
-                        OR COALESCE(delight_hook, '') = ''
+                        TRIM(COALESCE(delight_reason, '')) != ''
+                        OR TRIM(COALESCE(delight_hook, '')) != ''
+                      )
+                    )
+                    OR (
+                      COALESCE(delight_score, 0.0) >= ?
+                      AND TRIM(COALESCE(pool_expression, '')) != ''
+                      AND TRIM(COALESCE(pool_topic_label, '')) != ''
+                      AND (
+                        TRIM(COALESCE(delight_reason, '')) !=
+                            TRIM(COALESCE(pool_expression, ''))
+                        OR TRIM(COALESCE(delight_hook, '')) !=
+                            TRIM(COALESCE(pool_topic_label, ''))
                       )
                     )
                   )
@@ -12827,6 +13575,7 @@ class Database:
                 (
                     effective_min_relevance_score,
                     _DELIGHT_SCORE_SYNC_EPSILON,
+                    min_delight_score_for_reason,
                     min_delight_score_for_reason,
                     *guard_params,
                     limit,
@@ -12946,6 +13695,12 @@ class Database:
                 return f"t3_{path_parts[0]}"
             if len(path_parts) >= 4 and path_parts[0] == "r" and path_parts[2] == "comments":
                 return f"t3_{path_parts[3]}"
+        if (
+            platform == _BANGUMI_SOURCE_FAMILY
+            and len(path_parts) >= 2
+            and path_parts[0] == "subject"
+        ):
+            return path_parts[1] if path_parts[1].isdigit() else ""
         return ""
 
     @staticmethod

@@ -7,6 +7,7 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   buildVideoUrl,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   formatPublishedTime,
   getCommentSubmitUiState,
@@ -32,6 +33,7 @@ import {
   platformDisplayName,
   probeMessageKey,
   reconcileRecommendationReplacement,
+  resolveInitBangumiUsername,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -53,6 +55,7 @@ import {
   embeddingRepairStartAccepted,
   initProgressView,
   INIT_EXPECTATION_HINT,
+  INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
   shouldAttachRunningInitProgress,
@@ -138,7 +141,9 @@ import {
   removeSavedItem,
   saveItem,
   savedItemStatus,
+  sendBehaviorEvents,
   syncSavedItems,
+  verifySource,
 } from "./popup-api.js";
 
 const state = {
@@ -160,6 +165,10 @@ const state = {
   runtimeStatus: null,
   runtimeEvent: null,
   runtimeConfig: null,
+  initBangumiUsername: "",
+  initBangumiUsernameTouched: false,
+  initBangumiUsernamePrefilled: false,
+  initBangumiToken: "",
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -207,6 +216,7 @@ const elements = {
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
+  emptyAction: document.getElementById("emptyAction"),
   initPanel: document.getElementById("initPanel"),
   initSources: document.getElementById("initSources"),
   initChecklist: document.getElementById("initChecklist"),
@@ -391,6 +401,12 @@ const WATCH_LATER_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
 const FAVORITE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
+const THUMBS_UP_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
+const THUMBS_DOWN_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
+const MESSAGE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
 
 const CHAT_PLACEHOLDERS = [
   // 想法与内容判断类
@@ -482,6 +498,17 @@ function renderRuntimeToggles(config = state.runtimeConfig) {
 function applyRuntimeConfig(config) {
   if (!config) return;
   state.runtimeConfig = config;
+  if (!state.initBangumiUsernameTouched) {
+    state.initBangumiUsername = String(config.sources?.bangumi?.username || "").trim();
+    // Mark that a successful /api/config prefill populated the field, so an
+    // explicit clear afterwards is a deliberate reset (sends username="") while
+    // an untouched or never-prefilled empty field omits it (keeps configured).
+    state.initBangumiUsernamePrefilled = true;
+    const input = document.getElementById("initBangumiUsername");
+    if (input instanceof HTMLInputElement) {
+      input.value = state.initBangumiUsername;
+    }
+  }
   renderRuntimeToggles(config);
 }
 
@@ -884,6 +911,63 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
   });
 }
 
+async function postSavedFeedback(item, feedbackType, note = "") {
+  const contentId = item.content_id || item.bvid || "";
+  const res = await sendBehaviorEvents([{
+    type: "feedback",
+    source_platform: item.source_platform || "bilibili",
+    title: item.title || "",
+    url: buildContentUrl(item) || item.content_url || "",
+    timestamp: Date.now(),
+    metadata: {
+      feedback_type: feedbackType,
+      bvid: contentId,
+      content_id: contentId,
+      feedback_note: note,
+      saved_feedback: true,
+    },
+  }]);
+  if (!res || !(res.accepted >= 1)) {
+    const reason = res?.rejected?.[0]?.reason;
+    throw new Error(reason === "not_initialized"
+      ? "画像尚未就绪，暂时无法记录反馈。"
+      : "反馈未被接受，请稍后重试。");
+  }
+  return res;
+}
+
+async function handleSavedCardFeedback(item, feedbackType, clicked, other) {
+  if (clicked.disabled || other.disabled) return;
+  const previousPressed = [clicked, other].map((button) => (
+    button.getAttribute("aria-pressed")
+  ));
+  clicked.setAttribute("aria-pressed", "true");
+  other.setAttribute("aria-pressed", "false");
+  clicked.disabled = true;
+  other.disabled = true;
+  setHint(
+    feedbackType === "like" ? "正在记录喜欢…" : "正在记录不感兴趣…",
+    "info",
+  );
+  try {
+    await postSavedFeedback(item, feedbackType);
+    setHint(
+      feedbackType === "like" ? "记下了，这类多来点。" : "记下了，这类先少来点。",
+      "success",
+    );
+  } catch (error) {
+    [clicked, other].forEach((button, index) => {
+      const pressed = previousPressed[index];
+      if (pressed === null) button.removeAttribute("aria-pressed");
+      else button.setAttribute("aria-pressed", pressed);
+    });
+    setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+  } finally {
+    clicked.disabled = false;
+    other.disabled = false;
+  }
+}
+
 function buildSavedCard(listKind, item, { list, empty, toggles }) {
   if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
     || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
@@ -937,6 +1021,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   remove.dataset.savedAction = "remove";
   remove.textContent = "移除";
   remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
+  const onRemoved = listKind === "watch_later" ? loadWatchLater : loadFavorites;
   bindSavedCardRemove(card, remove, {
     listKind,
     itemKey: item.item_key,
@@ -944,7 +1029,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     toggles,
     list,
     empty,
-    onRemoved: listKind === "watch_later" ? loadWatchLater : loadFavorites,
+    onRemoved,
   });
 
   const actions = document.createElement("span");
@@ -970,7 +1055,85 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     actions.append(sync);
   }
   actions.append(remove);
-  card.append(body, actions);
+
+  const feedbackActions = document.createElement("div");
+  feedbackActions.className = "saved-card-feedback";
+  feedbackActions.setAttribute("aria-label", "反馈与保存操作");
+
+  const like = document.createElement("button");
+  like.type = "button";
+  like.className = "feedback-icon-btn";
+  like.dataset.savedAction = "like";
+  like.setAttribute("aria-label", "喜欢");
+  like.title = "喜欢";
+  like.setAttribute("aria-pressed", "false");
+  like.innerHTML = THUMBS_UP_ICON_SVG;
+
+  const dislike = document.createElement("button");
+  dislike.type = "button";
+  dislike.className = "feedback-icon-btn";
+  dislike.dataset.savedAction = "dislike";
+  dislike.setAttribute("aria-label", "不感兴趣");
+  dislike.title = "不感兴趣";
+  dislike.setAttribute("aria-pressed", "false");
+  dislike.innerHTML = THUMBS_DOWN_ICON_SVG;
+
+  like.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "like", like, dislike);
+  });
+  dislike.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "dislike", dislike, like);
+  });
+
+  const comment = document.createElement("button");
+  comment.type = "button";
+  comment.className = "feedback-icon-btn";
+  comment.dataset.savedAction = "comment";
+  comment.setAttribute("aria-label", "聊一聊");
+  comment.title = "聊一聊";
+  comment.innerHTML = MESSAGE_ICON_SVG;
+  comment.addEventListener("click", async () => {
+    const draft = window.prompt("想围绕这条聊什么？");
+    if (draft === null) return;
+    const note = draft.trim();
+    if (!note) {
+      setHint("先写一句想聊的内容，再提交这条反馈。", "warning");
+      return;
+    }
+    comment.disabled = true;
+    setHint("正在提交聊天线索…", "info");
+    try {
+      await postSavedFeedback(item, "comment", note);
+      setHint("已提交聊天线索。", "success");
+    } catch (error) {
+      setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+    } finally {
+      comment.disabled = false;
+    }
+  });
+
+  // The card already belongs to listKind (managed by 移除), so show only the
+  // other list's toggle: watch_later → 收藏; favorite → 稍后再看.
+  const crossIsFavorite = listKind === "watch_later";
+  const toggleCross = () => {
+    if (crossIsFavorite) return toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
+    return toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
+  };
+  const crossToggle = createActionButton(
+    "",
+    `feedback-icon-btn saved-toggle cross-toggle ${crossIsFavorite ? "favorite-btn" : "watch-later-btn"}`,
+    toggleCross,
+  );
+  crossToggle.dataset.savedAction = crossIsFavorite ? "favorite" : "watch-later";
+  crossToggle.innerHTML = crossIsFavorite ? FAVORITE_ICON_SVG : WATCH_LATER_ICON_SVG;
+  if (crossIsFavorite) {
+    bindFavoriteToggle(crossToggle, item);
+  } else {
+    bindWatchLaterToggle(crossToggle, item);
+  }
+
+  feedbackActions.append(like, dislike, comment, crossToggle);
+  card.append(body, actions, feedbackActions);
   return card;
 }
 
@@ -1010,6 +1173,10 @@ function showRecommendationEmptyState(title, message) {
   elements.emptyState.hidden = false;
   elements.emptyTitle.textContent = title;
   elements.emptyText.textContent = message;
+  // Only the degraded branch re-shows the action button after this reset.
+  if (elements.emptyAction instanceof HTMLElement) {
+    elements.emptyAction.hidden = true;
+  }
   // The guided-init panel is only for the uninitialized state; the
   // uninitialized branch re-shows it via renderInitPanelIdle().
   if (elements.initPanel instanceof HTMLElement) {
@@ -1211,6 +1378,75 @@ function _renderInitSources() {
     row.append(box, span);
     elements.initSources.append(row);
   }
+  const bangumiRow = document.createElement("label");
+  bangumiRow.className = "init-source-row";
+  const bangumiLabel = document.createElement("span");
+  bangumiLabel.textContent = "Bangumi 公开用户名（可留空，仅启用发现）";
+  const bangumiInput = document.createElement("input");
+  bangumiInput.id = "initBangumiUsername";
+  bangumiInput.maxLength = 128;
+  bangumiInput.autocomplete = "off";
+  bangumiInput.disabled = true;
+  bangumiInput.value = state.initBangumiUsername;
+  bangumiInput.addEventListener("input", () => {
+    state.initBangumiUsername = bangumiInput.value;
+    state.initBangumiUsernameTouched = true;
+  });
+  bangumiRow.append(bangumiLabel, bangumiInput);
+  elements.initSources.append(bangumiRow);
+
+  // Optional personal access token: identifies the account via /v0/me and reads
+  // private collections. When set, the username above is auto-resolved.
+  const bangumiTokenRow = document.createElement("label");
+  bangumiTokenRow.className = "init-source-row";
+  const bangumiTokenLabel = document.createElement("span");
+  bangumiTokenLabel.textContent = "Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）";
+  const bangumiTokenInput = document.createElement("input");
+  bangumiTokenInput.id = "initBangumiToken";
+  bangumiTokenInput.type = "password";
+  bangumiTokenInput.maxLength = 512;
+  bangumiTokenInput.autocomplete = "off";
+  bangumiTokenInput.disabled = true;
+  bangumiTokenInput.value = state.initBangumiToken;
+  bangumiTokenInput.addEventListener("input", () => {
+    state.initBangumiToken = bangumiTokenInput.value;
+  });
+  bangumiTokenRow.append(bangumiTokenLabel, bangumiTokenInput);
+  elements.initSources.append(bangumiTokenRow);
+  const bangumiTokenHint = document.createElement("p");
+  bangumiTokenHint.className = "init-sources-hint";
+  // Spell out the three-way choice: the backend accepts a token, an explicit
+  // public username, OR the account the extension reads off a logged-in
+  // bgm.tv page. Leaving both fields empty is a valid path, and users who
+  // aren't told that assume Bangumi needs a token they haven't got.
+  const bangumiTokenLink = document.createElement("a");
+  bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
+  bangumiTokenLink.target = "_blank";
+  bangumiTokenLink.rel = "noopener noreferrer";
+  bangumiTokenLink.textContent = "生成个人令牌";
+  const bangumiTokenDocLink = document.createElement("a");
+  bangumiTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌";
+  bangumiTokenDocLink.target = "_blank";
+  bangumiTokenDocLink.rel = "noopener noreferrer";
+  bangumiTokenDocLink.textContent = "取令牌步骤";
+  bangumiTokenHint.append(
+    document.createTextNode(
+      "Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；" +
+        "公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，" +
+        "扩展会自动识别账号（只拿到账号名，可能未经校验）。",
+    ),
+    bangumiTokenLink,
+    document.createTextNode("（约 1 年有效，视同密码保管）·"),
+    bangumiTokenDocLink,
+  );
+  elements.initSources.append(bangumiTokenHint);
+
+  elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+    const checked = Boolean(event.currentTarget.checked);
+    bangumiInput.disabled = !checked;
+    bangumiTokenInput.disabled = !checked;
+  });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
   hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -1231,6 +1467,31 @@ function _readSelectedInitSources() {
   return selected;
 }
 
+function _readInitBangumiUsername() {
+  state.initBangumiUsername = String(
+    document.getElementById("initBangumiUsername")?.value || "",
+  ).trim();
+  return state.initBangumiUsername;
+}
+
+function _readInitBangumiToken() {
+  state.initBangumiToken = String(
+    document.getElementById("initBangumiToken")?.value || "",
+  ).trim();
+  return state.initBangumiToken;
+}
+
+// Decide what Bangumi username (if any) guided init should send, delegating the
+// omit-vs-clear rule to the shared pure helper. Returns the trimmed value to
+// send, or null to omit it so the backend keeps the configured username.
+function _resolveInitBangumiUsernameForSubmit(value) {
+  return resolveInitBangumiUsername({
+    touched: state.initBangumiUsernameTouched,
+    prefilled: state.initBangumiUsernamePrefilled,
+    value,
+  });
+}
+
 // Idle entry: source checkboxes + the actionable button + a one-line note.
 // Conditions are checked ON CLICK (no slow upfront probe / blank panel);
 // failures are surfaced only after a click that doesn't pass.
@@ -1246,8 +1507,8 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
-    // Expectation management (init-progress Phase 2): tell the user upfront
-    // how long the whole run typically takes.
+    // Expectation management: total time is highly variable, so orient the
+    // user about that variability instead of quoting a duration.
     const expectation = document.createElement("li");
     expectation.className = "init-hint-row";
     expectation.textContent = INIT_EXPECTATION_HINT;
@@ -1278,6 +1539,14 @@ function renderInitProgress(status) {
     elements.initChecklist.replaceChildren();
   }
   const progress = initProgressView(status);
+  // The one reassurance a waiting user needs, said once: after v0.3.180 a run
+  // that keeps producing results is literally never interrupted.
+  if (elements.initChecklist instanceof HTMLElement && progress.active) {
+    const patience = document.createElement("li");
+    patience.className = "init-hint-row";
+    patience.textContent = INIT_RUNNING_HINT;
+    elements.initChecklist.append(patience);
+  }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
@@ -1301,13 +1570,13 @@ function renderInitProgress(status) {
       );
     }
   }
-  // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
+  // Liveness line under the bar: "● 进行中 (+ observed elapsed / counts)" while
   // the backend keeps writing; amber stall copy after >90s of silence.
   if (elements.initStallHint instanceof HTMLElement) {
     if (progress.active) {
       const staleness = stalenessView(status);
       const text = staleness.fresh
-        ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+        ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
         : staleness.text;
       elements.initStallHint.textContent = text;
       elements.initStallHint.classList.toggle("stale", !staleness.fresh);
@@ -1434,11 +1703,24 @@ function _startInitProgressPoll() {
 async function handleStartInitClick() {
   // Snapshot the source selection BEFORE we replace the panel contents.
   const selectedSources = _readSelectedInitSources();
+  const bangumiUsername = _readInitBangumiUsername();
+  const bangumiUsernameOption = _resolveInitBangumiUsernameForSubmit(bangumiUsername);
+  const bangumiToken = _readInitBangumiToken();
+  // Only send a token when the user typed one; omit otherwise so the backend
+  // keeps any configured token (empty string would clear a stored token).
+  const bangumiTokenOption = bangumiToken ? bangumiToken : null;
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
     return;
   }
+  // No client-side Bangumi-only admission check here on purpose. The backend
+  // owns a THREE-tier account ladder (token → explicit username →
+  // browser-extension-reported identity); a local "username or token required"
+  // copy of it can't see the third tier and silently blocked zero-config
+  // extension users from ever reaching /api/init. The backend answers 409
+  // no_profile_signal_sources when all three are genuinely missing, and the
+  // startInit catch below renders it via describeInitStartError.
   _setInitStartButton("检查中…", false);
   _setInitReason("");
   if (elements.initChecklist instanceof HTMLElement) {
@@ -1489,15 +1771,30 @@ async function handleStartInitClick() {
   // All conditions pass → start with the chosen sources. The backend
   // re-validates in its critical section, so a race can still 409 — surface
   // that and let the user retry.
+  let startResult;
   try {
-    await startInit({ force: false, sources: selectedSources });
+    startResult = await startInit({
+      force: false,
+      sources: selectedSources,
+      bangumiUsername: bangumiUsernameOption,
+      bangumiToken: bangumiTokenOption,
+    });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));
     return;
   }
-  setHint("初始化已开始，正在拉取数据…", "info");
+  // The 202 response may carry backend warnings (e.g. Bangumi selected without a
+  // public username → discovery-only). Surface them instead of the generic
+  // "已开始" note so the user knows the run is proceeding with a caveat.
+  const startWarnings = Array.isArray(startResult?.warnings)
+    ? startResult.warnings.filter((text) => typeof text === "string" && text.trim())
+    : [];
+  setHint(
+    startWarnings.length ? startWarnings.join(" ") : "初始化已开始，正在拉取数据…",
+    "info",
+  );
   renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
   _startInitProgressPoll();
 }
@@ -2870,11 +3167,15 @@ function formatCountCn(n) {
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
 function recommendationStats(item) {
   const segments = [];
+  const sourceRank = Math.trunc(Number(item?.source_rank) || 0);
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
+  if (item?.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+  if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
   return segments.join(" · ");
 }
 
@@ -5622,7 +5923,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -5648,7 +5949,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = `这位 UP：${item.up_name}`;
+    metaLine.textContent = formatRecommendationAuthorLine(item);
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
@@ -5890,6 +6191,16 @@ function renderRecommendationState(stateShape) {
     return;
   }
 
+  if (stateShape.kind === "degraded") {
+    showRecommendationEmptyState("AI 服务配置需要修复", stateShape.message);
+    if (elements.emptyAction instanceof HTMLElement) {
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
+    return;
+  }
+
   if (stateShape.kind === "error") {
     showRecommendationEmptyState("推荐暂时没刷出来", stateShape.message);
     setHint("后端连上了，但推荐接口这会儿没回。", "error");
@@ -5899,9 +6210,22 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
+      stateShape.degraded
+        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
-    setHint("先完成初始化，把画像和候选池攒起来。");
+    if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
+      // Keep the one-click config repair entry alongside the init journey —
+      // the checklist explains the blocker, this button opens the fix.
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint(
+      stateShape.degraded
+        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
+        : "先完成初始化，把画像和候选池攒起来。",
+      stateShape.degraded ? "error" : "info",
+    );
     renderInitPanelIdle();
     // If a run is already live (started elsewhere / page reopened mid-init),
     // take over with the progress view + poll instead of a dead idle panel.
@@ -6130,6 +6454,10 @@ async function initializeRecommendations() {
     ]);
 
   state.runtimeStatus = runtimeResult.status === "fulfilled" ? runtimeResult.value : null;
+  // The banner is gated on the runtime snapshot (initialized + not degraded);
+  // the boot-time check usually races ahead of this fetch, so re-evaluate now
+  // that the snapshot is in.
+  void maybeShowEmbeddingBanner();
   if (configResult.status === "fulfilled") {
     applyRuntimeConfig(configResult.value);
   }
@@ -6206,7 +6534,8 @@ async function handleManualRefresh() {
     normalizeRuntimeStatus(state.runtimeStatus).pool_available_count > 0;
   setRefreshButtonState(true, "正在给你换一批…");
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     if (!Array.isArray(result.items)) {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;
@@ -6784,7 +7113,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `后端处于降级模式，保存修复后需要 restart daemon。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");
@@ -6928,43 +7257,81 @@ function bindSettings() {
     return selected.length > 0 ? selected : ["search"];
   }
 
+  const BANGUMI_SOURCE_MODE_FIELDS = [
+    ["search", "cfgBangumiModeSearch"],
+    ["ranked", "cfgBangumiModeRanked"],
+    ["latest", "cfgBangumiModeLatest"],
+  ];
+  const BANGUMI_SUBJECT_TYPE_FIELDS = [
+    ["anime", "cfgBangumiTypeAnime"],
+    ["book", "cfgBangumiTypeBook"],
+    ["game", "cfgBangumiTypeGame"],
+    ["music", "cfgBangumiTypeMusic"],
+    ["real", "cfgBangumiTypeReal"],
+  ];
+
+  function setCheckedValues(fields, rawValues) {
+    const fallback = fields.map(([value]) => value);
+    const selected = new Set(
+      (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    );
+    for (const [value, id] of fields) {
+      const el = document.getElementById(id);
+      if (el) el.checked = selected.has(value);
+    }
+  }
+
+  function collectCheckedValues(fields, fallback) {
+    const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
+    return selected.length > 0 ? selected : fallback;
+  }
+
   // Unified per-source login / cookie status from GET /api/sources/status,
-  // rendered as a uniform colored-dot line inside every source card. Only X is
-  // live-validated (state ok); the rest report local cookie/token readiness.
-  const SOURCE_STATUS_DOT = {
-    ok: "#2ecc71",
-    ready: "#2ecc71",
-    syncing: "#9aa0a6",
-    no_auth: "#9aa0a6",
-    unverified: "#9aa0a6",
-    missing: "#e0a800",
-    missing_cookie: "#e0a800",
-    login_required: "#e0a800",
-    rate_limited: "#9aa0a6",
-    partial: "#e0a800",
-    stale: "#e0a800",
-    error: "#e74c3c",
-    expired_cookie: "#e74c3c",
-    blocked: "#e74c3c",
+  // rendered as a uniform colored-dot line inside every source card.
+  //
+  // The verdict, its colour and the strength of the evidence behind it all come
+  // from shared/source-status.js, which the desktop page and the setup wizard
+  // load too. This panel used to keep its own pair of tables, and they had
+  // drifted: `no_auth` and `unverified` were the same grey here while the
+  // desktop page told them apart, and an unrecognised state rendered as an
+  // empty string instead of "状态未知" (spec D6). Having only one row per source
+  // to write into, this surface takes `access.line`, which folds the evidence
+  // in parenthetically — 「已验证（◆ 联网验证 · 3 分钟前）」 — where the desktop
+  // page gives it a badge of its own. Loaded as
+  // a classic script by popup.html, so it is a global rather than an import —
+  // MV3's CSP forbids pulling it from the backend over HTTP.
+  const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+  const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
+  const BANGUMI_SAVE_ERROR_MESSAGES = {
+    invalid_bangumi_access_token:
+      "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+    bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   };
-  const SOURCE_STATUS_LABEL = {
-    ok: "接入可用",
-    ready: "凭据已就绪",
-    syncing: "接入中",
-    no_auth: "无需登录",
-    unverified: "状态待验证",
-    missing: "需要登录",
-    missing_cookie: "缺少 Cookie",
-    login_required: "需要登录",
-    rate_limited: "频率受限",
-    partial: "部分可用",
-    stale: "需要刷新",
-    error: "检查失败",
-    expired: "凭据失效",
-    expired_cookie: "Cookie 失效",
-    blocked: "接入受阻",
-  };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+
+  // The overseas-egress advisory is authored by the backend
+  // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+  // verbatim. This function must never learn a platform name nor read
+  // [network].mode: adding a platform must stay a one-line backend change.
+  // Only the `enabled` gate lives here — a disabled source makes no requests,
+  // so warning about its egress would be noise.
+  function applySourceNetworkHint(row, hint, enabled) {
+    const text = enabled ? String(hint || "") : "";
+    // The status row is a <p>; the hint is a sibling, never a nested <p>.
+    let node = row.nextElementSibling;
+    if (!node || !node.classList.contains("source-network-hint")) node = null;
+    if (!text) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("p");
+      node.className = "settings-hint source-network-hint";
+      row.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = text;
+  }
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -6980,19 +7347,16 @@ function bindSettings() {
       const dot = row.querySelector(".src-dot");
       const detail = row.querySelector(".src-detail");
       const item = data && data[key];
-      if (!item) {
-        if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
-        if (dot) dot.style.color = "#9aa0a6";
-        row.style.opacity = "1";
-        continue;
-      }
-      if (detail) {
-        const label = SOURCE_STATUS_LABEL[item.state] || "";
-        const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
-        detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
-      }
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
-      row.style.opacity = item.enabled ? "1" : "0.6";
+      const access = SourceStatus.describeAccess(item);
+      // Offline wording comes from the shared module too, so a backend the user
+      // cannot reach reads the same here as on the desktop page. The rejected-
+      // token override now lives in describeAccess() rather than being spelled
+      // out again here — this panel and the desktop page each having their own
+      // copy of that rule is how the two status tables drifted (spec D6).
+      if (detail) detail.textContent = access.present ? access.line : access.detail;
+      if (dot) dot.style.color = access.color;
+      applySourceNetworkHint(row, access.present ? item.network_hint : "", access.enabled);
+      row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
     }
   }
 
@@ -7126,6 +7490,36 @@ function bindSettings() {
     setVal("cfgRedditDailyRelatedBudget", cfg.sources?.reddit?.daily_related_budget);
     setVal("cfgRedditRequestInterval", cfg.sources?.reddit?.request_interval_seconds);
     setVal("cfgRedditMinInterval", cfg.sources?.reddit?.min_interval_minutes);
+    const bangumiEnabled = document.getElementById("cfgBangumiEnabled");
+    if (bangumiEnabled) bangumiEnabled.checked = cfg.sources?.bangumi?.enabled === true;
+    setVal("cfgBangumiUsername", cfg.sources?.bangumi?.username);
+    {
+      // Token is a secret and never returned by GET; access_token_set only
+      // signals whether one is stored. Keep the field empty and reflect the
+      // stored state in the placeholder so an untouched save never clobbers it.
+      const bangumiToken = document.getElementById("cfgBangumiAccessToken");
+      if (bangumiToken) {
+        bangumiToken.value = "";
+        bangumiToken.placeholder = cfg.sources?.bangumi?.access_token_set
+          ? "已配置（留空保持不变；填写新令牌以替换）"
+          : "填写以自动识别当前用户并读取私密收藏";
+      }
+      // Clear-token is a per-save action; never leave it pre-checked after a
+      // reload, and disable it when nothing is stored to clear.
+      const bangumiClearToken = document.getElementById("cfgBangumiClearToken");
+      if (bangumiClearToken) {
+        bangumiClearToken.checked = false;
+        bangumiClearToken.disabled = cfg.sources?.bangumi?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, cfg.sources?.bangumi?.source_modes);
+    setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, cfg.sources?.bangumi?.subject_types);
+    setVal("cfgBangumiDailySearchBudget", cfg.sources?.bangumi?.daily_search_budget);
+    setVal("cfgBangumiDailyRankedBudget", cfg.sources?.bangumi?.daily_ranked_budget);
+    setVal("cfgBangumiDailyLatestBudget", cfg.sources?.bangumi?.daily_latest_budget);
+    setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
+    setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
+    setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
     void renderSourcesStatus();
 
     // General
@@ -7133,7 +7527,9 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
-    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
+    // Mirrors the [network].mode backend default (system since v0.3.175);
+    // only reached if /api/config omits the field.
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "system");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
     const savedAutoSync = document.getElementById("cfgSavedAutoSync");
     if (savedAutoSync instanceof HTMLInputElement) {
@@ -7179,6 +7575,7 @@ function bindSettings() {
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
+    setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -7358,6 +7755,28 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
           min_interval_minutes: getInt("cfgRedditMinInterval", 60),
         },
+        bangumi: {
+          enabled: checked("cfgBangumiEnabled"),
+          username: getVal("cfgBangumiUsername"),
+          // Precedence: an explicit "clear token" checkbox sends access_token:""
+          // (backend clears the stored token + rejection marker). Otherwise send
+          // the token only when the user typed one; an empty field means "leave
+          // the stored token unchanged", so omit the key rather than clobbering
+          // the saved token with "".
+          ...(checked("cfgBangumiClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgBangumiAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgBangumiAccessToken") }
+              : {}),
+          subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+          source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgBangumiDailySearchBudget", 300),
+          daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
+          daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
+          request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -7391,6 +7810,7 @@ function bindSettings() {
           twitter: getInt("cfgPoolShareTwitter", 1),
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
+          bangumi: getInt("cfgPoolShareBangumi", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -7426,6 +7846,17 @@ function bindSettings() {
     };
   }
 
+  // One DOM convention for every "click, wait, read a verdict" strip in this
+  // panel: tone in the dataset, verdict in the text. The LLM/embedding probes
+  // and the per-source 测试连接 buttons share it instead of each keeping a
+  // private copy — two independent copies of one rendering rule is exactly the
+  // drift that left this codebase with two divergent source status maps.
+  function setProbeStatus(statusEl, tone, text) {
+    if (!statusEl) return;
+    statusEl.dataset.tone = tone;
+    statusEl.textContent = text;
+  }
+
   function renderProbeResult(statusEl, result) {
     if (!statusEl) return;
     const ok = Boolean(result?.ok);
@@ -7435,15 +7866,59 @@ function bindSettings() {
       ? ` (${Math.round(Number(result.latency_ms))}ms)`
       : "";
     const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-    statusEl.dataset.tone = ok ? "success" : "error";
-    statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+    setProbeStatus(
+      statusEl,
+      ok ? "success" : "error",
+      `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`,
+    );
   }
 
   function renderProbePending(statusEl, label) {
-    if (!statusEl) return;
-    statusEl.dataset.tone = "pending";
-    statusEl.textContent = `${label} 探测中...`;
+    setProbeStatus(statusEl, "pending", `${label} 探测中...`);
   }
+
+  // Three outcomes, three tones. The third one is the whole point: a dead proxy,
+  // a closed browser, a throttled platform or YouTube (which needs no login at
+  // all) all mean "could not tell", and showing that in red would send a user
+  // off to delete a credential that works. The backend picks the outcome — this
+  // map is a rendering detail, not a second opinion derived from
+  // `auth.verification` (invariant I4).
+  function renderVerifyResult(statusEl, result) {
+    const view = SourceStatus.describeVerifyResult(result);
+    setProbeStatus(statusEl, view.tone, view.text);
+  }
+
+  const sourceVerifyInFlight = new Set();
+
+  async function runSourceVerify(button) {
+    const slug = button?.closest("[data-source-card]")?.dataset?.sourceCard || "";
+    if (!slug || sourceVerifyInFlight.has(slug)) return;
+    const statusEl = button.parentElement?.querySelector(".source-verify-status");
+    sourceVerifyInFlight.add(slug);
+    button.disabled = true;
+    renderProbePending(statusEl, "连接");
+    let cooldown = 0;
+    try {
+      const result = await verifySource(slug);
+      renderVerifyResult(statusEl, result);
+      cooldown = Number(result?.retry_after_seconds) || 0;
+      // Only a verification that actually moved the credential or the verdict
+      // makes the status line above it stale; a refreshed timestamp does not.
+      if (result?.changed) void renderSourcesStatus();
+    } catch (err) {
+      const view = SourceStatus.describeVerifyError(err);
+      setProbeStatus(statusEl, view.tone, view.text);
+    } finally {
+      sourceVerifyInFlight.delete(slug);
+      SourceStatus.startVerifyCooldown(button, cooldown);
+    }
+  }
+
+  document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.(".source-verify-btn");
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+    void runSourceVerify(button);
+  });
 
   async function runLlmConfigProbe(button, statusEl) {
     if (!button) return;
@@ -7602,6 +8077,10 @@ function bindSettings() {
     });
   }
 
+  // The degraded empty state's "去设置修复" button routes through the gear so
+  // the overlay opens with the same banners / degraded save mode as always.
+  document.getElementById("emptyAction")?.addEventListener("click", () => gearBtn.click());
+
   gearBtn.addEventListener("click", async () => {
     overlay.hidden = false;
     toast.hidden = true;
@@ -7660,6 +8139,7 @@ function bindSettings() {
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
+            bangumi: checked("cfgBangumiEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -7669,6 +8149,7 @@ function bindSettings() {
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
+            bangumi: getInt("cfgPoolShareBangumi", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -7679,6 +8160,7 @@ function bindSettings() {
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");
@@ -7773,6 +8255,12 @@ function bindSettings() {
         showToast("未授予该后端地址的访问权限，地址未保存。", "error");
       } else if (err?.message === "invalid_backend_scheme") {
         showToast("后端协议无效。", "error");
+      } else if (BANGUMI_SAVE_ERROR_MESSAGES[err?.details?.error]) {
+        // Config PUT rejects a bad/expired Bangumi token live via /v0/me.
+        showToast(
+          err.details.message || BANGUMI_SAVE_ERROR_MESSAGES[err.details.error],
+          "error",
+        );
       } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }
@@ -7916,7 +8404,7 @@ async function maybeShowEmbeddingBanner() {
   if (!banner) return;
   if (sessionStorage.getItem(EMBEDDING_BANNER_DISMISS_KEY) === "1") return;
   const health = await fetchHealth();
-  if (!shouldShowEmbeddingBanner(health)) {
+  if (!shouldShowEmbeddingBanner(health, state.runtimeStatus)) {
     banner.hidden = true;
     return;
   }

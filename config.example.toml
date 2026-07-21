@@ -2,7 +2,10 @@
 # Copy this file to config.toml and edit as needed.
 # 首次运行如果缺少 config.toml，程序会自动基于本文件生成模板。
 # 使用远程模型（OpenAI / Claude / Gemini / DeepSeek / OpenRouter）时，需要为默认 provider 填写 api_key。
-# 如仅使用本地 Ollama，可将 default_provider 设为 "ollama"。
+# 本地 Ollama 主要用于向量检索（embedding, bge-m3）。作为聊天 provider 属高级用法：
+# 捆绑的 Ollama 只装了 embedding 模型，小体积本地聊天模型达不到内容管线质量线，
+# 因此图形向导 / init / bootstrap 都不再推荐把它当聊天默认。确要如此的高级用户可手动
+# 将 default_provider 设为 "ollama"，并在 [llm.ollama] 配好 chat 模型。
 
 [general]
 # Language for Agent output (zh / en)
@@ -46,8 +49,10 @@ extension_access_keys = []
 extension_token_ttl_hours = 24
 
 [llm]
-# Default LLM provider: "deepseek" | "openai" | "claude" | "gemini" | "ollama" | "openrouter" | "openai_compatible"
+# Default LLM chat provider: "deepseek" | "openai" | "claude" | "gemini" | "openrouter" | "openai_compatible"
 # 这里选择的 provider 决定了运行时会检查哪一组敏感字段。
+# "ollama" 仍可接受（后端注册表 / 设置页保留支持），但仅面向高级用户，且需自备本地 chat 模型；
+# 它默认的角色是 embedding（见 [llm.embedding]），不建议作为聊天默认。
 default_provider = "deepseek"
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
@@ -58,8 +63,9 @@ concurrency = 4
 # openai_compatible. Allowed range: 10..600. Default 300s.
 timeout = 300
 # 第二个备选 provider；默认空 = 不 fallback，不再自动尝试其它 provider。
-# 设为 "ollama" 可让本地 Ollama 兜底 chat，但需在 [llm.ollama] 配好 chat 模型
-# （或本地已 `ollama pull llama3`）——bge-m3 只能做 embedding，不能兜底 chat。
+# 建议填另一个远程 chat provider（如 deepseek / openai）。把它设为 "ollama" 属高级用法：
+# 捆绑的 bge-m3 只能做 embedding，兜底 chat 需在 [llm.ollama] 另配一个本地 chat 模型
+# （或本地已 `ollama pull` 好某个 chat 模型），否则 fallback 到 ollama 会失败。
 fallback_provider = ""
 
 [llm.openai]
@@ -279,12 +285,18 @@ headed = false
 
 # ── 海外网络路由（仅作用于海外客户端）──
 # 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
-# 的 chat + embedding、YouTube(yt-dlp)、GitHub 自动更新、Codex OAuth。
+# 的 chat + embedding、YouTube(yt-dlp)、Bangumi(api.bgm.tv 与封面 CDN
+# lain.bgm.tv 均为海外 Cloudflare,国内网络直连易超时,需走代理)、
+# GitHub 自动更新、Codex OAuth。
 # B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
-# direct = 忽略环境 / 系统代理；system = 明确继承；custom = 使用下方 proxy。
+# system(默认) = 继承环境 / 系统代理；direct = 忽略环境 / 系统代理；
+# custom = 只使用下方 proxy。
+# 默认给 system,是因为上面列的全是海外服务:direct 下国内网络必然超时,
+# 而这是开箱默认值——新用户配好令牌、启用来源,然后撞上一句没头没尾的
+# 网络错误。没有配代理时 system 与直连等价,海外用户无影响。
 # 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
 [network]
-mode = "direct"
+mode = "system"
 proxy = ""
 
 # ── 通用 Web / 自定义网页源的浏览器配置 ──
@@ -402,6 +414,28 @@ daily_related_budget = 300              # 相关扩展 discovery 每日条目上
 request_interval_seconds = 3            # 插件任务轮询间隔 / 命令 fallback 超时估算
 min_interval_minutes = 60               # RedditDiscoveryProducer 两次执行最小间隔
 
+# ── Bangumi 官方公开 API（只读）──
+# 无需 Cookie 或 OAuth。username 留空时只参与后续内容发现；填写后，首次初始化可读取
+# 该账号的公开收藏。latest 是兼容配置名，实际为按日期浏览，可能包含未播出的未来条目。
+[sources.bangumi]
+enabled = false
+username = ""
+# Optional personal access token. Generate one (valid ~1 year) at
+# https://next.bgm.tv/demo/access-token. When set, init/discovery identify your
+# account via /v0/me and read your OWN collections — including PRIVATE ones —
+# with a Bearer header; the username above is auto-resolved. Leave empty to keep
+# the anonymous public-username path (only reads public collections). Treat this
+# token like a password; it is written to config.toml (which is gitignored).
+access_token = ""
+subject_types = ["anime", "book", "game"]
+source_modes = ["search", "ranked", "latest"]
+daily_search_budget = 300
+daily_ranked_budget = 100
+daily_latest_budget = 100
+request_interval_seconds = 1
+min_interval_minutes = 60
+bootstrap_limit = 300
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -475,6 +509,7 @@ youtube = 1
 twitter = 1
 zhihu = 1
 reddit = 1
+bangumi = 1
 
 # ── 统一关键词规划器 / Discover 背压 (P1) ──
 # 把"每平台各自定时调 LLM 生成搜索词"换成缺口拉动的双缓冲背压模型：一个关键词

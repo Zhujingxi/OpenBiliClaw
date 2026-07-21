@@ -287,8 +287,14 @@ export async function refreshRecommendations() {
   return requestJson("/recommendations/refresh", { method: "POST" });
 }
 
-export async function reshuffleRecommendations() {
-  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+export async function reshuffleRecommendations(excludedBvids = []) {
+  const payload = await requestJson("/recommendations/reshuffle", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ excluded_bvids: excludedBvids }),
+  });
   return {
     ...payload,
     items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
@@ -325,12 +331,44 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
-export async function startInit({ force = false, sources } = {}) {
+// The counterpart to fetchSourcesStatus: that one is polled and never goes out,
+// this one is an explicit user action and is the only place a platform gets
+// probed. Generous timeout because it really can reach the network — a B站 nav
+// probe or a 5s wait for this very extension to answer a heartbeat request.
+export async function verifySource(slug) {
+  return requestJson(`/sources/${encodeURIComponent(slug)}/verify`, {
+    method: "POST",
+    timeoutMs: 30_000,
+  });
+}
+
+export async function startInit({
+  force = false,
+  sources,
+  bangumiUsername = null,
+  bangumiToken = null,
+} = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
     payload.sources = sources;
+  }
+  // Send explicit Bangumi options only when the caller has one to send.
+  // `null`/`undefined` means "leave the configured value untouched" (the backend
+  // treats an omitted field as keep-existing); an empty string is a deliberate
+  // clear the user asked for. A token, when present, auto-resolves the account.
+  if (Array.isArray(sources) && sources.includes("bangumi")) {
+    const bangumi = {};
+    if (bangumiUsername != null) {
+      bangumi.username = String(bangumiUsername).trim();
+    }
+    if (bangumiToken != null) {
+      bangumi.access_token = String(bangumiToken).trim();
+    }
+    if (Object.keys(bangumi).length > 0) {
+      payload.source_options = { bangumi };
+    }
   }
   return requestJson("/init", {
     method: "POST",
@@ -450,6 +488,14 @@ export async function submitFeedback(payload) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function sendBehaviorEvents(events) {
+  return requestJson("/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events }),
   });
 }
 
@@ -604,7 +650,7 @@ export async function respondToDelight(bvid, responseType, title = "", message =
 }
 
 export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
+  const config = await requestJson("/config", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }

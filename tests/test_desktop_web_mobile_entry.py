@@ -52,6 +52,25 @@ def test_app_js_builds_url_from_backend_lan_ip() -> None:
     assert 'safeBind("#mobileQrCopyBtn"' in _APP_JS
 
 
+def test_mobile_qr_drawer_requeries_lan_ip_on_every_open() -> None:
+    """The LAN IP moves with the network; a sticky cache must not win over it.
+
+    A page-load prefetch value survives Wi-Fi switches for the whole session,
+    so the drawer has to ask the backend again each time it opens and treat the
+    cached address only as a fallback when that request fails.
+    """
+    body = _APP_JS.split("async function openMobileQrDrawer", 1)[1].split(
+        'safeBind("#profileBtn"', 1
+    )[0]
+    assert "_cachedLanIp || String(" not in body, (
+        "the cache must not short-circuit the fetch; it is a fallback, not the source"
+    )
+    fetch_at = body.index("requestJson(ENDPOINTS.qrInfo)")
+    assert body.index("_cachedLanIp") > fetch_at, (
+        "the cached address may only be consulted after the fresh request resolves"
+    )
+
+
 def test_first_visit_discovery_affordance() -> None:
     """New visitors must get an unmissable pointer at the mobile entry."""
     for marker in (

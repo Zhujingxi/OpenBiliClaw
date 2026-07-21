@@ -305,6 +305,7 @@ body {
 .card-source[data-source="twitter"] { background: rgba(15, 23, 42, 0.08); color: #0f172a; }
 .card-source[data-source="zhihu"] { background: rgba(15, 136, 235, 0.1); color: #0f88eb; }
 .card-source[data-source="reddit"] { background: rgba(255, 69, 0, 0.1); color: #d93f00; }
+.card-source[data-source="bangumi"] { background: rgba(105, 80, 161, 0.12); color: #6950a1; }
 
 .card-expression {
   margin-top: 8px;
@@ -1996,6 +1997,15 @@ body {
 .card-action-btn:last-child { border-right: none; }
 .card-action-btn:active { background: var(--brand-soft); color: var(--brand); }
 .card-action-btn:disabled { opacity: 0.4; cursor: default; }
+/* saved-card feedback: light ghost icons; feedback grouped left, save toggle pushed right */
+.saved-card-feedback { display: flex; align-items: center; gap: 2px; border-top: none; margin-top: 6px; padding: 0; }
+.saved-card-feedback .card-action-btn { flex: 0 0 auto; border-right: none; min-height: 36px; min-width: 36px; padding: 7px; border-radius: 9px; color: var(--text-muted); }
+.saved-card-feedback .card-action-btn:hover { background: var(--brand-soft); color: var(--brand); }
+.saved-card-feedback .card-action-btn:active { transform: scale(0.94); }
+.saved-card-feedback .card-action-btn[aria-pressed="true"] { color: var(--brand, #c8553d); }
+.saved-card-feedback .cross-toggle { margin-left: auto; }
+.saved-card-feedback .cross-toggle.favorite-btn[aria-pressed="true"] { color: #e8a33d; }
+.saved-card-feedback .cross-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
 
 /* ── Feedback Bottom Sheet ────────────────────────────────── */
 .feedback-sheet {

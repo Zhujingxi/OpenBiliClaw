@@ -127,6 +127,13 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
 
         def do_GET(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path.startswith("/shared/"):
+                # The desktop page and the setup wizard both load the shared
+                # source-status module from the backend's /shared mount. Without
+                # this route it 404s, app.js dies on the missing global, and the
+                # failure surfaces as an unrelated test timing out.
+                rel = path.removeprefix("/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / rel)
             if path in {"/web", "/web/", "/web/index.html"}:
                 return self._serve_file(
                     ROOT / "src/openbiliclaw/web/desktop/index.html",
@@ -320,9 +327,10 @@ def chromium_page() -> Page:
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         page.add_init_script(
             """
-            // Keep the test fast while leaving enough time for Playwright to
-            // wait out the card hover/layout transition before clicking undo.
-            window.__OBC_TEST_UNDO_WINDOW_MS = 1200;
+            // Production keeps undo available for 10 seconds. Use a shorter but
+            // still human-sized window so Chromium can auto-scroll a tall card
+            // under full-suite load without racing the delayed commit.
+            window.__OBC_TEST_UNDO_WINDOW_MS = 5000;
             window.WebSocket = class FakeWebSocket {
               static OPEN = 1;
               constructor() {
@@ -606,7 +614,7 @@ def test_recommendation_feedback_is_immediate_stable_and_undoable(
 
     stub.feedback_delay_seconds = 0.8
     first.locator('[data-action="dislike"]').click()
-    assert stub.feedback_received.wait(timeout=2)
+    assert stub.feedback_received.wait(timeout=8)
     expect(first.locator(".status-line")).to_contain_text("正在保存")
     second.locator('[data-action="like"]').click()
     expect(second.locator(".status-line")).to_contain_text("撤销")
@@ -627,7 +635,7 @@ def test_recommendation_feedback_failure_rolls_back_current_card(
     like = first.locator('[data-action="like"]')
 
     like.click()
-    assert stub.feedback_received.wait(timeout=2)
+    assert stub.feedback_received.wait(timeout=8)
 
     expect(like).to_be_enabled(timeout=3000)
     expect(like).not_to_have_class("is-active")
@@ -792,7 +800,9 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     avoidance = profile.locator('[data-spec-domain="标题党"]')
     avoidance.locator('[data-spec-response="confirm"]').click()
     expect(avoidance).to_contain_text("撤销")
-    assert stub.probe_received.wait(timeout=2)
+    # The browser fixture gives probe actions a 5s undo window. Allow the
+    # delayed commit to cross that boundary even on a busy full-suite run.
+    assert stub.probe_received.wait(timeout=8)
     assert stub.probe_posts == [
         {
             "path": "/api/avoidance-probes/respond",
@@ -807,7 +817,7 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     stub.probe_received.clear()
     interest_row = profile.locator('[data-spec-domain="系统设计"]')
     interest_row.locator('[data-spec-response="reject"]').click()
-    assert stub.probe_received.wait(timeout=2)
+    assert stub.probe_received.wait(timeout=8)
     expect(interest_row.locator('[data-spec-response="reject"]')).to_be_visible()
     expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("已恢复")
 
@@ -824,5 +834,5 @@ def test_committed_probe_toast_names_its_domain(
     expect(interest).to_have_count(1)
     interest.locator('[data-probe="confirm"]').click()
 
-    assert stub.probe_received.wait(timeout=3)
+    assert stub.probe_received.wait(timeout=8)
     expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("系统设计")

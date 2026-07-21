@@ -32,6 +32,7 @@ from openbiliclaw.soul.speculator import (
     build_probe_axis,
     choose_next_probe_candidate,
 )
+from openbiliclaw.sources.platforms import source_family as _source_family
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -98,6 +99,11 @@ _PLATFORM_SOURCE_ORDER = (
     "reddit",
 )
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
+# Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
+# per drain tick. Deliberately small so pool composition converges toward the
+# configured shares gently (≤3 rows/minute) instead of a disruptive bulk purge;
+# admission fills the freed slots with under-share supply the same tick.
+_POOL_REBALANCE_MAX_PER_TICK = 3
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
 
@@ -341,6 +347,7 @@ class ContinuousRefreshController:
     x_producer: Any | None = None
     zhihu_producer: Any | None = None
     reddit_producer: Any | None = None
+    bangumi_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -432,6 +439,14 @@ class ContinuousRefreshController:
     _last_empty_plan_diag_at: datetime | None = field(default=None, init=False)
     _last_empty_plan_fingerprint: tuple[int] | None = field(default=None, init=False)
     _suppressed_empty_plan_count: int = field(default=0, init=False)
+    # Pool-share fairness (spec 2026-07-20, Phase 4): last per-family
+    # (available, target, deficit) snapshot. The per-source deficit summary is
+    # only logged when this changes, so a steady state stays quiet but any
+    # shift (e.g. an under-share source recovering) is visible in one line.
+    _last_source_deficit_snapshot: dict[str, tuple[int, int, int]] = field(
+        default_factory=dict,
+        init=False,
+    )
     _warned_pool_count_fallbacks: set[str] = field(default_factory=set, init=False)
     # Last pool_available count emitted via the runtime event stream so
     # popup-side ``mergeRuntimeStatusEvent`` only re-renders when the
@@ -1417,6 +1432,7 @@ class ContinuousRefreshController:
             ├─ _loop_x_producer()        60s   X (Twitter) discovery when under quota
             ├─ _loop_zhihu_producer()    60s   Zhihu discovery when under quota
             ├─ _loop_reddit_producer()   60s   Reddit command-backed discovery when under quota
+            ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
@@ -1459,6 +1475,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_x_producer()),
             asyncio.create_task(self._loop_zhihu_producer()),
             asyncio.create_task(self._loop_reddit_producer()),
+            asyncio.create_task(self._loop_bangumi_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -1745,6 +1762,16 @@ class ContinuousRefreshController:
                 await self._tick_reddit_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_bangumi_producer(self) -> None:
+        """Bangumi production — official anonymous API discovery when under quota."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_bangumi_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_keyword_planner(self) -> None:
         """P1.6: deficit-pulled merged keyword generation (flag-gated).
 
@@ -2018,6 +2045,23 @@ class ContinuousRefreshController:
         else:
             await produce_fn()
 
+    async def _tick_bangumi_producer(self) -> None:
+        """Invoke Bangumi discovery when its source-family quota has a deficit."""
+        producer = self.bangumi_producer
+        if producer is None or not self._is_initialized():
+            return
+        deficit = self._source_deficit("bangumi")
+        if deficit <= 0:
+            return
+        produce_fn = getattr(producer, "produce_if_due", None)
+        if not callable(produce_fn):
+            return
+        limit = max(1, min(deficit, self.discovery_limit))
+        if _call_accepts_limit(produce_fn):
+            await produce_fn(limit=limit)
+        else:
+            await produce_fn()
+
     async def _tick_soul_pipeline(self) -> None:
         """Invoke ProfileUpdatePipeline.tick() if the soul engine exposes one.
 
@@ -2213,6 +2257,13 @@ class ContinuousRefreshController:
             logger.debug("candidate eval drain skipped: reason=locked caller=%s", reason)
             return {"evaluated": 0, "cached": 0, "rejected": 0}
         async with self._discovery_drain_lock:
+            # Pool-share fairness (spec 2026-07-20, Phase 3/4): before measuring
+            # the pool, gently evict a few over-share rows if an under-share
+            # source has supply waiting, and log the deficit summary. This frees
+            # slots the same tick so the admission below (and the pool_at_cap
+            # gate) reflect the freed room. Shared with the coordinator assembly
+            # via the same entry point (D7).
+            self.run_pool_share_maintenance()
             try:
                 pool_available = self.database.count_pool_candidates(
                     xhs_self_nickname=self._xhs_self_nickname()
@@ -3032,6 +3083,157 @@ class ContinuousRefreshController:
     def _source_deficit(self, source_family: str) -> int:
         return self._source_requested_count(source_family)
 
+    def _waiting_supply_by_family(self) -> dict[str, int]:
+        """Return admission-waiting candidate counts per family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): counts every
+        non-terminal stage (``pending_eval`` + ``evaluating`` + ``evaluated``),
+        not just ``evaluated`` — an orphan occupier pins the pool full, so an
+        under-share source never reaches ``evaluated`` and eviction would never
+        fire if we only counted the last stage. Falls back to the older
+        evaluated-only counter if the wider one is unavailable.
+        """
+        count_fn = getattr(
+            self.database, "count_admission_waiting_discovery_candidates_by_source", None
+        )
+        if not callable(count_fn):
+            count_fn = getattr(
+                self.database, "count_evaluated_discovery_candidates_by_source", None
+            )
+        if not callable(count_fn):
+            return {}
+        try:
+            counts = count_fn()
+        except Exception:
+            logger.debug("waiting-supply-by-source snapshot failed", exc_info=True)
+            return {}
+        return {str(family): int(count) for family, count in dict(counts).items()}
+
+    def _rebalance_pool_shares(self) -> int:
+        """Gently free over-share slots for under-share sources with supply waiting.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3). Runs inside the drain
+        tick before admission. Only acts when the visible pool is at/over
+        target AND some under-share source has ``evaluated`` supply waiting to
+        take a freed slot. Evicts at most ``_POOL_REBALANCE_MAX_PER_TICK`` (3)
+        rows from the single most over-share source — the lowest-scored oldest
+        rows — so the pool converges toward the configured shares at a calm,
+        quality-preserving rate. Never touches under-share or at-share sources.
+        """
+        demote_fn = getattr(self.database, "demote_lowest_ranked_pool_rows", None)
+        if not callable(demote_fn):
+            return 0
+        try:
+            available_total = self.database.count_pool_candidates(
+                xhs_self_nickname=self._xhs_self_nickname()
+            )
+        except TypeError:
+            available_total = self.database.count_pool_candidates()
+        except Exception:
+            logger.debug("pool rebalance pool-count read failed", exc_info=True)
+            return 0
+        if int(available_total) < self.pool_target_count:
+            return 0
+
+        target_counts = self._source_target_counts()
+        available_by_source = self._count_pool_available_candidates_by_source()
+        waiting_by_source = self._waiting_supply_by_family()
+
+        # Budget = how many freed slots an under-share source could actually
+        # fill soon (deficit clamped by its admission-waiting supply — any of
+        # pending_eval / evaluating / evaluated, see _waiting_supply_by_family).
+        fillable = 0
+        for family, target in target_counts.items():
+            deficit = int(target) - self._platform_source_count(available_by_source, family)
+            if deficit > 0:
+                fillable += min(deficit, int(waiting_by_source.get(family, 0)))
+        if fillable <= 0:
+            return 0
+
+        # Pick the single most over-share source. Candidate families are the
+        # configured targets PLUS any family actually holding visible slots but
+        # absent from target_counts — a source the user disabled leaves stranded
+        # rows that must count as fully over-share (target 0), else those rows
+        # permanently squat the pool and an under-share source's deficit can
+        # never be freed (spec D8). Available keys are normalized to families
+        # first so a disabled bilibili surfacing under its four strategy names
+        # merges to one "bilibili" overage (note: _pool_source_family口径).
+        candidate_families: set[str] = set(target_counts)
+        for source_key in available_by_source:
+            candidate_families.add(_source_family(source_key, source_key))
+        over_share: list[tuple[int, str]] = []
+        for family in candidate_families:
+            overage = self._platform_source_count(available_by_source, family) - int(
+                target_counts.get(family, 0)
+            )
+            if overage > 0:
+                over_share.append((overage, family))
+        if not over_share:
+            return 0
+        over_share.sort(reverse=True)
+        overage, family = over_share[0]
+
+        demote_count = min(_POOL_REBALANCE_MAX_PER_TICK, overage, fillable)
+        if demote_count <= 0:
+            return 0
+        try:
+            demoted = int(demote_fn(source_family=family, limit=demote_count) or 0)
+        except Exception:
+            logger.debug("pool rebalance demotion failed", exc_info=True)
+            return 0
+        if demoted:
+            logger.info(
+                "pool rebalance: demoted %d over-share '%s' row(s) (overage=%d) to free "
+                "slots for %d under-share row(s) waiting admission",
+                demoted,
+                family,
+                overage,
+                fillable,
+            )
+        return demoted
+
+    def run_pool_share_maintenance(self) -> None:
+        """Run share rebalance + deficit summary once per candidate-eval tick.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3/4, wired per D7). This is
+        the single entry point invoked by BOTH candidate-eval assemblies —
+        legacy ``_loop_candidate_eval`` → ``_drain_discovery_candidates_and_precompute``
+        and the production ``CandidateEvalCoordinator`` (via its pre-admit
+        hook). The two are mutually exclusive at ``run_forever`` wiring
+        (``coordinator.run_forever()`` XOR ``_loop_candidate_eval()``), so this
+        never double-runs in a single tick. Errors are swallowed so pool
+        maintenance can never break the eval loop.
+        """
+        with suppress(Exception):
+            self._rebalance_pool_shares()
+        with suppress(Exception):
+            self._log_source_deficit_summary()
+
+    def _log_source_deficit_summary(self) -> None:
+        """Log a one-line per-source available/target/deficit summary on change.
+
+        Pool-share fairness (spec 2026-07-20, Phase 4). This排查 cost us three
+        layers of silent skips; a change-throttled INFO line makes the share
+        picture legible without spamming the log every steady tick.
+        """
+        target_counts = self._source_target_counts()
+        if not target_counts:
+            return
+        available_by_source = self._count_pool_available_candidates_by_source()
+        snapshot: dict[str, tuple[int, int, int]] = {}
+        for family, target in target_counts.items():
+            available = self._platform_source_count(available_by_source, family)
+            deficit = self._source_deficit(family)
+            snapshot[family] = (available, int(target), int(deficit))
+        if snapshot == self._last_source_deficit_snapshot:
+            return
+        self._last_source_deficit_snapshot = snapshot
+        summary = " | ".join(
+            f"{family} {available}/{target} (deficit {deficit})"
+            for family, (available, target, deficit) in sorted(snapshot.items())
+        )
+        logger.info("pool source shares: %s", summary)
+
     # ── keyword planner deficit / catalyst口径 (P1.6) ─────────────────────
     # The unified keyword planner reuses these so its "real deficit" shares the
     # exact available-pool deficit口径 that drives pool replenishment, instead of
@@ -3149,12 +3351,19 @@ class ContinuousRefreshController:
             )
         except TypeError:
             current_global_available = self.database.count_pool_candidates()
+        # Keep the durable inventory observation, but do NOT clamp per-source
+        # deficit by the global headroom. Pool-share fairness spec (2026-07-20,
+        # invariant 2): once the global pool is full, an over-supplied source
+        # (e.g. reddit 169/25) would zero out every under-share source's
+        # deficit via ``min(available_deficit, global_available_deficit)``,
+        # starving its producer forever. Own-share deficit is now bounded only
+        # by the per-source raw ceiling; admission stays globally capped so the
+        # visible pool never overshoots ``pool_target_count``.
         self._update_llm_inventory_state(current_global_available)
-        global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)
         raw_headroom = max(0, raw_target - current_raw)
-        requested_by_available = max(0, min(available_deficit, global_available_deficit))
+        requested_by_available = available_deficit
         if requested_by_available <= 0:
             return 0
         if raw_headroom > 0:
@@ -3233,6 +3442,8 @@ class ContinuousRefreshController:
                 stranded.append("zhihu")
             elif source == "reddit" and self.reddit_producer is None:
                 stranded.append("reddit")
+            elif source == "bangumi" and self.bangumi_producer is None:
+                stranded.append("bangumi")
             elif source not in {
                 "bilibili",
                 "xiaohongshu",
@@ -3241,6 +3452,7 @@ class ContinuousRefreshController:
                 "twitter",
                 "zhihu",
                 "reddit",
+                "bangumi",
             }:
                 # Unknown source family with an explicit share.
                 stranded.append(source)

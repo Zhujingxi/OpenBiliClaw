@@ -39,6 +39,8 @@
         "*://*.redd.it/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
+        "*://*.bgm.tv/*",
+        "*://*.bangumi.tv/*",
         "http://127.0.0.1/*",
         "http://localhost/*"
     ],
@@ -148,6 +150,27 @@
                 "main/x-graphql-tap.js"
             ],
             "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "content/bangumi.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "main/bgm-identity-bridge.js"
+            ],
+            "run_at": "document_idle",
             "world": "MAIN"
         }
     ],

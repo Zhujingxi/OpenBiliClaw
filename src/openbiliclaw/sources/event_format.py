@@ -305,7 +305,7 @@ _NEGATIVE_REACTIONS = frozenset({"thumbs_down"})
 
 # Events that record passive browse — useful for context but never a
 # direct signal of like / dislike.
-_PASSIVE_BROWSE_EVENT_TYPES = frozenset({"snapshot", "scroll", "hover", "search"})
+_PASSIVE_BROWSE_EVENT_TYPES = frozenset({"snapshot", "scroll", "hover", "search", "reshuffle"})
 
 
 def classify_event_satisfaction(event: dict[str, Any]) -> tuple[SatisfactionCategory, str]:
@@ -438,6 +438,7 @@ SOURCE_YOUTUBE = "youtube"
 SOURCE_TWITTER = "twitter"
 SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
+SOURCE_BANGUMI = "bangumi"
 
 # Human-readable platform labels used to render the context string.
 # Keys must match the source_platform values stored in event metadata.
@@ -450,6 +451,7 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_TWITTER: "X",
     SOURCE_ZHIHU: "知乎",
     SOURCE_REDDIT: "Reddit",
+    SOURCE_BANGUMI: "Bangumi",
 }
 
 # Action verbs per event_type. Designed so the rendered sentence reads
@@ -467,6 +469,7 @@ _EVENT_TYPE_LABELS: dict[str, str] = {
     "feedback": "反馈过",
     "comment": "评论过",
     "share": "分享了",
+    "reshuffle": "换了一批",
 }
 
 _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
@@ -486,6 +489,11 @@ _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
     "hover": 0.1,
     "scroll": 0.1,
     "snapshot": 0.1,
+    # One reshuffle describes a batch-level navigation choice, not ten
+    # item-level dislikes. Keep it at the same weak, satisfaction-neutral
+    # evidence strength as other passive browsing actions (2026-07-21 UX
+    # correction: removing the old bulk-dismiss toggle).
+    "reshuffle": 0.1,
     "dislike": 1.0,
 }
 

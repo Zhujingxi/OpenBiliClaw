@@ -171,6 +171,12 @@ LLM_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+# Local Ollama is intentionally NOT offered here as a chat provider
+# (v0.3.176+): the bundled Ollama is embedding-only (bge-m3), and small
+# local chat models don't clear the content-pipeline quality bar. Ollama
+# chat stays supported in the backend registry / desktop settings page,
+# and ``resolve_human_llm_choice`` still parses ``"ollama"`` for
+# non-interactive / backward-compat installs — it's just off the menu.
 HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
     ("deepseek", "DeepSeek 官方 ★默认推荐", "deepseek-v4-flash"),
     ("openai_compatible", "★ 中转站 / OpenAI 协议兼容服务", "relay preset"),
@@ -178,7 +184,6 @@ HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
     ("gemini", "Gemini 官方", "gemini-2.5-flash"),
     ("claude", "Claude 官方", "claude-sonnet-4-6"),
     ("openrouter", "OpenRouter 聚合", "openai/gpt-5-nano"),
-    ("ollama", "本地 Ollama", "qwen2.5:7b"),
 )
 
 HUMAN_OPENAI_COMPAT_PRESETS: tuple[str, ...] = (
@@ -308,7 +313,10 @@ def resolve_human_llm_choice(raw: str) -> str | None:
         "compat": "openai_compatible",
     }
     menu_providers = {key for key, _label, _model in HUMAN_LLM_MENU}
-    return aliases.get(value, value if value in menu_providers else None)
+    # ``ollama`` is off the interactive menu (embedding-only bundle) but
+    # still accepted by name for non-interactive / backward-compat installs.
+    accepted = menu_providers | {"ollama"}
+    return aliases.get(value, value if value in accepted else None)
 
 
 def _resolve_human_openai_compatible_preset(raw: str) -> str | None:
@@ -360,9 +368,7 @@ def _prompt_secret(
         try:
             value = str(secret_input_func(f"{prompt}{suffix}: ")).strip()
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
         if value:
             return value
         if existing:
@@ -381,9 +387,7 @@ def read_secret_no_echo(prompt: str) -> str:
         try:
             return getpass.getpass(prompt)
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
 
 
 def _collect_human_openai_compatible_llm(
@@ -447,9 +451,7 @@ def collect_human_llm_config(
 
     provider: str | None = None
     while provider is None:
-        provider = resolve_human_llm_choice(
-            str(input_func("LLM provider [1 DeepSeek]: "))
-        )
+        provider = resolve_human_llm_choice(str(input_func("LLM provider [1 DeepSeek]: ")))
         if provider is None:
             print("Unknown provider choice. Please choose a number from the menu.")
 
@@ -771,11 +773,7 @@ def apply_confirmation_answers_to_args(
         args.bilibili_favorite_limit = answers.bilibili_favorite_limit
     if args.bilibili_follow_limit is None:
         args.bilibili_follow_limit = answers.bilibili_follow_limit
-    if (
-        answers.cookie_mode == "manual"
-        and answers.bilibili_cookie
-        and not args.bilibili_cookie
-    ):
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
         args.bilibili_cookie = answers.bilibili_cookie
     if answers.cookie_mode == "extension":
         args.wait_for_extension_cookie = True
@@ -1552,7 +1550,9 @@ def _normalize_service_entry(raw: Any) -> dict[str, Any]:
     return entry
 
 
-def _service_check_command_failed_result(command: list[str], result: CommandResult) -> dict[str, Any]:
+def _service_check_command_failed_result(
+    command: list[str], result: CommandResult
+) -> dict[str, Any]:
     error = (result.stderr or result.stdout or "service check command failed").strip()
     services = {
         "llm": {
@@ -2025,9 +2025,9 @@ def should_auto_wire_embedding(
     """
     if mode == "docker":
         return False
-    explicitly_disabled = embedding_provider_arg is not None and not (
-        embedding_provider_arg or ""
-    ).strip()
+    explicitly_disabled = (
+        embedding_provider_arg is not None and not (embedding_provider_arg or "").strip()
+    )
     if explicitly_disabled:
         return False
     return not effective_provider.strip()

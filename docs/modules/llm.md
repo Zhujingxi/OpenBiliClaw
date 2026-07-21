@@ -58,7 +58,7 @@
 | Gemini reasoning-first 模型适配 | ✅ | Gemini thinking 不再由 `json_mode` 隐式决定，而由统一 effort 驱动：3.x 使用 `thinkingLevel`（已知仅支持 LOW/HIGH 或 MINIMAL/HIGH 的型号会映射到最近安全档）；2.5 Pro 使用合法正 budget，空渠道请求降到官方最小 128；2.5 Flash / Flash-Lite 的空渠道请求用 `thinking_budget=0` 真正关闭。这样既不向 reasoning-first 型号发送非法 zero budget，也不会把所有结构化深度任务一刀切关闭 reasoning |
 | v0.3.71 Prompt-cache 与 400 诊断 | ✅ | `build_awareness_prompt` / `build_batch_content_evaluation_prompt` / `build_soul_profile_prompt` 的 user prompt 按稳定画像 / tone / preference 在前、本次批次或历史在后排序，并使用 `sort_keys=True` 的确定性 JSON；`OpenAIProvider._map_error()` 会把 OpenAI-compatible HTTP 400 响应体摘要写入 WARNING 和错误文本，便于定位 MiMo 等兼容服务的请求 schema 问题 |
 | v0.3.71 Awareness 缓存形态回归锁 | ✅ | `build_awareness_prompt` 的 system 内容固定为模块级常量 `_AWARENESS_SYSTEM_PROMPT`，user 块顺序锁定为 `<soul_profile>` → `<preference_summary>` → `<recent_events>`，并通过 `tests/test_llm_prompts.py` 的 byte-equal / 末尾块 / 不同字典 key 序仍产相同字节三组回归测试保证未来改动不会再把变量数据放进 system、不把 recent_events 之后塞入稳定块、或丢掉 `sort_keys=True` |
-| v0.3.74 结构化输出共享解析 | ✅ | 新增 `llm/json_utils.py`，统一提供 `extract_llm_json_list()` / `extract_llm_json_object()` / `parse_llm_json_tolerant()`。调用方可传 item/object predicate 和 wrapper aliases，兼容 root array/object、`results/items/data/output/scores/evaluations` 等 wrapper、singleton dict、Markdown fenced JSON、JSONL、多 root echo 后最终结果，以及 MiMo 形态的 malformed `{ [ ... ] }` 数组包裹 |
+| v0.3.74 结构化输出共享解析 | ✅ | 新增 `llm/json_utils.py`，统一提供 `extract_llm_json_list()` / `extract_llm_json_object()` / `parse_llm_json_tolerant()`。调用方可传 item/object predicate 和 wrapper aliases，兼容 root array/object、`results/items/data/output/scores/evaluations` 等 wrapper、单行或 pretty-printed 多行 singleton dict、Markdown fenced JSON、JSONL、多 root echo 后最终结果，以及 MiMo 形态的 malformed `{ [ ... ] }` 数组包裹；`allow_singleton=True` 会显式把 root object 包成单元素列表，不再偶然依赖只支持单行的 JSONL fallback |
 | v0.3.74 Ollama embedding 空凭据静默本地默认 | ✅ | `embedding.provider="ollama"` 且 embedding `api_key/base_url` 为空时直接构造本地 Ollama provider，默认 `http://localhost:11434/v1`；如果 chat-side `[llm.ollama].base_url` 非空，会复用并规范化到 `/v1`，不再触发 `_emit_embedding_compat_warning()`。远端 embedding provider 留空凭据时仍保留一次性向后兼容 WARNING |
 | v0.3.77 LM Studio JSON mode 兼容 | ✅ | `OpenAIProvider` 的 `json_mode=True` 对普通 OpenAI-compatible 后端默认使用 `json_object`，遇到 `response_format.type` 只允许 `json_schema/text` 时用通用 `json_schema` 重试；对本地 LM Studio（默认 `localhost/127.0.0.1:1234` 或 URL 含 `lmstudio` / `lm-studio`）首次请求即不发送 `response_format`，依赖 prompt 约束 JSON，避免 compat 层在 `json_object` / `json_schema` 下丢失 `message.content` 后再浪费一整次 LLM 调用 |
 | v0.3.78 Codex OAuth 实验认证 | ✅ | `[llm.openai].auth_mode="codex_oauth"` 时，OpenAI provider 复用 Codex CLI 的 ChatGPT OAuth 凭据；`codex_auth.py` 负责导入 `~/.codex/auth.json`、安全落盘、临期刷新，`OpenAIProvider` 在 401 时强制刷新并重试一次。该路径为非官方实验集成，只允许 OpenAI 官方 `base_url` |
@@ -247,7 +247,7 @@ profile_delta = extract_llm_json_object(
 )
 ```
 
-这些 helper 是 MiMo / OpenAI-compatible / reasoning 模型结构化输出的统一容错边界。调用方仍应用 predicate 限定自己真正接受的 shape，避免 schema echo 或 prompt 示例被误当作结果。
+这些 helper 是 MiMo / OpenAI-compatible / reasoning 模型结构化输出的统一容错边界。`allow_singleton=True` 接受格式化为多行的合法 root object，并把它视为一个列表成员；调用方仍应用 predicate 限定自己真正接受的 shape，避免 schema echo 或 prompt 示例被误当作结果。
 
 ### Merged keyword prompt
 
@@ -348,6 +348,16 @@ LLMServiceError           # Service 层基类
 
 - `describe_llm_failure(exc) -> str | None`：识别 moderation、鉴权、额度/限流、超时、provider 全部不可用、provider/service 空响应。
 - `safe_llm_failure_message(exc) -> str`：公共边界使用；未知异常退化为固定安全提示，不回传上游异常文本。
+
+### `json_utils.validated_text_field`
+
+```python
+validated_text_field(value: object, *, field: str, content_key: str) -> str | None
+```
+
+校验结构化响应里的单个文本字段：返回去空白后的字符串，遇到非字符串返回 `None` 并记 WARNING。
+
+调用方**必须**把 `None` 当作"该字段不可用"处理(重试或丢弃),不能退回 `str()`。模型偶尔会把整批结果嵌进标量字段(`{"reason": [{...}, {...}]}`),`str()` 会把它转成 Python repr —— 非空、能过校验、最终作为推荐文案展示给用户。
 
 ## 配置项
 

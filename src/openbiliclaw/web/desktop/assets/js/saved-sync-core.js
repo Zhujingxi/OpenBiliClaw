@@ -45,6 +45,7 @@
       if (host === "x.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com")) return "twitter";
       if (host.endsWith(".zhihu.com")) return "zhihu";
       if (host.endsWith(".bilibili.com") || host === "b23.tv") return "bilibili";
+      if (["bgm.tv", "bangumi.tv"].some((domain) => host === domain || host.endsWith(`.${domain}`))) return "bangumi";
       return "web";
     } catch {
       return "bilibili";

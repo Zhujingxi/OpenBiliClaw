@@ -11,6 +11,7 @@
       refresh: "/recommendations/refresh",
       reshuffle: "/recommendations/reshuffle",
       append: "/recommendations/append",
+      platformAvailability: "/recommendations/platform-availability",
       runtimeStatus: "/runtime-status",
       activityFeed: "/activity-feed",
       notificationPending: "/notifications/pending",
@@ -19,19 +20,20 @@
       delightRespond: "/delight/respond",
       profile: "/profile-summary",
       feedback: "/feedback",
+      events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
-      sourceCredentials: "/sources/credentials?reveal_keys=true",
+      sourceCredentials: "/sources/credentials",
       configProbe: "/config/probe-service",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
       embeddingRepair: "/embedding/repair",
-      config: "/config?reveal_keys=true",
+      config: "/config",
       watchLater: "/watch-later",
       favorites: "/favorites",
       profileEdit: "/profile/edit",
@@ -49,6 +51,10 @@
       initReason: "",
       initBusy: false,
       initSelectedSources: ["bilibili"],
+      initBangumiUsername: "",
+      initBangumiUsernameTouched: false,
+      initBangumiUsernamePrefilled: false,
+      initBangumiToken: "",
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -58,11 +64,15 @@
       delights: [],
       delightIndex: 0,
       delight: null,
+      degraded: false,
       config: null,
       sourceStatus: null,
       sourceCredentials: null,
       runtimeStatus: null,
       runtimeSocket: null,
+      // 最近一次「成功」读到的平台可推库存快照 {total_available, by_platform}。
+      // null = 尚未成功读取过（未知态）；读取失败绝不把它改写成 0。
+      platformAvailability: null,
       videos: [],
       messages: [],
       messageListSnapshot: null,
@@ -89,25 +99,41 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit" };
+    // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
+    const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
+    const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
-    ];
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    //
+    // WHICH sources exist comes from the shared roster (/shared/source-status.js,
+    // loaded before this script), the same list the setup wizard and the side
+    // panel build their pickers from — a hardcoded copy here is what let the
+    // three surfaces drift. Labels come from the shared module too, with a local
+    // fallback map so an unrecognised key still renders. defaultChecked stays
+    // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
+    const INIT_SOURCE_LABEL_FALLBACK = {
+      bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+    };
+    const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+    const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+    const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+      ? [..._initSourceStatus.SOURCE_KEYS]
+      : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+    const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+      key,
+      label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+      ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
+    }));
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -117,6 +143,9 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+      invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+      bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -161,6 +190,11 @@
     let desktopRecommendationRecoveryInFlight = false;
     let desktopRuntimeRecoveryInFlight = false;
     let desktopRuntimeGeneration = 0;
+    let degradedRecoveryPresented = false;
+    const DESKTOP_RESUME_HYDRATE_TTL_MS = 15000;
+    let desktopBackendSessionInFlight = false;
+    let desktopLastHydratedAt = 0;
+    let desktopRuntimeReconnectTimer = null;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -182,7 +216,69 @@
 
     const scheduleDelightQueueRefresh = debounceAsync(() => fetchDelightQueue(), 1000);
 
+    // 库存变化事件可能成串到达（补货一轮会连发多条），去抖 + 单飞（合并 pending
+    // 调用）避免把只读快照接口打成风暴。debounceAsync 已实现这两点。
+    const schedulePlatformAvailabilityRefresh = debounceAsync(() => refreshPlatformAvailability(), 600);
+
+    let platformAvailabilityRetryAttempt = 0;
+    let platformAvailabilityRetryTimer = null;
+
+    function normalizePlatformAvailability(payload) {
+      const total = Number(payload?.total_available);
+      if (!Number.isFinite(total)) return null;
+      const byPlatform = {};
+      const raw = payload?.by_platform;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [key, value] of Object.entries(raw)) {
+          const slug = canonicalPlatformSlug(key);
+          const count = Number(value);
+          if (!slug || !Number.isFinite(count) || count <= 0) continue;
+          byPlatform[slug] = (byPlatform[slug] || 0) + Math.trunc(count);
+        }
+      }
+      return { total_available: Math.max(0, Math.trunc(total)), by_platform: byPlatform };
+    }
+
+    // 首次读取失败后的有界恢复；成功过一次就不再重试（后续由库存事件驱动）。
+    function schedulePlatformAvailabilityRetry() {
+      if (document.hidden) return;
+      if (state.platformAvailability) return;
+      if (platformAvailabilityRetryTimer !== null) return;
+      if (platformAvailabilityRetryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) return;
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[platformAvailabilityRetryAttempt];
+      platformAvailabilityRetryAttempt += 1;
+      platformAvailabilityRetryTimer = window.setTimeout(() => {
+        platformAvailabilityRetryTimer = null;
+        void refreshPlatformAvailability();
+      }, delayMs);
+    }
+
+    async function refreshPlatformAvailability() {
+      try {
+        const snapshot = normalizePlatformAvailability(
+          await requestJsonStrict(ENDPOINTS.platformAvailability, { timeoutMs: 15000, cache: "no-store" })
+        );
+        if (!snapshot) throw new Error("platform availability unavailable");
+        // 只有成功 snapshot 才覆盖旧值。
+        state.platformAvailability = snapshot;
+        platformAvailabilityRetryAttempt = 0;
+        // 库存更新只允许重绘 Tab / 空态与自动续页 gate；已经 append 的推荐卡片
+        // 不重建、不覆盖（renderVideos 只在当前就是空态或 Tab 被迫回退时才跑）。
+        const previousFilter = state.filter;
+        renderFilters();
+        if (state.filter !== previousFilter || grid?.querySelector(".empty-state")) renderVideos();
+        maybeAutoLoadAfterPoolRefill();
+      } catch {
+        // 读取失败保留上一次成功的数字；"失败即全零" 是明确禁止的。
+        schedulePlatformAvailabilityRetry();
+      }
+    }
+
     async function runBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationInFlight) {
         backendHydrationPending = true;
         return;
@@ -203,6 +299,10 @@
     }
 
     function scheduleBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationTimer !== null) window.clearTimeout(backendHydrationTimer);
       backendHydrationTimer = window.setTimeout(() => {
         backendHydrationTimer = null;
@@ -296,6 +396,7 @@
     }
 
     function scheduleDesktopRecommendationRecovery() {
+      if (document.hidden) return;
       if (state.videos.length > 0) {
         clearDesktopRecommendationRecovery("ready");
         return;
@@ -334,6 +435,7 @@
     }
 
     function scheduleDesktopRuntimeRecovery() {
+      if (document.hidden) return;
       if (desktopRuntimeLoadState !== "failed") return;
       if (desktopRuntimeRecoveryInFlight || desktopRuntimeRecoveryTimer !== null) return;
       if (desktopRuntimeRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
@@ -397,6 +499,13 @@
       }
       if (recommendationRestarted) renderVideos();
       if (runtimeRestarted) renderDesktopRuntimeFailure();
+      // 用户重试也重开一次库存快照读取（首次失败后的 Tab 计数仍是未知态）。
+      if (!state.platformAvailability) {
+        if (platformAvailabilityRetryTimer !== null) window.clearTimeout(platformAvailabilityRetryTimer);
+        platformAvailabilityRetryTimer = null;
+        platformAvailabilityRetryAttempt = 0;
+        schedulePlatformAvailabilityRefresh();
+      }
     }
 
     async function runActivityPageRefresh() {
@@ -420,6 +529,10 @@
     }
 
     function scheduleActivityPageRefresh() {
+      if (document.hidden) {
+        activityPageRefreshPending = true;
+        return;
+      }
       if (activityPageRefreshTimer !== null) window.clearTimeout(activityPageRefreshTimer);
       activityPageRefreshTimer = window.setTimeout(() => {
         activityPageRefreshTimer = null;
@@ -501,8 +614,6 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
-    const DISMISS_ON_RESHUFFLE_KEY = "openbiliclaw.dismissOnReshuffle";
-    state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
@@ -548,11 +659,16 @@
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let autoLoadCheckRaf = 0;
+    let autoLoadCheckFallbackTimer = 0;
     let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
     let _cachedLanIp = "";
+    // 惊喜卡自动轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文
+    // 摘录读下来就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 /
+    // 下一条。与移动端 web/js/views/recommend.js 的同名常量保持一致。
+    const DELIGHT_AUTO_ADVANCE_MS = 60000;
     let _delightAutoTimer = null;
     let _delightSwipeStartX = 0;
     const _delightStatusCache = new Map();
@@ -687,7 +803,6 @@
       applyThemeHue(state.themeHue);
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
-      renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
     }
@@ -699,16 +814,14 @@
       storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
       storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
-      storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
-      renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
-      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -995,7 +1108,7 @@
         item_key: canonical.item_key,
         content_id: contentId,
         title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
-        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
+        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? (canonical.source_platform === "bangumi" ? "" : "未知创作者")),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
         content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
@@ -1009,6 +1122,9 @@
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
         published_at: String(item?.published_at ?? "").trim(),
         published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
@@ -1083,7 +1199,7 @@
     function configErrorMessage(details) {
       if (!details) return "";
       if (typeof details === "string") return details;
-      const issues = details.config?.issues || details.detail?.config?.issues;
+      const issues = details.issues || details.config?.issues || details.detail?.config?.issues;
       if (Array.isArray(issues) && issues.length) {
         return issues.map((issue) => `${issue.severity || "warning"}: ${issue.message || issue.code || JSON.stringify(issue)}`).join("\n");
       }
@@ -1091,6 +1207,24 @@
         return details.detail.map((item) => `${item.loc?.join(".") || "字段"}: ${item.msg || JSON.stringify(item)}`).join("\n");
       }
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
+    }
+
+    function presentDegradedConfigRecovery(snapshot) {
+      if (snapshot?.degraded !== true) return;
+      state.degraded = true;
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const diagnostic = configErrorMessage(snapshot);
+      const configStatus = $("#configStatus");
+      if (configStatus) {
+        configStatus.setAttribute("role", "alert");
+        configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
+      }
+      $("#statusLabel").textContent = "模型配置待修复";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
+      if (degradedRecoveryPresented) return;
+      degradedRecoveryPresented = true;
+      openSettingsPage("models");
+      showToast("模型配置不可用，已打开恢复设置");
     }
 
     const toastManager = {
@@ -1341,11 +1475,30 @@
     // extension/popup/popup-init-control.js — the three GUI surfaces share no
     // module system, so keep the formulas in lock-step when editing either.
     const STAGE_FRACTION_CAP = 0.95;
-    const STAGE_FRACTION_FALLBACK = 0.5;
+    // A stage with no real done/total contributes NOTHING to the bar. It used
+    // to contribute a flat half-step (0.5), which implied a progress the stage
+    // had not made; such stages now render indeterminate instead.
+    const STAGE_FRACTION_UNKNOWN = 0;
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+    // Work-unit stall floor + adaptive slack. The heartbeat period says
+    // nothing about how long ONE unit of work legitimately takes: an analysis
+    // batch on a slow/remote chat model routinely runs minutes (field report
+    // 2026-07-20: 280s per batch — healthy, yet the shared 90s threshold cried
+    // "stalled" throughout). Floor generously, then adapt to this run's own
+    // cadence. Keep in lock-step with popup-init-control.js.
+    const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+    const PROGRESS_STALL_SLACK = 1.5;
+    function _progressStallThreshold(st, stage) {
+      const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+      const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+      const maxSeconds = Number(stage?.progress?.max_seconds || 0);
+      return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+    }
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+    // Said ONCE while the user waits, not repeated on every stage row.
+    const INIT_RUNNING_HINT = "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -1353,9 +1506,10 @@
       let st = _runViewState.get(runId);
       if (!st) {
         st = {
-          stageStartMs: new Map(), maxPct: 0,
+          maxPct: 0,
           lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
-          lastProgressMark: null, lastProgressChangeMs: 0
+          lastProgressMark: null, lastProgressChangeMs: 0,
+          slowestProgressIntervalSeconds: 0
         };
         _runViewState.set(runId, st);
         if (_runViewState.size > 8) {
@@ -1366,53 +1520,43 @@
       return st;
     }
 
-    function _runningStageFraction(stage, st, nowMs) {
-      const prog = stage?.progress;
-      if (prog?.mode === "indeterminate") {
-        const eta = Number(stage?.eta_seconds || 0);
-        if (eta > 0 && st) {
-          let startMs = st.stageStartMs.get(stage.n);
-          if (startMs === undefined) {
-            startMs = nowMs;
-            st.stageStartMs.set(stage.n, startMs);
-          }
-          return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta));
-        }
-        return STAGE_FRACTION_FALLBACK;
+    // Only REAL sub-progress moves the bar. The old elapsed/eta pseudo-progress
+    // (1 - e^-t/eta) is gone with the forecasts that fed it: faking a moving
+    // bar from a made-up duration is the same lie in another shape. A stage
+    // without done/total contributes nothing and renders indeterminate.
+    function _runningStageFraction(stage) {
+      const total = Number(stage?.progress?.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(stage?.progress?.done || 0), total));
+        return Math.min(STAGE_FRACTION_CAP, done / total);
       }
-      const progTotal = prog ? Number(prog.total || 0) : 0;
-      if (progTotal > 0) {
-        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-      }
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta > 0 && st) {
-        let startMs = st.stageStartMs.get(stage.n);
-        if (startMs === undefined) {
-          startMs = nowMs;
-          st.stageStartMs.set(stage.n, startMs);
-        }
-        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-      }
-      return STAGE_FRACTION_FALLBACK;
+      return STAGE_FRACTION_UNKNOWN;
     }
 
-    // Show the calibrated duration before it elapses; afterwards stop repeating
-    // an already-broken estimate and surface the real hard ceiling instead.
-    function stageEtaText(stage) {
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta <= 0) return "";
-      const elapsed = Number(stage?.progress?.elapsed_seconds || 0);
-      if (elapsed > eta) {
-        const maxSeconds = Number(stage?.progress?.max_seconds || 0);
-        if (maxSeconds > 0) {
-          return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-        }
-        return "已超常见用时；AI 或平台仍可能在处理";
+    // A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+    // duration we cannot honour is worse than none: every wrong estimate reads
+    // as "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and
+    // stage 4 announced 5, both legitimately ran far longer). So the running
+    // row reports only observed facts the backend already publishes: how long
+    // this stage has been running, and real sub-progress counts when they
+    // exist. No estimate, no ceiling, no extrapolation.
+    function formatElapsedText(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+    }
+
+    function stageDetailText(stage) {
+      const prog = stage?.progress;
+      if (!prog) return "";
+      const parts = [];
+      const elapsed = Number(prog.elapsed_seconds || 0);
+      if (elapsed > 0) parts.push(formatElapsedText(elapsed));
+      const total = Number(prog.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), total));
+        parts.push(`已完成 ${done}/${total}`);
       }
-      const halfMinutes = Math.ceil(eta / 30) / 2;
-      return `本阶段通常约 ${halfMinutes} 分钟`;
+      return parts.join(" · ");
     }
 
     // Split connection liveness from substantive work progress. A healthy 30s
@@ -1433,6 +1577,15 @@
       }
       const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
       if (st.lastProgressMark !== progressMark) {
+        // Learn this run's pace from every completed unit (skip the first
+        // mark, which measures "since we started watching").
+        if (st.lastProgressMark != null && st.lastProgressChangeMs) {
+          const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+          st.slowestProgressIntervalSeconds = Math.max(
+            st.slowestProgressIntervalSeconds || 0,
+            interval,
+          );
+        }
         st.lastProgressMark = progressMark;
         st.lastProgressChangeMs = nowMs;
       }
@@ -1446,12 +1599,15 @@
           text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`
         };
       }
-      if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+      const runningStage = Array.isArray(status.stages)
+        ? status.stages.find((stage) => stage?.status === "running")
+        : null;
+      if (progressStale > _progressStallThreshold(st, runningStage)) {
         const minutes = Math.max(1, Math.round(progressStale / 60));
         return {
           fresh: false,
           staleSeconds: progressStale,
-          text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`
+          text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`
         };
       }
       return { fresh: true, staleSeconds: progressStale, text: "● 后端在线 · 正在处理" };
@@ -1467,13 +1623,21 @@
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
-      const indeterminate = Boolean(running && currentStage?.progress?.mode === "indeterminate");
+      // Indeterminate covers both the backend's explicit flag and any
+      // running stage with no real done/total — with the eta gone there is
+      // nothing honest left to fill such a bar with.
+      const indeterminate = Boolean(
+        running &&
+          currentStage &&
+          (currentStage.progress?.mode === "indeterminate" ||
+            !(Number(currentStage.progress?.total || 0) > 0)),
+      );
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
       const note = currentStage?.progress?.note;
       if (stageLabel && note) stageLabel += ` · ${note}`;
       const runningStages = stages.filter((stage) => stage.status === "running");
       const inFlight = runningStages.length
-        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage, st, nowMs), 0) /
+        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage), 0) /
           runningStages.length
         : 0;
       const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
@@ -1489,7 +1653,7 @@
         indeterminate,
         pct,
         stageLabel,
-        etaText: running ? stageEtaText(currentStage) : "",
+        stageDetailText: running ? stageDetailText(currentStage) : "",
         failedReason: failedStage?.reason || ""
       };
     }
@@ -1575,7 +1739,16 @@
         const label = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
         return `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(opt.key)}" data-init-source="${escapeHtml(opt.key)}"${checked}><span>${escapeHtml(label)}</span></label>`;
       }).join("");
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      const bangumiDisabled = selected.has("bangumi") ? "" : " disabled";
+      const bangumiUsername = state.initBangumiUsernameTouched
+        ? state.initBangumiUsername
+        : state.config?.sources?.bangumi?.username || state.initBangumiUsername || "";
+      const bangumiInput = `<label class="init-source-row"><span>Bangumi 公开用户名（可留空，仅启用发现）</span><input id="initBangumiUsername" maxlength="128" autocomplete="off" value="${escapeHtml(bangumiUsername)}"${bangumiDisabled}></label>`;
+      // Optional personal access token: identifies the account via /v0/me and
+      // reads private collections; when set, the username above is auto-resolved.
+      const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
+      const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -1616,7 +1789,7 @@
         const staleness = stalenessView(status);
         const stallText = Boolean(status?.running)
           ? staleness.fresh
-            ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+            ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
             : staleness.text
           : "";
         stallHint.textContent = stallText;
@@ -1668,12 +1841,17 @@
       const staleness = stalenessView(status);
       const stallText = isRunning
         ? staleness.fresh
-          ? [staleness.text, displayProgress.etaText].filter(Boolean).join(" · ")
+          ? [staleness.text, displayProgress.stageDetailText].filter(Boolean).join(" · ")
           : staleness.text
         : "";
       // Expectation management near the start button while a run can begin.
-      const expectationText =
-        !isRunning && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
+      // Idle: orient the user about variability. Running: the one
+      // reassurance that is literally true after v0.3.180.
+      const expectationText = isRunning
+        ? INIT_RUNNING_HINT
+        : alreadyInitialized
+          ? ""
+          : INIT_EXPECTATION_HINT;
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);
@@ -1723,6 +1901,11 @@
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
           state.initSelectedSources = selectedInitSourcesFromDom();
+          const bangumiChecked = state.initSelectedSources.includes("bangumi");
+          const bangumiUsername = grid.querySelector("#initBangumiUsername");
+          if (bangumiUsername) bangumiUsername.disabled = !bangumiChecked;
+          const bangumiToken = grid.querySelector("#initBangumiToken");
+          if (bangumiToken) bangumiToken.disabled = !bangumiChecked;
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -1730,6 +1913,13 @@
             checklist.innerHTML = initChecklistMarkup(state.initStatus, state.initSelectedSources);
           }
         });
+      });
+      grid.querySelector("#initBangumiUsername")?.addEventListener("input", (event) => {
+        state.initBangumiUsername = event.currentTarget.value || "";
+        state.initBangumiUsernameTouched = true;
+      });
+      grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
+        state.initBangumiToken = event.currentTarget.value || "";
       });
     }
 
@@ -1742,6 +1932,7 @@
 
     function scheduleInitStatusRefresh(delayMs = INIT_STATUS_POLL_MS) {
       clearInitPolling();
+      if (document.hidden) return;
       initPollTimer = window.setTimeout(() => {
         initPollTimer = null;
         void refreshInitStatus();
@@ -1839,6 +2030,26 @@
         renderAll();
         return;
       }
+      const bangumiUsername = String(
+        $("#initBangumiUsername")?.value || state.initBangumiUsername || ""
+      ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        state.initBangumiUsernameTouched &&
+        (bangumiUsername !== "" || state.initBangumiUsernamePrefilled);
+      const bangumiToken = String(
+        $("#initBangumiToken")?.value || state.initBangumiToken || ""
+      ).trim();
+      // No client-side Bangumi-only admission check here on purpose. The
+      // backend owns a THREE-tier account ladder (token → explicit username →
+      // browser-extension-reported identity); a local "username or token
+      // required" copy of it can't see the third tier and silently blocked
+      // zero-config extension users from ever reaching /api/init. The backend
+      // answers 409 no_profile_signal_sources when all three are genuinely
+      // missing, and the catch below renders it.
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         state.initReason = "还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。";
         state.initBusy = false;
@@ -1852,15 +2063,31 @@
         return;
       }
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
+          const bangumi = {};
+          if (sendBangumiUsername) bangumi.username = bangumiUsername;
+          // Only send a token the user actually typed; omit otherwise so the
+          // backend keeps any configured token.
+          if (bangumiToken) bangumi.access_token = bangumiToken;
+          payload.source_options = { bangumi };
+        }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
           timeoutMs: 60000
         });
         state.initStatus = { ...(state.initStatus || {}), ...started };
         state.initBusy = false;
-        showToast("初始化已开始");
+        // The 202 response may carry backend warnings (e.g. Bangumi selected
+        // without a public username → discovery-only). Surface them in the
+        // onboarding reason and the toast instead of a bare "已开始".
+        const startWarnings = Array.isArray(started?.warnings)
+          ? started.warnings.filter((text) => typeof text === "string" && text.trim())
+          : [];
+        state.initReason = startWarnings.join(" ");
+        showToast(startWarnings.length ? startWarnings.join(" ") : "初始化已开始");
         renderAll();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
@@ -1986,8 +2213,10 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -2056,11 +2285,19 @@
       favorite: createDesktopSavedTaskRuntime()
     };
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) {
-        for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      if (document.hidden) {
+        pauseDesktopBackendSession();
+        return;
       }
+      for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      restartDesktopFailedRecoveries();
+      if (initRefreshPending || state.initStatus?.running) {
+        scheduleInitStatusRefresh(0);
+      }
+      void startDesktopBackendSession();
     });
     window.addEventListener("pagehide", () => {
+      pauseDesktopBackendSession();
       for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
     }, { once: true });
     function saveDesktopItem(listKind, item) {
@@ -2155,6 +2392,7 @@
             <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
             <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(syncPresentation.tone)}">${escapeHtml(syncPresentation.label)}</span><span>${escapeHtml(syncPresentation.detail)}</span></p>
           </div>
+${savedCardFeedbackBarHtml(listKind)}
           <div class="card-actions saved-card-actions">
             ${syncPresentation.actionable || syncPresentation.busy ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button" aria-disabled="${syncPresentation.busy}" aria-label="${escapeHtml(syncPresentation.busy ? `${syncPresentation.label}，请稍候` : syncPresentation.actionLabel)}" ${syncPresentation.busy ? "disabled" : ""}>${escapeHtml(syncPresentation.actionLabel)}</button>` : ""}
             <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
@@ -2183,6 +2421,7 @@
             if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地移除失败，请重试。"; }
           }
         });
+        wireSavedCardFeedback(card, item, listKind);
         return card;
       }));
       if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
@@ -2454,6 +2693,86 @@
       return platformLabel[String(value || "").toLowerCase()] || String(value || "").trim();
     }
 
+    // 别名只在这里归一化：引擎与库存快照只认 canonical slug。未知平台原样保留
+    // （小写），这样后端新增来源时 Tab 仍能显示而不是被悄悄吞掉。
+    function canonicalPlatformSlug(value) {
+      const raw = String(value || "").trim().toLowerCase();
+      if (!raw) return "";
+      return platformAliases[raw] || raw;
+    }
+
+    function recommendationPlatformSlug(item) {
+      return canonicalPlatformSlug(item?.platform ?? item?.source_platform);
+    }
+
+    // Tab 用中文标签做本地过滤，后端只认 canonical slug。"全部" 映射成空串，
+    // 调用方据此决定「不带 source_platform」（保持旧请求形状）。
+    function platformSlugForFilterLabel(label) {
+      const name = String(label || "").trim();
+      if (!name || name === "全部") return "";
+      const known = sourceFilterDefinitions.find((source) => source.label === name);
+      if (known) return known.key;
+      return canonicalPlatformSlug(name);
+    }
+
+    function activePlatformSlug() {
+      return platformSlugForFilterLabel(state.filter);
+    }
+
+    // 返回该平台「可立即推荐」的剩余数量；null = 未知（尚无成功快照）。
+    // 已启用但快照里缺键的平台按 0 处理（后端允许省略零库存平台）。
+    function platformAvailableCount(slug) {
+      const snapshot = state.platformAvailability;
+      if (!snapshot) return null;
+      if (!slug) return Number(snapshot.total_available) || 0;
+      const count = Number(snapshot.by_platform?.[slug]);
+      return Number.isFinite(count) && count > 0 ? count : 0;
+    }
+
+    function activePlatformAvailableCount() {
+      return platformAvailableCount(activePlatformSlug());
+    }
+
+    // 库存 snapshot 中数量大于 0 的平台也要出 Tab（配置里没启用、本会话也没
+    // 加载过卡片时同样成立）。
+    function availablePlatformSlugs() {
+      const byPlatform = state.platformAvailability?.by_platform || {};
+      return Object.keys(byPlatform).filter((slug) => Number(byPlatform[slug]) > 0);
+    }
+
+    // 平台定向换一批只替换该平台的卡片：其它平台本会话已加载的卡片必须原样保留，
+    // 新批次插在该平台原本第一张卡的位置，保持混合列表的相对交错。
+    function replacePlatformCards(videos, platform, fresh) {
+      const next = [];
+      let inserted = false;
+      for (const item of videos) {
+        if (recommendationPlatformSlug(item) === platform) {
+          if (!inserted) {
+            next.push(...fresh);
+            inserted = true;
+          }
+          continue;
+        }
+        next.push(item);
+      }
+      if (!inserted) next.push(...fresh);
+      return next;
+    }
+
+    // 平台定向请求返回跨平台内容 = 后端契约破坏。前端如实上报并放弃这一批，
+    // 绝不静默过滤后假装成功（设计文档 §8）。
+    function reportPlatformScopeLeak(action, requestPlatform, items) {
+      const leaked = items.filter((item) => recommendationPlatformSlug(item) !== requestPlatform);
+      if (!leaked.length) return false;
+      console.error("[openbiliclaw] platform-scoped recommendation leak", {
+        action,
+        requested: requestPlatform,
+        leaked: leaked.map((item) => ({ key: recommendationKey(item), platform: recommendationPlatformSlug(item) }))
+      });
+      showToast(`后端返回了 ${leaked.length} 条非「${platformName(requestPlatform)}」内容，已放弃这批${action}结果`);
+      return true;
+    }
+
     function configuredSourceFilterLabels() {
       const sources = state.config?.sources;
       const shares = state.config?.scheduler?.pool_source_shares || {};
@@ -2468,8 +2787,14 @@
         .map((source) => source.label);
     }
 
+    // Tab 集合 = 已启用配置 ∪ 库存快照中数量>0 的平台 ∪ 本会话已加载卡片的平台。
+    // 已知平台沿用 sourceFilterDefinitions 顺序，其它值按稳定字典序，"全部"恒居首。
     function buildFilters() {
       const sourceSet = new Set(configuredSourceFilterLabels());
+      for (const slug of availablePlatformSlugs()) {
+        const label = platformName(slug);
+        if (label) sourceSet.add(label);
+      }
       for (const item of state.videos) {
         const label = platformName(item.platform);
         if (label) sourceSet.add(label);
@@ -2621,22 +2946,6 @@
       if (hueInput) hueInput.value = hue;
     }
 
-    function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
-      state.dismissOnReshuffle = Boolean(enabled);
-      if (persist) storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
-      renderReshuffleToggle();
-      if (toast) showToast(state.dismissOnReshuffle ? "换一批前会忽略当前显示的推荐" : "换一批不会自动忽略当前推荐");
-    }
-
-    function renderReshuffleToggle() {
-      const toggles = [$("#dismissOnReshuffleToggle"), $("#dismissOnReshuffleSetting")];
-      toggles.forEach((toggle) => {
-        if (toggle && toggle.checked !== state.dismissOnReshuffle) toggle.checked = state.dismissOnReshuffle;
-      });
-      const settingText = $("#dismissOnReshuffleSettingText");
-      if (settingText) settingText.textContent = state.dismissOnReshuffle ? "开启" : "关闭";
-    }
-
     function setAutoLoadOnScroll(enabled, { persist = true, toast = false } = {}) {
       state.autoLoadOnScroll = Boolean(enabled);
       if (persist) storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
@@ -2666,16 +2975,28 @@
     }
 
     function scheduleAutoLoadCheck() {
-      if (!state.autoLoadOnScroll || autoLoadCheckRaf) return;
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf || autoLoadCheckFallbackTimer) return;
+      let settled = false;
       const run = () => {
+        if (settled) return;
+        settled = true;
+        const rafId = autoLoadCheckRaf;
+        const fallbackTimer = autoLoadCheckFallbackTimer;
         autoLoadCheckRaf = 0;
+        autoLoadCheckFallbackTimer = 0;
+        if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
         if (!refreshAutoLoadSentinelVisibility()) return;
         void autoLoadMoreIfNeeded().catch(() => {});
       };
       if (typeof requestAnimationFrame === "function") {
         autoLoadCheckRaf = requestAnimationFrame(run);
+        // Intersection/scroll loading is functional work, not just paint polish.
+        // A backgrounded or busy browser may throttle rAF indefinitely, so keep
+        // a short watchdog that runs the same coalesced geometry check once.
+        autoLoadCheckFallbackTimer = setTimeout(run, 120);
       } else {
-        autoLoadCheckRaf = setTimeout(run, 0);
+        autoLoadCheckFallbackTimer = setTimeout(run, 0);
       }
     }
 
@@ -2714,7 +3035,14 @@
     function autoLoadBlockReason(now) {
       if (!state.autoLoadOnScroll) return "disabled";
       if (appendMoreInFlight) return "in-flight";
-      if (!(state.runtimeStatus?.pool_available_count > 0)) return "pool-empty";
+      // 库存 gate 用「当前平台」的可推数量：全局还有货不代表当前 Tab 有货，否则
+      // 0 库存平台会被反复空请求。库存未知（首次快照尚未成功 / 后端还没有这个
+      // 接口）时回退到全局 pool_available_count，保持既有行为。
+      const scopedAvailable = activePlatformAvailableCount();
+      const hasStock = scopedAvailable === null
+        ? state.runtimeStatus?.pool_available_count > 0
+        : scopedAvailable > 0;
+      if (!hasStock) return "pool-empty";
       const homePage = $("#homePage");
       if (!homePage || homePage.hidden) return "not-home";
       const loadMore = $("#loadMoreBtn");
@@ -2772,18 +3100,68 @@
       }
     }
 
+    // 切换 Tab 只改变视图，不发任何推荐请求（设计文档 §5.2）。自动激活后 chip 会
+    // 被重建，所以键盘路径需要把 focus 还给新的同名 chip。
+    function setActiveFilter(name, { restoreFocus = false } = {}) {
+      state.filter = name;
+      renderAll();
+      if (!restoreFocus) return;
+      const chips = Array.from(document.querySelectorAll("#filterRow .chip"));
+      chips.find((chip) => chip.dataset.filter === name)?.focus();
+    }
+
+    function handleFilterChipKeydown(event, filters, index) {
+      const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      let next = index;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = filters.length - 1;
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + filters.length) % filters.length;
+      else next = (index + 1) % filters.length;
+      setActiveFilter(filters[next], { restoreFocus: true });
+    }
+
     function renderFilters() {
       const row = $("#filterRow");
       const filters = buildFilters();
       if (!filters.includes(state.filter)) state.filter = "全部";
-      row.replaceChildren(...filters.map((name) => {
+      // 整排 chip 每次都被替换掉：先记住焦点原本落在哪个 Tab 上，重建后还回去，
+      // 否则点一下 Tab 就把键盘焦点丢回 <body>，方向键再也走不动。
+      const focusedFilter = row.contains(document.activeElement) ? String(document.activeElement.dataset.filter || "") : "";
+      row.replaceChildren(...filters.map((name, index) => {
         const btn = document.createElement("button");
-        btn.className = `chip${state.filter === name ? " is-active" : ""}`;
+        const selected = state.filter === name;
+        const slug = platformSlugForFilterLabel(name);
+        const count = platformAvailableCount(slug);
+        btn.className = `chip${selected ? " is-active" : ""}`;
         btn.type = "button";
-        btn.textContent = name;
-        btn.addEventListener("click", () => { state.filter = name; renderAll(); });
+        btn.dataset.filter = name;
+        btn.dataset.platform = slug;
+        // role=tab + aria-selected：选中态不能只靠颜色表达，AT 也要能读到。
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", selected ? "true" : "false");
+        btn.setAttribute("aria-label", `${name}，可推荐 ${count === null ? PLATFORM_COUNT_UNKNOWN_LABEL : `${count} 条`}`);
+        btn.tabIndex = selected ? 0 : -1;
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "chip-label";
+        labelSpan.textContent = name;
+        const countSpan = document.createElement("span");
+        countSpan.className = "chip-count";
+        countSpan.dataset.state = count === null ? "unknown" : "known";
+        countSpan.textContent = count === null ? PLATFORM_COUNT_UNKNOWN_TEXT : String(count);
+        countSpan.setAttribute("aria-hidden", "true");
+        btn.replaceChildren(labelSpan, countSpan);
+        btn.addEventListener("click", () => setActiveFilter(name));
+        btn.addEventListener("keydown", (event) => handleFilterChipKeydown(event, filters, index));
         return btn;
       }));
+      if (focusedFilter) {
+        const chips = Array.from(row.querySelectorAll(".chip"));
+        const restored = chips.find((chip) => chip.dataset.filter === focusedFilter)
+          || chips.find((chip) => chip.dataset.filter === state.filter);
+        restored?.focus();
+      }
       const resetButton = $("#resetFiltersBtn");
       if (resetButton) resetButton.hidden = state.filter === "全部" && !String(state.query || "").trim();
     }
@@ -2858,6 +3236,7 @@
       if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
       if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
       if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "bangumi" && item.content_id) return `https://bgm.tv/subject/${encodeURIComponent(item.content_id)}`;
       if (platform === "reddit") return "";
       return "";
     }
@@ -2927,11 +3306,15 @@
 
     function recommendationStats(item) {
       const segments = [];
+      const sourceRank = Math.trunc(Number(item.source_rank) || 0);
       if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
       if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
       if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      if (item.rating_score > 0) segments.push(`评分 ${item.rating_score.toFixed(1)}`);
+      if (item.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+      if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
       return segments.join(" · ");
     }
 
@@ -2959,6 +3342,215 @@
       grid.querySelectorAll(".video-card.is-skeleton").forEach((el) => el.remove());
     }
 
+    // ---- issue #111: recommendation-style feedback actions on saved cards ----
+    const SAVED_FEEDBACK_COPY = {
+      like: { saving: "正在记录喜欢…", done: "已记录喜欢，会用于优化画像。", toast: "已记录喜欢" },
+      dislike: { saving: "正在记录不感兴趣…", done: "已记录不感兴趣，会用于优化画像。", toast: "已记录不感兴趣" },
+      dismiss: { saving: "正在记录忽略…", done: "已记录忽略，会用于优化画像。", toast: "已记录忽略" },
+      comment: { saving: "正在提交聊天线索…", done: "已提交聊天线索。", toast: "已提交聊天线索" }
+    };
+
+    // Shared recommendation-card feedback action bar markup.
+    function cardFeedbackBarHtml() {
+      return `          <div class="card-actions" aria-label="推荐反馈操作">
+            <div class="card-feedback-icons" aria-label="喜欢或不感兴趣">
+              <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn" data-action="dismiss" type="button" aria-label="忽略" title="忽略">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn watch-later-btn" data-action="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn favorite-btn" data-action="favorite" type="button" aria-label="收藏" title="收藏" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
+              </button>
+            </div>
+            <div class="comment-field"><input placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
+            <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
+            <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
+          </div>
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    function savedCardFeedbackBarHtml(listKind) {
+      const crossIsFavorite = listKind === "watch_later";
+      const crossAction = crossIsFavorite ? "favorite" : "watch-later";
+      const crossClass = crossIsFavorite ? "favorite-btn" : "watch-later-btn";
+      const crossLabel = crossIsFavorite ? "收藏" : "稍后再看";
+      const crossIcon = crossIsFavorite
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+      return `          <div class="card-actions saved-feedback-bar" aria-label="反馈与保存操作">
+            <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="saved-comment" type="button" aria-label="聊一聊" title="聊一聊">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+            </button>
+            <button class="feedback-icon-btn cross-toggle ${crossClass}" data-action="${crossAction}" type="button" aria-label="${crossLabel}" title="${crossLabel}" aria-pressed="false">
+              ${crossIcon}
+            </button>
+          </div>
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    // Saved-list items carry no recommendation_id, so the recommendation-scoped
+    // /api/feedback (which 404s without one) cannot record like/dislike/dismiss/
+    // comment for them. Mirror the extension's content-based signal path instead:
+    // post a feedback behavior event to /api/events keyed on content_id, shaped
+    // exactly like the recommendation feedback event (event_type=feedback +
+    // metadata.feedback_type + metadata.bvid) so the soul engine treats it the same.
+    function postSavedContentFeedback(item, feedbackType, note = "") {
+      const saved = desktopSavedItem(item);
+      const contentId = saved.content_id || item.bvid || "";
+      return requestJsonStrict(ENDPOINTS.events, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          events: [{
+            type: "feedback",
+            source_platform: saved.source_platform || "bilibili",
+            title: saved.title || "",
+            url: saved.content_url || "",
+            timestamp: Date.now(),
+            metadata: {
+              feedback_type: feedbackType,
+              bvid: contentId,
+              content_id: contentId,
+              feedback_note: note,
+              saved_feedback: true
+            }
+          }]
+        }),
+        timeoutMs: 30000
+      }).then((res) => {
+        if (!res || res.accepted < 1) {
+          const reason = res && res.rejected && res.rejected[0] && res.rejected[0].reason;
+          throw new Error(reason === "not_initialized"
+            ? "画像尚未就绪，暂时无法记录反馈。"
+            : "反馈未被接受，请稍后重试。");
+        }
+        return res;
+      });
+    }
+
+    async function handleSavedCardFeedback(action, item, card) {
+      const status = card.querySelector(".status-line");
+      const copy = SAVED_FEEDBACK_COPY[action];
+      const buttons = [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+      const clicked = card.querySelector(`[data-action="${action}"]`);
+      const snapshot = buttons.map((b) => ({ b, pressed: b.getAttribute("aria-pressed"), active: b.classList.contains("is-active") }));
+      buttons.forEach((b) => { b.setAttribute("aria-pressed", "false"); b.classList.remove("is-active"); });
+      if (clicked) { clicked.setAttribute("aria-pressed", "true"); clicked.classList.add("is-active"); }
+      if (status) { status.removeAttribute("role"); status.textContent = copy.saving; }
+      try {
+        await postSavedContentFeedback(item, action, "");
+        if (status) status.textContent = copy.done;
+        showToast(copy.toast);
+      } catch (error) {
+        snapshot.forEach(({ b, pressed, active }) => {
+          if (pressed == null) b.removeAttribute("aria-pressed"); else b.setAttribute("aria-pressed", pressed);
+          b.classList.toggle("is-active", active);
+        });
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+        showToast("反馈提交失败");
+      }
+    }
+
+    // Saved cards expose content feedback plus only the other list's save toggle;
+    // membership in the list currently being viewed is managed by 移除.
+    function wireSavedCardFeedback(card, item, listKind) {
+      const savedItem = desktopSavedItem(item);
+      const status = card.querySelector(".status-line");
+      const crossKind = listKind === "watch_later" ? "favorite" : "watch_later";
+
+      card.querySelectorAll('[data-action="like"], [data-action="dislike"]').forEach((btn) => {
+        btn.addEventListener("click", () => handleSavedCardFeedback(btn.dataset.action, item, card));
+      });
+
+      const commentBtn = card.querySelector('[data-action="saved-comment"]');
+      commentBtn?.addEventListener("click", async () => {
+        const draft = window.prompt("想围绕这条聊什么？");
+        if (draft === null) return;
+        const note = String(draft).trim();
+        if (!note) {
+          if (status) { status.removeAttribute("role"); status.textContent = "先写一句想聊的内容，再提交这条反馈。"; }
+          return;
+        }
+        commentBtn.disabled = true;
+        if (status) { status.removeAttribute("role"); status.textContent = SAVED_FEEDBACK_COPY.comment.saving; }
+        try {
+          await postSavedContentFeedback(item, "comment", note);
+          if (status) status.textContent = SAVED_FEEDBACK_COPY.comment.done;
+          showToast(SAVED_FEEDBACK_COPY.comment.toast);
+        } catch (error) {
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+          showToast("反馈提交失败");
+        } finally {
+          commentBtn.disabled = false;
+        }
+      });
+
+      const crossBtn = card.querySelector(".cross-toggle");
+      if (!crossBtn) return;
+      const crossIsFavorite = crossKind === "favorite";
+      const setCrossState = (saved) => {
+        const label = crossIsFavorite
+          ? (saved ? "取消收藏" : "收藏")
+          : (saved ? "取消稍后再看" : "稍后再看");
+        crossBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+        crossBtn.setAttribute("aria-label", label);
+        crossBtn.title = label;
+      };
+      crossBtn.addEventListener("click", async () => {
+        if (crossBtn.disabled || desktopSavedMutations.isBusy(crossKind, savedItem.item_key)) return;
+        const wasSaved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+        crossBtn.disabled = true;
+        setCrossState(!wasSaved);
+        if (status) {
+          status.removeAttribute("role");
+          status.textContent = crossIsFavorite
+            ? (wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…")
+            : (wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
+        }
+        try {
+          await desktopSavedMutations.toggle(crossKind, savedItem.item_key, {
+            add: () => saveDesktopItem(crossKind, item),
+            remove: () => removeDesktopSavedItem(crossKind, savedItem.item_key)
+          });
+          const saved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+          setCrossState(saved);
+          if (status) {
+            status.textContent = crossIsFavorite
+              ? (saved ? "已加入本地收藏。" : "已从本地收藏移除；平台记录不变。")
+              : (saved ? "已加入本地稍后再看。" : "已从本地稍后再看移除；平台记录不变。");
+          }
+        } catch (error) {
+          setCrossState(wasSaved);
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存操作失败，请重试。"; }
+        } finally {
+          crossBtn.disabled = false;
+        }
+      });
+      void desktopSavedMutations.hydrate(
+        crossKind,
+        savedItem.item_key,
+        () => savedStatus(crossKind, savedItem)
+      ).then(() => setCrossState(desktopSavedMutations.isSaved(crossKind, savedItem.item_key)));
+    }
+
     function renderVideos() {
       if (shouldShowInitOnboarding(state.runtimeStatus)) {
         renderInitOnboarding();
@@ -2968,15 +3560,29 @@
       if (loadMore) loadMore.hidden = false;
       const items = filteredVideos();
       if (!items.length) {
+        // 平台 Tab 的空态要区分「本会话还没装入」和「该平台暂时没有新候选」，
+        // 用的是同一份可推库存快照，不是 DOM 卡片数。
+        const activePlatform = activePlatformSlug();
+        const activePlatformCount = platformAvailableCount(activePlatform);
+        const loadFailed = desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted";
+        const platformMessage = activePlatform && !loadFailed
+          ? activePlatformCount === null
+            ? `${escapeHtml(platformName(activePlatform))}还没有装入推荐，可以点「加载更多推荐」试试。`
+            : activePlatformCount > 0
+              ? `${escapeHtml(platformName(activePlatform))}还有 ${activePlatformCount} 条候选没装进来，点「加载更多推荐」即可。`
+              : `${escapeHtml(platformName(activePlatform))}暂时没有新候选，后台会继续补货。`
+          : "";
         const message = state.query.trim()
           ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
-          : state.videos.length
-            ? "当前筛选下没有推荐。"
-            : desktopRecommendationLoadState === "failed"
-              ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
-              : desktopRecommendationLoadState === "failed-exhausted"
-                ? "推荐加载失败，点一下重新加载。"
-                : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
+          : platformMessage
+            ? platformMessage
+            : state.videos.length
+              ? "当前筛选下没有推荐。"
+              : desktopRecommendationLoadState === "failed"
+                ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
+                : desktopRecommendationLoadState === "failed-exhausted"
+                  ? "推荐加载失败，点一下重新加载。"
+                  : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
         const retry = desktopRecommendationLoadState === "failed-exhausted"
           ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
           : "";
@@ -3011,33 +3617,7 @@
             ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
           </div>
           <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
-          <div class="card-actions" aria-label="推荐反馈操作">
-            <div class="card-feedback-icons" aria-label="喜欢或不感兴趣">
-              <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn" data-action="dismiss" type="button" aria-label="忽略" title="忽略">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn watch-later-btn" data-action="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn favorite-btn" data-action="favorite" type="button" aria-label="收藏" title="收藏" aria-pressed="false">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
-              </button>
-            </div>
-            <div class="comment-field"><input placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
-            <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
-            <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
-          </div>
-          <p class="status-line" aria-live="polite"></p>`;
+${cardFeedbackBarHtml()}`;
         const reason = card.querySelector(".reason");
         const toggleReason = () => {
           const expanded = reason.classList.toggle("is-expanded");
@@ -3320,18 +3900,19 @@
       scheduleActivityRailHeightSync();
     }
 
-    // 用户是否正在惊喜卡上互动：聊天输入框展开 / 有焦点 / 有未发送草稿。
-    // 后台推送（新候选、队列刷新）在此期间不得切卡或重渲染——setActiveDelight
-    // 会 closeDelightComposer 收起输入框（field report 2026-07-05「打着打着惊喜
-    // 推荐突然变了」），切卡更会让随后的发送把这条反馈记到换上来的新卡上。
-    // 有未发送草稿也算互动中：草稿属于当前这张卡，换卡同样会串。
+    // 用户是否正在首页内容上互动：惊喜聊天框展开 / 有焦点 / 有未发送草稿，
+    // 或正在普通推荐卡上悬停、输入、提交可撤销反馈。后台推送与惊喜自动轮播
+    // 在此期间不得切卡或重渲染——否则会让下方卡片在点击中途发生位移，或把
+    // 惊喜聊天反馈记到换上来的新卡上。
     function delightUserEngaged() {
       const input = document.getElementById("delightCommentInput");
-      if (!input) return false;
       const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
       const focused = document.activeElement === input;
-      const hasDraft = Boolean(String(input.value || "").trim());
-      return composing || focused || hasDraft;
+      const hasDraft = Boolean(String(input?.value || "").trim());
+      const recommendationEngaged = Boolean(document.querySelector(
+        "#videoGrid:hover, #videoGrid:focus-within, #videoGrid .is-feedback-pending, #videoGrid .card-actions.is-composing"
+      ));
+      return composing || focused || hasDraft || recommendationEngaged;
     }
 
     // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
@@ -5170,56 +5751,69 @@
       }
     }
 
-    function dismissVisibleRecommendationsBeforeReshuffle(visibleItems) {
-      const submissions = visibleItems.map((item) => submitFeedback(item, "dismiss"));
-      void Promise.allSettled(submissions).then((results) => {
-        const failed = results.filter((result) => result.status === "rejected").length;
-        if (failed) showToast(`${failed} 张忽略提交失败（不影响当前列表）`);
-      });
-    }
-
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
-      const dismissToggle = $("#dismissOnReshuffleToggle");
+      // 请求发出前捕获当时选中的平台：用户在请求期间切 Tab 不能把响应写进错误批次。
+      const requestPlatform = activePlatformSlug();
+      // 当前可见卡片始终是本次换一批的排除集；平台定向时覆盖该平台
+      // 本会话已加载的全部内容（不止可见的那些）。
       const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
       const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
+      const scopedForExclusion = requestPlatform
+        ? state.videos.filter((item) => item?.id != null && recommendationPlatformSlug(item) === requestPlatform)
+        : visibleForExclusion;
       if (reshuffleButton) reshuffleButton.disabled = true;
-      if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const excludedBvids = visibleForExclusion.map((item) => item.bvid).filter(Boolean);
+        const excludedBvids = scopedForExclusion.map((item) => item.bvid).filter(Boolean);
+        const requestBody = { excluded_bvids: excludedBvids };
+        // "全部" 不带 source_platform：旧客户端 / 兼容路径的请求形状保持不变。
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
         const payload = await requestJson(ENDPOINTS.reshuffle, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ excluded_bvids: excludedBvids })
+          body: JSON.stringify(requestBody)
         });
-        const fresh = payload?.items?.length
-          ? normalizeRecommendationList(payload.items).filter((item) => !visibleKeys.has(recommendationKey(item)))
-          : [];
+        const returned = payload?.items?.length ? normalizeRecommendationList(payload.items) : [];
+        if (requestPlatform && reportPlatformScopeLeak("换一批", requestPlatform, returned)) return;
+        const fresh = returned.filter((item) => !visibleKeys.has(recommendationKey(item)));
+        // 后端返回空数组时保留现有卡片，不制造空屏。
         if (fresh.length) {
-          state.videos = fresh;
+          state.videos = requestPlatform ? replacePlatformCards(state.videos, requestPlatform, fresh) : fresh;
           renderAll();
-          if (state.dismissOnReshuffle && visibleForExclusion.length) {
-            dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
-          }
           showToast("已换一批推荐");
         } else {
           showToast("暂时没有更多新推荐了");
         }
       } finally {
+        schedulePlatformAvailabilityRefresh();
         if (reshuffleButton) reshuffleButton.disabled = false;
-        if (dismissToggle) dismissToggle.disabled = false;
       }
     }
 
+    // 手动「加载更多」与滚动自动续页共用这一条路径。库存为 0 时按钮仍可点：
+    // 它负责唤醒后端已有的补货链路；只有自动续页会被库存 gate 拦下。
     async function appendMore() {
       if (appendMoreInFlight) return;
       appendMoreInFlight = true;
+      // 与换一批同理：捕获请求开始时的平台，响应到达时不再读 state.filter。
+      const requestPlatform = activePlatformSlug();
       showAppendSkeletons();
       try {
-        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
+        const requestBody = { excluded_bvids: state.videos.map((v) => v.bvid) };
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
+        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) });
         const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
         if (payload?.items?.length) {
-          const freshItems = normalizeRecommendationList(payload.items);
+          const returned = normalizeRecommendationList(payload.items);
+          if (requestPlatform && reportPlatformScopeLeak("加载更多", requestPlatform, returned)) return;
+          // 按稳定 recommendation key 去重后再追加。
+          const loadedKeys = new Set(state.videos.map((item) => recommendationKey(item)));
+          const freshItems = returned.filter((item) => {
+            const key = recommendationKey(item);
+            if (!key || loadedKeys.has(key)) return false;
+            loadedKeys.add(key);
+            return true;
+          });
           const appendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
           state.videos = state.videos.concat(freshItems);
           renderAll();
@@ -5241,6 +5835,7 @@
         // showAppendSkeletons may have cleared an empty-state placeholder; if
         // nothing came back, re-render so the grid never ends up blank.
         if (!grid.childElementCount) renderVideos();
+        schedulePlatformAvailabilityRefresh();
         appendMoreInFlight = false;
       }
     }
@@ -5277,6 +5872,13 @@
         last_account_sync_at: String(merged.last_account_sync_at ?? ""),
         last_account_sync_error: String(merged.last_account_sync_error ?? ""),
         last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
+        last_account_sync_issues: Array.isArray(merged.last_account_sync_issues)
+          ? merged.last_account_sync_issues
+          : [],
+        // This is an explicit-key whitelist: a field missing here is dropped
+        // silently, which is how the backend copy stopped reaching the chip.
+        last_account_sync_message: String(merged.last_account_sync_message ?? ""),
+        last_account_sync_severity: String(merged.last_account_sync_severity ?? ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
     }
@@ -5385,25 +5987,49 @@
       if (!el) return;
       const kind = String(runtime?.last_account_sync_error_kind || "");
       const error = String(runtime?.last_account_sync_error || "");
-      // Healthy installs (no error) show nothing — zero visual change.
-      if (!error && !kind) {
+      const issues = Array.isArray(runtime?.last_account_sync_issues)
+        ? runtime.last_account_sync_issues
+        : [];
+      const severity = String(runtime?.last_account_sync_severity || "");
+      const sourceIssues = collectEnabledSourceIssues(state.sourceStatus);
+      // Healthy installs (no sync or source issue) show nothing — zero visual
+      // change. Pending verification alone is not an error and stays on the
+      // source card instead of turning the dashboard into an alarm panel.
+      if (!error && !kind && !issues.length && !sourceIssues.length) {
         el.hidden = true;
         el.textContent = "";
-        el.classList.remove("is-auth-expired", "is-error");
+        el.classList.remove("is-auth-expired", "is-warning", "is-error");
         return;
       }
       el.hidden = false;
-      if (runtime.last_account_sync_error_kind === "auth_expired") {
-        el.classList.add("is-auth-expired");
+      // The backend renders the sentence so every surface says the same thing;
+      // the literals here are only a fallback for an older backend.
+      const message = String(runtime?.last_account_sync_message || "");
+      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
+      const accountDetail = message || (error || kind || issues.length
+        ? "账号同步遇到未分类异常，暂时无法确定具体环节"
+        : "");
+      const accountText = accountDetail && when
+        ? `${accountDetail}（上次同步 ${when}）`
+        : accountDetail;
+      const sourceText = sourceIssues.length
+        ? `来源接入：${sourceIssues.map((issue) => `${issue.source}：${issue.detail}`).join("；")}`
+        : "";
+      const combined = [accountText, sourceText].filter(Boolean).join("；");
+      const hasSourceDanger = sourceIssues.some((issue) => issue.tone === "danger");
+      if (kind === "auth_expired" && !hasSourceDanger) {
+        el.classList.add("is-auth-expired", "is-warning");
         el.classList.remove("is-error");
-        el.textContent = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        const fallback = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        el.textContent = [message ? accountText : fallback, sourceText].filter(Boolean).join("；");
         return;
       }
-      el.classList.add("is-error");
+      const hasAccountIssue = Boolean(error || kind || issues.length);
+      const warningOnly = !hasSourceDanger && (!hasAccountIssue || severity === "warning");
+      el.classList.toggle("is-warning", warningOnly);
+      el.classList.toggle("is-error", !warningOnly);
       el.classList.remove("is-auth-expired");
-      const when = String(runtime?.last_account_sync_at || "");
-      const detail = error || "账号同步出错";
-      el.textContent = when ? `账号同步出错：${detail}（上次同步 ${when}）` : `账号同步出错：${detail}`;
+      el.textContent = combined;
     }
 
     function applyRuntimeStatus(payload) {
@@ -5504,6 +6130,39 @@
       return selected.length > 0 ? selected : ["search"];
     }
 
+    const BANGUMI_SOURCE_MODE_FIELDS = [
+      ["search", "bangumiModeSearch"],
+      ["ranked", "bangumiModeRanked"],
+      ["latest", "bangumiModeLatest"],
+    ];
+    const BANGUMI_SUBJECT_TYPE_FIELDS = [
+      ["anime", "bangumiTypeAnime"],
+      ["book", "bangumiTypeBook"],
+      ["game", "bangumiTypeGame"],
+      ["music", "bangumiTypeMusic"],
+      ["real", "bangumiTypeReal"],
+    ];
+
+    function setCheckedValues(fields, rawValues) {
+      const fallback = fields.map(([value]) => value);
+      const selected = new Set(
+        (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+          .map((value) => String(value).trim())
+          .filter(Boolean),
+      );
+      fields.forEach(([value, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = selected.has(value);
+      });
+    }
+
+    function collectCheckedValues(fields, fallback) {
+      const selected = fields
+        .filter(([, id]) => document.getElementById(id)?.checked === true)
+        .map(([value]) => value);
+      return selected.length > 0 ? selected : fallback;
+    }
+
     function joinPath(directory, filename) {
       const dir = String(directory || "").trim();
       const name = String(filename || "").trim();
@@ -5537,8 +6196,16 @@
 
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+    //
+    // The state -> label/tone table, the verify tones and the credential-row
+    // shape all come from /shared/source-status.js, which the extension side
+    // panel and the setup wizard load too. Keeping a private copy here is what
+    // let the two surfaces drift into painting `no_auth` and `unverified` the
+    // same colour (spec D6). The roster it exports includes Bangumi, so this
+    // page keeps rendering that row even though the backend sends it no `auth`
+    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+    const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -5546,29 +6213,63 @@
       youtube: "youtubeEnabled",
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
-      reddit: "redditEnabled"
+      reddit: "redditEnabled",
+      bangumi: "bangumiEnabled"
     };
-    const SOURCE_ACCESS_STATE = {
-      ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "凭据已就绪" },
-      no_auth: { tone: "public", label: "无需登录" },
-      unverified: { tone: "pending", label: "状态待验证" },
-      missing: { tone: "warning", label: "需要登录" },
-      login_required: { tone: "warning", label: "需要登录" },
-      missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "pending", label: "频率受限" },
-      partial: { tone: "warning", label: "部分可用" },
-      stale: { tone: "warning", label: "需要刷新" },
-      error: { tone: "danger", label: "检查失败" },
-      expired: { tone: "danger", label: "凭据失效" },
-      expired_cookie: { tone: "danger", label: "Cookie 失效" },
-      blocked: { tone: "danger", label: "接入受阻" }
-    };
+
+    function collectEnabledSourceIssues(data) {
+      if (!data || typeof data !== "object") return [];
+      return SOURCE_STATUS_KEYS.flatMap((key) => {
+        const issue = SourceStatus.describeSourceIssue(data[key]);
+        if (!issue) return [];
+        return [{ ...issue, key, source: SourceStatus.sourceLabel(key) }];
+      });
+    }
 
     function setSourceBadge(badge, text, tone) {
       if (!badge) return;
       badge.textContent = text;
       badge.dataset.tone = tone;
+    }
+
+    // How strong the evidence behind the access verdict is, as its own badge
+    // beside it. Two sources can honestly both read 已验证 while one asked the
+    // platform and the other only found a file on disk; before this they were
+    // the same green pill, which is the misreading the contract exists to fix.
+    // Hidden rather than blanked when there is nothing to rate — a source that
+    // needs no credential has no evidence, and an empty pill reads as a bug.
+    function setSourceEvidence(badge, evidence) {
+      if (!badge) return;
+      const shown = Boolean(evidence && evidence.text);
+      badge.hidden = !shown;
+      badge.textContent = shown ? evidence.text : "";
+      badge.dataset.rank = shown ? evidence.rank : "none";
+      // The glyph and the method name already carry the distinction; the title
+      // spells it out for anyone who wants it, and comes from the shared module
+      // so it cannot drift from the glyph it explains.
+      if (shown && evidence.hint) badge.title = evidence.hint;
+      else badge.removeAttribute("title");
+    }
+
+    // The overseas-egress advisory is authored by the backend
+    // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+    // verbatim. This function must never learn a platform name nor read
+    // [network].mode: adding a platform must stay a one-line backend change.
+    // Only the `enabled` gate lives here, because "is this row live right now"
+    // is a UI fact the backend cannot see (the desktop select can be pending).
+    function applySourceNetworkHint(row, hint, enabled) {
+      const text = enabled ? String(hint || "") : "";
+      let node = row.querySelector(".source-network-hint");
+      if (!text) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.className = "source-network-hint";
+        row.appendChild(node);
+      }
+      node.textContent = text;
     }
 
     function getPendingSourceEnabled(key, item) {
@@ -5590,29 +6291,35 @@
         if (!row) return;
         const sourceBadge = row.querySelector(".source-source-badge");
         const accessBadge = row.querySelector(".source-access-badge");
+        const evidenceBadge = row.querySelector(".source-evidence-badge");
         const detail = row.querySelector(".src-detail");
         const item = data?.[key];
-        if (!item) {
+        const access = SourceStatus.describeAccess(item);
+        setSourceEvidence(evidenceBadge, access.evidence);
+        if (!access.present) {
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
-          setSourceBadge(accessBadge, "接入：后端未连接", "muted");
-          if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
+          if (detail) detail.textContent = access.detail;
+          // No status means no basis for an egress advisory either; drop any
+          // hint left over from the last successful poll.
+          applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
-          row.dataset.accessTone = "muted";
+          row.dataset.accessTone = access.tone;
           return;
         }
         const enableState = getPendingSourceEnabled(key, item);
-        const accessState = SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" };
         const sourceLabel = enableState.pending
           ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
           : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
         setSourceBadge(sourceBadge, sourceLabel, enableState.pending ? "pending" : enableState.savedEnabled ? "enabled" : "disabled");
-        setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
+        setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
-        if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        if (detail) detail.textContent = detailPrefix + (access.detail || "暂无更多状态细节。");
+        applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
-        row.dataset.accessTone = accessState.tone;
+        row.dataset.accessTone = access.tone;
       });
     }
 
@@ -5621,58 +6328,76 @@
       try { data = await requestJson("/sources/status"); } catch { data = null; }
       state.sourceStatus = data;
       renderSourcesStatusRows(data);
+      renderAccountSyncStatus(state.runtimeStatus);
     }
+
+    function renderVerifyResult(statusEl, result) {
+      const view = SourceStatus.describeVerifyResult(result);
+      setProbeStatus(statusEl, view.tone, view.text);
+    }
+
+    const sourceVerifyInFlight = new Set();
+
+    async function runSourceVerify(row) {
+      const slug = row?.dataset?.sourceStatus || "";
+      if (!slug || sourceVerifyInFlight.has(slug)) return;
+      const button = row.querySelector(".source-verify-btn");
+      const statusEl = row.querySelector(".source-verify-status");
+      sourceVerifyInFlight.add(slug);
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "连接");
+      let cooldown = 0;
+      try {
+        const result = await requestJsonStrict(`/sources/${encodeURIComponent(slug)}/verify`, {
+          method: "POST",
+          timeoutMs: 30000
+        });
+        renderVerifyResult(statusEl, result);
+        cooldown = Number(result?.retry_after_seconds) || 0;
+        // Only a verification that actually moved the credential or the verdict
+        // makes the badge above it stale; a refreshed timestamp does not.
+        if (result?.changed) void renderSourcesStatus();
+      } catch (error) {
+        const view = SourceStatus.describeVerifyError(error);
+        setProbeStatus(statusEl, view.tone, view.text);
+      } finally {
+        sourceVerifyInFlight.delete(slug);
+        SourceStatus.startVerifyCooldown(button, cooldown);
+      }
+    }
+
+    $("#sourceStatusList")?.addEventListener("click", (event) => {
+      const button = event.target.closest(".source-verify-btn");
+      if (!button || button.disabled) return;
+      void runSourceVerify(button.closest(".source-status-row"));
+    });
 
     function renderSourceCredentialRows(data) {
       const list = $("#sourceCredentialList");
       if (!list) return;
-      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
+      SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
-        const copyBtn = row.querySelector(".source-credential-copy");
-        const item = data?.[key];
-        if (!item) {
-          row.dataset.available = "false";
-          if (summary) summary.textContent = "状态暂不可用";
-          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
-          if (copyBtn) copyBtn.disabled = true;
-          return;
-        }
-        row.dataset.available = item.available ? "true" : "false";
-        if (summary) {
-          if (key === "xiaohongshu" && item.available) {
-            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
-          } else {
-            summary.textContent = item.available
-              ? `${item.label || "Cookie"} 已保存，展开查看`
-              : item.detail || "当前没有可展示 Cookie";
-          }
-        }
-        if (value) {
-          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
-        }
-        if (copyBtn) copyBtn.disabled = !item.available;
+        // Summary wording is the backend's, including 小红书's "a stored
+        // content token is not a login" caveat. That caveat used to be a
+        // per-platform branch right here, so only this page ever showed it —
+        // the side panel and the setup wizard silently disagreed.
+        const view = SourceStatus.describeCredential(data?.[key]);
+        row.dataset.available = view.available ? "true" : "false";
+        row.dataset.formKind = view.form.kind;
+        if (summary) summary.textContent = view.summary;
+        if (value) value.value = view.value;
       });
-      // Reddit's paste box has no config-side cookie field (the value goes to
-      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
-      // by credential availability instead of the config snapshot.
+      // Not a display branch over the access enum: every other paste box gets
+      // its "已保存/未保存" placeholder from the config snapshot in
+      // populateForm(), but Reddit's credential goes to rdt-cli's own store, so
+      // config.toml has no field to read and the hint has to come from here.
+      // Generalising it would mean either a new contract field or moving three
+      // other platforms off the config snapshot — both beyond this change.
       setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
-
-    $("#sourceCredentialList")?.addEventListener("click", async (event) => {
-      const btn = event.target.closest(".source-credential-copy");
-      if (!btn || btn.disabled) return;
-      const value = btn.closest(".source-credential-row")?.querySelector(".source-credential-value")?.value?.trim() || "";
-      if (!value) return;
-      try {
-        await navigator.clipboard.writeText(value);
-        showToast("已复制当前凭据");
-      } catch {
-        showToast("复制失败：浏览器未授予剪贴板访问权限");
-      }
-    });
 
     async function renderSourceCredentials() {
       let data = null;
@@ -5838,6 +6563,7 @@
 
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
+      state.degraded = config.degraded === true;
       state.config = config;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
@@ -5862,6 +6588,7 @@
       setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
+      setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -5886,7 +6613,9 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
-      setSelect("networkProxyMode", config.network?.mode || "direct");
+      // Mirrors the [network].mode backend default (system since v0.3.175);
+      // only reached if /api/config omits the field.
+      setSelect("networkProxyMode", config.network?.mode || "system");
       setInput("networkProxy", config.network?.proxy || "");
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
@@ -6002,8 +6731,46 @@
       setInput("redditDailyRelatedBudget", config.sources?.reddit?.daily_related_budget);
       setInput("redditRequestInterval", config.sources?.reddit?.request_interval_seconds);
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      setSelect("bangumiEnabled", config.sources?.bangumi?.enabled === true ? "on" : "off");
+      setInput("bangumiUsername", config.sources?.bangumi?.username);
+      {
+        // The token itself is never returned by GET (secret); access_token_set
+        // only tells us whether one is stored. Keep the field empty and signal
+        // the stored state via placeholder so an untouched save never clobbers it.
+        const bangumiToken = document.getElementById("bangumiAccessToken");
+        if (bangumiToken) {
+          bangumiToken.value = "";
+          bangumiToken.placeholder = config.sources?.bangumi?.access_token_set
+            ? "已配置（留空保持不变；填写新令牌以替换）"
+            : "可留空；填写以自动识别当前用户并读取私密收藏";
+        }
+        // Clear-token is a per-save action; never leave it pre-checked after a
+        // reload, and hide it when nothing is stored to clear.
+        const bangumiClearToken = document.getElementById("bangumiClearToken");
+        if (bangumiClearToken) {
+          bangumiClearToken.checked = false;
+          bangumiClearToken.disabled = !config.sources?.bangumi?.access_token_set;
+        }
+      }
+      setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, config.sources?.bangumi?.source_modes);
+      setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, config.sources?.bangumi?.subject_types);
+      setInput("bangumiDailySearchBudget", config.sources?.bangumi?.daily_search_budget);
+      setInput("bangumiDailyRankedBudget", config.sources?.bangumi?.daily_ranked_budget);
+      setInput("bangumiDailyLatestBudget", config.sources?.bangumi?.daily_latest_budget);
+      setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
+      setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
+      setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      if (!state.initBangumiUsernameTouched) {
+        state.initBangumiUsername = config.sources?.bangumi?.username || "";
+        // A successful prefill populated the field; a later explicit clear is
+        // then a deliberate reset (sends ""), while an untouched or config-failed
+        // empty field omits the username to keep the configured value.
+        state.initBangumiUsernamePrefilled = true;
+      }
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -6062,6 +6829,9 @@
         comment_count: Number(item?.comment_count ?? 0) || 0,
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
@@ -6175,7 +6945,7 @@
             if (delightUserEngaged()) return;
             const next = state.delightIndex + 1;
             setActiveDelight(next >= state.delights.length ? 0 : next);
-        }, 4000);
+        }, DELIGHT_AUTO_ADVANCE_MS);
     }
 
     function _stopDelightAutoAdvance() {
@@ -6208,11 +6978,12 @@
         scheduleActivityRailHeightSync();
         return;
       }
+      const shouldAnimateTransition = Boolean(state.delight);
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
       // 锁定容器高度防止下方布局跳变
       const banner = $("#delightBanner");
-      if (banner) {
+      if (banner && shouldAnimateTransition) {
         banner.style.height = `${banner.offsetHeight}px`;
         banner.classList.add("is-height-locked");
         banner.classList.remove("is-height-settling");
@@ -6246,7 +7017,7 @@
         if (copy) copy.classList.remove("is-exiting");
         if (thumb) thumb.classList.remove("is-exiting");
         // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
-        if (banner) {
+        if (banner && shouldAnimateTransition) {
           if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
           const startH = parseFloat(banner.style.height) || banner.offsetHeight;
           banner.style.height = `${startH}px`;
@@ -6278,11 +7049,14 @@
             }
           };
           banner._heightRaf = requestAnimationFrame(step);
+        } else if (banner) {
+          banner.style.removeProperty("height");
+          banner.classList.remove("is-height-locked", "is-height-settling");
         }
       };
-      if (copy) copy.classList.add("is-exiting");
-      if (thumb) thumb.classList.add("is-exiting");
-      if (copy || thumb) {
+      if (copy && shouldAnimateTransition) copy.classList.add("is-exiting");
+      if (thumb && shouldAnimateTransition) thumb.classList.add("is-exiting");
+      if (shouldAnimateTransition && (copy || thumb)) {
         setTimeout(applyContent, 250);
       } else {
         applyContent();
@@ -6487,6 +7261,15 @@
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      // 库存变化事件只刷新 Tab 数字 / 空态 / 自动续页 gate，不碰已加载的推荐卡片。
+      if (event.type === "refresh.pool_updated" || event.type === "pool_status") schedulePlatformAvailabilityRefresh();
+      if (event.type === "degraded") {
+        presentDegradedConfigRecovery({
+          degraded: true,
+          degraded_reason: event.reason || "",
+          issues: event.issues || [],
+        });
+      }
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
       // (/api/recommendations only returns the latest top window). Header/pool counts
@@ -6592,7 +7375,23 @@
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
     }
 
+    function scheduleDesktopRuntimeReconnect() {
+      if (document.hidden || desktopRuntimeReconnectTimer !== null) return;
+      desktopRuntimeReconnectTimer = window.setTimeout(() => {
+        desktopRuntimeReconnectTimer = null;
+        connectRuntimeStream();
+      }, 3000);
+    }
+
     function connectRuntimeStream() {
+      if (document.hidden) return;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      if (state.runtimeSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.runtimeSocket.readyState)) {
+        return;
+      }
       if (state.runtimeSocket) state.runtimeSocket.close();
       try {
         const socket = new WebSocket(getRuntimeStreamUrl());
@@ -6617,11 +7416,63 @@
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
         });
         socket.addEventListener("close", () => {
-          if (state.runtimeSocket === socket) window.setTimeout(connectRuntimeStream, 3000);
+          if (state.runtimeSocket === socket) {
+            state.runtimeSocket = null;
+            scheduleDesktopRuntimeReconnect();
+          }
         });
         socket.addEventListener("error", () => { $("#statusLabel").textContent = "实时流断开"; });
       } catch {
         $("#statusLabel").textContent = "实时流不可用";
+      }
+    }
+
+    function pauseDesktopBackendSession() {
+      backendHydrationPending = true;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      for (const timer of [
+        backendHydrationTimer,
+        desktopRecommendationRecoveryTimer,
+        desktopRuntimeRecoveryTimer,
+        platformAvailabilityRetryTimer,
+        activityPageRefreshTimer,
+      ]) {
+        if (timer !== null) window.clearTimeout(timer);
+      }
+      backendHydrationTimer = null;
+      desktopRecommendationRecoveryTimer = null;
+      desktopRuntimeRecoveryTimer = null;
+      platformAvailabilityRetryTimer = null;
+      activityPageRefreshTimer = null;
+      clearInitPolling();
+      const socket = state.runtimeSocket;
+      state.runtimeSocket = null;
+      if (socket) socket.close();
+    }
+
+    async function startDesktopBackendSession({ forceHydrate = false } = {}) {
+      if (document.hidden || desktopBackendSessionInFlight) return;
+      desktopBackendSessionInFlight = true;
+      try {
+        await ensureAuthenticated();
+        const stale = Date.now() - desktopLastHydratedAt >= DESKTOP_RESUME_HYDRATE_TTL_MS;
+        if (forceHydrate || backendHydrationPending || !desktopLastHydratedAt || stale) {
+          await hydrateFromBackend();
+          desktopLastHydratedAt = Date.now();
+          backendHydrationPending = false;
+        }
+        if (!document.hidden) connectRuntimeStream();
+      } catch (error) {
+        console.error("后端数据加载失败", error);
+        $("#statusLabel").textContent = "后端数据加载失败";
+        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
+        showToast("后端数据加载失败，页面已保留离线数据");
+        if (!document.hidden) connectRuntimeStream();
+      } finally {
+        desktopBackendSessionInFlight = false;
       }
     }
 
@@ -6649,9 +7500,23 @@
         scheduleAutoLoadCheck();
       }
 
-      function markDesktopRecommendationFailedAndRecover() {
+      function markDesktopRecommendationFailedAndRecover(error) {
         if (state.videos.length > 0) {
           clearDesktopRecommendationRecovery("ready");
+          return;
+        }
+        // A mid-session LLM-registry degrade blocks /api/recommendations with a
+        // 503 {status:"degraded", …} envelope, which requestJsonStrict rethrows
+        // as error.details (§4.8). Route that to the model-settings recovery
+        // instead of the generic retry UI — the pool cannot refill until the
+        // provider is fixed, so a retry loop here is a dead end.
+        const details = error && error.details;
+        if (details && details.status === "degraded") {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: details.reason || "",
+            issues: details.issues || [],
+          });
           return;
         }
         desktopRecommendationLoadState = "failed";
@@ -6684,7 +7549,16 @@
       }
 
       function applyHealthSnapshot(snapshot) {
-        if (snapshot) $("#statusLabel").textContent = "已连接本地后端";
+        if (!snapshot) return;
+        if (snapshot.degraded === true) {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: snapshot.degraded_reason || "",
+            issues: snapshot.issues || [],
+          });
+          return;
+        }
+        $("#statusLabel").textContent = "已连接本地后端";
       }
 
       function applyInitStatusSnapshot(snapshot) {
@@ -6753,7 +7627,9 @@
       }
 
       function applyConfigSnapshot(snapshot) {
-        applyConfig(snapshot?.config || snapshot);
+        const configSnapshot = snapshot?.config || snapshot;
+        applyConfig(configSnapshot);
+        presentDegradedConfigRecovery(configSnapshot);
         renderFilters();
         syncSourceMetric();
       }
@@ -6779,12 +7655,23 @@
         }
       }
 
+      // /api/ping is deliberately provider-free and carries recovery
+      // metadata only when the backend is degraded. Pay one loopback RTT
+      // before normal parallel hydration so a broken LLM registry does not
+      // generate a console storm from intentionally-blocked business APIs.
+      const pingSnapshot = await requestJson(ENDPOINTS.ping);
+      applyHealthSnapshot(pingSnapshot);
+      if (pingSnapshot?.degraded === true) {
+        applyConfigSnapshot(await requestJson(ENDPOINTS.config));
+        return;
+      }
+
       const recommendationsPromise = readRecommendationSnapshot();
       const runtimePromise = readRuntimeSnapshot();
 
       const recommendationApplicationPromise = recommendationsPromise.then(
         (items) => applyInitialRecommendations(items),
-        () => markDesktopRecommendationFailedAndRecover(),
+        (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
         (snapshot) => applyInitialRuntimeSnapshot(snapshot),
@@ -6796,7 +7683,6 @@
       );
 
       const secondaryPromises = [
-        requestJson(ENDPOINTS.ping).then(applyHealthSnapshot),
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),
@@ -6806,6 +7692,7 @@
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
         requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
+        refreshPlatformAvailability(),
       ];
 
       // 预取 LAN IP，供二维码面板使用；它不参与任一首屏资源的应用顺序。
@@ -6819,7 +7706,7 @@
     }
 
     function renderAll() {
-      const steps = [renderReshuffleToggle, renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
+      const steps = [renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
       for (const step of steps) {
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
@@ -6974,6 +7861,28 @@
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
             min_interval_minutes: getIntInput("redditMinInterval", 60)
+          },
+          bangumi: {
+            enabled: $("#bangumiEnabled").value === "on",
+            username: getInput("bangumiUsername"),
+            // Precedence: an explicit "clear token" checkbox sends access_token:""
+            // (backend clears the stored token + rejection marker). Otherwise
+            // send the token only when the user typed one; an empty field means
+            // "leave the stored token unchanged", so omit the key rather than
+            // clobbering it with "".
+            ...(document.getElementById("bangumiClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("bangumiAccessToken") || "") !== ""
+                ? { access_token: getInput("bangumiAccessToken") }
+                : {}),
+            subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+            source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("bangumiDailySearchBudget", 300),
+            daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
+            daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
+            request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 60),
+            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },
         scheduler: {
@@ -6998,7 +7907,8 @@
             youtube: getIntInput("shareYoutube", 1),
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
-            reddit: getIntInput("shareReddit", 1)
+            reddit: getIntInput("shareReddit", 1),
+            bangumi: getIntInput("shareBangumi", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -7056,7 +7966,9 @@
       already_applying: "正在更新中"
     };
 
-    function formatUpdateCheckTime(iso) {
+    // Shared by update checks and account-sync status: the backend hands out
+    // raw ISO strings (UTC, microseconds), which are unreadable as-is.
+    function formatLocalTime(iso) {
       if (!iso) return "";
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return "";
@@ -7068,7 +7980,7 @@
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "disabled":
@@ -7114,7 +8026,7 @@
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -7142,7 +8054,7 @@
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -7320,18 +8232,26 @@
       });
     }
 
+    // One DOM convention for every "click, wait, read a verdict" strip on this
+    // page: tone in the dataset, verdict in the text. The LLM/embedding probes
+    // and the per-source 测试连接 buttons share it instead of each keeping a
+    // private copy — two independent copies of one rendering rule is exactly
+    // the drift that left the codebase with two divergent source status maps.
+    function setProbeStatus(statusEl, tone, text) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = tone;
+      statusEl.textContent = text;
+    }
+
     function renderProbeResult(statusEl, result) {
       if (!statusEl) return;
-      statusEl.dataset.tone = result?.ok ? "success" : "error";
-      statusEl.textContent = formatProbeResult(result);
+      setProbeStatus(statusEl, result?.ok ? "success" : "error", formatProbeResult(result));
       const configStatus = $("#configStatus");
       if (configStatus) configStatus.value = formatProbeResult(result);
     }
 
     function renderProbePending(statusEl, label) {
-      if (!statusEl) return;
-      statusEl.dataset.tone = "pending";
-      statusEl.textContent = `${label} 探测中…`;
+      setProbeStatus(statusEl, "pending", `${label} 探测中…`);
     }
 
     async function runLlmConfigProbe() {
@@ -7503,9 +8423,13 @@
       hintEl.hidden = true;
       hintEl.textContent = "";
       // The backend knows its own LAN IP; the page host may be 127.0.0.1,
-      // which a phone cannot reach. Use the cached value from page load
-      // prefetch, falling back to a fresh request if unavailable.
-      const lanIp = _cachedLanIp || String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      // which a phone cannot reach. Always re-query on open: the address moves
+      // when the user switches Wi-Fi or plugs in a dongle, and a sticky cache
+      // would keep encoding an unreachable host until a full page reload. The
+      // page-load prefetch is only a fallback for when this request fails.
+      const freshLanIp = String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      if (freshLanIp) _cachedLanIp = freshLanIp;
+      const lanIp = freshLanIp || _cachedLanIp;
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
@@ -7571,11 +8495,6 @@
     safeBind("#hueValueInput", "change", (event) => {
       const val = Math.min(360, Math.max(0, parseInt(event.target.value, 10) || 0));
       setThemeHue(val);
-    });
-    ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
-      safeBind(selector, "change", (event) => {
-        setDismissOnReshuffle(Boolean(event.target.checked), { toast: true });
-      });
     });
     safeBind("#autoLoadOnScrollSetting", "change", (event) => {
       setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
@@ -7651,7 +8570,7 @@
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -7661,6 +8580,7 @@
         if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");
@@ -7677,10 +8597,10 @@
       $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
-        const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {
+        const result = await requestJsonStrict(ENDPOINTS.config, {
           method: "PUT",
           timeoutMs: 60000,
           headers: { "Content-Type": "application/json" },
@@ -7741,14 +8661,5 @@
       $("#statusLabel").textContent = "首屏渲染失败";
       $("#runtimeSummary").textContent = error?.message || "请检查后端返回的数据结构。";
     }
-    ensureAuthenticated()
-      .then(() => hydrateFromBackend())
-      .then(connectRuntimeStream)
-      .catch((error) => {
-        console.error("后端数据加载失败", error);
-        $("#statusLabel").textContent = "后端数据加载失败";
-        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
-        showToast("后端数据加载失败，页面已保留离线数据");
-        connectRuntimeStream();
-      });
+    void startDesktopBackendSession({ forceHydrate: true });
     })();

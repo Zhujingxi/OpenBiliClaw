@@ -70,6 +70,25 @@ def test_create_app_boots_degraded_when_registry_build_fails(
     assert body["issues"][0]["severity"] == "blocking"
 
 
+def test_degraded_ping_stays_live_and_advertises_fast_recovery_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.get("/api/ping")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "openbiliclaw-api"
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "llm_registry_unavailable"
+    assert body["issues"][0]["severity"] == "blocking"
+
+
 def test_degraded_config_get_includes_recovery_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -125,6 +144,37 @@ def test_degraded_mode_keeps_mobile_static_shell_assets_reachable(
     assert favicon_response.headers.get("content-type", "").startswith("image/png")
 
 
+def test_degraded_mode_keeps_desktop_and_setup_recovery_shells_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    root_response = client.get("/", follow_redirects=False)
+    desktop_response = client.get("/web")
+    desktop_asset_response = client.get("/web/assets/js/app.js")
+    setup_response = client.get("/setup/")
+    shared_module_response = client.get("/shared/source-status.js")
+    unrelated_prefix_response = client.get("/webhook")
+
+    assert root_response.status_code == 302
+    assert root_response.headers["location"] == "/setup/"
+    assert desktop_response.status_code == 200
+    assert desktop_response.headers.get("content-type", "").startswith("text/html")
+    assert desktop_asset_response.status_code == 200
+    assert "javascript" in desktop_asset_response.headers.get("content-type", "")
+    assert setup_response.status_code == 200
+    assert setup_response.headers.get("content-type", "").startswith("text/html")
+    # The setup wizard's <script src="/shared/source-status.js"> runs at parse
+    # time; a 503 here leaves SourceStatus undefined and the whole wizard dead,
+    # so the degraded config could never be repaired from the browser.
+    assert shared_module_response.status_code == 200
+    assert "javascript" in shared_module_response.headers.get("content-type", "")
+    assert unrelated_prefix_response.status_code == 503
+
+
 @pytest.mark.parametrize(
     ("method", "path", "json_payload"),
     [
@@ -151,6 +201,33 @@ def test_degraded_non_config_endpoints_return_503(
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["reason"] == "llm_registry_unavailable"
+
+
+def test_degraded_mode_allows_llm_independent_repair_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Sources status/verify and embedding repair only need config + database.
+
+    Blocking them made the settings 平台源 tab and the embedding banner fail
+    with misleading "backend unavailable" copy while degraded, even though
+    fixing platform logins / pulling bge-m3 is exactly what a user can
+    usefully do while repairing the LLM config.
+    """
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    status_response = client.get("/api/sources/status")
+    verify_response = client.post("/api/sources/bilibili/verify")
+    repair_status_response = client.get("/api/embedding/repair")
+
+    assert status_response.status_code == 200
+    assert "bilibili" in status_response.json()
+    # Verify may legitimately fail (no cookie configured) but must NOT be the
+    # degraded guard's 503 envelope.
+    assert verify_response.status_code != 503
+    assert repair_status_response.status_code != 503
 
 
 def test_degraded_update_status_is_reachable(
@@ -191,6 +268,47 @@ def test_degraded_runtime_stream_sends_degraded_event_and_stays_open(
         assert event["type"] == "degraded"
         assert event["reason"] == "llm_registry_unavailable"
         assert event["issues"]
+
+
+def test_degraded_init_post_rejects_with_actionable_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """POST /api/init while degraded must explain the LLM-config cause, not
+    return a bare error or crash on a missing coordinator (project rule 7)."""
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    app = create_app()
+    app.state.auth_gate.is_trusted_local = lambda request: True
+    client = TestClient(app)
+
+    response = client.post("/api/init", json={})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "degraded"
+    assert "LLM 配置有误" in body["detail"]
+    assert "设置页" in body["detail"]
+
+
+def test_degraded_init_status_reports_degraded_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """GET /api/init-status while degraded must surface a degraded-aware reason
+    with an actionable detail instead of a generic 'AI 服务不可用' line."""
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.get("/api/init-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reason"] == "degraded"
+    assert "LLM 配置有误" in body["detail"]
+    assert "设置页" in body["detail"]
+    assert body["can_start"] is False
 
 
 def test_normal_boot_health_payload_reports_profile_state(

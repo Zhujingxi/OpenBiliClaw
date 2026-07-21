@@ -89,6 +89,10 @@ let runtimeStatusGeneration = 0;
 let recommendationActionMessage = "";
 
 // Delight auto-advance
+// 轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文摘录读下来
+// 就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 / 下一条。
+// 与桌面端 web/desktop/assets/js/app.js 的同名常量保持一致。
+const DELIGHT_AUTO_ADVANCE_MS = 60000;
 let _delightAutoTimer = null;
 let _delightDragging = false;
 let _delightSwipeStartX = 0;
@@ -872,7 +876,7 @@ function _startDelightAutoAdvance() {
     if (delightUserEngaged()) return;
     const next = state.delightCurrentIndex + 1;
     navigateDelight(next >= state.activeDelights.length ? 0 : next);
-  }, 4000);
+  }, DELIGHT_AUTO_ADVANCE_MS);
 }
 
 function _stopDelightAutoAdvance() {
@@ -1448,7 +1452,8 @@ async function handleReshuffle() {
   resetAutoAppendIntent();
   render();
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     const replacement = reconcileRecommendationReplacement(
       state.recommendations,
       result.items || [],

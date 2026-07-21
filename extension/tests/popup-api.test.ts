@@ -23,6 +23,7 @@ import {
   requestJson,
   reshuffleRecommendations,
   respondToAvoidanceProbe,
+  startInit,
   startChatTurn,
   submitInsightFeedback,
   updateConfig,
@@ -37,6 +38,129 @@ test("guided init API calls all have finite request deadlines", () => {
   assert.match(source, /requestJson\("\/init-status", \{ method: "GET", timeoutMs: 45000 \}\)/);
   assert.match(source, /body: JSON\.stringify\(payload\),\s+timeoutMs: 60000,/);
   assert.match(source, /requestJson\("\/init\/cancel", \{ method: "POST", timeoutMs: 15000 \}\)/);
+});
+
+test("startInit sends Bangumi username in scoped source_options", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: " sai " });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai" } },
+  });
+});
+
+test("startInit omits source_options when no username is supplied (keep configured)", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"] });
+  await startInit({ sources: ["bangumi"], bangumiUsername: null });
+
+  // A missing/null username must not send source_options.bangumi.username, so
+  // the backend keeps the configured value instead of erasing it.
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: false, sources: ["bangumi"] });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { force: false, sources: ["bangumi"] });
+});
+
+test("startInit sends an empty username to clear the configured value", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "" });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "" } },
+  });
+});
+
+test("startInit sends a Bangumi access token in scoped source_options", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiToken: "  tok-123  " });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { access_token: "tok-123" } },
+  });
+});
+
+test("startInit sends both Bangumi username and access token when supplied", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "sai", bangumiToken: "tok-1" });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai", access_token: "tok-1" } },
+  });
+});
+
+test("startInit omits the token when none is supplied (keep configured)", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "sai", bangumiToken: null });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai" } },
+  });
+});
+
+test("popup resolves the Bangumi username omit-vs-clear before sending guided init", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /resolveInitBangumiUsername\(\{/);
+  assert.match(source, /bangumiUsername:\s*bangumiUsernameOption/);
+  assert.match(source, /state\.initBangumiUsernamePrefilled = true/);
+});
+
+test("popup surfaces guided-init 202 warnings via the hint banner", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /startResult = await startInit\(/);
+  assert.match(source, /startResult\?\.warnings/);
+  assert.match(source, /setHint\(\s*\n?\s*startWarnings\.length/);
+});
+
+test("popup preserves the Bangumi username across init-panel rerenders", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /initBangumiUsername:\s*""/);
+  assert.match(source, /bangumiInput\.value = state\.initBangumiUsername/);
+  assert.match(
+    source,
+    /bangumiInput\.addEventListener\("input", \(\) => \{\s*state\.initBangumiUsername/,
+  );
 });
 
 test("popup exposes cancel, offline feedback, and indeterminate init progress", () => {
@@ -175,11 +299,16 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
     };
   };
 
-  const result = await reshuffleRecommendations();
+  const result = await reshuffleRecommendations(["BV1CURRENT", "BV2CURRENT"]);
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "http://127.0.0.1:8420/api/recommendations/reshuffle");
   assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.equal(
+    calls[0].options.body,
+    JSON.stringify({ excluded_bvids: ["BV1CURRENT", "BV2CURRENT"] }),
+  );
   assert.deepEqual(result, {
     items: [
       {
@@ -204,6 +333,9 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
         comment_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
+        rating_score: 0,
+        rating_count: 0,
+        source_rank: 0,
       },
     ],
   });
@@ -265,6 +397,9 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
         comment_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
+        rating_score: 0,
+        rating_count: 0,
+        source_rank: 0,
       },
     ],
   });
@@ -366,6 +501,9 @@ test("fetchRecommendations normalizes cover urls from the recommend endpoint", a
       comment_count: 0,
       favorite_count: 0,
       danmaku_count: 0,
+      rating_score: 0,
+      rating_count: 0,
+      source_rank: 0,
     },
   ]);
 });
@@ -649,7 +787,7 @@ test("fetchProfileSummary forwards limit and cursor for cognition history pagina
   assert.equal(calls[0].options.method, "GET");
 });
 
-test("fetchConfig sends GET to /config with reveal_keys", async () => {
+test("fetchConfig requests the masked config snapshot", async () => {
   const calls: Array<{ url: string; options: any }> = [];
   globalThis.fetch = async (url: any, options: any) => {
     calls.push({ url, options });
@@ -675,7 +813,7 @@ test("fetchConfig sends GET to /config with reveal_keys", async () => {
   const result = await fetchConfig();
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config?reveal_keys=true");
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config");
   assert.equal(calls[0].options.method, "GET");
   assert.equal(result.llm.default_provider, "gemini");
   assert.equal(result.llm.gemini.api_key, "test-key");
@@ -1069,7 +1207,7 @@ test("popup-api requests honor configured backend host and port from chrome.stor
   try {
     await fetchConfig();
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config?reveal_keys=true");
+    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

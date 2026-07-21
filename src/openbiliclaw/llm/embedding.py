@@ -342,8 +342,8 @@ class EmbeddingService:
         # after the upstream issue is fixed. v0.3.31 had ~170 keys
         # poisoned this way before this guard existed — top user
         # interests like 游戏攻略 / 洛克王国 / 金铲铲之战 were affected
-        # and the cascade silently zero'd DelightScorer's
-        # likes_alignment for the most relevant content. Surface a
+        # and the cascade silently zero'd every embedding-derived
+        # similarity signal for the most relevant content. Surface a
         # WARN per occurrence so the failure mode is visible at the
         # service layer, not buried in provider-level logs.
         if not vector:

@@ -92,14 +92,15 @@ GitHub issue #98 报告桌面 Web 在推荐反馈、猜测兴趣和猜测避雷�
 
 ## 换一批流程
 
-现状会先等待所有当前卡片 dismiss，再发 reshuffle，造成可见阻塞。新流程为：
+> 2026-07-21 语义修订：换批排除当前卡是默认去重，不再通过可选开关把整批内容写成
+> `dismiss`。以下流程以本次修订为准。
 
-1. 始终收集当前可见卡的稳定内容 ID，作为 `excluded_bvids` 发送给 reshuffle API；该排除与“换一批前忽略当前推荐”开关相互独立。
+1. 始终收集当前可见卡的稳定内容 ID，作为 `excluded_bvids` 发送给 reshuffle API；桌面平台 Tab 会覆盖该平台本会话已加载 ID，移动 Web 与 side panel 发送当前列表 ID。
 2. 后端 reshuffle 请求体新增可选 `excluded_bvids`，缺省/空 body 保持旧客户端行为。
 3. 推荐引擎在候选读取时为排除项补足取数窗口，并在平台 floor top-up 之后再次做最终排除，保证返回批次不含当前卡且在池足时仍能补满。
 4. 收到新批次后立即替换列表并渲染。
-5. 只有开关开启时，才在换批成功后 fire-and-forget 提交旧卡 dismiss；批量失败只提示，不把旧卡重新插入新批次。
-6. 使用列表 generation token 保护所有延迟的列表写入，旧批次回调不能删除或恢复新批次同 key 卡片。
+5. 后端仅在非空成功批次上写一条 satisfaction-neutral 的 `reshuffle` 事件；不逐卡提交 `dismiss`。
+6. 返回空批次或请求失败时保留当前列表。
 
 ## 后端事件循环隔离
 
@@ -127,7 +128,7 @@ GitHub issue #98 报告桌面 Web 在推荐反馈、猜测兴趣和猜测避雷�
 - 在列表被 reshuffle/hydrate 后，旧 generation 的 DOM/list rollback 变为 no-op。
 - 请求 4xx/5xx/timeout 均视为失败；保留后端 detail 优先的现有错误文案解析。
 - pagehide keepalive 请求不尝试更新已卸载页面；正常页面中的失败才回滚 DOM。
-- reshuffle 返回空批次时保留当前列表，不提交批量 dismiss。
+- reshuffle 返回空批次时保留当前列表，不记录批次事件。
 
 ## 测试设计
 
@@ -147,7 +148,7 @@ GitHub issue #98 报告桌面 Web 在推荐反馈、猜测兴趣和猜测避雷�
 - 推荐反馈分支不在网络回调中调用 `renderAll()`。
 - 两个探针展示面都使用协调器和同一稳定 key。
 - pagehide 注册 flush。
-- reshuffle 始终发送 visible exclusions，dismiss 不阻塞换批。
+- reshuffle 始终发送当前卡 exclusions，且源码中不存在换批批量 dismiss。
 
 ### Python/API 测试
 
@@ -184,6 +185,6 @@ GitHub issue #98 报告桌面 Web 在推荐反馈、猜测兴趣和猜测避雷�
 - 普通反馈点击与响应完成都不会触发全网格/全列表重建。
 - 10 秒内撤销后，网络、数据库事件与画像均无该操作；到期或 pagehide 后至多提交一次。
 - API 失败时组件恢复到点击前状态。
-- 换一批不等待 dismiss，且新旧批次无内容 ID 交集。
+- 换一批不产生逐卡 dismiss，且新旧批次无内容 ID 交集；成功仅记录一条批次事件。
 - 相同输入下 offload 前后推荐顺序与 supergroup map 完全相同。
 - 定向测试、ruff、mypy、完整 pytest 通过；真实浏览器场景通过。

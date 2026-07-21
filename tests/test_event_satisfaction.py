@@ -210,7 +210,7 @@ def test_video_dwell_classification_unchanged_by_content_rule() -> None:
 # --- Passive browse ---
 
 
-@pytest.mark.parametrize("event_type", ["snapshot", "scroll", "hover", "search"])
+@pytest.mark.parametrize("event_type", ["snapshot", "scroll", "hover", "search", "reshuffle"])
 def test_passive_browse_events_are_neutral(event_type: str) -> None:
     category, reason = classify_event_satisfaction({"event_type": event_type})
     assert (category, reason) == ("neutral", "passive_browse")

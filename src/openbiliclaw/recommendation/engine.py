@@ -15,15 +15,21 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.base import classify_llm_failure_kind
-from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
+from openbiliclaw.llm.json_utils import (
+    extract_llm_json_list,
+    extract_llm_json_object,
+    validated_text_field,
+)
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.saved_sync.identity import content_storage_key
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
+from openbiliclaw.sources.platforms import normalize_source_platform, source_family
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -163,6 +169,47 @@ def _batch_results_by_content_key(
         matched[raw_key] = item
 
     return matched if saw_identifier else None
+
+
+def _validated_expression_fields(
+    result: object,
+    *,
+    content_key: str,
+) -> tuple[str, str] | None:
+    """Return (expression, topic_label) only when both are non-empty strings.
+
+    The LLM occasionally answers with the whole batch nested under
+    ``expression`` (``{"expression": [{...}, {...}], "topic_label": "..."}``).
+    An unconditional ``str()`` turned that list into its Python repr, which
+    passed the non-empty check and was persisted as card copy — users saw
+    ``[{'expression': ..., 'topic_label': ...}]`` in the recommendation.
+    Reject non-strings here instead, so the caller can fall back or retry.
+    """
+    if not isinstance(result, dict):
+        return None
+    expression = result.get("expression")
+    topic_label = result.get("topic_label")
+    if not isinstance(expression, str) or not isinstance(topic_label, str):
+        logger.warning(
+            "Discarding expression payload with non-string fields for %s "
+            "(expression=%s, topic_label=%s)",
+            content_key,
+            type(expression).__name__,
+            type(topic_label).__name__,
+        )
+        return None
+    expression = expression.strip()
+    topic_label = topic_label.strip()
+    if not expression or not topic_label:
+        logger.warning(
+            "Discarding blank expression payload for %s "
+            "(expression_empty=%s, topic_label_empty=%s)",
+            content_key,
+            not expression,
+            not topic_label,
+        )
+        return None
+    return (expression, topic_label)
 
 
 class SupportsCoreMemoryTask(Protocol):
@@ -358,6 +405,7 @@ class RecommendationEngine:
         limit: int = 5,
         excluded_bvids: frozenset[str] = frozenset(),
         expression_mode: Literal["realtime", "precomputed"] = "precomputed",
+        source_platform: str = "",
     ) -> list[Recommendation]:
         """Serve recommendations while preserving the legacy list API."""
         result = await self.serve_with_result(
@@ -365,6 +413,7 @@ class RecommendationEngine:
             limit=limit,
             excluded_bvids=excluded_bvids,
             expression_mode=expression_mode,
+            source_platform=source_platform,
         )
         return result.items
 
@@ -375,6 +424,7 @@ class RecommendationEngine:
         limit: int = 5,
         excluded_bvids: frozenset[str] = frozenset(),
         expression_mode: Literal["realtime", "precomputed"] = "precomputed",
+        source_platform: str = "",
     ) -> ServeResult:
         """Serve one serialized batch with inventory/timing metadata."""
         async with self._serve_lock:
@@ -383,7 +433,49 @@ class RecommendationEngine:
                 limit=limit,
                 excluded_bvids=excluded_bvids,
                 expression_mode=expression_mode,
+                source_platform=source_platform,
             )
+
+    def _enforce_platform_scope(
+        self,
+        candidates: list[DiscoveredContent],
+        scope: str,
+    ) -> list[DiscoveredContent]:
+        """Drop candidates that do not belong to a requested platform scope.
+
+        The candidate loaders are supposed to hand back a single family, so a
+        mismatch here means the strict read drifted from its contract. Log it
+        as an error and drop the rows: a scoped request must never leak
+        another platform into the response, and letting the client filter it
+        away would hide the drift instead of surfacing it.
+
+        Classification must use ``source_family`` — the same function storage
+        counts and selects with — not ``source_platform`` alone. Legacy rows
+        carry their platform only in the ``source`` strategy prefix
+        (``zhihu-hot``), and ``_rows_to_discovered`` defaults their blank
+        ``source_platform`` to bilibili; judging by that column would discard
+        real stock the tab is advertising and log a phantom contract violation
+        on every scoped request.
+        """
+        if not scope:
+            return candidates
+        kept: list[DiscoveredContent] = []
+        leaked: list[str] = []
+        for item in candidates:
+            family = source_family(item.source_strategy, item.source_platform)
+            if family == scope:
+                kept.append(item)
+            else:
+                leaked.append(f"{item.bvid}@{family}")
+        if leaked:
+            logger.error(
+                "serve(source_platform=%s) candidate loader leaked %d cross-platform "
+                "row(s): %s. Dropping them rather than returning off-platform picks.",
+                scope,
+                len(leaked),
+                ", ".join(leaked[:10]),
+            )
+        return kept
 
     async def _serve_with_result_unlocked(
         self,
@@ -392,6 +484,7 @@ class RecommendationEngine:
         limit: int,
         excluded_bvids: frozenset[str],
         expression_mode: Literal["realtime", "precomputed"],
+        source_platform: str = "",
     ) -> ServeResult:
         """Unified recommendation entry point — always picks from the pool.
 
@@ -411,6 +504,7 @@ class RecommendationEngine:
             Recommendations plus inventory and phase timings.
         """
         label = "realtime" if expression_mode == "realtime" else "pool"
+        scope = normalize_source_platform(source_platform)
         multiplier = 4 if excluded_bvids else 3
         candidate_limit = max(limit * multiplier, 40) + len(excluded_bvids)
         pool_snapshot_started = time.perf_counter()
@@ -418,13 +512,22 @@ class RecommendationEngine:
         curator_snapshot: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None
         if callable(snapshot_loader):
             history_limit = max(1, int(getattr(self._curator, "_history_window", 30)))
-            snapshot = await snapshot_loader(
-                limit=candidate_limit,
-                xhs_self_nickname=self._xhs_self_nickname(),
-                curator_history_limit=history_limit,
-            )
+            # Only pass the new keyword when a scope was actually requested:
+            # test doubles and third-party adapters implement the historical
+            # signature, and a cross-platform serve must keep working on them.
+            snapshot_kwargs: dict[str, Any] = {
+                "limit": candidate_limit,
+                "xhs_self_nickname": self._xhs_self_nickname(),
+                "curator_history_limit": history_limit,
+            }
+            if scope:
+                snapshot_kwargs["source_platform"] = scope
+            snapshot = await snapshot_loader(**snapshot_kwargs)
             pool_readiness = dict(snapshot.readiness)
-            candidates = self._rows_to_discovered(list(snapshot.candidate_rows))
+            candidates = self._enforce_platform_scope(
+                self._rows_to_discovered(list(snapshot.candidate_rows)),
+                scope,
+            )
             loaded_count = int(snapshot.loaded_count)
             if snapshot.platform_topups:
                 logger.info(
@@ -436,10 +539,8 @@ class RecommendationEngine:
             after_exclude_count = len(candidates)
             candidates = self._exclude_disliked_topic_candidates(candidates, profile)
             after_disliked_count = len(candidates)
-            if snapshot.recent_viewed_bvids:
-                candidates = [
-                    item for item in candidates if item.bvid not in snapshot.recent_viewed_bvids
-                ]
+            if snapshot.seen_bvids:
+                candidates = [item for item in candidates if item.bvid not in snapshot.seen_bvids]
             after_viewed_count = len(candidates)
             curator_snapshot = (
                 list(snapshot.curator_signals),
@@ -449,6 +550,15 @@ class RecommendationEngine:
             # Compatibility path for test doubles and third-party adapters.
             pool_readiness = await asyncio.to_thread(self._pool_readiness_counts)
             if int(pool_readiness.get("available", 0)) > 0:
+                # Same rule as the snapshot loader: subclasses and test doubles
+                # override this with the historical signature, so a
+                # cross-platform serve must not hand them a new keyword.
+                loader_kwargs: dict[str, Any] = {
+                    "limit": candidate_limit,
+                    "excluded_bvids": excluded_bvids,
+                }
+                if scope:
+                    loader_kwargs["source_platform"] = scope
                 (
                     candidates,
                     loaded_count,
@@ -456,10 +566,7 @@ class RecommendationEngine:
                     after_disliked_count,
                     after_viewed_count,
                 ) = await asyncio.to_thread(
-                    self._load_filtered_serve_candidates,
-                    profile,
-                    limit=candidate_limit,
-                    excluded_bvids=excluded_bvids,
+                    partial(self._load_filtered_serve_candidates, profile, **loader_kwargs)
                 )
             else:
                 candidates = []
@@ -1608,8 +1715,18 @@ class RecommendationEngine:
             if not isinstance(score_value, (int, float, str)):
                 score_value = 0.0
             score = max(0.0, min(1.0, float(score_value)))
-            reason = str(result.get("reason", "")).strip()
-            topic_group = str(result.get("topic_group", "")).strip()
+            reason = validated_text_field(
+                result.get("reason", ""), field="reason", content_key=content.bvid
+            )
+            topic_group = validated_text_field(
+                result.get("topic_group", ""), field="topic_group", content_key=content.bvid
+            )
+            if reason is None or topic_group is None:
+                # Keep malformed evaluator output out of persisted diagnostics;
+                # delight display copy is gated separately on pool_expression.
+                content.relevance_score = 0.01
+                content.relevance_reason = "classification_failed"
+                continue
             style_key = normalize_style_key(result.get("style_key", ""))
 
             content.relevance_score = score or 0.01  # never leave at 0.0
@@ -1629,8 +1746,10 @@ class RecommendationEngine:
 
         Evo already runs the expensive candidate evaluator and the pool-copy
         path writes user-facing ``pool_expression`` into ``content_cache``.
-        Delight reuses ``relevance_score`` for scoring and prefers
-        ``pool_expression`` for card copy instead of paying another LLM pass.
+        Delight starts only after both ``pool_expression`` and
+        ``pool_topic_label`` are ready, then reuses ``relevance_score`` and
+        atomically snapshots that formal copy. The evaluator's diagnostic
+        ``relevance_reason`` is never delight state or display copy.
         """
         from openbiliclaw.recommendation.delight import effective_delight_threshold
 
@@ -1664,13 +1783,26 @@ class RecommendationEngine:
         for candidate in candidates:
             persisted_score = max(0.01, min(1.0, float(candidate.relevance_score or 0.0)))
             if persisted_score < effective_threshold:
-                self._database.update_delight_score(
+                persisted = self._database.update_delight_score(
                     candidate.bvid,
                     delight_score=persisted_score,
                     delight_reason="",
                     delight_hook="",
                 )
-                scored_count += 1
+                if persisted:
+                    scored_count += 1
+                continue
+
+            reason = self._evo_delight_reason(candidate)
+            hook = self._evo_delight_hook(candidate)
+            if not reason or not hook:
+                # The storage query must never return an uncopied row. Keep an
+                # engine-level guard for adapters and read/write races so no
+                # delight score is written before formal copy is ready.
+                logger.warning(
+                    "Delight readiness gate leak: bvid=%s has incomplete formal copy",
+                    candidate.bvid,
+                )
                 continue
 
             # Only nudge candidates that ALREADY qualify: visual never changes
@@ -1679,14 +1811,18 @@ class RecommendationEngine:
             visual_bonus = await self._visual_cover_bonus(candidate, visual_anchor_vecs)
             final_score = min(1.0, persisted_score + visual_bonus)
 
-            reason = self._evo_delight_reason(candidate)
-            hook = self._evo_delight_hook(candidate)
-            self._database.update_delight_score(
+            persisted = self._database.update_delight_score(
                 candidate.bvid,
                 delight_score=final_score,
                 delight_reason=reason,
                 delight_hook=hook,
             )
+            if not persisted:
+                logger.info(
+                    "Delight admission deferred because formal copy changed: %s",
+                    candidate.bvid,
+                )
+                continue
             scored_count += 1
             logger.info(
                 "Delight candidate found from Evo result: %s (score=%.3f, "
@@ -1907,30 +2043,11 @@ class RecommendationEngine:
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
-        reason = (item.pool_expression or "").strip()
-        if reason:
-            return reason
-        reason = (item.relevance_reason or "").strip()
-        if reason:
-            return reason
-        topic = (
-            (item.pool_topic_label or "").strip()
-            or (item.topic_group or "").strip()
-            or (item.topic_key or "").strip()
-        )
-        if topic:
-            return f"这条内容和你当前画像里的「{topic}」方向匹配度很高。"
-        return "Evo 判断这条内容和你当前的兴趣画像匹配度很高。"
+        return (item.pool_expression or "").strip()
 
     @staticmethod
     def _evo_delight_hook(item: DiscoveredContent) -> str:
-        hook = (
-            (item.pool_topic_label or "").strip()
-            or (item.topic_group or "").strip()
-            or (item.topic_key or "").strip()
-            or (item.style_key or "").strip()
-        )
-        return hook or "高契合"
+        return (item.pool_topic_label or "").strip()
 
     async def _precompute_batch(
         self,
@@ -2042,10 +2159,12 @@ class RecommendationEngine:
                 )
             if not isinstance(result, dict):
                 continue
-            expression = str(result.get("expression", "")).strip()
-            topic_label = str(result.get("topic_label", "")).strip()
-            if not expression or not topic_label:
+            validated = _validated_expression_fields(result, content_key=item.bvid)
+            if validated is None:
+                # Leave this item missing so the caller retries it rather than
+                # persisting a repr'd payload as card copy.
                 continue
+            expression, topic_label = validated
             gathered.append((item, expression, topic_label))
 
         bvids_by_expression: dict[str, set[str]] = defaultdict(set)
@@ -2179,15 +2298,19 @@ class RecommendationEngine:
         profile: SoulProfile,
         excluded_bvids: list[str] | None = None,
         limit: int = 5,
+        source_platform: str = "",
     ) -> list[Recommendation]:
         """Instantly pick a new batch from the discovery pool.
 
         Delegates to :meth:`serve` with ``expression_mode="precomputed"``.
+        ``source_platform`` narrows the batch to one canonical platform;
+        empty keeps the historical cross-platform behaviour.
         """
         result = await self.reshuffle_recommendations_with_result(
             profile=profile,
             excluded_bvids=excluded_bvids,
             limit=limit,
+            source_platform=source_platform,
         )
         return result.items
 
@@ -2197,6 +2320,7 @@ class RecommendationEngine:
         profile: SoulProfile,
         excluded_bvids: list[str] | None = None,
         limit: int = 5,
+        source_platform: str = "",
     ) -> ServeResult:
         """Return a reshuffle batch with post-commit inventory metadata."""
         excluded = frozenset(
@@ -2207,6 +2331,7 @@ class RecommendationEngine:
             limit=limit,
             excluded_bvids=excluded,
             expression_mode="precomputed",
+            source_platform=source_platform,
         )
 
     async def append_recommendations(
@@ -2215,6 +2340,7 @@ class RecommendationEngine:
         profile: SoulProfile,
         excluded_bvids: list[str],
         limit: int = 10,
+        source_platform: str = "",
     ) -> list[Recommendation]:
         """Append another page of recommendations from the discovery pool.
 
@@ -2224,6 +2350,7 @@ class RecommendationEngine:
             profile=profile,
             excluded_bvids=excluded_bvids,
             limit=limit,
+            source_platform=source_platform,
         )
         return result.items
 
@@ -2233,6 +2360,7 @@ class RecommendationEngine:
         profile: SoulProfile,
         excluded_bvids: list[str],
         limit: int = 10,
+        source_platform: str = "",
     ) -> ServeResult:
         """Return an appended page with post-commit inventory metadata."""
         excluded = frozenset(b.strip() for b in excluded_bvids if b and b.strip())
@@ -2241,6 +2369,7 @@ class RecommendationEngine:
             limit=limit,
             excluded_bvids=excluded,
             expression_mode="precomputed",
+            source_platform=source_platform,
         )
 
     async def generate_personal_topic(
@@ -2334,10 +2463,9 @@ class RecommendationEngine:
             )
             if payload is None:
                 raise ValueError("Expression response must be a JSON object.")
-            expression = str(payload.get("expression", "")).strip()
-            topic_label = str(payload.get("topic_label", "")).strip()
-            if expression and topic_label:
-                return (expression, topic_label)
+            validated = _validated_expression_fields(payload, content_key=content.bvid)
+            if validated is not None:
+                return validated
         except Exception:
             logger.exception("Failed to generate recommendation expression: %s", content.bvid)
         return None
@@ -3254,17 +3382,53 @@ class RecommendationEngine:
         )
         return self._rows_to_discovered(rows)
 
+    def _load_pool_candidates_for_platform(
+        self,
+        platform: str,
+        *,
+        limit: int,
+    ) -> list[DiscoveredContent]:
+        """Load one platform's servable pool rows on the compatibility path.
+
+        Returns nothing when the adapter predates platform-scoped reads —
+        an empty scoped batch is the safe outcome, whereas falling back to
+        the cross-platform window would answer a scoped request with other
+        platforms' content.
+        """
+        fetch = getattr(self._database, "get_pool_candidates_for_platform", None)
+        if not callable(fetch):
+            logger.warning(
+                "Database adapter %s cannot serve platform-scoped requests "
+                "(no get_pool_candidates_for_platform); returning an empty batch.",
+                type(self._database).__name__,
+            )
+            return []
+        rows = fetch(platform, limit, xhs_self_nickname=self._xhs_self_nickname())
+        return self._rows_to_discovered(list(rows))
+
     def _load_filtered_serve_candidates(
         self,
         profile: SoulProfile,
         *,
         limit: int,
         excluded_bvids: frozenset[str],
+        source_platform: str = "",
     ) -> tuple[list[DiscoveredContent], int, int, int, int]:
         """Load and filter one serve window outside the asyncio event loop."""
-        candidates = self._load_pool_candidates(limit=limit)
-        loaded_count = len(candidates)
-        candidates = self._apply_platform_floor(candidates)
+        scope = normalize_source_platform(source_platform)
+        if scope:
+            candidates = self._enforce_platform_scope(
+                self._load_pool_candidates_for_platform(scope, limit=limit),
+                scope,
+            )
+            loaded_count = len(candidates)
+        else:
+            candidates = self._load_pool_candidates(limit=limit)
+            loaded_count = len(candidates)
+            # The platform floor exists to rescue platforms a cross-platform
+            # relevance window drops; under an explicit scope it would be the
+            # very cross-platform leak the scope forbids.
+            candidates = self._apply_platform_floor(candidates)
         if excluded_bvids:
             candidates = [item for item in candidates if item.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
@@ -3370,7 +3534,10 @@ class RecommendationEngine:
         self,
         candidates: list[DiscoveredContent],
     ) -> list[DiscoveredContent]:
-        viewed_bvids = self._database.get_recent_viewed_bvids()
+        get_seen = getattr(self._database, "get_seen_bvids", None)
+        if not callable(get_seen):
+            get_seen = self._database.get_recent_viewed_bvids
+        viewed_bvids = get_seen()
         if not viewed_bvids:
             return candidates
         return [item for item in candidates if item.bvid not in viewed_bvids]
