@@ -6542,7 +6542,13 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.messages: list[str] = []
 
-            async def respond(self, user_message: str) -> str:
+            async def respond(
+                self,
+                user_message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+            ) -> str:
                 self.messages.append(user_message)
                 await asyncio.sleep(0.01)
                 return "这部番像是从另一个角度补上你的口味。"
