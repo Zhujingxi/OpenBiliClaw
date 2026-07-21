@@ -77,11 +77,21 @@ class GateDecision:
     True only when a synchronous judgement actually gated the write (enforce
     mode); shadow/off return ``accept`` with ``enforced=False`` so the write
     proceeds unchanged.
+
+    ``is_error`` distinguishes a *genuine* conservative downgrade (the LLM
+    judged the change thin / in tension) from a downgrade forced by an
+    LLM/parse **exception** (F7). Both behave identically for the write
+    (fail-closed to a hypothesis), but a rebuild caller reads ``is_error`` to
+    decide whether to CLEAR its ``rebuild_pending`` (real verdict — the batch
+    was judged) or KEEP it for a bounded retry (transient error — not yet
+    judged). It mirrors the shadow path's ``shadow_error`` vs
+    ``shadow_downgrade`` distinction. Access point ① callers ignore this field.
     """
 
     verdict: str = ACCEPT
     reason: str = ""
     enforced: bool = False
+    is_error: bool = False
 
     @property
     def blocks(self) -> bool:
@@ -174,11 +184,14 @@ class PostureGate:
             return GateDecision(verdict=ACCEPT, enforced=False)
 
         # enforce — a provider failure fails closed to a hypothesis (downgrade).
+        # ``is_error`` is set ONLY on the exception path so a rebuild caller can
+        # keep its pending marker for a bounded retry (F7); a real downgrade
+        # verdict from ``_judge`` leaves it False so the caller clears pending.
         try:
             verdict, reason = await self._judge(snapshot)
         except Exception:
             logger.warning("posture gate enforce judgement errored; downgrading conservatively")
-            verdict, reason = DOWNGRADE, "llm error"
+            return GateDecision(verdict=DOWNGRADE, reason="llm error", enforced=True, is_error=True)
         return GateDecision(verdict=verdict, reason=reason, enforced=True)
 
     # -- shadow side-channel ---------------------------------------------------

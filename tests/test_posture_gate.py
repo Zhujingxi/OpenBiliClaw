@@ -122,6 +122,45 @@ async def test_enforce_llm_exception_downgrades() -> None:
     assert decision.verdict == DOWNGRADE
 
 
+async def test_enforce_llm_exception_is_error_true() -> None:
+    """A provider exception downgrades but flags is_error (F7): callers keep pending."""
+
+    class _Boom:
+        async def complete_structured_task(self, **kwargs: Any) -> _FakeResponse:
+            raise RuntimeError("provider down")
+
+    gate = PostureGate(mode="enforce", registry=_Boom())
+    decision = await gate.evaluate(write_point="wp", change={"k": 1})
+    assert decision.verdict == DOWNGRADE
+    assert decision.is_error is True
+    assert decision.blocks is True
+
+
+async def test_enforce_real_downgrade_is_error_false() -> None:
+    """A genuine LLM downgrade verdict is NOT an error (F7): callers clear pending."""
+    gate = PostureGate(mode="enforce", registry=_FakeRegistry('{"verdict": "downgrade"}'))
+    decision = await gate.evaluate(write_point="wp", change={"k": 1})
+    assert decision.verdict == DOWNGRADE
+    assert decision.is_error is False
+
+
+async def test_enforce_accept_is_error_false() -> None:
+    gate = PostureGate(mode="enforce", registry=_FakeRegistry('{"verdict": "accept"}'))
+    decision = await gate.evaluate(write_point="wp", change={"k": 1})
+    assert decision.verdict == ACCEPT
+    assert decision.is_error is False
+
+
+async def test_off_and_shadow_decisions_are_not_errors() -> None:
+    off_gate = PostureGate(mode="off", registry=_FakeRegistry('{"verdict": "reject"}'))
+    off_decision = await off_gate.evaluate(write_point="wp", change={"k": 1})
+    assert off_decision.is_error is False
+    shadow_gate = PostureGate(mode="shadow", registry=_FakeRegistry('{"verdict": "reject"}'))
+    shadow_decision = await shadow_gate.evaluate(write_point="wp", change={"k": 1})
+    assert shadow_decision.is_error is False
+    await shadow_gate.drain_shadow()
+
+
 # --------------------------------------------------------------------------
 # shadow: zero-delay + snapshot isolation + ledger rows
 # --------------------------------------------------------------------------
