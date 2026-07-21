@@ -1,1836 +1,743 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenBiliClaw · 首次设置</title>
-  <style>
-    :root {
-      --bg: #0f1115; --panel: #181b22; --panel-2: #20242e; --line: #2c313c;
-      --text: #eef1f6; --muted: #99a2b2; --accent: #fb7299; --accent-2: #2bb3a3;
-      --ok: #36c46f; --warn: #f4b942; --err: #ff6b6b; --radius: 14px;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; min-height: 100vh; background: radial-gradient(1200px 600px at 50% -10%, #1b2030 0%, var(--bg) 60%);
-      color: var(--text); font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-      display: flex; align-items: center; justify-content: center; padding: 32px 16px;
-    }
-    .card {
-      width: 100%; max-width: 860px; background: var(--panel); border: 1px solid var(--line);
-      border-radius: 20px; box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden;
-    }
-    .head { padding: 26px 28px 18px; border-bottom: 1px solid var(--line); }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
-    .brand .mark {
-      width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
-      background: linear-gradient(135deg, var(--accent), #ff9bb6); color: #fff; font-weight: 800;
-    }
-    .steps { display: flex; gap: 8px; margin-top: 18px; }
-    .steps .dot { flex: 1; height: 4px; border-radius: 99px; background: var(--line); transition: .3s; }
-    .steps .dot.active { background: var(--accent); }
-    .steps .dot.done { background: var(--accent-2); }
-    .body { padding: 26px 28px; }
-    .panel { display: none; animation: fade .25s ease; }
-    .panel.active { display: block; }
-    @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-    h2 { margin: 0 0 6px; font-size: 20px; }
-    .sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
-    label { display: block; font-weight: 600; margin: 16px 0 6px; font-size: 13px; }
-    select, input {
-      width: 100%; padding: 11px 13px; background: var(--panel-2); color: var(--text);
-      border: 1px solid var(--line); border-radius: 10px; font-size: 14px; outline: none;
-    }
-    select:focus, input:focus { border-color: var(--accent); }
-    .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
-    .hint a { color: var(--accent); text-decoration: none; }
-    .hint a:hover { text-decoration: underline; }
-    .row-actions { display: flex; gap: 10px; justify-content: space-between; margin-top: 26px; }
-    button {
-      appearance: none; border: 0; border-radius: 11px; padding: 12px 20px; font-size: 14px; font-weight: 700;
-      cursor: pointer; transition: .15s; font-family: inherit;
-    }
-    .primary { background: var(--accent); color: #fff; }
-    .primary:hover { filter: brightness(1.08); }
-    .primary:disabled { opacity: .5; cursor: not-allowed; }
-    .ghost { background: transparent; color: var(--muted); }
-    .ghost:hover { color: var(--text); }
-    .msg { margin-top: 14px; padding: 11px 13px; border-radius: 10px; font-size: 13px; display: none; }
-    .msg.show { display: block; }
-    .msg.ok { background: rgba(54,196,111,.12); color: var(--ok); border: 1px solid rgba(54,196,111,.3); }
-    .msg.err { background: rgba(255,107,107,.12); color: var(--err); border: 1px solid rgba(255,107,107,.3); }
-    .msg.warn { background: rgba(244,185,66,.12); color: var(--warn); border: 1px solid rgba(244,185,66,.3); }
-    .msg.info { background: rgba(255,122,162,.12); color: var(--accent); border: 1px solid rgba(255,122,162,.28); }
-    .init-cli-command { display: none; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text); overflow-wrap: anywhere; }
-    .init-cli-command.show { display: block; }
-    .init-cli-command code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
-    .check-list { list-style: none; padding: 0; margin: 18px 0; }
-    .check-list li { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--panel-2);
-      border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
-    .check-list .tick { width: 24px; height: 24px; border-radius: 50%; background: rgba(54,196,111,.15);
-      color: var(--ok); display: grid; place-items: center; font-weight: 800; flex: none; }
-    .check-list .pending .tick { background: rgba(153,162,178,.15); color: var(--muted); }
-    .init-checks { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 9px; }
-    .init-checks li { padding: 11px 13px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); }
-    .init-row { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 13px; }
-    .init-mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; background: rgba(153,162,178,.15); color: var(--muted); font-weight: 900; }
-    .init-ok .init-mark { background: rgba(54,196,111,.14); color: var(--ok); }
-    .init-missing.init-hard .init-mark { background: rgba(255,107,107,.14); color: var(--err); }
-    .init-missing.init-soft .init-mark { background: rgba(244,185,66,.14); color: var(--warn); }
-    .init-hint { margin: 7px 0 0 32px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
-    .init-repair-btn { margin: 8px 0 0 32px; font-size: 12.5px; padding: 5px 12px; }
-    .init-sources { display: grid; gap: 8px; margin: 16px 0; }
-    .init-sources-title { margin: 0 0 2px; font-size: 13px; font-weight: 800; color: var(--text); }
-    .init-source-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
-    .init-source-row input { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); }
-    .init-source-row input:disabled { opacity: .75; }
-    .progress { margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
-    .progress-track { height: 8px; border-radius: 999px; background: #10131a; overflow: hidden; }
-    .progress-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
-    .progress-label { margin: 9px 0 0; color: var(--muted); font-size: 13px; }
-    /* Liveness line (init-progress Phase 2): quiet while fresh, amber after
-       >90s without backend activity. */
-    .progress-label.stall-hint.stale { color: #d97706; }
-    .adv { margin-top: 14px; }
-    .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; }
-    .ext-steps { counter-reset: s; padding-left: 0; list-style: none; margin: 16px 0; }
-    .ext-steps li { counter-increment: s; position: relative; padding: 8px 0 8px 34px; font-size: 14px; }
-    .ext-steps li::before { content: counter(s); position: absolute; left: 0; top: 7px; width: 22px; height: 22px;
-      background: var(--accent); color: #fff; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; }
-    .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
-      border-top-color: #fff; border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
-    .model-setup-layout { display: grid; grid-template-columns: minmax(190px, 230px) minmax(0, 1fr); gap: 18px; align-items: start; }
-    .model-connection-list-pane { min-width: 0; }
-    .connection-type-list { display: grid; gap: 8px; max-height: 440px; overflow: auto; padding-right: 3px; }
-    .connection-type-option {
-      width: 100%; padding: 12px 13px; background: var(--panel-2); color: var(--text);
-      border: 1px solid var(--line); border-radius: 11px; text-align: left; font-weight: 700;
-    }
-    .connection-type-option:hover { border-color: #596174; }
-    .connection-type-option[aria-selected="true"] { border-color: var(--accent); background: rgba(251,114,153,.1); }
-    .connection-type-option span, .connection-type-option small { display: block; }
-    .connection-type-option small { margin-top: 2px; color: var(--muted); font-size: 11.5px; font-weight: 500; }
-    .model-connection-editor { min-width: 0; padding: 2px 16px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(32,36,46,.45); }
-    .model-connection-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin: 14px 0 4px; }
-    .model-connection-heading strong { font-size: 16px; }
-    .model-connection-heading code { color: var(--muted); font-size: 11px; }
-    .model-descriptor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
-    .model-field.full { grid-column: 1 / -1; }
-    .model-field .hint { line-height: 1.4; }
-    .credential-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .credential-actions button { padding: 7px 10px; font-size: 12px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
-    .credential-actions button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
-    .model-type-back { display: none; margin: 12px 0 2px; padding: 7px 10px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
-    @media (max-width: 680px) {
-      .card { max-width: 560px; }
-      .model-setup-layout { grid-template-columns: 1fr; }
-      .connection-type-list { max-height: none; grid-template-columns: 1fr; }
-      .model-setup-layout[data-narrow-view="list"] .model-connection-editor { display: none; }
-      .model-setup-layout[data-narrow-view="detail"] .model-connection-list-pane { display: none; }
-      .model-setup-layout[data-narrow-view="list"] ~ .row-actions { display: none; }
-      .model-type-back { display: inline-flex; align-items: center; }
-      .model-descriptor-fields { grid-template-columns: 1fr; }
-      .model-field.full { grid-column: auto; }
-    }
-    @keyframes rot { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="head">
-      <div class="brand"><span class="mark">B</span><span>OpenBiliClaw</span></div>
-      <div class="steps">
-        <div class="dot active" data-dot="0"></div>
-        <div class="dot" data-dot="1"></div>
-        <div class="dot" data-dot="2"></div>
-        <div class="dot" data-dot="3"></div>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenBiliClaw · 首次设置</title>
+    <style>
+      :root {
+        --bg: #0f1115;
+        --panel: #181b22;
+        --panel-2: #20242e;
+        --line: #2c313c;
+        --text: #eef1f6;
+        --muted: #99a2b2;
+        --accent: #fb7299;
+        --ok: #36c46f;
+        --warn: #f4b942;
+        --err: #ff6b6b;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(
+          1200px 600px at 50% -10%,
+          #1b2030 0%,
+          var(--bg) 60%
+        );
+        color: var(--text);
+        font:
+          15px/1.6 -apple-system,
+          "PingFang SC",
+          system-ui,
+          sans-serif;
+        display: grid;
+        place-items: center;
+        padding: 32px 16px;
+      }
+      .card {
+        width: min(860px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        box-shadow: 0 24px 60px #0007;
+        overflow: hidden;
+      }
+      .head {
+        padding: 26px 28px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 700;
+        font-size: 17px;
+      }
+      .brand .mark {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, var(--accent), #ff9bb6);
+      }
+      .steps {
+        display: flex;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      .dot {
+        flex: 1;
+        height: 4px;
+        border-radius: 99px;
+        background: var(--line);
+      }
+      .dot.active {
+        background: var(--accent);
+      }
+      .dot.done {
+        background: var(--ok);
+      }
+      .body {
+        padding: 26px 28px;
+      }
+      .panel {
+        display: none;
+        animation: fade 0.25s ease;
+      }
+      .panel.active {
+        display: block;
+      }
+      h2 {
+        margin: 0 0 6px;
+        font-size: 20px;
+      }
+      .sub {
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 6px;
+      }
+      .alias-setup-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(220px, 0.8fr);
+        gap: 18px;
+        align-items: start;
+      }
+      .alias-admin-pane {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(32, 36, 46, 0.45);
+      }
+      .alias-admin-pane h3 {
+        margin: 0 0 6px;
+        font-size: 15px;
+      }
+      .alias-admin-pane .button {
+        display: inline-flex;
+        margin-top: 10px;
+      }
+      .init-sources {
+        display: grid;
+        gap: 8px;
+        margin: 16px 0;
+      }
+      .init-source-row {
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .init-source-row input {
+        margin-top: 5px;
+        accent-color: var(--accent);
+      }
+      .init-source-row strong,
+      .init-source-row small {
+        display: block;
+      }
+      .init-source-row small {
+        color: var(--muted);
+      }
+      .init-source-content {
+        flex: 1;
+        min-width: 0;
+      }
+      .source-credentials {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .source-credentials label {
+        display: grid;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .source-credentials input {
+        width: 100%;
+        margin: 0;
+        padding: 9px 10px;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .alias-list {
+        display: grid;
+        gap: 9px;
+        margin: 16px 0;
+      }
+      .alias {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 14px;
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .bad {
+        color: var(--err);
+      }
+      .row-actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 24px;
+      }
+      button,
+      .button {
+        border: 0;
+        border-radius: 11px;
+        padding: 11px 18px;
+        font: 700 14px inherit;
+        cursor: pointer;
+        text-decoration: none;
+      }
+      .primary {
+        background: var(--accent);
+        color: white;
+      }
+      .ghost {
+        background: transparent;
+        color: var(--muted);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .msg {
+        display: none;
+        margin-top: 14px;
+        padding: 11px 13px;
+        border-radius: 10px;
+      }
+      .msg.show {
+        display: block;
+      }
+      .msg.info {
+        color: var(--accent);
+        background: #fb72991f;
+      }
+      .msg.err {
+        color: var(--err);
+        background: #ff6b6b1f;
+      }
+      .msg.ok {
+        color: var(--ok);
+        background: #36c46f1f;
+      }
+      .msg.warn {
+        color: var(--warn);
+        background: rgba(244, 185, 66, 0.12);
+      }
+      .init-checks {
+        list-style: none;
+        padding: 0;
+        margin: 16px 0;
+        display: grid;
+        gap: 9px;
+      }
+      .init-checks li {
+        padding: 11px 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .progress {
+        margin-top: 18px;
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .progress-track {
+        height: 8px;
+        border-radius: 999px;
+        background: #10131a;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), #2bb3a3);
+        transition: width 0.25s;
+      }
+      .progress-label {
+        margin: 9px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .ext-steps {
+        counter-reset: step;
+        padding: 0;
+        margin: 16px 0;
+        list-style: none;
+      }
+      .ext-steps li {
+        counter-increment: step;
+        position: relative;
+        padding: 8px 0 8px 34px;
+      }
+      .ext-steps li::before {
+        content: counter(step);
+        position: absolute;
+        left: 0;
+        top: 7px;
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--accent);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .check-list {
+        list-style: none;
+        padding: 0;
+        margin: 18px 0;
+      }
+      .check-list li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .check-list .tick {
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        flex: none;
+        border-radius: 50%;
+        background: rgba(54, 196, 111, 0.15);
+        color: var(--ok);
+        font-weight: 800;
+      }
+      .check-list .pending .tick {
+        background: rgba(153, 162, 178, 0.15);
+        color: var(--muted);
+      }
+      .spin {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        margin-right: 6px;
+        vertical-align: -2px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: rot 0.7s linear infinite;
+      }
+      .login {
+        display: flex;
+        gap: 10px;
+      }
+      .login input {
+        flex: 1;
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 11px 13px;
+      }
+      @keyframes fade {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes rot {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (max-width: 680px) {
+        .alias-setup-layout {
+          grid-template-columns: 1fr;
+        }
+        .body,
+        .head {
+          padding: 22px 18px;
+        }
+        .row-actions {
+          flex-wrap: wrap;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="head">
+        <div class="brand"><span class="mark">B</span><span>OpenBiliClaw</span></div>
+        <div class="steps">
+          <div class="dot active" data-dot="0"></div>
+          <div class="dot" data-dot="1"></div>
+          <div class="dot" data-dot="2"></div>
+          <div class="dot" data-dot="3"></div>
+        </div>
+      </div>
+      <div class="body">
+        <section class="panel active" data-panel="0">
+          <h2>连接 AI 服务</h2>
+          <p class="sub">
+            模型、凭据、路由和预算统一在 LiteLLM Admin 管理。这里确认
+            OpenBiliClaw 的三个稳定别名可用。
+          </p>
+          <div id="aliasSetupLayout" class="alias-setup-layout">
+            <div class="alias-health-pane">
+              <div id="loginBox" hidden>
+                <p class="hint">后端启用了访问密码，请先登录。</p>
+                <form id="loginForm" class="login">
+                  <input id="password" type="password" autocomplete="current-password" required placeholder="访问密码">
+                  <button class="primary">登录</button>
+                </form>
+              </div>
+              <div id="aliasList" class="alias-list" aria-live="polite">
+                <div class="alias"><span>正在检查 /api/v1/system/ai-health…</span></div>
+              </div>
+              <div id="aiMessage" class="msg"></div>
+            </div>
+            <div class="alias-admin-pane">
+              <h3>模型服务管理</h3>
+              <p class="hint">供应商、凭据、路由、回退、预算和缓存都在 LiteLLM Admin 中统一配置。</p>
+              <a id="adminLink" class="button ghost" target="_blank" rel="noreferrer" hidden>打开 LiteLLM Admin ↗</a>
+            </div>
+          </div>
+          <div class="row-actions">
+            <span></span
+            ><button id="nextAi" class="primary" disabled>
+              继续选择内容源 →
+            </button>
+          </div>
+        </section>
+        <section class="panel" data-panel="1">
+          <h2>连接浏览器扩展和平台账号</h2>
+          <p class="sub">
+            保留原有的扩展连接步骤。需要浏览器登录态的平台会通过扩展执行采集任务；账号也可以稍后在设置中连接。
+          </p>
+          <ol class="ext-steps">
+            <li>安装 OpenBiliClaw 浏览器扩展（Chrome / Edge / Firefox）</li>
+            <li>在浏览器里登录要接入的平台账号</li>
+            <li>继续后选择本次需要初始化的内容来源</li>
+          </ol>
+          <div id="biliStatus" class="msg show info" role="status">
+            浏览器扩展可以在当前已登录的平台页面执行来源任务。
+          </div>
+          <p class="hint">没装扩展也可以先继续，之后在主界面随时连接。</p>
+          <div class="row-actions">
+            <button class="ghost" id="back1">← 上一步</button
+            ><button id="next1" class="primary">先跳过 / 已连接 →</button>
+          </div>
+        </section>
+        <section class="panel" data-panel="2">
+          <h2>初始化画像和推荐池</h2>
+          <p class="sub">
+            选择要同步的来源，随后依次投影证据画像并补齐首轮发现流。
+          </p>
+          <div id="initSources" class="init-sources"></div>
+          <ul id="initChecklist" class="init-checks">
+            <li>检查所需 AI 别名和来源能力</li>
+            <li>同步来源活动并建立证据画像</li>
+            <li>补齐首轮发现流</li>
+          </ul>
+          <div id="sourceMessage" class="msg"></div>
+          <div id="initProgress" class="progress" hidden>
+            <div class="progress-track"><div class="progress-fill" id="initProgressBar"></div></div>
+            <p id="initProgressLabel" class="progress-label" role="status" aria-live="polite" aria-atomic="true">等待开始</p>
+            <p id="initStallHint" class="progress-label" hidden></p>
+          </div>
+          <div id="initReason" class="msg" role="status"></div>
+          <div id="initEscape" class="msg info">
+            后台会继续处理；你可以<a href="/web/">先进入应用 →</a>
+          </div>
+          <div class="row-actions">
+            <button class="ghost" id="backInit">← 上一步</button
+            ><button id="startInit" class="primary">开始初始化</button>
+          </div>
+        </section>
+        <section class="panel" data-panel="3">
+          <h2>就绪 🎉</h2>
+          <p class="sub">
+            基础配置和首轮初始化已经完成，可以开始使用。
+          </p>
+          <ul class="check-list">
+            <li><span class="tick">✓</span><div><strong>AI 大脑</strong><br><span id="doneLlm" class="hint">三个稳定别名已连接</span></div></li>
+            <li id="biliDone" class="pending"><span class="tick">…</span><div><strong>平台账号</strong><br><span id="doneBili" class="hint">所选来源已完成首轮同步</span></div></li>
+            <li><span class="tick">✓</span><div><strong>证据画像</strong><br><span class="hint">活动已经归一化为可追溯证据</span></div></li>
+            <li><span class="tick">✓</span><div><strong>首轮发现流</strong><br><span class="hint">候选内容已经去重、评估并入选</span></div></li>
+          </ul>
+          <div id="runMessage" class="msg ok">初始化完成。之后的同步和补货会由后台任务自动维护。</div>
+          <div class="row-actions">
+            <button class="ghost" id="back2">← 上一步</button
+            ><a id="finish" class="button primary" href="/web/">开始使用 OpenBiliClaw →</a>
+          </div>
+        </section>
       </div>
     </div>
-    <div class="body">
-
-      <!-- Step 0: 连接 AI -->
-      <section class="panel active" data-panel="0">
-        <h2>设置 Chat 模型路由</h2>
-        <p class="sub">先选连接类型，再选对应 preset。OpenAI、DeepSeek 和 OpenRouter 统一归入 OpenAI-compatible；OAuth 登录单独列出。</p>
-
-        <!-- Decision 3: migration interstitial — old-format configs must be
-             resolved in the full settings page; the wizard stays linear. -->
-        <div id="migrationInterstitial" class="msg show" hidden style="background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:14px;border-radius:10px;margin-bottom:14px">
-          <b>检测到旧版模型配置</b>
-          <p class="hint" style="margin:6px 0 10px">当前配置来自旧版本，需要先完成迁移。为避免破坏现有配置，向导不在此处处理迁移。</p>
-          <p style="margin:0"><a href="/web#settings-model">打开 设置 → 模型 完成迁移 →</a>，完成后刷新本页。</p>
-        </div>
-
-        <div id="modelSetupLayout" class="model-setup-layout" data-narrow-view="list">
-          <div class="model-connection-list-pane">
-            <label>连接类型</label>
-            <div id="connectionTypeList" class="connection-type-list" role="listbox" aria-label="Chat 连接类型"></div>
-          </div>
-          <div class="model-connection-editor">
-            <button type="button" id="modelTypeBack" class="model-type-back" aria-label="返回连接类型列表">← 返回连接类型</button>
-            <div class="model-connection-heading">
-              <strong id="connectionTypeTitle">正在读取…</strong>
-              <code id="connectionStableId"></code>
-            </div>
-            <p class="hint" id="connectionTypeHelp"></p>
-            <div id="modelDescriptorFields" class="model-descriptor-fields"></div>
-            <div id="modelCredentialEditor"></div>
-          </div>
-        </div>
-        <!-- Decision 2: fallback disclosure (preservation, not silent carry) -->
-        <p id="preservedFallbacks" class="hint" hidden style="margin-top:8px"></p>
-
-        <!-- Step 0.5: optional embedding route -->
-        <div id="embeddingSection" style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px">
-          <b>Embedding 向量模型（可选）</b>
-          <p class="hint" style="margin:6px 0 10px">用于推荐去重和多样性。本地 Ollama bge-m3 已随包就绪；也可跳过，稍后在 设置 → 模型 → Embedding 路由 中配置。</p>
-          <div class="credential-actions" style="margin-bottom:10px">
-            <button type="button" id="embeddingEnable">启用并配置</button>
-            <button type="button" id="embeddingSkip">跳过</button>
-          </div>
-          <p id="embeddingSkipHint" class="hint" hidden>已跳过 — Embedding 未启用，可在设置中随时开启。</p>
-          <div id="embeddingFields" hidden>
-            <div id="embeddingTypeList" class="connection-type-list" role="listbox" aria-label="Embedding 连接类型"></div>
-            <div id="embeddingDescriptorFields" class="model-descriptor-fields" style="margin-top:10px"></div>
-            <div class="model-field full" style="margin-top:8px">
-              <label>Embedding 模型名</label>
-              <input type="text" id="embeddingModel" placeholder="例如 bge-m3" autocomplete="off">
-            </div>
-            <div id="embeddingCredential" style="margin-top:8px"></div>
-            <p id="embeddingProbeStatus" class="hint" style="color:var(--ok);margin-top:6px"></p>
-          </div>
-          <div class="msg" id="msgEmbedding"></div>
-        </div>
-
-        <div class="msg" id="msg0"></div>
-        <div class="row-actions">
-          <span></span>
-          <button class="primary" id="saveModel">测试、保存并继续 →</button>
-        </div>
-      </section>
-
-      <!-- Step 1: 连接浏览器扩展 -->
-      <section class="panel" data-panel="1">
-        <h2>连接浏览器扩展和平台账号</h2>
-        <p class="sub">让 OpenBiliClaw 读到你在各平台的真实行为,推荐才懂你。最省事的方式是装浏览器扩展,它会在初始化时使用当前浏览器里已登录的平台账号。</p>
-        <ol class="ext-steps">
-          <li>安装 OpenBiliClaw 浏览器扩展（Chrome / Edge）</li>
-          <li>在浏览器里登录要接入的平台账号，例如 <b>bilibili.com</b> / <b>reddit.com</b></li>
-          <li>下一步只会检查你勾选的平台，B 站默认推荐但可以取消</li>
-        </ol>
-        <div id="biliStatus" class="msg show" style="background:var(--panel-2);color:var(--muted);border:1px solid var(--line)">
-          <span class="spin"></span>正在检查 B站 登录同步…（只用 Reddit 等其他来源时可以直接跳过）
-        </div>
-        <div class="hint" style="margin-top:14px">没装扩展也行——可以先跳过,之后在主界面随时连接。</div>
-        <div class="row-actions">
-          <button class="ghost" id="back1">← 上一步</button>
-          <button class="primary" id="next1">先跳过 / 已连接 →</button>
-        </div>
-      </section>
-
-      <!-- Step 2: 初始化 -->
-      <section class="panel" data-panel="2">
-        <h2>初始化画像和推荐池</h2>
-        <p class="sub">和浏览器插件里的「开始初始化」走同一套流程：先检查 AI 服务和所选平台登录，再拉取数据、生成画像、补齐首轮内容池。B 站默认勾选但可取消，至少保留一个来源。</p>
-        <div id="initSources" class="init-sources"></div>
-        <ul id="initChecklist" class="init-checks">
-          <li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>
-        </ul>
-        <div id="initProgress" class="progress" hidden>
-          <div class="progress-track"><div class="progress-fill" id="initProgressBar"></div></div>
-          <p class="progress-label" id="initProgressLabel" role="status" aria-live="polite" aria-atomic="true">等待开始</p>
-          <p class="progress-label stall-hint" id="initStallHint" hidden></p>
-        </div>
-        <div class="msg" id="initReason" role="status" aria-live="polite" aria-atomic="true"></div>
-        <div class="init-cli-command" id="initCliCommand"><code>docker exec -it openbiliclaw-backend openbiliclaw init</code></div>
-        <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
-        <div class="row-actions">
-          <button class="ghost" id="backInit">← 上一步</button>
-          <button class="primary" id="startInit">开始初始化</button>
-        </div>
-      </section>
-
-      <!-- Step 3: 完成 -->
-      <section class="panel" data-panel="3">
-        <h2>就绪 🎉</h2>
-        <p class="sub">基础配置和首轮初始化已完成,本地引擎可以开始为你工作了。</p>
-        <ul class="check-list">
-          <li><span class="tick">✓</span><div><b>AI 大脑</b><br><span class="hint" id="doneLlm">已连接</span></div></li>
-          <li><span class="tick">✓</span><div><b>Embedding 向量模型</b><br><span class="hint" id="doneEmbedding">按上方选择配置</span></div></li>
-          <li id="biliDone" class="pending"><span class="tick">…</span><div><b>平台账号</b><br><span class="hint" id="doneBili">B 站可稍后连接；Reddit 等来源按初始化勾选项检查</span></div></li>
-          <li><span class="tick">✓</span><div><b>首轮初始化</b><br><span class="hint">画像和推荐池已就绪</span></div></li>
-        </ul>
-        <div class="row-actions">
-          <button class="ghost" id="back2">← 上一步</button>
-          <button class="primary" id="finish">开始使用 OpenBiliClaw →</button>
-        </div>
-      </section>
-
-    </div>
-  </div>
-
-  <script type="module">
-    import {
-      applyPreset as sharedApplyPreset,
-      appendRouteItem,
-      changeConnectionType as sharedChangeConnectionType,
-      createProbeSignature,
-      createSingleConnectionDraft,
-      hydrateModelConfig,
-      selectedRecord,
-      toModelConfigPayload,
-      updateRouteField,
-      updateRouteSetting,
-    } from "/web/shared/model-config-state.js";
-    import { escapeHtml } from "/web/shared/model-config-render.js";
-
-    const $ = (s) => document.querySelector(s);
-    // v0.3.118+: bilibili is selectable like every other source — default
-    // checked (recommended) but no longer forced. At least one source must
-    // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" },
-    ];
-    const INIT_REASON_TEXT = {
-      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
-      already_running: "初始化正在进行中。",
-      bilibili_not_logged_in: "还没检测到 B站 登录。",
-      llm_not_ready: "AI 服务还没配好或当前不可用。",
-      embedding_not_ready: "向量模型还没就绪，请等待 bge-m3 下载完成或修复 Ollama 后重试。",
-      already_initialized: "已经初始化过了。",
-      local_only: "只能在本机发起初始化。",
-      no_sources_selected: "至少勾选一个数据来源。",
-      analyze_failed: "偏好分析未完成。",
-      profile_failed: "画像生成未完成。",
-      discovery_timeout: "画像已生成，但首轮内容池整理超时。",
-      discovery_partial: "画像已生成，但首轮内容池本次未完成。",
-      internal_error: "初始化过程中出错了，请稍后重试。",
-      interrupted: "上次初始化被打断（后端重启），可重试。",
-      cancelled: "初始化已取消。",
-      none: "",
-    };
-    const INIT_SOURCE_LOGIN_HINT =
-      "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
-    const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init";
-    const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
-    const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
-    const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
-    const API_READ_TIMEOUT_MS = Number(window.__OBC_TEST_API_READ_TIMEOUT_MS) || 12000;
-    const API_WRITE_TIMEOUT_MS = Number(window.__OBC_TEST_API_WRITE_TIMEOUT_MS) || 60000;
-    let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
-    let initPollInFlight = false, initPollPending = false;
-    // Model-route state lives in the shared DOM-free module; the wizard keeps
-    // only flow state here (which step, save-in-flight, narrow-layout view).
-    let modelState = null;
-    let modelDescriptors = [];
-    let embeddingDescriptors = [];
-    let modelSaveInFlight = false;
-    let modelNarrowView = "list";
-    let embeddingEnabledChoice = null; // null = undecided, true/false after step 0.5
-    let embeddingProbeOk = false;
-    let draft = null; // createSingleConnectionDraft lens over modelState (chat)
-
-    function setStep(n) {
-      step = n;
-      document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", +p.dataset.panel === n));
-      document.querySelectorAll(".dot").forEach((d) => {
-        const i = +d.dataset.dot;
-        d.classList.toggle("active", i === n);
-        d.classList.toggle("done", i < n);
-      });
-      if (n === 1) startBiliPoll();
-      if (n === 2) renderInitIdle();
-    }
-
-    function showMsg(id, text, kind) {
-      const el = $(id);
-      el.className = "msg show " + kind;
-      el.innerHTML = text;
-    }
-
-    function showTextMsg(id, text, kind) {
-      const el = $(id);
-      el.className = "msg show " + kind;
-      el.textContent = text;
-    }
-
-    function clone(value) {
-      return JSON.parse(JSON.stringify(value));
-    }
-
-    function setModelNarrowView(view) {
-      modelNarrowView = view === "detail" ? "detail" : "list";
-      const layout = $("#modelSetupLayout");
-      if (layout) layout.dataset.narrowView = modelNarrowView;
-    }
-
-    function showModelTypeList() {
-      setModelNarrowView("list");
-      const selected = document.querySelector('#connectionTypeList [aria-selected="true"]');
-      if (selected) selected.focus();
-    }
-
-    function descriptorFor(type) {
-      return modelDescriptors.find((descriptor) => descriptor.id === type) || null;
-    }
-
-    function chatDraft() {
-      return selectedRecord(modelState, "chat");
-    }
-
-    // The wizard edits exactly one primary chat connection through the shared
-    // single-connection lens; every other route item (existing fallbacks,
-    // embedding providers) round-trips untouched through toModelConfigPayload
-    // (decision 2: preservation + disclosure, never silent carry).
-    function refreshDraftLens() {
-      const record = chatDraft();
-      draft = record ? createSingleConnectionDraft(modelState, "chat", record.id) : null;
-      return draft;
-    }
-
-    function createFirstChatDraft() {
-      const descriptor = modelDescriptors[0];
-      if (!descriptor) throw new Error("后端没有可用的 Chat 连接类型。");
-      const usedIds = new Set([
-        ...modelState.models.chat.connections,
-        ...modelState.models.embedding.providers,
-      ].map((record) => String(record?.id || "")).filter(Boolean));
-      let stableId = "chat-primary";
-      let suffix = 2;
-      while (usedIds.has(stableId)) {
-        stableId = `chat-primary-${suffix}`;
-        suffix += 1;
-      }
-      const firstPreset = (descriptor.preset_definitions || []).find(
-        (preset) => !preset.capabilities?.length || preset.capabilities.includes("chat"),
-      );
-      modelState = appendRouteItem(modelState, "chat", {
-        id: stableId,
-        name: descriptor.label,
-        type: descriptor.id,
-        preset: firstPreset?.id || "",
-        credential: { action: descriptor.category === "oauth" ? "keep" : "set" },
-      });
-      refreshDraftLens();
-      if (firstPreset) {
-        modelState = sharedApplyPreset(modelState, "chat", stableId, firstPreset);
-        refreshDraftLens();
-      }
-    }
-
-    function currentPreset(descriptor) {
-      const record = chatDraft();
-      return (descriptor?.preset_definitions || []).find(
-        (preset) => preset.id === record?.preset
-          && (!preset.capabilities?.length || preset.capabilities.includes("chat")),
-      ) || null;
-    }
-
-    function selectConnectionType(type) {
-      if (modelSaveInFlight || !draft) return;
-      const descriptor = descriptorFor(type);
-      if (!descriptor) return;
-      const record = chatDraft();
-      if (record.type !== type) {
-        // The wizard starts each draft from a blank slate, so there are no
-        // populated incompatible fields to confirm — force the change.
-        const outcome = sharedChangeConnectionType(
-          modelState, "chat", record.id, descriptor, { confirmed: true },
-        );
-        modelState = outcome.state;
-        refreshDraftLens();
-        const preset = currentPreset(descriptor);
-        if (preset) {
-          modelState = sharedApplyPreset(modelState, "chat", record.id, preset);
-          refreshDraftLens();
-        }
-      }
-      setModelNarrowView("detail");
-      renderModelSetup();
-    }
-
-    function renderConnectionTypes() {
-      const record = chatDraft();
-      const disabled = modelSaveInFlight ? " disabled" : "";
-      $("#connectionTypeList").innerHTML = modelDescriptors.map((descriptor) => `
-        <button type="button" class="connection-type-option" role="option"
-          data-connection-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record?.type}"${disabled}>
-          <span>${escapeHtml(descriptor.label)}</span><small>${escapeHtml(descriptor.category === "oauth" ? "OAuth 登录" : descriptor.help)}</small>
-        </button>`).join("");
-    }
-
-    function renderDescriptorField(descriptor, field) {
-      const record = chatDraft();
-      if (!record) return "";
-      if (field.name === "credential") return "";
-      if (field.capabilities?.length && !field.capabilities.includes("chat")) return "";
-      if (field.presets?.length && !field.presets.includes(record.preset)) return "";
-      const required = field.required ? " required" : "";
-      const disabled = modelSaveInFlight ? " disabled" : "";
-      const help = field.help ? `<div class="hint">${escapeHtml(field.help)}</div>` : "";
-      if (field.name === "preset") {
-        const options = (descriptor.preset_definitions || [])
-          .filter((preset) => !preset.capabilities?.length || preset.capabilities.includes("chat"));
-        return `<div class="model-field full"><label>Preset</label><select data-model-field="preset"${required}${disabled}>${options.map(
-          (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === record.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
-        ).join("")}</select>${currentPreset(descriptor)?.help ? `<div class="hint">${escapeHtml(currentPreset(descriptor).help)}</div>` : help}</div>`;
-      }
-      if (field.input_type === "select") {
-        const current = String(record[field.name] || "");
-        const hasBlankChoice = (field.choices || []).includes("");
-        const blank = !field.required && !current && !hasBlankChoice
-          ? '<option value="" selected>默认</option>'
-          : "";
-        return `<div class="model-field"><label>${escapeHtml(field.label)}</label><select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${blank}${(field.choices || []).map(
-          (choice) => `<option value="${escapeHtml(choice)}"${current === choice ? " selected" : ""}>${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`,
-        ).join("")}</select>${help}</div>`;
-      }
-      const inputType = field.input_type === "number" ? "number" : "text";
-      const value = record[field.name] ?? "";
-      const full = field.name === "base_url" ? " full" : "";
-      return `<div class="model-field${full}"><label>${escapeHtml(field.label)}</label><input type="${inputType}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>${help}</div>`;
-    }
-
-    function renderCredential(descriptor) {
-      const host = $("#modelCredentialEditor");
-      const record = chatDraft();
-      const definition = descriptor.fields.find((field) => field.name === "credential");
-      if (!definition || !record) {
-        host.innerHTML = '<p class="hint">此连接类型不需要凭据。</p>';
-        return;
-      }
-      const status = record.credential.status || {};
-      if (descriptor.category === "oauth") {
-        if (record.credential.action !== "keep") {
-          modelState = updateRouteField(modelState, "chat", record.id, "credential", { action: "keep" });
-          refreshDraftLens();
-        }
-        const oauthNote = status.oauth_logged_in
-          ? "已检测到登录"
-          : "尚未检测到登录 — 如需重新登录，请在终端运行 openbiliclaw auth codex";
-        host.innerHTML = `<label>${escapeHtml(definition.label)}</label><div class="hint">${escapeHtml(oauthNote)} · ${escapeHtml(status.credential_ref || definition.choices?.[0] || descriptor.label)}</div>`;
-        return;
-      }
-      const disabled = modelSaveInFlight ? " disabled" : "";
-      const sourceText = status.configured
-        ? `已配置（${status.source}${status.env_name ? ` · ${status.env_name}` : ""}）`
-        : "尚未配置";
-      const action = record.credential.action;
-      const needsValue = action === "set" || action === "env";
-      host.innerHTML = `
-        <label>${escapeHtml(definition.label)}</label>
-        <div class="hint">${escapeHtml(sourceText)}。读取时只返回状态，不会把已保存的密钥写入输入框。</div>
-        <div class="credential-actions">
-          ${status.configured ? `<button type="button" data-credential-action="keep" aria-pressed="${action === "keep"}"${disabled}>沿用已保存</button>` : ""}
-          <button type="button" data-credential-action="set" aria-pressed="${action === "set"}"${disabled}>输入 API Key</button>
-          <button type="button" data-credential-action="env" aria-pressed="${action === "env"}"${disabled}>环境变量</button>
-          <button type="button" data-credential-action="clear" aria-pressed="${action === "clear"}"${disabled}>清除</button>
-        </div>
-        ${needsValue ? `<input id="modelCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(record.credential.value || "")}" placeholder="${action === "env" ? "例如 OPENAI_API_KEY" : "输入新 API Key"}" autocomplete="new-password"${disabled}>` : ""}`;
-    }
-
-    // Decision 2: disclose preserved fallbacks instead of silently carrying.
-    function renderPreservedFallbacks() {
-      const host = $("#preservedFallbacks");
-      if (!host) return;
-      const count = Math.max(0, modelState.models.chat.connections.length - 1);
-      host.hidden = count === 0;
-      if (count) {
-        host.textContent = `已检测到现有配置：除主连接外还有 ${count} 个备用连接，保存后将继续保留，可在 设置 → 模型 中管理。`;
-      }
-    }
-
-    function renderModelSetup() {
-      setModelNarrowView(modelNarrowView);
-      renderConnectionTypes();
-      const record = chatDraft();
-      const descriptor = descriptorFor(record?.type);
-      if (!descriptor || !record) return;
-      $("#connectionTypeTitle").textContent = descriptor.label;
-      $("#connectionStableId").textContent = `ID: ${record.id}`;
-      $("#connectionTypeHelp").textContent = descriptor.help;
-      $("#modelDescriptorFields").innerHTML = descriptor.fields
-        .map((field) => renderDescriptorField(descriptor, field))
-        .join("");
-      renderCredential(descriptor);
-      renderPreservedFallbacks();
-    }
-
-    function updateModelField(field, value) {
-      const record = chatDraft();
-      if (!record || modelSaveInFlight) return;
-      if (field === "preset") {
-        const descriptor = descriptorFor(record.type);
-        const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
-        if (preset) {
-          modelState = sharedApplyPreset(modelState, "chat", record.id, preset);
-          refreshDraftLens();
-        }
-        renderModelSetup();
-        return;
-      }
-      modelState = updateRouteField(
-        modelState, "chat", record.id, field,
-        field === "num_ctx" ? Number(value || 0) : value,
-      );
-      refreshDraftLens();
-    }
-
-    function validateModelDraft(descriptor) {
-      const record = chatDraft();
-      if (!record) return "缺少主连接草稿。";
-      for (const field of descriptor.fields || []) {
-        if (field.name === "credential") continue;
-        if (field.capabilities?.length && !field.capabilities.includes("chat")) continue;
-        if (field.presets?.length && !field.presets.includes(record.preset)) continue;
-        if (field.required && !String(record[field.name] ?? "").trim()) {
-          return `请填写${field.label}。`;
-        }
-      }
-      const credentialField = descriptor.fields.find((field) => field.name === "credential");
-      if (
-        credentialField?.required
-        && ["set", "env"].includes(record.credential.action)
-        && !String(record.credential.value || "").trim()
-      ) return record.credential.action === "env" ? "请填写环境变量名。" : "请填写 API Key。";
-      return "";
-    }
-
-    // Single bounded request helper for every backend call in the wizard —
-    // mirrors web/js/api.js requestJson: same-origin session cookie, the
-    // X-OBC-Auth CSRF header on every request (the gate requires it on GETs
-    // too), an AbortController timeout, and structured {status, details}
-    // errors. Callers pass an absolute /api path; 401 login guidance lives
-    // here instead of per-call checks.
-    async function apiFetch(path, options = {}) {
-      const { timeoutMs = API_READ_TIMEOUT_MS, acceptStatuses, ...init } = options;
-      const controller = new AbortController();
-      const tid = setTimeout(() => controller.abort(), timeoutMs);
-      let response;
-      try {
-        response = await fetch(path, {
-          ...init,
-          credentials: "same-origin",
-          signal: controller.signal,
-          headers: { ...(init.headers || {}), "X-OBC-Auth": "1" },
+    <script type="module">
+      import {
+        request,
+        readSse,
+        escapeHtml,
+        errorMessage,
+        safeWebUrl,
+      } from "/m/js/vnext-api.js";
+      const sourceNames = {
+        bilibili: "Bilibili",
+        xiaohongshu: "小红书",
+        douyin: "抖音",
+        youtube: "YouTube",
+        twitter: "X",
+        zhihu: "知乎",
+        reddit: "Reddit",
+      };
+      const requiredAliases = [
+        "obc-interactive",
+        "obc-analysis",
+        "obc-embedding",
+      ];
+      let aliasesReady = false;
+      let sourceManifests = [];
+      let configuredSources = new Set();
+      const panels = [...document.querySelectorAll(".panel")],
+        dots = [...document.querySelectorAll(".dot")];
+      function step(index) {
+        panels.forEach((el, i) => el.classList.toggle("active", i === index));
+        dots.forEach((el, i) => {
+          el.classList.toggle("active", i === index);
+          el.classList.toggle("done", i < index);
         });
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          const timeoutError = new Error("请求超时，请确认后端仍在运行后重试。");
-          timeoutError.status = 0;
-          timeoutError.details = {};
-          throw timeoutError;
-        }
-        throw error;
-      } finally {
-        clearTimeout(tid);
       }
-      let details = {};
-      try { details = await response.json(); } catch {}
-      if (response.ok || (acceptStatuses || []).includes(response.status)) return details;
-      if (response.status === 401) showAuthRequired();
-      const error = new Error(
-        details.message || details.detail || details.error || `HTTP ${response.status}`,
-      );
-      error.status = response.status;
-      error.details = details;
-      throw error;
-    }
-
-    function showAuthRequired() {
-      showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
-    }
-
-    function hydrateModelSetup(snapshot) {
-      if (!snapshot?.models?.chat || !snapshot?.models?.embedding) {
-        throw new Error("模型配置快照结构不完整。");
+      function message(id, text, tone = "info") {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        el.className = `msg show ${tone}`;
       }
-      modelState = hydrateModelConfig(snapshot);
-      setModelNarrowView("list");
-      if (!modelState.models.chat.connections.length) createFirstChatDraft();
-      refreshDraftLens();
-      renderModelSetup();
-    }
-
-    // Decision 3: a non-"none" migration state routes the user to the full
-    // configuration page's migration flow — the wizard stays linear and never
-    // attempts inline resolution.
-    function migrationBlocksWizard() {
-      return modelState && modelState.migration && modelState.migration.state !== "none";
-    }
-
-    function renderMigrationInterstitial() {
-      const panel = $("#migrationInterstitial");
-      if (!panel) return;
-      panel.hidden = !migrationBlocksWizard();
-      $("#modelSetupLayout").style.display = migrationBlocksWizard() ? "none" : "";
-      $("#saveModel").disabled = migrationBlocksWizard() || modelSaveInFlight;
-    }
-
-    function handleModelConflict(details) {
-      // Decision 5: hydrate from details.latest but surface the conflict in a
-      // banner; the wizard draft is small, so re-confirm is acceptable, but
-      // the banner must make the overwrite explicit.
-      if (details?.latest) hydrateModelSetup(details.latest);
-      showMsg("#msg0", "模型配置已在另一个窗口更新。已载入最新版本，请重新确认后点击重试。", "warn");
-    }
-
-    async function loadModelSetup() {
-      const [descriptors, embeddingDescriptorResponse, snapshot] = await Promise.all([
-        apiFetch("/api/model-connection-types?capability=chat"),
-        apiFetch("/api/model-connection-types?capability=embedding"),
-        apiFetch("/api/model-config"),
-      ]);
-      modelDescriptors = Array.isArray(descriptors.connection_types) ? descriptors.connection_types : [];
-      if (!modelDescriptors.length) throw new Error("后端没有可用的 Chat 连接类型。");
-      embeddingDescriptors = Array.isArray(embeddingDescriptorResponse.connection_types)
-        ? embeddingDescriptorResponse.connection_types
-        : [];
-      hydrateModelSetup(snapshot);
-      renderMigrationInterstitial();
-    }
-
-    // ── Step 0.5: optional embedding route ──────────────────────────────
-    // Decision: the wizard offers a single optional embedding provider with
-    // shared settings; skipping discloses that it can be enabled later.
-    function embeddingDescriptorFor(type) {
-      return embeddingDescriptors.find((descriptor) => descriptor.id === type) || null;
-    }
-
-    function embeddingProvider() {
-      return modelState?.models.embedding.providers[0] || null;
-    }
-
-    function ensureEmbeddingDraft() {
-      if (!modelState.models.embedding.providers.length) {
-        const descriptor = embeddingDescriptors[0];
-        if (!descriptor) throw new Error("后端没有可用的 Embedding 连接类型。");
-        const firstPreset = (descriptor.preset_definitions || []).find(
-          (preset) => !preset.capabilities?.length || preset.capabilities.includes("embedding"),
-        );
-        modelState = appendRouteItem(modelState, "embedding", {
-          id: "embedding-primary",
-          name: descriptor.label,
-          type: descriptor.id,
-          preset: firstPreset?.id || "",
-          credential: { action: descriptor.category === "oauth" ? "keep" : "clear" },
-        });
-        if (firstPreset) {
-          modelState = sharedApplyPreset(modelState, "embedding", "embedding-primary", firstPreset);
-        }
-      }
-      modelState = updateRouteSetting(modelState, "embedding", "enabled", true);
-      return embeddingProvider();
-    }
-
-    function renderEmbeddingStep() {
-      const enabled = embeddingEnabledChoice === true;
-      $("#embeddingFields").hidden = !enabled;
-      $("#embeddingSkipHint").hidden = embeddingEnabledChoice !== false;
-      if (!enabled) return;
-      let provider;
-      try {
-        provider = ensureEmbeddingDraft();
-      } catch (error) {
-        showTextMsg("#msgEmbedding", error.message, "err");
-        return;
-      }
-      const descriptor = embeddingDescriptorFor(provider.type);
-      const disabled = modelSaveInFlight ? " disabled" : "";
-      $("#embeddingTypeList").innerHTML = embeddingDescriptors.map((item) => `
-        <button type="button" class="connection-type-option" role="option"
-          data-embedding-type="${escapeHtml(item.id)}" aria-selected="${item.id === provider.type}"${disabled}>
-          <span>${escapeHtml(item.label)}</span><small>${escapeHtml(item.category === "oauth" ? "OAuth 登录" : item.help)}</small>
-        </button>`).join("");
-      const presetOptions = (descriptor?.preset_definitions || [])
-        .filter((preset) => !preset.capabilities?.length || preset.capabilities.includes("embedding"));
-      $("#embeddingDescriptorFields").innerHTML = (descriptor?.fields || [])
-        .filter((field) => field.name !== "credential")
-        .filter((field) => !field.capabilities?.length || field.capabilities.includes("embedding"))
-        .filter((field) => !field.presets?.length || field.presets.includes(provider.preset))
-        .map((field) => {
-          const required = field.required ? " required" : "";
-          const help = field.help ? `<div class="hint">${escapeHtml(field.help)}</div>` : "";
-          if (field.name === "preset") {
-            return `<div class="model-field full"><label>Preset</label><select data-embedding-field="preset"${required}${disabled}>${presetOptions.map(
-              (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === provider.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
-            ).join("")}</select>${help}</div>`;
-          }
-          return `<div class="model-field full"><label>${escapeHtml(field.label)}</label><input type="text" data-embedding-field="${escapeHtml(field.name)}" value="${escapeHtml(provider[field.name] ?? "")}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>${help}</div>`;
-        }).join("");
-      $("#embeddingModel").value = modelState.models.embedding.settings.model || "";
-      $("#embeddingCredential").innerHTML = renderEmbeddingCredential(descriptor, provider);
-      $("#embeddingProbeStatus").textContent = embeddingProbeOk ? "✓ 已探测通过" : "";
-    }
-
-    function renderEmbeddingCredential(descriptor, provider) {
-      const definition = descriptor?.fields?.find((field) => field.name === "credential");
-      if (!definition) return '<p class="hint">此连接类型不需要凭据。</p>';
-      const status = provider.credential.status || {};
-      const disabled = modelSaveInFlight ? " disabled" : "";
-      const sourceText = status.configured
-        ? `已配置（${status.source}${status.env_name ? ` · ${status.env_name}` : ""}）`
-        : "尚未配置（本地 Ollama 通常不需要 Key）";
-      const action = provider.credential.action;
-      const needsValue = action === "set" || action === "env";
-      return `
-        <label>${escapeHtml(definition.label)}</label>
-        <div class="hint">${escapeHtml(sourceText)}</div>
-        <div class="credential-actions">
-          ${status.configured ? `<button type="button" data-embedding-credential-action="keep" aria-pressed="${action === "keep"}"${disabled}>沿用已保存</button>` : ""}
-          <button type="button" data-embedding-credential-action="set" aria-pressed="${action === "set"}"${disabled}>输入 API Key</button>
-          <button type="button" data-embedding-credential-action="env" aria-pressed="${action === "env"}"${disabled}>环境变量</button>
-          <button type="button" data-embedding-credential-action="clear" aria-pressed="${action === "clear"}"${disabled}>无 / 清除</button>
-        </div>
-        ${needsValue ? `<input id="embeddingCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(provider.credential.value || "")}" autocomplete="new-password"${disabled}>` : ""}`;
-    }
-
-    function updateEmbeddingField(field, value) {
-      const provider = embeddingProvider();
-      if (!provider || modelSaveInFlight) return;
-      if (field === "preset") {
-        const descriptor = embeddingDescriptorFor(provider.type);
-        const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
-        if (preset) {
-          modelState = sharedApplyPreset(modelState, "embedding", provider.id, preset);
-        }
-      } else {
-        modelState = updateRouteField(modelState, "embedding", provider.id, field, value);
-      }
-      embeddingProbeOk = false;
-      renderEmbeddingStep();
-    }
-
-    function selectEmbeddingType(type) {
-      const provider = embeddingProvider();
-      if (!provider || modelSaveInFlight) return;
-      const descriptor = embeddingDescriptorFor(type);
-      if (!descriptor || provider.type === type) return;
-      const outcome = sharedChangeConnectionType(
-        modelState, "embedding", provider.id, descriptor, { confirmed: true },
-      );
-      modelState = outcome.state;
-      const preset = (descriptor.preset_definitions || []).find(
-        (item) => !item.capabilities?.length || item.capabilities.includes("embedding"),
-      );
-      if (preset) {
-        modelState = sharedApplyPreset(modelState, "embedding", provider.id, preset);
-      }
-      embeddingProbeOk = false;
-      renderEmbeddingStep();
-    }
-
-    function setEmbeddingEnabled(enabled) {
-      embeddingEnabledChoice = Boolean(enabled);
-      embeddingProbeOk = false;
-      if (embeddingEnabledChoice) {
+      async function loadAi() {
         try {
-          ensureEmbeddingDraft();
-        } catch (error) {
-          showTextMsg("#msgEmbedding", error.message, "err");
-        }
-      } else {
-        // Skip: disable the route but keep any existing providers preserved
-        // verbatim in the payload (shared state never drops route items).
-        modelState = updateRouteSetting(modelState, "embedding", "enabled", false);
-      }
-      renderEmbeddingStep();
-    }
-
-    async function probeEmbeddingDraft() {
-      const provider = embeddingProvider();
-      if (!provider) return false;
-      const settings = modelState.models.embedding.settings;
-      if (!String(settings.model || "").trim()) {
-        showTextMsg("#msgEmbedding", "请填写 Embedding 模型名（如 bge-m3）。", "err");
-        return false;
-      }
-      const probe = await apiFetch("/api/model-config/probe", {
-        method: "POST",
-        timeoutMs: API_WRITE_TIMEOUT_MS,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind: "embedding",
-          revision: modelState.revision,
-          provider: {
-            id: provider.id,
-            name: provider.name,
-            type: provider.type,
-            preset: provider.preset,
-            base_url: provider.base_url,
-            credential: provider.credential.action === "set" || provider.credential.action === "env"
-              ? { action: provider.credential.action, value: provider.credential.value || "" }
-              : { action: provider.credential.action },
-          },
-          settings: {
-            model: String(settings.model || ""),
-            output_dimensionality: Number(settings.output_dimensionality) || 0,
-            similarity_threshold: Number(settings.similarity_threshold),
-            multimodal_enabled: Boolean(settings.multimodal_enabled),
-          },
-        }),
-      });
-      if (!probe.ok) {
-        showTextMsg("#msgEmbedding", `Embedding 连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
-        return false;
-      }
-      embeddingProbeOk = true;
-      renderEmbeddingStep();
-      return true;
-    }
-
-    function updateEmbeddingSummary() {
-      const el = $("#doneEmbedding");
-      if (!el) return;
-      if (embeddingEnabledChoice === true && embeddingProbeOk) {
-        const provider = embeddingProvider();
-        const descriptor = embeddingDescriptorFor(provider?.type);
-        el.textContent = `已启用 · ${descriptor?.label || provider?.type || ""} · ${modelState.models.embedding.settings.model}`;
-      } else if (modelState?.models.embedding.enabled) {
-        el.textContent = "使用现有 Embedding 配置";
-      } else {
-        el.textContent = "未启用 — 可稍后在 设置 → 模型 → Embedding 路由 中配置";
-      }
-    }
-
-    async function saveModelRoute() {
-      if (!modelState || !chatDraft() || modelSaveInFlight) return;
-      if (migrationBlocksWizard()) {
-        showTextMsg("#msg0", "检测到旧版模型配置需要迁移，请先完成迁移。", "err");
-        return;
-      }
-      const descriptor = descriptorFor(chatDraft().type);
-      if (!descriptor) return;
-      const validationError = validateModelDraft(descriptor);
-      if (validationError) {
-        showTextMsg("#msg0", validationError, "err");
-        return;
-      }
-
-      const payload = toModelConfigPayload(modelState);
-      const chatConnectionDraft = payload.models.chat.connections[0];
-      const btn = $("#saveModel");
-      modelSaveInFlight = true;
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spin"></span>正在测试精确配置…';
-      renderModelSetup();
-      try {
-        const probe = await apiFetch("/api/model-config/probe", {
-          method: "POST",
-          timeoutMs: API_WRITE_TIMEOUT_MS,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: "chat",
-            revision: modelState.revision,
-            connection: chatConnectionDraft,
-          }),
-        });
-        if (!probe.ok) {
-          showTextMsg("#msg0", `连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
-          return;
-        }
-        // Optional embedding route (step 0.5): probe-and-proceed gate.
-        if (embeddingEnabledChoice === true && !embeddingProbeOk) {
-          const embeddingOk = await probeEmbeddingDraft();
-          if (!embeddingOk) return;
-        }
-        btn.innerHTML = '<span class="spin"></span>测试通过，正在保存…';
-        const result = await apiFetch("/api/model-config", {
-          method: "PUT",
-          timeoutMs: API_WRITE_TIMEOUT_MS,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        hydrateModelSetup(result.snapshot);
-        renderMigrationInterstitial();
-        const preset = currentPreset(descriptorFor(chatDraft().type));
-        $("#doneLlm").textContent = `已连接 · ${preset?.label || descriptor.label}`;
-        updateEmbeddingSummary();
-        setStep(1);
-      } catch (error) {
-        if (error.status === 401) {
-          showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
-        } else if (error.status === 409 && error.details?.error === "revision_conflict") {
-          handleModelConflict(error.details);
-        } else {
-          const fieldErrors = Array.isArray(error.details?.errors)
-            ? error.details.errors.map((item) => item.message).filter(Boolean).join("；")
-            : "";
-          showTextMsg("#msg0", `模型配置失败：${fieldErrors || error.message || "请稍后重试"}`, "err");
-        }
-      } finally {
-        modelSaveInFlight = false;
-        btn.disabled = migrationBlocksWizard();
-        btn.innerHTML = "测试、保存并继续 →";
-        renderModelSetup();
-      }
-    }
-
-    // The guided-init login authority is /api/init-status: its prerequisites
-    // run the backend's real B站 probe. The legacy config endpoint only
-    // projects stored config, so a stale cookie string would read as
-    // logged-in — never gate on it here.
-    async function checkBili() {
-      try {
-        const status = await apiFetch("/api/init-status");
-        return Boolean(status?.prerequisites?.bilibili_logged_in);
-      } catch { return false; }
-    }
-
-    function describeInitReason(reason) {
-      if (!reason || reason === "none") return "";
-      return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
-    }
-
-    function initStatusReasonText(status) {
-      const reason = String(status?.reason || "");
-      const detail = String(status?.detail || "").trim();
-      const detailFirst = [
-        "analyze_failed",
-        "profile_failed",
-        "discovery_timeout",
-        "discovery_partial",
-      ];
-      if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
-        return detail;
-      }
-      return describeInitReason(reason) || detail;
-    }
-
-    function initLastFailureText(status) {
-      const reason = String(status?.last_failure_reason || "");
-      const detail = String(status?.last_failure_detail || "").trim();
-      return detail || describeInitReason(reason);
-    }
-
-    function initRecoveryReasonText(status) {
-      return initLastFailureText(status) || initStatusReasonText(status);
-    }
-
-    function initStartMode(status) {
-      if (status?.start_mode) return String(status.start_mode);
-      if (status?.reason === "unsupported_runtime") return "cli_only";
-      if (status?.reason === "local_only") return "local_only";
-      return "web";
-    }
-
-    function enabledPlatforms(status) {
-      const platforms = status?.prerequisites?.enabled_platforms;
-      return Array.isArray(platforms) ? platforms.map(String) : [];
-    }
-
-    function initSourceLabels(keys) {
-      const byKey = new Map(INIT_SOURCE_OPTIONS.map((opt) => [opt.key, opt.label]));
-      return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
-    }
-
-    function embeddingPhaseHint(prereq) {
-      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
-    }
-
-    function embeddingPullProgressView(status) {
-      const prereq = status?.prerequisites || {};
-      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
-      const completed = Number(prereq.embedding_repair_completed || 0);
-      const total = Number(prereq.embedding_repair_total || 0);
-      const pct = total > 0
-        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
-        : active ? 1 : 0;
-      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
-      return { active, pct, label };
-    }
-
-    function buildInitChecklist(status, selected = null) {
-      const prereq = status?.prerequisites || {};
-      const enabled = enabledPlatforms(status);
-      const selectedSources = Array.isArray(selected) ? selected : null;
-      // B站 login only blocks when bilibili is among the checked sources.
-      const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
-      const embeddingRequired = Boolean(prereq.embedding_required);
-      const embeddingHint = [
-        embeddingPhaseHint(prereq),
-        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim(),
-      ].filter(Boolean).join(" ");
-      const embeddingCheck = String(prereq.embedding_check || "");
-      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
-      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
-      // Label must state the ACTUAL probe result — a fixed "已登录" item name
-      // reads as "logged in" the moment the row stops being a red ✗.
-      const biliOk = Boolean(prereq.bilibili_logged_in);
-      const biliState = biliOk ? "B站 已登录" : "B站 登录检测未通过";
-      const biliDetail = String(prereq.bilibili_detail || "").trim();
-      return [
-        {
-          key: "bilibili",
-          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
-          ok: biliOk,
-          hard: biliSelected,
-          hint:
-            (biliDetail ? `${biliDetail} ` : "") +
-            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。",
-        },
-        {
-          key: "llm",
-          label: "AI 服务可用",
-          ok: Boolean(prereq.llm_ready),
-          hard: true,
-          hint: "回到第一步填好 LLM provider 的 API Key，或确认本地 / 远端模型服务可达。",
-        },
-        {
-          key: "embedding",
-          label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
-          ok: Boolean(prereq.embedding_ready),
-          hard: embeddingRequired,
-          // Backend classifies the cause (embedding_detail, v0.3.155+):
-          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
-          // detail 带实时百分比，3s 轮询自动刷新）。Fall back to the generic
-          // copy on older backends.
-          hint:
-            embeddingHint ||
-            (embeddingRequired
-              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
-          // One-click server-side `ollama pull` when the missing model is the
-          // only problem (v0.3.155+). Hidden while a repair is running — the
-          // hint line already shows live progress.
-          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
-          repairLabel: embeddingCheck === "model_path_encoding"
-            ? "迁移模型目录并修复"
-            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型",
-        },
-        {
-          key: "platforms",
-          label: selectedSources?.length
-            ? `本次初始化来源：${initSourceLabels(selectedSources).join("、")}`
-            : enabled.length
-              ? `已启用来源：${initSourceLabels(enabled).join("、")}`
-              : "数据来源：仅 B站",
-          ok: true,
-          hard: false,
-          hint: "",
-        },
-      ];
-    }
-
-    function renderInitSources() {
-      const root = $("#initSources");
-      root.innerHTML = '<p class="init-sources-title">选择初始化数据来源（至少一个）</p>';
-      for (const opt of INIT_SOURCE_OPTIONS) {
-        const label = document.createElement("label");
-        label.className = "init-source-row";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.value = opt.key;
-        input.dataset.initSource = opt.key;
-        input.checked = Boolean(opt.defaultChecked);
-        const text = document.createElement("span");
-        text.textContent = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
-        label.append(input, text);
-        root.append(label);
-      }
-      const hint = document.createElement("p");
-      hint.className = "hint";
-      hint.textContent = INIT_SOURCE_LOGIN_HINT;
-      root.append(hint);
-    }
-
-    function readSelectedInitSources() {
-      return [...document.querySelectorAll("input[data-init-source]")]
-        .filter((input) => input.checked)
-        .map((input) => input.value);
-    }
-
-    function renderInitChecklist(status, selected = null) {
-      const root = $("#initChecklist");
-      root.innerHTML = "";
-      for (const row of buildInitChecklist(status, selected)) {
-        const li = document.createElement("li");
-        li.className = `${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}`;
-        const head = document.createElement("div");
-        head.className = "init-row";
-        const mark = document.createElement("span");
-        mark.className = "init-mark";
-        mark.textContent = row.ok ? "✓" : row.hard ? "✗" : "•";
-        const label = document.createElement("span");
-        label.textContent = row.label;
-        head.append(mark, label);
-        li.append(head);
-        if (!row.ok && row.hint) {
-          const hint = document.createElement("p");
-          hint.className = "init-hint";
-          hint.textContent = row.hint;
-          li.append(hint);
-        }
-        if (!row.ok && row.repairable) {
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "btn ghost init-repair-btn";
-          btn.setAttribute("data-embedding-repair", "1");
-          btn.textContent = row.repairLabel || "自动下载向量模型";
-          btn.addEventListener("click", () => void startEmbeddingRepairFromChecklist(btn));
-          li.append(btn);
-        }
-        root.append(li);
-      }
-    }
-
-    // Kick the server-side `ollama pull` (POST /api/embedding/repair); the
-    // 3s init-status poll then renders live percent on the checklist row
-    // (embedding_check="repairing"). 409 already_running is success-shaped.
-    async function startEmbeddingRepairFromChecklist(btn) {
-      const originalLabel = btn.textContent || "自动下载向量模型";
-      btn.disabled = true;
-      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
-      try {
-        const body = await apiFetch("/api/embedding/repair", {
-          method: "POST",
-          acceptStatuses: [409],
-        });
-        if (body?.error && body.error !== "already_running") {
-          throw new Error(body.detail || body.error);
-        }
-        scheduleInitPoll(300);
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-        setInitReason(`向量模型下载启动失败：${e.message || e}`);
-      }
-    }
-
-    function setInitReason(text, kind = "err") {
-      const el = $("#initReason");
-      el.className = text ? `msg show ${kind}` : "msg";
-      el.textContent = text || "";
-      el.setAttribute("role", kind === "err" ? "alert" : "status");
-      el.setAttribute("aria-live", kind === "err" ? "assertive" : "polite");
-    }
-
-    function renderCliInitRequired(status) {
-      clearInitPoll();
-      $("#initSources").style.display = "none";
-      $("#initProgress").hidden = true;
-      $("#initEscape").className = "msg";
-      $("#initCliCommand").className = "init-cli-command show";
-      renderInitChecklist(status);
-      $("#startInit").disabled = false;
-      $("#startInit").textContent = "复制初始化命令";
-      const failure = initLastFailureText(status);
-      setInitReason(
-        failure
-          ? `上次初始化未完成：${failure}。Docker 环境请在宿主机终端重新运行下方命令。`
-          : INIT_REASON_TEXT.unsupported_runtime,
-        failure ? "err" : "info",
-      );
-    }
-
-    async function copyCliInitCommand() {
-      try {
-        await navigator.clipboard.writeText(INIT_CLI_COMMAND);
-        setInitReason("初始化命令已复制，请粘贴到宿主机终端运行。", "ok");
-      } catch {
-        setInitReason(`请复制并在宿主机终端运行：${INIT_CLI_COMMAND}`, "info");
-      }
-    }
-
-    async function fetchInitStatus() {
-      return apiFetch("/api/init-status");
-    }
-
-    async function fetchRuntimeStatus() {
-      return apiFetch("/api/runtime-status");
-    }
-
-    function runtimeHasFirstPool(runtime) {
-      return Number(runtime?.pool_available_count ?? runtime?.pool_available ?? runtime?.available_count ?? 0) > 0
-        || Number(runtime?.recommendation_count ?? 0) > 0;
-    }
-
-    async function firstInitPoolReady() {
-      try {
-        return runtimeHasFirstPool(await fetchRuntimeStatus());
-      } catch {
-        return false;
-      }
-    }
-
-    function renderWaitingForFirstPool(status = null) {
-      const partial = Boolean(status?.partial_success);
-      $("#initSources").style.display = "none";
-      $("#initProgress").hidden = false;
-      $("#initProgressBar").style.width = "95%";
-      $("#initProgressLabel").textContent = partial
-        ? "画像已生成，但首轮内容池本次未完成"
-        : "画像已生成，正在整理首轮内容池…";
-      $("#initStallHint").hidden = true;
-      $("#initStallHint").classList.remove("stale");
-      $("#startInit").disabled = true;
-      $("#startInit").textContent = "整理首轮内容…";
-      setInitReason(
-        partial
-          ? initStatusReasonText(status)
-          : "等第一批内容入池可刷后，初始化才会完成。",
-        partial ? "warn" : "info",
-      );
-      // Escape hatch: replenishment can be slow (or stuck) — never park the
-      // user on a disabled button with no way out of the wizard.
-      $("#initEscape").className = "msg show info";
-    }
-
-    // Human text for a failed/cancelled run. ``status.detail`` carries the
-    // backend's stored failure specifics (exception summary / GuidedInitError
-    // message, v0.3.156+) — append it so internal_error is diagnosable from
-    // the UI instead of only the generic "请稍后重试".
-    function initFailureText(status, failedStage) {
-      const previousFailure = initLastFailureText(status);
-      if (previousFailure) return previousFailure;
-      const base = describeInitReason(status?.reason) || "";
-      const detail = String(status?.detail || "").trim();
-      const reason = String(status?.reason || "");
-      if (
-        detail &&
-        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
-          detail.startsWith("画像分析失败："))
-      ) return detail;
-      // Unmapped codes (empty_history / empty_signals / profile_failed …)
-      // carry their authoritative human message in detail — show it alone
-      // instead of "未知初始化状态：code（message）".
-      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
-      if (base && detail) return `${base}（${detail}）`;
-      return base || failedStage?.reason || "请稍后重试";
-    }
-
-    // ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──
-    // MIRROR of the reference implementation in
-    // extension/popup/popup-init-control.js (and desktop web app.js) — the
-    // three GUI surfaces share no module system, so keep the formulas in
-    // lock-step. Copy exception: setup wires no init-cancel action, so its
-    // stall text points at page-leave persistence instead of cancellation.
-    const STAGE_FRACTION_CAP = 0.95;
-    const STAGE_FRACTION_FALLBACK = 0.5;
-    // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
-    // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
-    const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
-
-    const _runViewState = new Map();
-
-    function _viewState(runId) {
-      let st = _runViewState.get(runId);
-      if (!st) {
-        st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
-        _runViewState.set(runId, st);
-        if (_runViewState.size > 8) {
-          const oldest = _runViewState.keys().next().value;
-          if (oldest !== runId) _runViewState.delete(oldest);
-        }
-      }
-      return st;
-    }
-
-    function _runningStageFraction(stage, st, nowMs) {
-      const prog = stage?.progress;
-      const progTotal = prog ? Number(prog.total || 0) : 0;
-      if (progTotal > 0) {
-        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-      }
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta > 0 && st) {
-        let startMs = st.stageStartMs.get(stage.n);
-        if (startMs === undefined) {
-          startMs = nowMs;
-          st.stageStartMs.set(stage.n, startMs);
-        }
-        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-      }
-      return STAGE_FRACTION_FALLBACK;
-    }
-
-    // "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise);
-    // X rounds UP to the nearest half minute.
-    function stageEtaText(stage) {
-      const eta = Number(stage?.eta_seconds || 0);
-      if (eta <= 0) return "";
-      const halfMinutes = Math.ceil(eta / 30) / 2;
-      return `本阶段通常约 ${halfMinutes} 分钟`;
-    }
-
-    // Liveness indicator driven by last_activity (bumped by every backend
-    // write incl. the 30s heartbeat). Staleness is measured from the CLIENT
-    // time the (sequence, last_activity) marker last changed — clock-skew
-    // immune. Old backends without the field get no stall detection.
-    function stalenessView(status, nowMs = Date.now()) {
-      if (!status?.running) return { fresh: true, staleSeconds: 0, text: "" };
-      const runId = status.run_id ? String(status.run_id) : "";
-      if (!runId || !status.last_activity) {
-        return { fresh: true, staleSeconds: 0, text: "● 进行中" };
-      }
-      const st = _viewState(runId);
-      const mark = `${status.sequence ?? ""}|${status.last_activity}`;
-      if (st.lastMark !== mark) {
-        st.lastMark = mark;
-        st.lastChangeMs = nowMs;
-      }
-      const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
-      if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
-        const minutes = Math.max(1, Math.round(staleSeconds / 60));
-        return {
-          fresh: false,
-          staleSeconds,
-          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，也可以先离开页面，进度会保留。`,
-        };
-      }
-      return { fresh: true, staleSeconds, text: "● 进行中" };
-    }
-
-    function progressView(status, nowMs = Date.now()) {
-      const pull = embeddingPullProgressView(status);
-      if (pull.active && !status?.running) {
-        return { pct: pull.pct, failed: null, label: pull.label, etaText: "" };
-      }
-      const total = status?.total_stages || 4;
-      const stages = Array.isArray(status?.stages) ? status.stages : [];
-      const done = stages.filter((s) => s.status === "ok").length;
-      const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
-      const failed = failedStage || (initLastFailureText(status) ? { reason: status?.last_failure_reason } : null);
-      const running = Boolean(status?.running);
-      const runId = status?.run_id ? String(status.run_id) : "";
-      const st = runId ? _viewState(runId) : null;
-      const current = status?.current_stage || 0;
-      const currentStage = stages.find((s) => s.n === current);
-      let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
-      const note = currentStage?.progress?.note;
-      if (stageLabel && note) stageLabel += ` · ${note}`;
-      const runningStages = stages.filter((s) => s.status === "running");
-      const inFlight = runningStages.length
-        ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
-          runningStages.length
-        : 0;
-      let pct = Math.max(0, Math.min(100, Math.round(((done + (running ? inFlight : 0)) / total) * 100)));
-      if (running) pct = Math.max(pct, 1);
-      if (st) {
-        st.maxPct = Math.max(st.maxPct, pct);
-        pct = st.maxPct;
-      }
-      return {
-        pct,
-        failed,
-        etaText: running ? stageEtaText(currentStage) : "",
-        label: failed
-          ? `初始化未完成：${initFailureText(status, failed)}`
-          : running
-            ? `${stageLabel || "正在初始化"}（${pct}%）`
-            : "初始化完成",
-      };
-    }
-
-    function renderInitProgress(status) {
-      $("#initCliCommand").className = "init-cli-command";
-      $("#initSources").style.display = "none";
-      $("#initEscape").className = "msg";
-      $("#initProgress").hidden = false;
-      // The transient "正在检查 AI 服务…" row is only meaningful between the
-      // start click and the run launch — once a run is rendering (running or
-      // terminal) it reads as a stuck state, so swap it out (field report
-      // 2026-07-05: a failed run showed the stale checking row above the
-      // failure banner).
-      if ($("#initChecklist").querySelector(".init-checking")) {
-        $("#initChecklist").innerHTML = status?.running
-          ? '<li class="init-hint-row">前置检查已通过，初始化进行中…</li>'
-          : '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>';
-      }
-      const view = progressView(status);
-      $("#initProgressBar").style.width = `${view.pct}%`;
-      const progressLabel = $("#initProgressLabel");
-      progressLabel.textContent = view.label;
-      progressLabel.setAttribute("role", view.failed ? "alert" : "status");
-      progressLabel.setAttribute("aria-live", view.failed ? "assertive" : "polite");
-      // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
-      // keeps writing; amber stall copy after >90s of silence.
-      const staleness = stalenessView(status);
-      const stallText = status?.running
-        ? staleness.fresh
-          ? [staleness.text, view.etaText].filter(Boolean).join(" · ")
-          : staleness.text
-        : "";
-      const stallHint = $("#initStallHint");
-      stallHint.textContent = stallText;
-      stallHint.classList.toggle("stale", Boolean(status?.running) && !staleness.fresh);
-      stallHint.hidden = !stallText;
-      $("#startInit").disabled = Boolean(status?.running);
-      $("#startInit").textContent = status?.running ? "初始化进行中…" : view.failed ? "重试初始化" : "开始初始化";
-    }
-
-    function renderInitIdle() {
-      clearInitPoll();
-      renderInitSources();
-      $("#initEscape").className = "msg";
-      $("#initCliCommand").className = "init-cli-command";
-      $("#initSources").style.display = "";
-      $("#initChecklist").innerHTML =
-        '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>' +
-        `<li class="init-hint-row">${INIT_EXPECTATION_HINT}</li>`;
-      $("#initProgress").hidden = true;
-      $("#initProgressBar").style.width = "0";
-      $("#initStallHint").hidden = true;
-      $("#initStallHint").classList.remove("stale");
-      $("#startInit").disabled = false;
-      $("#startInit").textContent = "开始初始化";
-      setInitReason("");
-    }
-
-    function clearInitPoll() {
-      if (initPoll) {
-        clearTimeout(initPoll);
-        initPoll = null;
-      }
-    }
-
-    function scheduleInitPoll(delayMs = INIT_POLL_MS) {
-      clearInitPoll();
-      initPoll = setTimeout(() => {
-        initPoll = null;
-        void pollInitStatus();
-      }, delayMs);
-    }
-
-    function initStreamReady() {
-      return initSocket && initSocket.readyState === 1;
-    }
-
-    async function pollInitStatus() {
-      if (initPollInFlight) {
-        initPollPending = true;
-        return;
-      }
-      initPollInFlight = true;
-      clearInitPoll();
-      try {
-        const status = await fetchInitStatus();
-        renderInitProgress(status);
-        if (status.initialized) {
-          if (await firstInitPoolReady()) {
-            clearInitPoll();
-            setStep(3);
+          const auth = await request("v1_auth_status");
+          if (auth.enabled && !auth.authenticated) {
+            document.getElementById("loginBox").hidden = false;
             return;
           }
-          renderWaitingForFirstPool(status);
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-          return;
-        }
-        if (status.running) {
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-          return;
-        }
-        if (initStartMode(status) === "cli_only") {
-          renderCliInitRequired(status);
-          return;
-        }
-        clearInitPoll();
-        // Pre-init: keep the checklist fresh, and while a one-click model
-        // download is running keep polling so the row shows live percent
-        // (embedding_check="repairing", detail carries progress).
-        renderInitChecklist(status, readSelectedInitSources());
-        if (status?.prerequisites?.embedding_repair_running) {
-          scheduleInitPoll(INIT_POLL_MS);
-          return;
-        }
-        if (initRecoveryReasonText(status)) {
-          const failedStage = (Array.isArray(status.stages) ? status.stages : [])
-            .find((s) => s.status === "failed" || s.status === "cancelled");
-          setInitReason(
-            failedStage
-              ? initFailureText(status, failedStage)
-              : initRecoveryReasonText(status) || "初始化未完成。"
+          const health = await request("v1_system_ai_health");
+          const aliases = new Map(
+            (health.aliases || []).map((item) => [item.alias, item]),
           );
-        }
-      } catch {
-        scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-      } finally {
-        initPollInFlight = false;
-        if (initPollPending && step === 2) {
-          initPollPending = false;
-          void pollInitStatus();
-        } else {
-          initPollPending = false;
+          aliasesReady = requiredAliases.every(
+            (alias) => aliases.get(alias)?.available === true,
+          );
+          document.getElementById("aliasList").innerHTML = requiredAliases
+            .map((alias) => {
+              const item = aliases.get(alias);
+              const ready = Boolean(item?.available);
+              return `<div class="alias"><strong>${escapeHtml(alias)}</strong><span class="${ready ? "ok" : "bad"}">${ready ? "可用" : escapeHtml(item?.reason || "未配置")}</span></div>`;
+            })
+            .join("");
+          const link = document.getElementById("adminLink");
+          const adminUrl = safeWebUrl(health.admin_url);
+          if (adminUrl) {
+            link.href = adminUrl;
+            link.hidden = false;
+          }
+          document.getElementById("nextAi").disabled = !aliasesReady;
+          if (!aliasesReady)
+            message(
+              "aiMessage",
+              "三个必需别名均可用后才能继续，请在 LiteLLM Admin 完成配置。",
+              "err",
+            );
+        } catch (error) {
+          message("aiMessage", errorMessage(error), "err");
         }
       }
-    }
-
-    function connectInitStream() {
-      if (initSocket) return;
-      try {
-        const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        initSocket = new WebSocket(`${proto}//${location.host}/api/runtime-stream`);
-        initSocket.onmessage = (event) => {
+      async function loadSources() {
+        try {
+          const [sources, statuses] = await Promise.all([
+            request("v1_sources_list"),
+            request("v1_sources_status"),
+          ]);
+          sourceManifests = sources;
+          configuredSources = new Set(
+            (statuses || [])
+              .filter((status) => status.configured && status.enabled)
+              .map((status) => status.source_id),
+          );
+          const defaultSource =
+            sources.find((source) =>
+              Boolean(Object.keys(source.credential_schema?.properties || {}).length),
+            )?.source_id || sources[0]?.source_id;
+          document.getElementById("initSources").innerHTML = sources
+            .map(
+              (source) => {
+                const properties = source.credential_schema?.properties || {};
+                const required = new Set(source.credential_schema?.required || []);
+                const configured = configuredSources.has(source.source_id);
+                const credentialFields = configured
+                  ? '<small class="ok">后端账号已连接</small>'
+                  : Object.entries(properties)
+                      .map(
+                        ([name, schema]) =>
+                          `<label>${escapeHtml(schema.title || name)}<input data-source-credential="${escapeHtml(source.source_id)}" name="${escapeHtml(name)}" type="${schema.writeOnly ? "password" : "text"}" autocomplete="off" ${required.has(name) ? "required" : ""}></label>`,
+                      )
+                      .join("");
+                const transportHint = Object.keys(properties).length
+                  ? credentialFields
+                  : '<small>此来源通过浏览器扩展执行，不需要后端凭据。</small>';
+                return `<div class="init-source-row"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${source.source_id === defaultSource ? "checked" : ""}><div class="init-source-content"><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small><div class="source-credentials">${transportHint}</div></div></div>`;
+              },
+            )
+            .join("");
+        } catch (error) {
+          message("sourceMessage", errorMessage(error), "err");
+        }
+      }
+      document
+        .getElementById("loginForm")
+        .addEventListener("submit", async (event) => {
+          event.preventDefault();
           try {
-            const payload = JSON.parse(event.data);
-            if (["init_progress", "init_completed", "init_failed", "refresh.pool_updated"].includes(payload.type)) {
-              void pollInitStatus();
+            await request("v1_auth_login", {
+              body: { password: document.getElementById("password").value },
+            });
+            document.getElementById("loginBox").hidden = true;
+            await loadAi();
+          } catch (error) {
+            message("aiMessage", errorMessage(error, "密码不正确"), "err");
+          }
+        });
+      document.getElementById("nextAi").addEventListener("click", async () => {
+        if (!aliasesReady) return;
+        step(1);
+      });
+      document.getElementById("back1").addEventListener("click", () => step(0));
+      document.getElementById("next1").addEventListener("click", async () => {
+        step(2);
+        await loadSources();
+      });
+      document.getElementById("backInit").addEventListener("click", () => step(1));
+      document.getElementById("back2").addEventListener("click", () => step(2));
+      document.getElementById("startInit").addEventListener("click", async () => {
+        const source_ids = [
+          ...document.querySelectorAll("#initSources input:checked"),
+        ].map((el) => el.value);
+        if (!source_ids.length) {
+          message("sourceMessage", "至少选择一个内容源。", "err");
+          return;
+        }
+        if (!aliasesReady) {
+          message("initReason", "必需 AI 别名不可用，请返回第一步检查。", "err");
+          return;
+        }
+        document.getElementById("initProgress").hidden = false;
+        document.getElementById("startInit").disabled = true;
+        try {
+          for (const source_id of source_ids) {
+            const manifest = sourceManifests.find(
+              (source) => source.source_id === source_id,
+            );
+            const properties = manifest?.credential_schema?.properties || {};
+            if (!Object.keys(properties).length || configuredSources.has(source_id))
+              continue;
+            const credentials = {};
+            for (const name of Object.keys(properties)) {
+              const input = document.querySelector(
+                `[data-source-credential="${source_id}"][name="${name}"]`,
+              );
+              const value = input?.value.trim() || "";
+              if (
+                (manifest.credential_schema?.required || []).includes(name) &&
+                !value
+              ) {
+                throw new Error(
+                  `${manifest.display_name || sourceNames[source_id]}：请填写 ${properties[name].title || name}`,
+                );
+              }
+              if (value) credentials[name] = value;
             }
-          } catch {}
-        };
-        initSocket.onclose = () => {
-          initSocket = null;
-          if (step === 2) scheduleInitPoll(INIT_POLL_MS);
-        };
-      } catch {
-        initSocket = null;
-      }
-    }
-
-    async function startGuidedInit() {
-      const selected = readSelectedInitSources();
-      $("#startInit").disabled = true;
-      $("#startInit").innerHTML = '<span class="spin"></span>检查中…';
-      $("#initChecklist").innerHTML = '<li class="init-checking">正在检查 AI 服务 / 向量模型与所选平台登录（实时请求测试，可能要十几秒）…</li>';
-      setInitReason("");
-      let status;
-      try {
-        status = await fetchInitStatus();
-      } catch (e) {
-        renderInitIdle();
-        setInitReason("前置检查没拉到，后端可能还在启动，请稍后再试。");
-        return;
-      }
-
-      if (status.initialized) {
-        if (await firstInitPoolReady()) {
-          setStep(3);
-        } else {
-          renderInitProgress(status);
-          renderWaitingForFirstPool(status);
-          connectInitStream();
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-        }
-        return;
-      }
-      if (status.running) {
-        renderInitProgress(status);
-        connectInitStream();
-        scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_START_POLL_MS);
-        return;
-      }
-      if (initStartMode(status) === "cli_only") {
-        renderCliInitRequired(status);
-        await copyCliInitCommand();
-        return;
-      }
-      if (!selected.length) {
-        renderInitChecklist(status, selected);
-        $("#startInit").disabled = false;
-        $("#startInit").textContent = "开始初始化";
-        setInitReason(INIT_REASON_TEXT.no_sources_selected);
-        return;
-      }
-      if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
-        renderInitChecklist(status, selected);
-        $("#startInit").disabled = false;
-        $("#startInit").textContent = "开始初始化";
-        setInitReason("还没检测到 B站 登录。先登录 bilibili.com，或取消勾选 B 站再开始。");
-        return;
-      }
-      if (!status.can_start) {
-        renderInitChecklist(status, selected);
-        $("#startInit").disabled = false;
-        $("#startInit").textContent = "开始初始化";
-        setInitReason(initStatusReasonText(status) || "以下条件未满足，无法开始初始化。");
-        return;
-      }
-
-      try {
-        await apiFetch("/api/init", {
-          method: "POST",
-          timeoutMs: API_WRITE_TIMEOUT_MS,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
-        });
-      } catch (e) {
-        const initErrorCode = e.details?.error || e.details?.reason;
-        if (initErrorCode === "unsupported_runtime") {
-          renderCliInitRequired({ ...status, start_mode: "cli_only", reason: initErrorCode });
-          return;
-        }
-        renderInitChecklist(status, selected);
-        $("#startInit").disabled = false;
-        $("#startInit").textContent = "开始初始化";
-        setInitReason(
-          "初始化没能启动：" +
-            (describeInitReason(e.details?.error || e.details?.reason) ||
-              e.message ||
-              "请稍后重试。"),
-        );
-        return;
-      }
-      connectInitStream();
-      renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
-      scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_START_POLL_MS);
-    }
-
-    function startBiliPoll() {
-      if (biliPoll) return;
-      const tick = async () => {
-        if (await checkBili()) {
-          biliConnected = true;
-          clearInterval(biliPoll); biliPoll = null;
-          $("#biliStatus").className = "msg show ok";
-          $("#biliStatus").innerHTML = "✓ 已检测到 B站 登录；其他平台会在初始化时按勾选项检查。";
-          $("#next1").textContent = "继续 →";
-          const done = $("#biliDone"); done.classList.remove("pending");
-          done.querySelector(".tick").textContent = "✓";
-          $("#doneBili").textContent = "B 站已连接；其他平台按初始化勾选项检查";
-        }
-      };
-      tick();
-      biliPoll = setInterval(tick, 3000);
-    }
-
-    function finish() {
-      location.href = "/web";
-    }
-
-    // Resume where the user actually is: hydrate the native model route, then ask
-    // /api/init-status — a reload mid-init must re-attach to the live progress
-    // instead of silently landing on step 0. An initialized backend goes
-    // straight to done / first-pool waiting.
-    (async function guard() {
-      try {
-        await loadModelSetup();
-      } catch (error) {
-        if (error.status === 401) {
-          showMsg("#msg0", '后端开启了访问密码。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试。', "err");
-        } else {
-          showTextMsg("#msg0", `无法读取模型配置：${error.message || "请稍后刷新"}`, "err");
-        }
-      }
-      try {
-        const status = await fetchInitStatus();
-        if (status.running) {
-          setStep(2);
-          renderInitProgress(status);
-          connectInitStream();
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-          return;
-        }
-        if (status.initialized) {
-          if (await firstInitPoolReady()) {
-            setStep(3);
-            return;
+            await request("v1_sources_configure_account", {
+              path: { source_id },
+              body: { account_key: "default", credentials },
+            });
+            configuredSources.add(source_id);
           }
-          setStep(2);
-          renderWaitingForFirstPool(status);
-          connectInitStream();
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-          return;
+          const run = await request("v1_onboarding_start", {
+            body: { source_ids },
+          });
+          await readSse(
+            "v1_onboarding_events",
+            { path: { run_id: run.id } },
+            ({ event, data }) => {
+              if (event === "progress") {
+                const pct = Math.round((data.run?.progress || 0) * 100);
+                document.getElementById("initProgressBar").style.width = `${pct}%`;
+                document.getElementById("initProgressLabel").textContent =
+                  `${data.stage} · ${data.run?.status || "pending"} · ${pct}%`;
+              } else if (event === "done") {
+                if (data.status === "failed" || data.status === "cancelled") {
+                  document.getElementById("startInit").disabled = false;
+                  document.getElementById("initProgressLabel").textContent =
+                    data.status === "cancelled" ? "初始化已取消" : "初始化失败";
+                  message(
+                    "initReason",
+                    data.status === "cancelled"
+                      ? "初始化已取消，可以重新开始。"
+                      : "初始化失败，请检查任务状态后重试。",
+                    "err",
+                  );
+                  return;
+                }
+                document.getElementById("initProgressBar").style.width = "100%";
+                document.getElementById("initProgressLabel").textContent = "画像与发现流已准备好";
+                step(3);
+              } else if (event === "error") {
+                document.getElementById("startInit").disabled = false;
+                document.getElementById("initProgressLabel").textContent = "初始化失败";
+                message(
+                  "initReason",
+                  data.message || "初始化失败，请稍后重试。",
+                  "err",
+                );
+              }
+            },
+          );
+        } catch (error) {
+          document.getElementById("startInit").disabled = false;
+          message("initReason", errorMessage(error), "err");
         }
-        const shouldResumeRecovery = Boolean(initLastFailureText(status)) || (
-          initStartMode(status) === "cli_only" && Boolean(status?.prerequisites?.llm_ready)
-        );
-        if (shouldResumeRecovery) {
-          setStep(2);
-          if (initStartMode(status) === "cli_only") {
-            renderCliInitRequired(status);
-          } else {
-            renderInitProgress(status);
-            renderInitChecklist(status, readSelectedInitSources());
-            setInitReason(initRecoveryReasonText(status) || "上次初始化未完成，可以修正配置后重试。");
-          }
-        }
-      } catch {}
-    })();
-
-    $("#connectionTypeList").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-connection-type]");
-      if (button) selectConnectionType(button.dataset.connectionType);
-    });
-    $("#modelTypeBack").addEventListener("click", showModelTypeList);
-    $("#modelDescriptorFields").addEventListener("input", (event) => {
-      const field = event.target.dataset.modelField;
-      if (field && event.target.tagName !== "SELECT") updateModelField(field, event.target.value);
-    });
-    $("#modelDescriptorFields").addEventListener("change", (event) => {
-      const field = event.target.dataset.modelField;
-      if (field) updateModelField(field, event.target.value);
-    });
-    $("#modelCredentialEditor").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-credential-action]");
-      const record = chatDraft();
-      if (!button || !record || modelSaveInFlight) return;
-      modelState = updateRouteField(modelState, "chat", record.id, "credential", {
-        action: button.dataset.credentialAction,
-        value: "",
       });
-      refreshDraftLens();
-      renderCredential(descriptorFor(record.type));
-    });
-    $("#modelCredentialEditor").addEventListener("input", (event) => {
-      const record = chatDraft();
-      if (event.target.id === "modelCredentialValue" && record && !modelSaveInFlight) {
-        // Merge, don't replace: retain the action selected by the click
-        // handler — the shared reducer defaults a missing action to "keep"
-        // and clears the value for non-set/env actions.
-        modelState = updateRouteField(modelState, "chat", record.id, "credential", {
-          ...record.credential,
-          value: event.target.value,
-        });
-        refreshDraftLens();
-      }
-    });
-    // Step 0.5 embedding listeners
-    $("#embeddingEnable").addEventListener("click", () => setEmbeddingEnabled(true));
-    $("#embeddingSkip").addEventListener("click", () => setEmbeddingEnabled(false));
-    $("#embeddingTypeList").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-embedding-type]");
-      if (button) selectEmbeddingType(button.dataset.embeddingType);
-    });
-    $("#embeddingDescriptorFields").addEventListener("input", (event) => {
-      const field = event.target.dataset.embeddingField;
-      if (field && event.target.tagName !== "SELECT") updateEmbeddingField(field, event.target.value);
-    });
-    $("#embeddingDescriptorFields").addEventListener("change", (event) => {
-      const field = event.target.dataset.embeddingField;
-      if (field) updateEmbeddingField(field, event.target.value);
-    });
-    $("#embeddingModel").addEventListener("input", (event) => {
-      modelState = updateRouteSetting(modelState, "embedding", "model", event.target.value);
-      embeddingProbeOk = false;
-    });
-    $("#embeddingCredential").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-embedding-credential-action]");
-      const provider = embeddingProvider();
-      if (!button || !provider || modelSaveInFlight) return;
-      modelState = updateRouteField(modelState, "embedding", provider.id, "credential", {
-        action: button.dataset.embeddingCredentialAction,
-        value: "",
-      });
-      embeddingProbeOk = false;
-      renderEmbeddingStep();
-    });
-    $("#embeddingCredential").addEventListener("input", (event) => {
-      const provider = embeddingProvider();
-      if (event.target.id === "embeddingCredentialValue" && provider && !modelSaveInFlight) {
-        // Merge, don't replace: retain the selected action (see chat handler).
-        modelState = updateRouteField(modelState, "embedding", provider.id, "credential", {
-          ...provider.credential,
-          value: event.target.value,
-        });
-        embeddingProbeOk = false;
-      }
-    });
-    $("#saveModel").addEventListener("click", saveModelRoute);
-    $("#back1").addEventListener("click", () => setStep(0));
-    $("#next1").addEventListener("click", () => setStep(2));
-    $("#backInit").addEventListener("click", () => setStep(1));
-    $("#startInit").addEventListener("click", startGuidedInit);
-    $("#back2").addEventListener("click", () => setStep(2));
-    $("#finish").addEventListener("click", finish);
-  </script>
-</body>
+      loadAi();
+    </script>
+  </body>
 </html>

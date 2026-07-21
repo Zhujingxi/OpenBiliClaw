@@ -46,7 +46,7 @@ test("flush after 18s on a 60s video records watch_seconds=18 and duration", () 
 
   assert.notEqual(ev, null);
   assert.equal(emitted.length, 1);
-  assert.equal(emitted[0].type, "click");
+  assert.equal(emitted[0].type, "dwell");
   assert.equal(emitted[0].url, "https://www.bilibili.com/video/BVdeep");
   assert.equal(emitted[0].metadata.watch_seconds, 18);
   assert.equal(emitted[0].metadata.video_duration_seconds, 60);

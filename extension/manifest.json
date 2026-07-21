@@ -6,9 +6,6 @@
     "permissions": [
         "activeTab",
         "alarms",
-        "cookies",
-        "notifications",
-        "scripting",
         "sidePanel",
         "storage"
     ],
@@ -56,7 +53,6 @@
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [
-                "dist/main/xhs-token-sniffer.js",
                 "dist/main/xhs-state-bridge.js"
             ],
             "run_at": "document_start",

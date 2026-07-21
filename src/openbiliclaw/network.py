@@ -1,13 +1,11 @@
-"""Process-level single source of truth for overseas network routing.
+"""Process-level network policy shared by retained outbound adapters.
 
 ``[network].mode`` selects ``direct`` (ignore env/system proxies), ``system``
 (inherit them), or ``custom`` (use ``[network].proxy`` explicitly). Those
-construction points do not all hold a ``Config`` reference, so the resolved
-policy is mirrored here once and consumed by every supported HTTP stack.
-
-CN-direct clients (bilibili / douyin / ollama / CN-CDN image cache) MUST NOT
-read this module — that isolation is pinned by
-``tests/test_network_proxy_isolation.py``.
+construction points do not all hold a settings-service reference, so the
+resolved policy is mirrored here once and consumed by retained source and AI
+infrastructure adapters. Source transports that deliberately require a direct
+connection set ``trust_env=False`` locally instead of consulting this module.
 """
 
 from __future__ import annotations
@@ -30,13 +28,11 @@ logger = logging.getLogger(__name__)
 _CA_FILE_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 _CA_DIR_ENV_VARS = ("SSL_CERT_DIR",)
 
-# Domestic (mainland-China) LLM gateways must ALWAYS connect directly, even
-# when ``[network].mode`` is ``system`` / ``custom`` for reaching overseas
-# models. A user who turns on a proxy to reach OpenAI must not have their
-# DeepSeek / SenseNova / 通义 / … requests shoved through the same overseas
-# ladder — that routes a domestic request out and back and reliably times
-# out ("商汤请求总是超时"). The ``.cn`` TLD is caught by a wildcard below;
-# this set covers Chinese gateways that live on non-``.cn`` domains.
+# Domestic endpoints must connect directly when proxy mode is ``system`` or
+# ``custom``. LiteLLM and embedding deployments may live on these hosts, while
+# source transports can also reuse this endpoint-specific helper. The ``.cn``
+# TLD is caught by a wildcard below; this set covers Chinese gateways hosted on
+# non-``.cn`` domains.
 _DOMESTIC_HOST_SUFFIXES = frozenset(
     {
         "deepseek.com",  # DeepSeek
@@ -63,7 +59,7 @@ _DOMESTIC_HOST_SUFFIXES = frozenset(
 
 
 def set_outbound_proxy(url: str, *, mode: str | None = None) -> None:
-    """Set the process-wide overseas routing policy.
+    """Set the process-wide outbound routing policy.
 
     ``mode=None`` preserves the original helper's call contract: a non-empty
     URL means ``custom`` and an empty URL means ``direct``. Config-aware call

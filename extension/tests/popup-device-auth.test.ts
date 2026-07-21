@@ -74,7 +74,8 @@ test("pairDeviceKey preserves stable backend error codes and removes a rejected 
       pairDeviceKey("bad", {
         getBaseUrl: async () => "https://backend.example/api",
         fetchImpl: async () => Response.json(
-          { error: "extension_access_disabled" }, { status: 403 },
+          { error: { code: "extension_access_disabled", message: "disabled" } },
+          { status: 403 },
         ),
       }),
       /extension_access_disabled/,

@@ -15,6 +15,7 @@ import {
 } from "../shared/behavior.js";
 import type { BehaviorEvent, PlatformAdapter } from "../shared/types.js";
 import { VideoDwellTracker } from "./video-dwell-tracker.js";
+import { handoffBehaviorEvent } from "./activity-handoff.js";
 
 const HOVER_DELAY_MS = 800;
 const SCROLL_DEBOUNCE_MS = 600;
@@ -24,7 +25,7 @@ const HOVER_THROTTLE_MS = 200;
 const SNAPSHOT_TYPES = new Set(["snapshot", "view", "like", "coin", "favorite", "comment"]);
 
 function sendEvent(event: BehaviorEvent): void {
-  chrome.runtime.sendMessage({ action: "BEHAVIOR_EVENT", data: event });
+  void handoffBehaviorEvent(event);
 }
 
 function closestHref(element: Element): string | null {
@@ -50,7 +51,7 @@ export function startCollector(adapter: PlatformAdapter): void {
     now: () => performance.now(),
     emit: (event) => sendEvent(event),
     buildEvent: (previousUrl, metadata) => ({
-      type: "click",
+      type: "dwell",
       url: previousUrl,
       title: document.title || "",
       timestamp: Date.now(),

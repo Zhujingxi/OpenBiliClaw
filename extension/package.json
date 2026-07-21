@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run clean && npm run build:popup && npm run build:types && npm run build:bundle",
+    "api:generate": "node ../openapi/generate-client.mjs --write",
+    "api:check": "node ../openapi/generate-client.mjs --check",
+    "build": "npm run clean && npm run build:types && npm run build:bundle",
     "build:bundle": "node scripts/build.mjs",
-    "build:popup": "node scripts/build-popup.mjs",
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
-    "build:firefox": "TARGET=firefox npm run clean && npm run build:popup && npm run build:types && TARGET=firefox npm run build:bundle",
+    "build:firefox": "TARGET=firefox npm run clean && npm run build:types && TARGET=firefox npm run build:bundle",
     "clean": "rm -rf dist dist-firefox",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.popup.json --noEmit",
-    "pretest": "npm run build:popup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "package": "node scripts/package.mjs",
     "package:only": "node scripts/package.mjs --no-build",
@@ -24,9 +24,14 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.1.29",
-    "@types/node": "^22.10.0",
     "esbuild": "^0.25.10",
     "typescript": "^5.9.2",
-    "web-ext": "^10.4.0"
+    "web-ext": "^10.5.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "brace-expansion": "1.1.16",
+    "js-yaml": "4.3.0",
+    "shell-quote": "1.10.0"
   }
 }

@@ -10,66 +10,8 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
-# tomllib requires Python 3.11+. Prefer a `python3` that is already 3.11+;
-# otherwise discover any `python3.<minor>` executable on PATH and pick the
-# highest minor version that satisfies >= 3.11. The scan is future-compatible:
-# a system whose only suitable interpreter is `python3.14` (or any later
-# versioned binary) still resolves, and the ordering is deterministic
-# (version-sorted descending) regardless of PATH order. Candidate names are
-# matched against a strict `python3.N` shape so stray executables like
-# `python3-config` or `python3.10-config` are never selected.
-pick_python() {
-  local candidate
-  if command -v python3 >/dev/null 2>&1 \
-    && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-    printf '%s\n' python3
-    return 0
-  fi
-
-  local -a versioned=()
-  local dir base minor
-  local IFS=':'
-  for dir in $PATH; do
-    [ -d "$dir" ] || continue
-    for candidate in "$dir"/python3.*; do
-      [ -e "$candidate" ] || continue
-      base="${candidate##*/}"
-      # Strict `python3.N` (digits only after the dot); skip `python3.*-config`
-      # and any other non-interpreter that happens to share the prefix.
-      minor="${base#python3.}"
-      case "$minor" in
-        ''|*[!0-9]*)
-          continue
-          ;;
-        *)
-          versioned+=("$minor")
-          ;;
-      esac
-    done
-  done
-  unset IFS
-
-  if [ "${#versioned[@]}" -gt 0 ]; then
-    # Sort numerically descending so the newest suitable minor wins and the
-    # choice is independent of directory listing / PATH ordering.
-    while IFS= read -r minor; do
-      candidate="python3.${minor}"
-      if command -v "$candidate" >/dev/null 2>&1 \
-        && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done < <(printf '%s\n' "${versioned[@]}" | sort -rn -u)
-  fi
-
-  echo "Python 3.11+ is required to read pyproject.toml (tomllib)" >&2
-  return 1
-}
-
-PY_BIN="$(pick_python)"
-
 project_version="$(
-  "$PY_BIN" - <<'PY'
+  python3 - <<'PY'
 import tomllib
 from pathlib import Path
 
@@ -100,7 +42,6 @@ release_with_project_version() {
 }
 
 extension_tag="$(release_with_project_version "extension-v")"
-desktop_tag="$(release_with_project_version "desktop-v")"
 
 extension_line="Not published yet."
 chrome_extension_asset_line="not available yet for this version"
@@ -113,21 +54,12 @@ if [ -n "$extension_tag" ]; then
   firefox_dev_asset_line="use \`openbiliclaw-extension-v${extension_version}-firefox.zip\` via \`about:debugging\`"
 fi
 
-desktop_line="Not published yet."
-desktop_note=""
-if [ -n "$desktop_tag" ]; then
-  desktop_line="[${desktop_tag}](https://github.com/${repo}/releases/tag/${desktop_tag})"
-fi
-
 # Docker channel: report the GHCR images only when this exact version's
 # manifest is actually pullable (same "no backfill" rule as the other
 # channels). Anonymous registry check; any failure degrades to
-# "Not published yet." without breaking the sync. Both the backend image AND
-# the bundled-bge-m3 Ollama image must be present — the prebuilt compose needs
-# both, so half a release must not read as "Docker ready".
+# "Not published yet." without breaking the sync.
 docker_image_owner="$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')"
 docker_image="ghcr.io/${docker_image_owner}/openbiliclaw-backend"
-docker_ollama_image="ghcr.io/${docker_image_owner}/openbiliclaw-ollama"
 docker_line="Not published yet."
 docker_download_line=""
 
@@ -146,9 +78,9 @@ _ghcr_manifest_pullable() {
     "https://ghcr.io/v2/${image#ghcr.io/}/manifests/${project_version}" 2>/dev/null
 }
 
-if _ghcr_manifest_pullable "$docker_image" && _ghcr_manifest_pullable "$docker_ollama_image"; then
-  docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) + [\`${docker_ollama_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-ollama) (multi-arch: amd64 + arm64; bge-m3 baked in)"
-  docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
+if _ghcr_manifest_pullable "$docker_image"; then
+  docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) (multi-arch: amd64 + arm64)"
+  docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml) and [\`litellm/config.yaml\`](https://github.com/${repo}/blob/main/litellm/config.yaml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
 "
 fi
 
@@ -234,7 +166,6 @@ download_release_assets() {
 }
 
 download_release_assets "$extension_tag" "openbiliclaw-extension-v*.zip" "openbiliclaw-extension-v*.xpi"
-download_release_assets "$desktop_tag" "*.dmg" "*.exe"
 
 if [ -n "$extension_tag" ]; then
   firefox_xpi_asset_name="openbiliclaw-extension-v${extension_version}-firefox.xpi"
@@ -253,13 +184,12 @@ if [ "${#assets[@]}" -gt 0 ]; then
 fi
 
 cat > "$notes_file" <<EOF
-This is the user-facing aggregate release. It keeps the current backend source tag, browser extension packages, and desktop installers visible together.
+This is the user-facing aggregate release for the backend, Docker deployment, and browser extension.
 
 ## Current Channels
 
 - Backend source: [${backend_tag}](https://github.com/${repo}/tree/${backend_tag})
 - Browser extension: ${extension_line}
-- Desktop installer: ${desktop_line}.${desktop_note}
 - Docker image: ${docker_line}
 
 ## Downloads
@@ -267,7 +197,6 @@ This is the user-facing aggregate release. It keeps the current backend source t
 - Chrome / Edge / Brave extension: ${chrome_extension_asset_line}
 - Firefox 140+ extension: ${firefox_signed_asset_line}
 - Firefox temporary debugging package: ${firefox_dev_asset_line}
-- macOS / Windows desktop app: use the attached \`.dmg\` / \`.exe\` installer when present
 ${docker_download_line}
 
 Attached package assets:
@@ -276,8 +205,7 @@ ${asset_list}
 ## Notes
 
 - Chrome Web Store updates can lag GitHub releases because Google review is asynchronous.
-- The desktop app is still unsigned and experimental; first launch may need the README bypass steps.
-- Automation channel releases remain available as \`backend-v*\`, \`extension-v*\`, and \`desktop-v*\`; Docker images ride \`backend-v*\` tags to GHCR automatically.
+- Automation channel releases remain available as \`backend-v*\` and \`extension-v*\`; Docker images ride \`backend-v*\` tags to GHCR automatically.
 
 Synced by channel: \`${channel}\`
 EOF
@@ -341,7 +269,7 @@ is_aggregate_package_asset() {
   local asset_name="$1"
 
   case "$asset_name" in
-    openbiliclaw-extension-v*.zip | openbiliclaw-extension-v*.xpi | OpenBiliClaw-macos-v*.dmg | OpenBiliClaw-windows-*-Setup.exe)
+    openbiliclaw-extension-v*.zip | openbiliclaw-extension-v*.xpi)
       return 0
       ;;
     *)
@@ -354,9 +282,8 @@ prune_existing_package_assets() {
   local asset_name
 
   # Only prune an existing package asset when we actually have a replacement of
-  # the SAME NAME to upload this run. A partial release (e.g. the with-embedding
-  # desktop variant failed to build) must NOT delete the previous good asset it
-  # can't replace — otherwise half a release wipes the other half's downloads.
+  # the same name. A partial extension release must not delete a previous good
+  # asset that it cannot replace.
   local replacing=$'\n'
   local path base
   for path in "${assets[@]}"; do

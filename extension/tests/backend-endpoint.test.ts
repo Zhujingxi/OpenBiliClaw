@@ -5,7 +5,6 @@ import {
   __resetBackendEndpointForTests,
   getBackendBaseUrl,
   getBackendEndpointConfig,
-  getBackendWsBaseUrl,
   isValidBackendHost as isValidPopupBackendHost,
   isValidBackendPort as isValidPopupBackendPort,
   updateBackendEndpoint,
@@ -17,7 +16,6 @@ import {
   isValidBackendHost as isValidSharedBackendHost,
   isValidBackendPort as isValidSharedBackendPort,
   updateBackendEndpoint as updateSharedEndpoint,
-  wsUrl,
 } from "../src/shared/backend-endpoint.ts";
 
 const validPorts: unknown[] = [1, 8420, 65535, "1", "8420", "65535", " 19090 "];
@@ -126,14 +124,14 @@ test("popup backend endpoint update persists host and port together", async () =
         },
       },
     ]);
-    assert.equal(await getBackendBaseUrl(), "http://192.168.1.100:19090/api");
+    assert.equal(await getBackendBaseUrl(), "http://192.168.1.100:19090/api/v1");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();
   }
 });
 
-test("old endpoint storage migrates to http and https derives wss", async () => {
+test("old endpoint storage migrates to http and vNext API URLs", async () => {
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   (globalThis as { chrome?: unknown }).chrome = {
     storage: { local: { get(_key: string, callback: (items: object) => void) {
@@ -152,9 +150,7 @@ test("old endpoint storage migrates to http and https derives wss", async () => 
 
   resetSharedEndpoint();
   await updateSharedEndpoint("https", "backend.example.com", 443);
-  assert.equal(await apiUrl("/config"), "https://backend.example.com:443/api/config");
-  assert.equal(await wsUrl("/runtime-stream", "session"),
-    "wss://backend.example.com:443/api/runtime-stream?token=session");
+  assert.equal(await apiUrl("/settings"), "https://backend.example.com:443/api/v1/settings");
   assert.equal((await getBackendEndpoint()).scheme, "https");
   resetSharedEndpoint();
 });
@@ -196,7 +192,7 @@ test("permission denial leaves endpoint cache and storage unchanged", async () =
     assert.deepEqual(await getBackendEndpointConfig(), {
       scheme: "http", host: "127.0.0.1", port: 8420,
     });
-    assert.equal(await getBackendWsBaseUrl(), "ws://127.0.0.1:8420/api");
+    assert.equal(await getBackendBaseUrl(), "http://127.0.0.1:8420/api/v1");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

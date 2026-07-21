@@ -1,99 +1,48 @@
-# ❓ 常见问题（FAQ）
+# 常见问题（vNext）
 
-> 汇总安装和日常使用中最高频的问题。没找到答案可以在 [GitHub Issues](https://github.com/whiteguo233/OpenBiliClaw/issues) 提问，或加 README 里的用户交流群。
+## Web 或扩展在哪里配置模型？
 
-## 安装
+Web/extension 已通过 generated client 接入 `/api/v1`，只展示三个稳定 alias 的健康状态
+和 LiteLLM Admin 入口。Provider credential、routing、fallback、budget 与 cache 在 LiteLLM
+Admin 配置，不在 OpenBiliClaw 重复实现 provider editor。
 
-### macOS 打开桌面安装包提示「无法验证开发者」或「未经安全验证」？
+## 为什么源码安装必须提供 LiteLLM？
 
-当前 Release 是 ad-hoc signed、未 notarized 的实验性预发布。先把应用拖进「应用程序」，再右键 / Control-click `OpenBiliClaw.app` →「打开」→ 在弹窗里再点「打开」；也可以到「系统设置 → 隐私与安全性」点击「仍要打开」。
+LiteLLM 是所有支持部署的必需基础设施。OpenBiliClaw 不再保存 provider
+credentials，也不再实现 routing、fallback 或 provider editor。源码部署设置
+`OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`；Docker 使用
+Compose 内的 LiteLLM 服务。
 
-### macOS 提示「OpenBiliClaw.app 已损坏，无法打开」？
+## 安装器重复运行会旋转 secret 吗？
 
-通常是下载隔离属性导致。确认安装包来自本项目 [Releases](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 后运行：
+不会。`.env` 中已有的非空 access/encryption/LiteLLM 值会复用。文件通过同目录
+临时文件和原子 replace 更新，POSIX 权限为 `0600`；符号链接会被拒绝。
 
-```bash
-APP="/Applications/OpenBiliClaw.app"
-xattr -dr com.apple.quarantine "$APP"
-```
+## 为什么必须同时有 API 和 worker？
 
-然后再次打开应用。
+API 负责请求与 SSE，Huey worker 负责 source sync、profile projection、feed
+replenishment 和 cleanup。只启动 API 会让 durable jobs 留在 queue 中。源码
+installer 管理两个 PID；Compose 管理两个 service。
 
-### Windows 安装时弹出 SmartScreen 警告？
+## 如何判断安装成功？
 
-点「更多信息 → 仍要运行」。安装包未购买代码签名证书，属预期现象。
+Installer 必须依次通过 migration、API/worker 启动、`openbiliclaw doctor`、public readiness 和
+bearer-protected settings。`GET /api/v1/system/readiness` 只说明 API 存活，不等于
+整个安装契约完成。
 
-### Firefox 安装 `-firefox.zip` 提示「未通过验证 / could not be verified」？
+## 为什么 queue 与应用库是两个 SQLite 文件？
 
-`-firefox.zip` 是未签名开发包，只用于 `about:debugging` 临时加载。普通 Firefox 用户请优先安装 release 里的已签名 `openbiliclaw-extension-v*-firefox.xpi`（若该版本提供）；临时加载方式见 README 的 Firefox 折叠说明。
+`openbiliclaw.db` 是业务权威，包含 `job_runs`；`huey.db` 是 durable transport。
+两者分离可以避免把 queue result 当成产品状态。API 与 worker 必须挂载相同的
+data volume，并使用相同的两个绝对路径。
 
-### Chrome 应用商店的版本比 GitHub Releases 旧？
+## Provider 在哪里配置？
 
-正常。商店版受审核排期影响，通常滞后几天到一两周。想第一时间拿到新功能，从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载 zip 手动安装即可（缺点是需要手动更新）。
+Docker 打开 `http://127.0.0.1:4000/ui`。Source install 使用用户自己的 LiteLLM
+Admin。需要三个稳定 alias：`obc-interactive`、`obc-analysis`、
+`obc-embedding`。
 
-### 想用 Docker 部署后端？
+## 旧数据会被删除或自动迁移吗？
 
-不需要克隆源码：下载一个 compose 文件启动预构建镜像（自带 Ollama embedding sidecar），再打开 `http://127.0.0.1:8420/setup/` 完成初始化：
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
-docker compose -f docker-compose.prebuilt.yml up -d
-```
-
-升级到最新版：`docker compose -f docker-compose.prebuilt.yml pull` 再 `up -d`。源码构建、代理与排查见 [Docker 部署指南](docker-deployment.md)。
-
-## 连接与初始化
-
-### 插件显示「后端还没开张」/ 连不上后端？
-
-按顺序排查：
-
-1. 后端在跑吗？桌面包看菜单栏 / 托盘图标；源码安装跑 `openbiliclaw start`。
-2. 浏览器访问 `http://127.0.0.1:8420/api/health`，有 JSON 返回说明后端正常。
-3. 插件默认连 `127.0.0.1:8420`；如果你改过端口，在插件设置里同步修改。
-4. 后端启动后插件会在 1 秒内自动重连，不需要手动刷新。
-
-### 初始化需要哪些前置条件？
-
-三样：① 至少一个已登录且能拉到信号的内容平台（B 站默认勾选，可换成小红书 / 抖音 / YouTube / X / 知乎 / Reddit）；② 一个可用的 LLM provider（自己的 API Key）；③ embedding 服务（桌面包内置，其他安装方式可用 Ollama）。引导初始化会先真实验证 LLM 和 embedding 再开跑，不会硬跑出空画像。
-
-### 不想为 embedding 单独配 API Key？
-
-装一次 [Ollama](https://ollama.com/download)，手动运行 `ollama pull bge-m3`，再运行 `openbiliclaw setup-embedding`。该命令只负责配置并写入原生 `[models.embedding]`，不会安装、启动、下载或访问网络；需要连通性检查时另行运行 `openbiliclaw models probe <id>`。桌面安装包已内置运行时和默认模型，无需额外安装。
-
-### 手机打不开移动端 Web（`/m/`）？
-
-1. 手机和电脑要在同一个局域网。
-2. 后端要绑定 `0.0.0.0`：桌面包默认如此；源码安装检查 `config.toml` 的 `[api].host`（`0.0.0.0` = 局域网可达，`127.0.0.1` = 仅本机）。
-3. 用插件顶部手机图标的二维码打开最稳，它会优先展示电脑的局域网 IP。
-
-## 更新与数据
-
-### 后端设置里没有「立即应用」更新按钮？
-
-「立即应用」只对源码安装（`install_mode="git"`）显示。桌面安装包用户请直接从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载新版安装包覆盖安装，数据目录不受影响。
-
-### 点「立即应用」提示更新未开始 / 被拒绝？
-
-后端自动更新有安全守卫：本地有未提交改动（`dirty_worktree`）、remote 不受信任（`untrusted_remote`）、分支无法快进（`branch_not_fast_forwardable`）等情况会拒绝更新，插件会展示具体原因。源码安装用户可进仓库目录手动处理后重试（如 `git status` 清理本地改动）。
-
-### 一直提示「git 远端不在允许列表，更新被阻止」？
-
-老版本（≤0.3.153）的允许列表按**精确字符串**匹配 `origin` 地址，`git clone` 时少写 `.git` 后缀、或用了与列表拼法不一致的 HTTPS/SSH 地址都会被永久拦住——而且被拦住的安装无法通过自动更新拿到修复版本，需要一次手动解锁（进入安装目录执行）：
-
-```bash
-git remote -v                      # 先看实际的 origin 地址
-git pull --ff-only                 # 手动拉一次最新代码即可解锁
-# 或者把 origin 改成官方地址后重试自动更新：
-git remote set-url origin https://github.com/whiteguo233/OpenBiliClaw.git
-```
-
-新版本起允许列表按规范化形式比较（`.git` 后缀可省、HTTPS/SSH 拼法等价、大小写不敏感），正常克隆不会再触发；通过 GitHub 镜像克隆的安装把镜像地址加入 `config.toml` 的 `[scheduler] auto_update_allowed_remotes` 即可。被拒绝时后端日志会打出实际的 remote 地址和修复命令。
-
-### 我的数据存在哪里？会上传吗？
-
-所有数据存在本机的一个 SQLite 文件里，数据目录为 `~/OpenBiliClaw`（macOS / Linux）或 `%USERPROFILE%\OpenBiliClaw`（Windows），升级和卸载不会动它。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器；只有你配置了云端 LLM / embedding 时，相关内容才会按你的配置发给对应服务商。详见 [隐私政策](privacy.md)。
-
-### 配置文件写坏了导致启动失败？
-
-桌面包（v0.3.152+）会自动把坏的 `config.toml` / `config.local.toml` 备份为 `*.invalid`、重建默认配置并打开 `/setup/` 重新初始化；`data/` 不会被删除。源码安装可对照 `config.example.toml` 手动修复。
+不会。vNext 使用 fresh database；旧文件保持不动作为手工 archive。项目没有旧
+API 或旧数据兼容层。

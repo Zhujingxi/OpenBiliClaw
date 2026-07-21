@@ -1,9 +1,11 @@
-// @ts-check
 import { execFileSync, execSync } from "node:child_process";
 import { cp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { makeFirefoxSignedXpiName, normalizeReleaseVersion } from "./release-utils.mjs";
+import {
+  makeFirefoxSignedXpiName,
+  normalizeReleaseVersion,
+} from "./release-utils.mjs";
 
 /**
  * Submit the Firefox build to Mozilla AMO for unlisted signing.
@@ -22,7 +24,8 @@ const distDir = resolve(root, "dist-firefox");
 const artifactsDir = resolve(root, "web-ext-artifacts", "firefox-signed");
 const skipBuild = process.argv.includes("--no-build");
 const archiveVersionFlag = process.argv.indexOf("--archive-version");
-const archiveVersionInput = archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
+const archiveVersionInput =
+  archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
 
 if (archiveVersionFlag !== -1 && !archiveVersionInput) {
   throw new Error("--archive-version requires a value");
@@ -65,7 +68,9 @@ execFileSync(
   { cwd: root, stdio: "inherit" },
 );
 
-const signedFiles = (await readdir(artifactsDir)).filter((entry) => entry.endsWith(".xpi")).sort();
+const signedFiles = (await readdir(artifactsDir))
+  .filter((entry) => entry.endsWith(".xpi"))
+  .sort();
 
 if (signedFiles.length !== 1) {
   throw new Error(

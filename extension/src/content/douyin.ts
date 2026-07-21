@@ -27,9 +27,6 @@ import type {
 } from "../main/dy-fetch-tap.js";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
-import { registerE2EExecutor } from "./e2e-executor.ts";
-import { installNativeSaveExecutor } from "./native-save/runtime.ts";
-import { saveDouyin, verifyDouyin } from "./native-save/douyin.ts";
 
 let behaviorCollectorStarted = false;
 
@@ -54,17 +51,17 @@ function startDouyinBehaviorCollector(): void {
 }
 
 startDouyinBehaviorCollector();
-registerE2EExecutor("douyin");
-if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
-  installNativeSaveExecutor("douyin", saveDouyin, verifyDouyin);
+
+function debugLog(_event: string, _data?: unknown): void {
+  // Retained executor diagnostics stay local; vNext has no debug-control API.
 }
 
 /**
  * Re-inject the MAIN-world fetch-tap by appending a <script> element
  * with src pointing at the extension's bundled dy-fetch-tap.js.
  *
- * Why this is needed: chrome.scripting.executeScript runs once at
- * page load. After each click-driven SPA route, Douyin's React app
+ * Why this is needed: the manifest injection runs once at page load.
+ * After each click-driven SPA route, Douyin's React app
  * may re-set window.fetch with its own wrapper — replacing our
  * wrap and silently breaking aweme capture (e2e probe 2026-05-08:
  * install_messages_received=3 but aweme_messages_received=0
@@ -124,7 +121,7 @@ interface ScopeResultPayload {
   error?: string;
   /**
    * Diagnostic counters surfaced through the dispatcher into the
-   * /api/sources/dy/task-result partial debug field. Lets us
+   * The task result diagnostic field lets us
    * disambiguate "scope returned empty because fetch-tap never
    * installed" from "fetch-tap installed but Douyin returned empty
    * 200s (risk control)" without needing the user's browser console.
@@ -257,8 +254,20 @@ if (typeof window !== "undefined") {
       const secUid = String((data as { secUid?: unknown }).secUid ?? "");
       if (secUid && secUid !== _detectedSecUid) {
         _detectedSecUid = secUid;
+        debugLog("sec_uid_detected", { secUid });
       }
       return;
+    }
+    // TEMP DIAGNOSTIC (2026-05-08): relay every /aweme*/ URL the
+    // MAIN-world tap sees back to the daemon log so we can diagnose
+    // why aweme_messages_received stays at 0.
+    if (data.type === "OPENBILICLAW_DOUYIN_URL_PROBE") {
+      const probe = data as { transport?: unknown; url?: unknown; classified?: unknown };
+      debugLog("url_probe", {
+        transport: String(probe.transport ?? ""),
+        url: String(probe.url ?? ""),
+        classified: probe.classified ?? null,
+      });
     }
   });
 }
@@ -969,6 +978,27 @@ function scrollScopeListToEnd(scope: DouyinScope): boolean {
 }
 
 /**
+ * Diagnostic helper — finds the apparent inner scroll container by
+ * walking ancestors of the last visible scope card, looking for a
+ * node where scrollHeight > clientHeight (the canonical "this is the
+ * scroller" signal). Returns its scrollHeight, or 0 when no scroller
+ * was identified. Lets us see in debug logs whether (a) the page has
+ * an inner overflow:auto container at all and (b) whether it's
+ * growing across scroll rounds.
+ */
+function findScopeScrollerHeight(): number {
+  const last = document.querySelector<HTMLElement>(
+    'a[href*="/video/"]:last-of-type, a[href*="/user/MS4w"]:last-of-type',
+  );
+  let cur: HTMLElement | null = last;
+  while (cur && cur !== document.body) {
+    if (cur.scrollHeight > cur.clientHeight + 5) return cur.scrollHeight;
+    cur = cur.parentElement;
+  }
+  return 0;
+}
+
+/**
  * Detect Douyin's "no more content" indicator on the current tab.
  * Returns the matched phrase when found (so the caller can log it),
  * or "" when the list still has more to load.
@@ -1039,6 +1069,11 @@ function detectEndOfFeed(): string {
 }
 
 async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
+  debugLog("runScope:start", {
+    scope: msg.scope,
+    page_url: location.href,
+    inject_status: msg.debug_inject_status,
+  });
   const { BootstrapItemSink, dyShouldContinueScroll, ingestMainWorldFetchMessage } =
     await loadTaskExecutorHelpers();
   const { extractDouyinItemsFromDocument } = await loadDomExtractor();
@@ -1102,12 +1137,14 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
     // than chrome.tabs.update URL jumps). clickToScope handles both
     // the homepage→profile transition and the sub-tab switch.
     clickReport = await clickToScope(msg.scope);
+    debugLog("runScope:clickToScope_done", { scope: msg.scope, clickReport });
 
     // Re-inject MAIN-world fetch-tap after the click-driven SPA route.
     // Douyin's React app sometimes re-sets window.fetch on URL change,
     // which would silently bypass our wrap. Reinjecting guarantees
     // the latest live fetch is wrapped.
     reinjectFetchTap();
+    debugLog("runScope:reinjected_fetch_tap");
 
     // The MAIN-world fetch-tap auto-installs after waitForDouyinSdk
     // resolves. Give it a beat to settle so any pageload-time
@@ -1145,11 +1182,25 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
           if (item.scope === msg.scope) allItems.push(item);
         }
       }
+      debugLog("api_harvest_done", {
+        scope: msg.scope,
+        pages: apiResult.pages,
+        items_total: apiResult.items.length,
+        items_new: apiItemsHarvested,
+        error: apiError,
+      });
+    } else {
+      debugLog("api_harvest_skipped", { scope: msg.scope, reason: "no_sec_uid" });
     }
 
+    const anchorSelector =
+      msg.scope === "dy_follow"
+        ? 'a[href*="/user/MS4w"]'
+        : 'a[href*="/video/"]';
     let stagnantRounds = 0;
     for (let round = 0; round < msg.max_scroll_rounds; round += 1) {
       const beforeCount = sink.scopeCounts()[msg.scope];
+      const beforeDomSize = document.querySelectorAll(anchorSelector).length;
 
       // Trigger Douyin's virtual-list pagination. Two strategies in
       // sequence:
@@ -1169,7 +1220,19 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
       harvestDomSnapshot();
 
       const afterCount = sink.scopeCounts()[msg.scope];
+      const afterDomSize = document.querySelectorAll(anchorSelector).length;
       endOfFeedPhrase = detectEndOfFeed();
+      debugLog("scroll_round", {
+        scope: msg.scope,
+        round,
+        beforeCount,
+        afterCount,
+        beforeDomSize,
+        afterDomSize,
+        scrollY: window.scrollY,
+        innerScrollerHeight: findScopeScrollerHeight(),
+        endOfFeed: endOfFeedPhrase,
+      });
       stagnantRounds = afterCount > beforeCount ? 0 : stagnantRounds + 1;
 
       if (endOfFeedPhrase) break; // page tells us we're done
@@ -1263,6 +1326,7 @@ async function runSearch(msg: SearchExecuteMessage): Promise<SearchResultPayload
     uiTriggered = triggerResult.submitted;
     searchNavigationOk = triggerResult.navigated;
     searchSubmitMethod = triggerResult.method;
+    debugLog("search_ui_triggered", { keyword: msg.keyword, ...triggerResult });
     await sleep(2_000);
 
     for (let round = 0; round < 4 && allItems.length < maxItems; round += 1) {
@@ -1353,6 +1417,11 @@ async function runHot(msg: HotExecuteMessage): Promise<HotResultPayload> {
     reinjectFetchTap();
     await sleep(POST_INSTALL_SETTLE_MS);
     uiTriggered = await triggerHotUi(msg.sentence_id, msg.word);
+    debugLog("hot_ui_triggered", {
+      sentence_id: msg.sentence_id,
+      word: msg.word,
+      uiTriggered,
+    });
     await sleep(2_000);
     seedAwemeId = await waitForCurrentVideoAwemeId(2_000);
     if (!seedAwemeId && fallbackSeedAwemeId) {
@@ -1557,13 +1626,23 @@ export function registerDyScopeExecutor(): void {
       if (message.action !== "DY_SCOPE_EXECUTE") return false;
       const data = message.data;
       if (!isValidScopeExecuteMessage(data)) {
+        debugLog("listener:invalid_scope_execute", { message });
         return false;
       }
+      debugLog("listener:DY_SCOPE_EXECUTE_received", {
+        scope: (data as { scope: string }).scope,
+        page_url: location.href,
+      });
 
       void runScope(data).then((result) => {
-        chrome.runtime
-          .sendMessage({ action: "DY_SCOPE_RESULT", data: result })
-          .catch(() => undefined);
+        debugLog("runScope:returning", {
+          scope: result.scope,
+          status: result.status,
+          items_count: result.items.length,
+        });
+        chrome.runtime.sendMessage({ action: "DY_SCOPE_RESULT", data: result }).catch((err) => {
+          debugLog("listener:DY_SCOPE_RESULT_send_failed", { error: String(err) });
+        });
       });
 
       // We don't use sendResponse — return false so the channel closes.
@@ -1575,13 +1654,23 @@ export function registerDyScopeExecutor(): void {
       if (message.action !== "DY_SEARCH_EXECUTE") return false;
       const data = message.data;
       if (!isValidSearchExecuteMessage(data)) {
+        debugLog("listener:invalid_search_execute", { message });
         return false;
       }
+      debugLog("listener:DY_SEARCH_EXECUTE_received", {
+        keyword: (data as { keyword: string }).keyword,
+        page_url: location.href,
+      });
 
       void runSearch(data).then((result) => {
-        chrome.runtime
-          .sendMessage({ action: "DY_SEARCH_RESULT", data: result })
-          .catch(() => undefined);
+        debugLog("runSearch:returning", {
+          keyword: result.keyword,
+          status: result.status,
+          items_count: result.items.length,
+        });
+        chrome.runtime.sendMessage({ action: "DY_SEARCH_RESULT", data: result }).catch((err) => {
+          debugLog("listener:DY_SEARCH_RESULT_send_failed", { error: String(err) });
+        });
       });
 
       return false;
@@ -1592,13 +1681,23 @@ export function registerDyScopeExecutor(): void {
       if (message.action !== "DY_HOT_EXECUTE") return false;
       const data = message.data;
       if (!isValidHotExecuteMessage(data)) {
+        debugLog("listener:invalid_hot_execute", { message });
         return false;
       }
+      debugLog("listener:DY_HOT_EXECUTE_received", {
+        sentence_id: (data as { sentence_id: string }).sentence_id,
+        page_url: location.href,
+      });
 
       void runHot(data).then((result) => {
-        chrome.runtime
-          .sendMessage({ action: "DY_HOT_RESULT", data: result })
-          .catch(() => undefined);
+        debugLog("runHot:returning", {
+          sentence_id: result.sentence_id,
+          status: result.status,
+          items_count: result.items.length,
+        });
+        chrome.runtime.sendMessage({ action: "DY_HOT_RESULT", data: result }).catch((err) => {
+          debugLog("listener:DY_HOT_RESULT_send_failed", { error: String(err) });
+        });
       });
 
       return false;
@@ -1609,13 +1708,21 @@ export function registerDyScopeExecutor(): void {
       if (message.action !== "DY_FEED_EXECUTE") return false;
       const data = message.data;
       if (!isValidFeedExecuteMessage(data)) {
+        debugLog("listener:invalid_feed_execute", { message });
         return false;
       }
+      debugLog("listener:DY_FEED_EXECUTE_received", {
+        page_url: location.href,
+      });
 
       void runFeed(data).then((result) => {
-        chrome.runtime
-          .sendMessage({ action: "DY_FEED_RESULT", data: result })
-          .catch(() => undefined);
+        debugLog("runFeed:returning", {
+          status: result.status,
+          items_count: result.items.length,
+        });
+        chrome.runtime.sendMessage({ action: "DY_FEED_RESULT", data: result }).catch((err) => {
+          debugLog("listener:DY_FEED_RESULT_send_failed", { error: String(err) });
+        });
       });
 
       return false;

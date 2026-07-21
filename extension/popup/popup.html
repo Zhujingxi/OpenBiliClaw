@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="openbiliclaw-api-base" content="/api/v1">
+  <link rel="modulepreload" href="api-client.js">
   <title>OpenBiliClaw</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -232,10 +234,10 @@
       gap: 10px;
     }
 
-    /* "Star" button in the familiar GitHub-Buttons action-chip style: Octocat +
-       "Star", opening the repo (direct-starring needs GitHub auth, so even
-       GitHub's own widget links out). No live count — the GitHub REST host is
-       not in the manifest host_permissions, so a fetch could never succeed. */
+    /* "Star" button in the familiar GitHub-Buttons two-part style (the look big
+       repos use): an action chip (Octocat + "Star") joined to a live star-count
+       box. Clicking opens the repo (direct-starring needs GitHub auth, so even
+       GitHub's own widget links out). The count is fetched + cached by popup.js. */
     .gh-star {
       flex-shrink: 0;
       display: inline-flex;
@@ -275,6 +277,20 @@
       width: 14px;
       height: 14px;
       color: #24292f;
+    }
+
+    .gh-star-count {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 9px;
+      color: #24292f;
+      background: #ffffff;
+      border-left: 1px solid rgba(208, 215, 222, 0.95);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .gh-star-count[hidden] {
+      display: none;
     }
 
     .status-badge {
@@ -370,12 +386,10 @@
 
     .tab-button:focus-visible,
     .mobile-button:focus-visible,
-    .messages-button:focus-visible,
     .settings-gear:focus-visible,
     .recommendation-preview:focus-visible,
     .action-button:focus-visible,
-    .chat-input:focus-visible,
-    .comment-input:focus-visible {
+    .chat-input:focus-visible {
       outline: none;
       box-shadow: var(--focus-ring);
     }
@@ -582,609 +596,23 @@
       overflow-wrap: anywhere;
     }
 
-    #delightSlot {
-      display: grid;
-      gap: 12px;
-    }
-
-    #delightSlot[hidden] {
-      display: none;
-    }
-
-    /* Compact banner version of the delight card.
-       Collapsed state is a single ~36px row that doesn't push the
-       recommendation feed down; click the row to expand. */
-    /* Delight banner — same visual language as .recommendation-card
-       (radius / background / inset highlight) so it feels like part of
-       the same family, but with pink-tinted accents (border, hover glow,
-       ✨ overlay on cover) so it instantly reads as a "surprise pick"
-       and not just another rec card. */
-    .delight-banner {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: stretch;
-      border-radius: 22px;
-      border: 1px solid rgba(251, 114, 153, 0.28);
-      background: linear-gradient(180deg, rgba(255, 252, 254, 0.98), rgba(252, 248, 255, 0.98));
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.82),
-        0 4px 14px rgba(251, 114, 153, 0.1);
-      overflow: hidden;
-      transition: box-shadow 0.2s ease, border-color 0.2s ease;
-    }
-    .delight-banner:hover {
-      border-color: rgba(251, 114, 153, 0.5);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.82),
-        0 12px 28px rgba(251, 114, 153, 0.18);
-    }
-    .delight-banner.is-highlighted {
-      border-color: rgba(251, 114, 153, 0.55);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.82),
-        0 12px 28px rgba(251, 114, 153, 0.22);
-    }
-    .delight-banner.is-expanded {
-      grid-template-rows: auto auto;
-      grid-template-columns: 1fr auto;
-    }
-
-    .delight-banner-row {
-      grid-column: 1;
-      grid-row: 1;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px;
-      border: 0;
-      background: transparent;
-      cursor: pointer;
-      text-align: left;
-      min-width: 0;
-    }
-
     /* 16:9 cover — same visual treatment as .recommendation-cover.
        Inset highlight, pink/blue gradient backdrop, and a bottom
        darkening scrim so a ✨ badge overlay reads in any light/dark
        cover image. */
-    .delight-banner-thumb {
-      flex-shrink: 0;
-      position: relative;
-      width: 160px;
-      aspect-ratio: 16 / 9;
-      border-radius: 18px;
-      overflow: hidden;
-      border: 1px solid rgba(255, 255, 255, 0.92);
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 248, 252, 0.94)),
-        linear-gradient(145deg, rgba(251, 114, 153, 0.18), rgba(168, 85, 247, 0.12));
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.72),
-        0 2px 8px rgba(251, 114, 153, 0.12);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    .delight-banner:hover .delight-banner-thumb {
-      transform: translateY(-1px);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.72),
-        0 6px 16px rgba(251, 114, 153, 0.2);
-    }
-    .delight-banner-thumb img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .delight-banner-thumb.is-fallback {
-      font-size: 36px;
-      color: var(--brand-strong);
-    }
+
     /* ✨ overlay badge — instant "this one is special" marker. */
-    .delight-banner-thumb::before {
-      content: "✨";
-      position: absolute;
-      top: 6px;
-      left: 6px;
-      width: 22px;
-      height: 22px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.92);
-      color: var(--brand-strong);
-      font-size: 13px;
-      line-height: 22px;
-      text-align: center;
-      box-shadow: 0 2px 6px rgba(251, 114, 153, 0.28);
-      pointer-events: none;
-      z-index: 2;
-    }
+
     /* Bottom scrim to keep covers readable + match rec-card style */
-    .delight-banner-thumb::after {
-      content: "";
-      position: absolute;
-      inset: auto 0 0 0;
-      height: 32%;
-      background: linear-gradient(180deg, transparent, rgba(32, 48, 74, 0.16));
-      pointer-events: none;
-    }
-    .delight-banner-thumb.is-fallback::after {
-      display: none;
-    }
-
-    .delight-banner-text {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .delight-banner-kicker-line {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .delight-banner-kicker {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--brand-strong);
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: rgba(251, 114, 153, 0.1);
-      letter-spacing: 0.02em;
-    }
-
-    .delight-banner-platform {
-      font-size: 10px;
-      font-weight: 600;
-      color: var(--text-muted);
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: rgba(0, 0, 0, 0.05);
-    }
-
-    .delight-banner-counter {
-      font-size: 10px;
-      font-weight: 600;
-      color: var(--text-muted);
-      padding: 1px 5px;
-      border-radius: 8px;
-      background: rgba(0, 0, 0, 0.04);
-    }
 
     /* Nav buttons (‹ / ›). 28×28 visible target plus a transparent
        ::before that extends the hit area to 36×36 — keeps the visual
        compact in the kicker row while staying comfortably clickable
        in a popup. */
-    .delight-banner-nav {
-      position: relative;
-      width: 28px;
-      height: 28px;
-      border: 1px solid rgba(251, 114, 153, 0.2);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.7);
-      color: var(--brand-strong);
-      font-size: 18px;
-      font-weight: 700;
-      line-height: 1;
-      cursor: pointer;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s ease, transform 0.1s ease, border-color 0.15s ease;
-    }
-    .delight-banner-nav::before {
-      content: "";
-      position: absolute;
-      inset: -4px;
-    }
-    .delight-banner-nav:hover:not(:disabled) {
-      background: rgba(251, 114, 153, 0.14);
-      border-color: rgba(251, 114, 153, 0.45);
-    }
-    .delight-banner-nav:active:not(:disabled) {
-      transform: scale(0.94);
-    }
-    .delight-banner-nav:disabled {
-      opacity: 0.32;
-      cursor: default;
-    }
 
-    /* Inbox delight card — thumbnail + title row */
-    .message-delight-top {
-      display: flex;
-      gap: 10px;
-      align-items: flex-start;
-      margin-bottom: 6px;
-    }
-    .message-delight-thumb {
-      flex-shrink: 0;
-      width: 56px;
-      height: 56px;
-      border-radius: 10px;
-      overflow: hidden;
-      background: linear-gradient(135deg, rgba(168, 85, 247, 0.18), rgba(90, 169, 255, 0.18));
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid rgba(255, 255, 255, 0.6);
-    }
-    .message-delight-thumb img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .message-delight-thumb.is-fallback {
-      font-size: 20px;
-      color: #6b21a8;
-    }
-    .message-delight-text {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .message-delight-hook {
-      font-size: 10px;
-      font-weight: 700;
-      color: #6b21a8;
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: rgba(168, 85, 247, 0.12);
-      align-self: flex-start;
-    }
-    .message-delight-platform {
-      font-size: 10px;
-      font-weight: 600;
-      color: #6b7280;
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: rgba(107, 114, 128, 0.12);
-      align-self: flex-start;
-    }
-    .message-delight-title {
-      font-size: 13px;
-      font-weight: 700;
-      color: #4c1d95;
-      line-height: 1.4;
-      overflow-wrap: anywhere;
-    }
-
-    .delight-banner-title {
-      min-width: 0;
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--text-main);
-      line-height: 1.45;
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-      overflow-wrap: anywhere;
-    }
     /* Reveal full title once the user has chosen to expand the banner —
        collapsed state still respects the row-height budget with a
        3-line clamp, but the expanded state shouldn't hide content. */
-    .delight-banner.is-expanded .delight-banner-title {
-      -webkit-line-clamp: unset;
-      display: block;
-    }
-
-    .delight-banner-dismiss-all {
-      align-self: flex-start;
-      margin-top: 4px;
-      border: 0;
-      background: transparent;
-      color: var(--text-secondary);
-      font-size: 11px;
-      cursor: pointer;
-      text-decoration: underline;
-      padding: 2px 4px;
-    }
-    .delight-banner-dismiss-all:hover {
-      color: var(--text-main);
-    }
-
-    .delight-banner-chevron {
-      flex-shrink: 0;
-      font-size: 12px;
-      color: var(--text-secondary);
-      transition: transform 0.2s ease;
-    }
-
-    .delight-banner-dismiss {
-      grid-column: 2;
-      grid-row: 1;
-      width: 32px;
-      border: 0;
-      border-left: 1px solid rgba(237, 219, 233, 0.6);
-      background: transparent;
-      color: var(--text-muted);
-      font-size: 18px;
-      line-height: 1;
-      cursor: pointer;
-      transition: background 0.15s ease;
-    }
-    .delight-banner-dismiss:hover {
-      background: rgba(0, 0, 0, 0.04);
-      color: var(--text-main);
-    }
-
-    .delight-banner-body {
-      grid-column: 1 / -1;
-      grid-row: 2;
-      padding: 4px 12px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      border-top: 1px solid rgba(237, 219, 233, 0.6);
-    }
-
-    .delight-banner-reason {
-      font-size: 12px;
-      line-height: 1.6;
-      color: var(--text-secondary);
-      margin: 4px 0 0;
-    }
-
-    .delight-banner-response {
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin: 0;
-    }
-    .delight-banner-response[data-tone="success"] { color: #1a7f37; }
-    .delight-banner-response[data-tone="error"] { color: #cf222e; }
-
-    .delight-banner-chat-reply {
-      font-size: 12px;
-      line-height: 1.55;
-      color: var(--text-main);
-      margin: 0;
-      padding: 8px 10px;
-      background: rgba(255, 255, 255, 0.7);
-      border-radius: 10px;
-      border: 1px solid rgba(237, 219, 233, 0.6);
-    }
-
-    .delight-chat-turns {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-      max-height: 220px;
-      overflow-y: auto;
-      padding: 2px 0;
-    }
-
-    .delight-turn-bubble {
-      max-width: 88%;
-      padding: 7px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-      line-height: 1.5;
-      word-break: break-word;
-    }
-
-    .delight-turn-bubble.is-user {
-      background: var(--brand);
-      color: #fff;
-      margin-left: auto;
-      border-bottom-right-radius: 3px;
-    }
-
-    .delight-turn-bubble.is-assistant {
-      background: rgba(255, 255, 255, 0.7);
-      border: 1px solid rgba(237, 219, 233, 0.6);
-      border-bottom-left-radius: 3px;
-    }
-
-    .delight-turn-bubble.is-thinking {
-      color: var(--text-secondary);
-      font-style: italic;
-    }
-
-    .delight-turn-bubble.is-error {
-      background: rgba(239, 122, 134, 0.1);
-      color: #cf222e;
-      border-color: rgba(239, 122, 134, 0.2);
-    }
-
-    .delight-banner-actions {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-
-    .delight-banner-action {
-      flex: 1;
-      min-width: 0;
-      padding: 6px 10px;
-      font-size: 12px;
-    }
-
-    .delight-card {
-      border-radius: 20px;
-      border: 1px solid rgba(237, 219, 233, 0.96);
-      background:
-        radial-gradient(circle at top right, rgba(251, 114, 153, 0.16), transparent 38%),
-        linear-gradient(180deg, rgba(255, 252, 254, 0.98), rgba(246, 250, 255, 0.98));
-      box-shadow: 0 18px 34px rgba(251, 114, 153, 0.12);
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .delight-card.is-highlighted {
-      border-color: rgba(251, 114, 153, 0.42);
-      box-shadow: 0 22px 38px rgba(251, 114, 153, 0.18);
-    }
-
-    .delight-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    .delight-kicker {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 9px;
-      border-radius: 999px;
-      background: rgba(251, 114, 153, 0.1);
-      color: var(--brand-strong);
-      font-size: 10px;
-      line-height: 1;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      font-weight: 800;
-    }
-
-    .delight-score {
-      display: inline-flex;
-      align-items: center;
-      padding: 5px 9px;
-      border-radius: 999px;
-      background: rgba(90, 169, 255, 0.12);
-      color: #3279c7;
-      font-size: 10px;
-      line-height: 1;
-      font-weight: 700;
-    }
-
-    .delight-hero {
-      display: grid;
-      grid-template-columns: 112px minmax(0, 1fr);
-      gap: 12px;
-      align-items: stretch;
-      border: 0;
-      background: transparent;
-      padding: 0;
-      text-align: left;
-      color: inherit;
-      cursor: pointer;
-    }
-
-    .delight-cover {
-      position: relative;
-      overflow: hidden;
-      border-radius: 16px;
-      aspect-ratio: 16 / 10;
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 249, 255, 0.92)),
-        linear-gradient(145deg, rgba(251, 114, 153, 0.16), rgba(90, 169, 255, 0.12));
-      border: 1px solid rgba(255, 255, 255, 0.94);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--text-secondary);
-      font-size: 11px;
-      line-height: 1.5;
-      font-weight: 700;
-      text-align: center;
-      padding: 10px;
-    }
-
-    .delight-cover img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-
-    .delight-copy {
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      justify-content: center;
-    }
-
-    .delight-hook {
-      display: inline-flex;
-      align-items: center;
-      align-self: flex-start;
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.82);
-      color: var(--text-secondary);
-      font-size: 10px;
-      line-height: 1;
-      font-weight: 700;
-    }
-
-    .delight-title {
-      font-size: 17px;
-      line-height: 1.35;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      color: var(--text-main);
-      overflow-wrap: anywhere;
-    }
-
-    .delight-reason {
-      font-size: 12px;
-      line-height: 1.65;
-      color: var(--text-secondary);
-    }
-
-    .delight-response {
-      padding: 10px 12px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.78);
-      border: 1px solid rgba(233, 237, 246, 0.96);
-      font-size: 12px;
-      line-height: 1.6;
-      color: var(--text-main);
-    }
-
-    .delight-response[data-tone="success"] {
-      background: rgba(241, 255, 248, 0.92);
-      border-color: rgba(150, 221, 185, 0.82);
-    }
-
-    .delight-chat-reply {
-      padding: 10px 12px;
-      border-radius: 16px;
-      background: rgba(245, 249, 255, 0.9);
-      border: 1px solid rgba(210, 224, 242, 0.92);
-      font-size: 12px;
-      line-height: 1.65;
-      color: var(--text-main);
-    }
-
-    .delight-actions {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    .delight-chat-composer {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 12px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.82);
-      border: 1px solid rgba(233, 237, 246, 0.96);
-    }
-
-    .delight-chat-status {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-secondary);
-      min-height: 1.5em;
-    }
 
     .recommendation-list,
     .chat-shell {
@@ -1497,10 +925,6 @@
         gap: 8px;
       }
 
-      .delight-hero {
-        grid-template-columns: 1fr;
-      }
-
       .recommendation-card {
         padding: 6px;
       }
@@ -1544,10 +968,6 @@
         margin-top: 4px;
         gap: 4px;
         justify-content: space-between;
-      }
-
-      .delight-actions {
-        gap: 4px;
       }
 
       .action-button {
@@ -1690,18 +1110,6 @@
       color: var(--text-main);
     }
 
-    .comment-composer {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 10px;
-      padding: 12px;
-      border-radius: 18px;
-      background: linear-gradient(180deg, rgba(255, 245, 249, 0.98), rgba(246, 251, 255, 0.98));
-      border: 1px solid rgba(234, 226, 240, 0.94);
-    }
-
-    .comment-input,
     .chat-input {
       width: 100%;
       resize: vertical;
@@ -1713,7 +1121,6 @@
       color: var(--text-main);
     }
 
-    .comment-input::placeholder,
     .chat-input::placeholder {
       color: var(--text-muted);
     }
@@ -1878,70 +1285,6 @@
       border-bottom: 1px solid rgba(231, 238, 248, 0.6);
     }
 
-    /* ── MBTI display ── */
-    .mbti-container {
-      margin-top: 10px;
-    }
-    .mbti-type-row {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-    .mbti-type-label {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--brand-strong);
-    }
-    .mbti-confidence {
-      font-size: 10px;
-      color: var(--text-muted);
-      background: rgba(231, 238, 248, 0.96);
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-weight: 600;
-    }
-    .mbti-dimensions {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .mbti-dim-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 11px;
-    }
-    .mbti-dim-pole {
-      width: 24px;
-      text-align: center;
-      font-weight: 600;
-      color: var(--brand-strong);
-    }
-    .mbti-dim-bar {
-      flex: 1;
-      height: 6px;
-      border-radius: 3px;
-      background: rgba(231, 238, 248, 0.96);
-      overflow: hidden;
-    }
-    .mbti-dim-bar-fill {
-      height: 100%;
-      border-radius: 3px;
-      background: linear-gradient(90deg, #f7828e, #c7698f);
-      transition: width 0.3s ease;
-    }
-    .mbti-dim-pct {
-      width: 32px;
-      text-align: right;
-      font-size: 10px;
-      color: var(--text-muted);
-    }
-    .mbti-fallback {
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-
     /* ── Interest tree (domain → specifics) ── */
     .interest-tree {
       margin-top: 10px;
@@ -2085,254 +1428,6 @@
       font-size: 11px;
       color: var(--text-muted);
       white-space: nowrap;
-    }
-
-    /* ── Speculative interests ── */
-    .speculative-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 10px;
-    }
-    .speculative-item {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      background: rgba(255, 248, 240, 0.96);
-      border: 1px solid rgba(245, 228, 210, 0.96);
-    }
-    .speculative-item .spec-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .speculative-item .spec-domain {
-      font-size: 12px;
-      font-weight: 600;
-      color: #c57b2e;
-    }
-    .speculative-item .spec-reason {
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin: 0;
-    }
-    .speculative-item .spec-progress {
-      font-size: 10px;
-      color: var(--text-muted);
-      white-space: nowrap;
-    }
-    .speculative-item .spec-status {
-      font-size: 10px;
-      font-weight: 700;
-      color: #9a6420;
-      background: rgba(255, 228, 196, 0.96);
-      border: 1px solid rgba(235, 190, 140, 0.8);
-      padding: 1px 7px;
-      border-radius: 999px;
-      white-space: nowrap;
-    }
-    .speculative-item.is-status-deprecated,
-    .speculative-item.is-status-rejected {
-      opacity: 0.6;
-    }
-    .speculative-item .spec-confidence-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 2px;
-    }
-    .speculative-item .spec-confidence-bar {
-      flex: 1;
-      height: 4px;
-      border-radius: 4px;
-      background: rgba(245, 228, 210, 0.8);
-      overflow: hidden;
-    }
-    .speculative-item .spec-confidence-fill {
-      height: 100%;
-      border-radius: 4px;
-      background: linear-gradient(90deg, #f5b36b, #c57b2e);
-      transition: width 0.3s ease;
-    }
-    .speculative-item .spec-confidence-label {
-      font-size: 10px;
-      color: #9a6420;
-      white-space: nowrap;
-    }
-    .speculative-item .spec-specifics {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      margin-top: 2px;
-    }
-    .spec-specific-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      font-size: 10px;
-      color: #9a6420;
-      background: rgba(255, 240, 220, 0.96);
-      border: 1px solid rgba(235, 210, 180, 0.8);
-    }
-    .spec-specific-count {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 14px;
-      height: 14px;
-      border-radius: 7px;
-      font-size: 9px;
-      font-weight: 600;
-      color: #fff;
-      background: #c57b2e;
-    }
-    .speculative-list .is-fallback {
-      font-size: 11px;
-      color: var(--text-muted);
-      padding: 6px 0;
-    }
-    .speculative-item .spec-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 4px;
-    }
-    .speculative-item .spec-actions .probe-btn {
-      padding: 4px 10px;
-      font-size: 11px;
-    }
-    .speculative-item .spec-result {
-      margin: 0;
-      font-size: 11px;
-      color: #9a6420;
-      font-style: italic;
-    }
-
-    .probe-card {
-      padding: 14px 16px;
-      border-radius: 18px;
-      background: linear-gradient(135deg, rgba(255, 244, 230, 0.98), rgba(255, 238, 215, 0.96));
-      border: 1.5px solid rgba(240, 136, 62, 0.35);
-      margin-bottom: 12px;
-      animation: probeSlideIn 0.3s ease-out;
-    }
-
-    .probe-card.is-interest,
-    .message-item.is-interest {
-      background: linear-gradient(135deg, rgba(255, 248, 232, 0.98), rgba(255, 238, 210, 0.96));
-      border-color: rgba(221, 127, 45, 0.34);
-    }
-
-    .probe-card.is-challenge,
-    .message-item.is-challenge {
-      background: linear-gradient(135deg, rgba(246, 241, 255, 0.98), rgba(237, 232, 255, 0.96));
-      border-color: rgba(124, 58, 237, 0.28);
-    }
-
-    .message-item.is-avoidance {
-      background: linear-gradient(135deg, rgba(238, 247, 255, 0.98), rgba(225, 239, 252, 0.96));
-      border-color: rgba(59, 130, 246, 0.28);
-    }
-
-    .probe-card.is-challenge .probe-kicker,
-    .message-item.is-challenge .message-domain { color: #6d28d9; }
-    .message-item.is-challenge .message-reason { color: #5b21b6; }
-    .message-item.is-avoidance .message-domain { color: #1d4ed8; }
-    .message-item.is-avoidance .message-reason { color: #1e40af; }
-
-    .probe-kicker,
-    .message-kind-copy {
-      margin: 0 0 8px;
-      color: #7c5b2f;
-      font-size: 11px;
-      font-weight: 700;
-      line-height: 1.45;
-    }
-
-    .probe-card.is-challenge .message-kind-copy,
-    .message-item.is-challenge .message-kind-copy { color: #6d28d9; }
-    .message-item.is-avoidance .message-kind-copy { color: #1d4ed8; }
-
-    @keyframes probeSlideIn {
-      from { opacity: 0; transform: translateY(-8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .probe-question {
-      font-size: 13px;
-      line-height: 1.6;
-      color: #3d2e1f;
-      margin-bottom: 10px;
-    }
-
-    .probe-specifics {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
-
-    .probe-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .probe-btn {
-      flex: 1;
-      padding: 8px 0;
-      border-radius: 12px;
-      border: 1px solid rgba(0, 0, 0, 0.1);
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-
-    .probe-btn:focus-visible {
-      outline: none;
-      box-shadow: var(--focus-ring);
-    }
-
-    .probe-btn.is-confirm {
-      background: rgba(63, 185, 80, 0.15);
-      color: #1a7f37;
-      border-color: rgba(63, 185, 80, 0.3);
-    }
-    .probe-btn.is-confirm:hover {
-      background: rgba(63, 185, 80, 0.25);
-    }
-
-    .probe-btn.is-neutral {
-      background: var(--warning-soft);
-      color: #9a6420;
-      border-color: rgba(235, 190, 140, 0.45);
-    }
-    .probe-btn.is-neutral:hover {
-      background: rgba(255, 189, 110, 0.3);
-    }
-
-    .probe-btn.is-reject {
-      background: rgba(139, 148, 158, 0.1);
-      color: #57606a;
-      border-color: rgba(139, 148, 158, 0.2);
-    }
-    .probe-btn.is-reject:hover {
-      background: rgba(139, 148, 158, 0.2);
-    }
-
-    .probe-btn.is-chat {
-      background: rgba(88, 166, 255, 0.12);
-      color: #0969da;
-      border-color: rgba(88, 166, 255, 0.25);
-    }
-    .probe-btn.is-chat:hover {
-      background: rgba(88, 166, 255, 0.22);
     }
 
     /* ── Editable profile (Phase 2) ── */
@@ -2564,422 +1659,6 @@
       font-variant-numeric: tabular-nums;
     }
 
-    .probe-result {
-      font-size: 13px;
-      color: #57606a;
-      text-align: center;
-      padding: 8px 0;
-    }
-
-    .cognition-list {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .cognition-card {
-      border-radius: 18px;
-      border: 1px solid rgba(231, 238, 248, 0.96);
-      background: linear-gradient(180deg, rgba(255, 249, 252, 0.98), rgba(247, 251, 255, 0.98));
-      overflow: hidden;
-    }
-
-    .cognition-card.is-expanded {
-      box-shadow: 0 12px 24px rgba(60, 87, 132, 0.08);
-    }
-
-    .cognition-card.is-summary-only {
-      background: linear-gradient(180deg, rgba(250, 251, 253, 0.98), rgba(245, 247, 251, 0.98));
-    }
-
-    .cognition-card.is-fallback {
-      padding: 12px 14px;
-      background: rgba(246, 248, 252, 0.98);
-    }
-
-    .cognition-toggle {
-      width: 100%;
-      border: 0;
-      background: transparent;
-      padding: 14px;
-      text-align: left;
-    }
-
-    .cognition-toggle.is-static {
-      cursor: default;
-    }
-
-    .cognition-header {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .cognition-summary {
-      font-size: 12px;
-      line-height: 1.7;
-      color: var(--text-main);
-      font-weight: 700;
-    }
-
-    .cognition-context {
-      font-size: 11px;
-      line-height: 1.6;
-      color: var(--text-secondary);
-    }
-
-    .cognition-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      font-size: 11px;
-      line-height: 1.3;
-    }
-
-    .cognition-source {
-      color: var(--text-muted);
-      font-weight: 700;
-    }
-
-    .cognition-timestamp {
-      color: var(--text-muted);
-      font-size: 10px;
-      font-weight: 500;
-      margin-left: auto;
-      margin-right: 8px;
-    }
-
-    .cognition-state {
-      color: var(--brand-strong);
-      font-weight: 800;
-    }
-
-    .cognition-details {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding: 0 14px 14px;
-      border-top: 1px solid rgba(236, 226, 240, 0.96);
-    }
-
-    .cognition-details[hidden] {
-      display: none;
-    }
-
-    .cognition-detail {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding-top: 10px;
-    }
-
-    .cognition-detail-label {
-      font-size: 11px;
-      line-height: 1.4;
-      font-weight: 800;
-      color: var(--brand-strong);
-    }
-
-    .cognition-detail-value {
-      font-size: 12px;
-      line-height: 1.7;
-      color: var(--text-secondary);
-    }
-
-    .cognition-history-footer {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .cognition-history-status {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-muted);
-    }
-
-    .cognition-history-more {
-      align-self: flex-start;
-      border: 0;
-      border-radius: 999px;
-      padding: 8px 14px;
-      background: rgba(58, 123, 213, 0.1);
-      color: var(--brand-strong);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .cognition-history-more:disabled {
-      opacity: 0.55;
-    }
-
-    /* ── Active insights ── */
-    .insight-list {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .insight-item {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      padding: 12px 14px;
-      border-radius: 16px;
-      background: linear-gradient(180deg, rgba(247, 251, 255, 0.98), rgba(240, 248, 255, 0.96));
-      border: 1px solid rgba(210, 228, 248, 0.9);
-    }
-
-    .insight-item.is-validated {
-      background: linear-gradient(180deg, rgba(244, 255, 250, 0.98), rgba(235, 252, 243, 0.96));
-      border-color: rgba(180, 230, 210, 0.9);
-    }
-
-    .insight-hypothesis {
-      font-size: 12.5px;
-      line-height: 1.65;
-      color: var(--text-main);
-      font-weight: 500;
-    }
-
-    .insight-confidence-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .insight-confidence-bar {
-      flex: 1;
-      height: 4px;
-      border-radius: 4px;
-      background: rgba(210, 228, 248, 0.6);
-      overflow: hidden;
-    }
-
-    .insight-confidence-fill {
-      height: 100%;
-      border-radius: 4px;
-      background: linear-gradient(90deg, var(--sky), #397fcb);
-      transition: width 0.3s ease;
-    }
-
-    .insight-confidence-label {
-      font-size: 10px;
-      color: var(--text-muted);
-      white-space: nowrap;
-    }
-
-    .insight-validated-badge {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--success);
-      border: 1px solid rgba(48, 185, 128, 0.3);
-      border-radius: 999px;
-      padding: 1px 7px;
-      align-self: flex-start;
-    }
-
-    .insight-evidence {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      padding-left: 8px;
-      border-left: 2px solid rgba(90, 169, 255, 0.3);
-      margin-top: 2px;
-    }
-
-    .insight-evidence-item {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-secondary);
-    }
-
-    .insight-timestamp {
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-top: 2px;
-      text-align: right;
-    }
-
-    .insight-list .is-fallback {
-      font-size: 11px;
-      color: var(--text-muted);
-      padding: 6px 0;
-    }
-
-    .insight-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-top: 4px;
-    }
-
-    .insight-action-btn {
-      font-size: 11px;
-      font-weight: 600;
-      padding: 3px 12px;
-      border-radius: 999px;
-      cursor: pointer;
-      border: 1px solid rgba(210, 228, 248, 0.9);
-      background: rgba(255, 255, 255, 0.85);
-      color: var(--text-secondary);
-      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-    }
-
-    .insight-action-btn:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-
-    .insight-action-btn.is-confirm:hover:not(:disabled) {
-      background: rgba(48, 185, 128, 0.12);
-      border-color: rgba(48, 185, 128, 0.4);
-      color: var(--success);
-    }
-
-    .insight-action-btn.is-reject:hover:not(:disabled) {
-      background: rgba(235, 110, 110, 0.12);
-      border-color: rgba(235, 110, 110, 0.4);
-      color: #d9534f;
-    }
-
-    .insight-action-status {
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-left: 2px;
-    }
-
-    /* ── Recent awareness ── */
-    .awareness-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .awareness-item {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding: 10px 13px;
-      border-radius: 14px;
-      background: rgba(255, 252, 247, 0.97);
-      border: 1px solid rgba(240, 230, 215, 0.9);
-    }
-
-    .awareness-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .awareness-date {
-      font-size: 10px;
-      color: var(--text-muted);
-      white-space: nowrap;
-    }
-
-    .awareness-emotion {
-      font-size: 10px;
-      color: var(--brand);
-      font-weight: 600;
-    }
-
-    .awareness-observation {
-      font-size: 12px;
-      line-height: 1.65;
-      color: var(--text-main);
-    }
-
-    .awareness-trend {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-secondary);
-      padding-left: 8px;
-      border-left: 2px solid rgba(251, 114, 153, 0.25);
-    }
-
-    .awareness-list .is-fallback {
-      font-size: 11px;
-      color: var(--text-muted);
-      padding: 6px 0;
-    }
-
-    .embedding-banner {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin: 0 0 12px;
-      padding: 12px 14px;
-      border-radius: 14px;
-      background: linear-gradient(135deg, rgba(255, 196, 87, 0.18), rgba(251, 114, 153, 0.14));
-      border: 1px solid rgba(255, 176, 32, 0.4);
-    }
-
-    .embedding-banner-text {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      flex: 1;
-      min-width: 0;
-    }
-
-    .embedding-banner-text strong {
-      font-size: 12.5px;
-      font-weight: 800;
-      color: var(--text-main);
-    }
-
-    .embedding-banner-text span {
-      font-size: 11.5px;
-      line-height: 1.5;
-      color: var(--text-secondary);
-    }
-
-    .embedding-banner-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
-    }
-
-    .embedding-banner-btn {
-      padding: 7px 12px;
-      border: none;
-      border-radius: 10px;
-      font-size: 12px;
-      font-weight: 700;
-      color: #fff;
-      cursor: pointer;
-      background: linear-gradient(135deg, #fb7299, #5aa9ff);
-      white-space: nowrap;
-    }
-
-    .embedding-banner-btn:disabled {
-      opacity: 0.6;
-      cursor: default;
-    }
-
-    .embedding-banner-dismiss {
-      width: 24px;
-      height: 24px;
-      border: none;
-      border-radius: 8px;
-      background: transparent;
-      color: var(--text-secondary);
-      cursor: pointer;
-      font-size: 12px;
-      line-height: 1;
-    }
-
-    .embedding-banner-dismiss:hover {
-      background: rgba(0, 0, 0, 0.06);
-    }
-
     .empty-state {
       padding: 28px 20px;
       text-align: center;
@@ -3153,20 +1832,6 @@
       line-height: 1.6;
       color: var(--text-secondary);
       text-align: center;
-    }
-
-    .init-cli-command {
-      margin: 8px 0;
-      padding: 8px 10px;
-      border: 1px solid rgba(90, 169, 255, 0.25);
-      border-radius: 10px;
-      background: rgba(90, 169, 255, 0.08);
-      color: var(--text-main);
-      overflow-wrap: anywhere;
-    }
-
-    .init-cli-command code {
-      font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
     /* Liveness / expectation line under the progress bar (init-progress
@@ -3343,25 +2008,6 @@
       letter-spacing: 0.02em;
     }
 
-    /* In-card chat "thinking" indicator (probe / delight inbox + banner). */
-    .message-chat-thinking {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      margin-top: 8px;
-      font-size: 12px;
-      line-height: 1.4;
-      color: var(--text-secondary);
-      background: rgba(255, 255, 255, 0.7);
-      border-radius: 12px;
-      border: 1px solid rgba(237, 219, 233, 0.5);
-      animation: chat-thinking-fadein 0.18s ease-out;
-    }
-    .message-chat-thinking-label {
-      flex: 1;
-      min-width: 0;
-    }
     @keyframes chat-thinking-fadein {
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: none; }
@@ -3703,7 +2349,6 @@
     }
 
     .mobile-button,
-    .messages-button,
     .webui-button {
       width: 32px;
       height: 32px;
@@ -3720,14 +2365,12 @@
     }
 
     .mobile-button:hover,
-    .messages-button:hover,
     .webui-button:hover {
       background: var(--brand-soft);
       transform: translateY(-1px);
     }
 
     .mobile-button svg,
-    .messages-button svg,
     .webui-button svg {
       width: 16px;
       height: 16px;
@@ -3748,27 +2391,6 @@
       color: var(--text-secondary);
       white-space: nowrap;
     }
-
-
-    .message-badge {
-      position: absolute;
-      top: -4px;
-      right: -4px;
-      min-width: 16px;
-      height: 16px;
-      border-radius: 8px;
-      background: var(--brand);
-      color: #fff;
-      font-size: 10px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0 4px;
-      line-height: 1;
-    }
-
-    .message-badge[hidden] { display: none; }
 
     /* ── Mobile QR overlay ───────────────────────────────────── */
 
@@ -3864,192 +2486,6 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
       width: 100%;
-    }
-
-    /* ── Messages overlay ─────────────────────────────────────── */
-
-    .messages-overlay {
-      position: absolute;
-      inset: 0;
-      z-index: 100;
-      background:
-        radial-gradient(circle at 15% 12%, rgba(240, 136, 62, 0.12), transparent 30%),
-        radial-gradient(circle at 88% 18%, rgba(90, 169, 255, 0.14), transparent 26%),
-        linear-gradient(180deg, var(--bg-base) 0%, var(--bg-sky) 100%);
-      display: flex;
-      flex-direction: column;
-      overflow-y: auto;
-      padding: 16px;
-      gap: 12px;
-    }
-
-    .messages-overlay[hidden] { display: none; }
-
-    .messages-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-
-    .messages-header h2 {
-      font-size: 20px;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-    }
-
-    .messages-empty {
-      text-align: center;
-      padding: 40px 20px;
-      color: var(--text-muted);
-      font-size: 13px;
-      line-height: 1.7;
-    }
-
-    .messages-empty-icon {
-      font-size: 32px;
-      margin-bottom: 8px;
-      opacity: 0.5;
-    }
-
-    .message-item {
-      padding: 14px 16px;
-      border-radius: 18px;
-      background: linear-gradient(135deg, rgba(255, 244, 230, 0.98), rgba(255, 238, 215, 0.96));
-      border: 1.5px solid rgba(240, 136, 62, 0.35);
-      animation: probeSlideIn 0.25s ease-out;
-      position: relative;
-    }
-
-    .message-item + .message-item { margin-top: 8px; }
-
-    .message-item.is-delight {
-      background: linear-gradient(135deg, rgba(243, 232, 255, 0.98), rgba(233, 218, 250, 0.96));
-      border-color: rgba(168, 85, 247, 0.35);
-    }
-    .message-item.is-delight .message-domain { color: #4c1d95; }
-    .message-item.is-delight .message-reason { color: #6b21a8; }
-    .message-item.is-delight .message-kind-copy { color: #6b21a8; }
-
-    .probe-btn.is-view {
-      background: rgba(88, 166, 255, 0.12);
-      color: #0969da;
-      border-color: rgba(88, 166, 255, 0.25);
-    }
-    .probe-btn.is-view:hover { background: rgba(88, 166, 255, 0.22); }
-
-    .message-dismiss {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      width: 22px;
-      height: 22px;
-      border: 0;
-      border-radius: 50%;
-      background: rgba(0, 0, 0, 0.06);
-      color: #8b7a6a;
-      font-size: 13px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-
-    .message-dismiss:hover {
-      background: rgba(0, 0, 0, 0.12);
-    }
-
-    .message-domain {
-      font-size: 14px;
-      font-weight: 700;
-      color: #3d2e1f;
-      margin-bottom: 4px;
-      padding-right: 24px;
-    }
-
-    .message-chat-area {
-      margin-top: 10px;
-      display: flex;
-      gap: 6px;
-    }
-
-    .message-chat-input {
-      flex: 1;
-      padding: 7px 10px;
-      border-radius: 10px;
-      border: 1px solid rgba(0, 0, 0, 0.12);
-      background: rgba(255, 255, 255, 0.8);
-      font-size: 12px;
-      color: #3d2e1f;
-      outline: none;
-      resize: none;
-      font-family: inherit;
-    }
-
-    .message-chat-input:focus {
-      border-color: rgba(88, 166, 255, 0.5);
-    }
-
-    .message-chat-send {
-      padding: 7px 12px;
-      border-radius: 10px;
-      border: 1px solid rgba(88, 166, 255, 0.3);
-      background: rgba(88, 166, 255, 0.12);
-      color: #0969da;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      flex-shrink: 0;
-      transition: background 0.15s;
-    }
-
-    .message-chat-send:hover {
-      background: rgba(88, 166, 255, 0.22);
-    }
-
-    .message-chat-send:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-
-    .message-chat-reply {
-      margin-top: 8px;
-      padding: 10px 12px;
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.7);
-      border: 1px solid rgba(0, 0, 0, 0.06);
-      font-size: 12px;
-      line-height: 1.6;
-      color: #3d2e1f;
-    }
-
-    .message-reason {
-      font-size: 12px;
-      line-height: 1.6;
-      color: #6e5b44;
-      margin-bottom: 10px;
-    }
-
-    .message-specifics {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
-
-    .message-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .message-result {
-      font-size: 13px;
-      color: #57606a;
-      text-align: center;
-      padding: 8px 0;
     }
 
     /* ── Settings panel ─────────────────────────────────────── */
@@ -4327,32 +2763,6 @@
 
     .settings-secondary-btn:hover { border-color: var(--sky); }
 
-    .settings-probe-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin: 0 0 2px;
-    }
-
-    .settings-probe-status {
-      min-width: 0;
-      flex: 1 1 180px;
-      color: var(--text-secondary);
-      font-size: 11.5px;
-      font-weight: 700;
-      line-height: 1.45;
-      overflow-wrap: anywhere;
-    }
-
-    .settings-probe-status[data-tone="success"] {
-      color: #1a7a4a;
-    }
-
-    .settings-probe-status[data-tone="error"] {
-      color: #c0404e;
-    }
-
     .settings-link {
       color: var(--brand-strong);
       font-weight: 700;
@@ -4381,180 +2791,6 @@
       display: flex;
     }
 
-    /* Model routes use a list -> detail flow so the popup remains legible as
-       connection types and ordered fallbacks grow. */
-    .popup-model-shell {
-      padding: 14px;
-      gap: 14px;
-      overflow: hidden;
-    }
-
-    .popup-model-heading,
-    .popup-model-section-heading,
-    .popup-model-detail-heading,
-    .popup-model-save-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    .popup-model-heading > div,
-    .popup-model-section-heading > div,
-    .popup-model-detail-heading > div {
-      min-width: 0;
-    }
-
-    .popup-model-heading .eyebrow {
-      margin-bottom: 3px;
-    }
-
-    .popup-model-authority,
-    .popup-model-role {
-      display: inline-flex;
-      align-items: center;
-      min-height: 24px;
-      padding: 4px 8px;
-      border-radius: 999px;
-      color: #397fcb;
-      background: var(--sky-soft);
-      font-size: 10px;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-
-    .popup-model-tabs {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 5px;
-      padding: 4px;
-      border: 1px solid var(--line);
-      border-radius: 13px;
-      background: rgba(246, 249, 255, 0.9);
-    }
-
-    .popup-model-tabs button {
-      min-height: 34px;
-      border: 0;
-      border-radius: 9px;
-      color: var(--text-secondary);
-      background: transparent;
-      font-size: 12px;
-      font-weight: 800;
-    }
-
-    .popup-model-tabs button.is-active {
-      color: #fff;
-      background: linear-gradient(135deg, var(--brand), var(--brand-strong));
-      box-shadow: 0 7px 14px rgba(251, 114, 153, 0.18);
-    }
-
-    .popup-model-notice,
-    .popup-model-errors {
-      padding: 10px 11px;
-      border-radius: 11px;
-      border: 1px solid var(--line);
-      background: rgba(244, 248, 255, 0.92);
-      color: var(--text-secondary);
-      font: inherit;
-      font-size: 11px;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-
-    .popup-model-notice {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    .popup-model-notice > div,
-    .popup-model-notice > div > span {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .popup-model-notice[data-tone="warning"],
-    .popup-model-errors {
-      border-color: rgba(239, 122, 134, 0.28);
-      background: rgba(255, 242, 244, 0.92);
-      color: #9d4d59;
-    }
-
-    .popup-model-notice ul {
-      margin: 6px 0 0 18px;
-    }
-
-    .popup-model-notice li span {
-      margin-left: 5px;
-    }
-
-    .popup-model-editor {
-      min-width: 0;
-      margin: 0;
-      padding: 0;
-      border: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .popup-model-shared,
-    .popup-model-runtime,
-    .popup-model-migration,
-    .popup-model-detail-page,
-    .popup-model-route-page {
-      min-width: 0;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 13px;
-      background: rgba(255, 255, 255, 0.74);
-    }
-
-    .popup-model-shared,
-    .popup-model-runtime,
-    .popup-model-migration,
-    .popup-model-detail-page,
-    .popup-model-route-page {
-      flex-direction: column;
-      gap: 11px;
-    }
-
-    .popup-model-shared:not([hidden]),
-    .popup-model-runtime:not([hidden]),
-    .popup-model-migration:not([hidden]),
-    .popup-model-route-page {
-      display: flex;
-    }
-
-    .popup-model-section-heading strong,
-    .popup-model-detail-heading h3 {
-      display: block;
-      font-size: 13px;
-      color: var(--text-main);
-    }
-
-    .popup-model-section-heading span {
-      display: block;
-      margin-top: 3px;
-      font-size: 10.5px;
-      line-height: 1.45;
-      color: var(--text-muted);
-    }
-
-    .popup-model-field-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 9px;
-    }
-
-    .popup-model-field-grid .full {
-      grid-column: 1 / -1;
-    }
-
     .settings-field > span {
       font-size: 10.5px;
       font-weight: 800;
@@ -4569,197 +2805,6 @@
       line-height: 1.45;
     }
 
-    .popup-model-route-layout {
-      min-width: 0;
-    }
-
-    .popup-model-detail-page {
-      display: none;
-    }
-
-    .popup-model-route-layout.is-detail .popup-model-route-page {
-      display: none;
-    }
-
-    .popup-model-route-layout.is-detail .popup-model-detail-page:not([hidden]) {
-      display: flex;
-    }
-
-    .model-route-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .model-route-row {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 8px;
-      align-items: center;
-      padding: 9px;
-      border: 1px solid var(--line);
-      border-radius: 11px;
-      background: rgba(248, 250, 255, 0.88);
-    }
-
-    .model-route-row.is-selected {
-      border-color: rgba(90, 169, 255, 0.58);
-      box-shadow: 0 0 0 2px rgba(90, 169, 255, 0.1);
-    }
-
-    .model-route-row:focus-visible {
-      outline: none;
-      box-shadow: var(--focus-ring);
-    }
-
-    .model-route-drag-handle {
-      color: var(--text-muted);
-      font-size: 12px;
-      letter-spacing: -3px;
-    }
-
-    .model-route-row-copy {
-      min-width: 0;
-      padding: 0;
-      border: 0;
-      text-align: left;
-      color: inherit;
-      background: transparent;
-    }
-
-    .model-route-row-copy strong,
-    .model-route-row-copy span {
-      display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .model-route-row-copy strong {
-      font-size: 11.5px;
-    }
-
-    .model-route-row-copy span,
-    .model-route-health {
-      margin-top: 3px;
-      color: var(--text-muted);
-      font-size: 10px;
-    }
-
-    .model-route-health {
-      grid-column: 2;
-      margin-top: -3px;
-    }
-
-    .model-route-health[data-tone="success"],
-    #popupModelProbeStatus[data-tone="success"],
-    #popupModelSaveStatus[data-tone="success"] {
-      color: var(--success);
-    }
-
-    .model-route-health[data-tone="error"],
-    #popupModelProbeStatus[data-tone="error"],
-    #popupModelSaveStatus[data-tone="error"] {
-      color: var(--danger);
-    }
-
-    .popup-model-detail-back {
-      align-self: flex-start;
-      padding: 6px 9px;
-      border: 0;
-      border-radius: 8px;
-      color: #397fcb;
-      background: var(--sky-soft);
-      font-size: 11px;
-      font-weight: 800;
-    }
-
-    .popup-model-order-actions,
-    .model-credential-actions,
-    .model-migration-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .popup-model-order-actions .settings-secondary-btn {
-      padding: 6px 8px;
-      font-size: 10.5px;
-    }
-
-    .popup-model-danger {
-      color: #b64e5d;
-    }
-
-    .popup-model-type-picker,
-    .popup-model-credential {
-      display: flex;
-      flex-direction: column;
-      gap: 9px;
-      padding-top: 2px;
-    }
-
-    .model-type-groups {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      max-height: 310px;
-      overflow-y: auto;
-      padding-right: 2px;
-    }
-
-    .model-type-group {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-
-    .model-type-group-title {
-      color: var(--text-muted);
-      font-size: 9.5px;
-      font-weight: 800;
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-    }
-
-    .model-type-option {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      width: 100%;
-      padding: 8px 9px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      text-align: left;
-      color: var(--text-main);
-      background: rgba(248, 250, 255, 0.82);
-    }
-
-    .model-type-option[aria-selected="true"] {
-      border-color: rgba(251, 114, 153, 0.55);
-      background: var(--brand-soft);
-    }
-
-    .model-type-option span,
-    .model-type-option strong,
-    .model-type-option small {
-      display: block;
-      min-width: 0;
-    }
-
-    .model-type-option strong {
-      font-size: 11px;
-    }
-
-    .model-type-option small,
-    .model-empty-types {
-      color: var(--text-muted);
-      font-size: 9.5px;
-      line-height: 1.4;
-    }
-
-    .model-credential-action,
     .small-btn {
       padding: 6px 8px;
       border: 1px solid var(--line);
@@ -4770,89 +2815,10 @@
       font-weight: 700;
     }
 
-    .model-credential-action[aria-pressed="true"],
     .small-btn.is-active {
       color: var(--brand-strong);
       border-color: rgba(251, 114, 153, 0.42);
       background: var(--brand-soft);
-    }
-
-    .model-field-error {
-      color: var(--danger);
-      font-size: 10px;
-      line-height: 1.4;
-    }
-
-    .popup-model-runtime-summary {
-      display: grid;
-      gap: 7px;
-    }
-
-    .model-runtime-card,
-    .model-migration-issue {
-      padding: 9px 10px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: rgba(248, 250, 255, 0.82);
-    }
-
-    .model-runtime-card span,
-    .model-runtime-card strong,
-    .model-migration-issue > strong,
-    .model-migration-issue > span {
-      display: block;
-    }
-
-    .model-runtime-card span {
-      color: var(--text-muted);
-      font-size: 9.5px;
-    }
-
-    .model-runtime-card strong {
-      margin-top: 3px;
-      font-size: 11px;
-    }
-
-    .model-migration-issue {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .popup-model-save-bar {
-      align-items: stretch;
-    }
-
-    .popup-model-save-bar .settings-save {
-      flex: 0 0 auto;
-      padding: 10px 14px;
-      font-size: 12px;
-    }
-
-    .popup-model-save-bar .settings-probe-status {
-      align-self: center;
-      flex: 1 1 auto;
-    }
-
-    @media (max-width: 460px) {
-      .popup-model-field-grid {
-        grid-template-columns: minmax(0, 1fr);
-      }
-
-      .popup-model-field-grid .full {
-        grid-column: auto;
-      }
-
-      .popup-model-detail-heading,
-      .popup-model-save-bar,
-      .popup-model-notice {
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      .popup-model-save-bar .settings-save {
-        width: 100%;
-      }
     }
 
     .settings-actions {
@@ -4966,169 +2932,38 @@
     }
 
     /* 保存动作：稍后再看=时钟 / 收藏=星星 SVG 图标按钮 */
-    .saved-toggle,
-    .delight-save-toggle {
+
+    /* ── Favorites view (收藏夹) ───────────────────────────── */
+
+    @media (max-width: 520px), (pointer: coarse) {
+
+    }
+
+    /* vNext keeps the original popup visual system; these two affordances did
+       not exist in the retained markup and therefore only bridge its tokens. */
+    .popup-toast {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 200;
+      max-width: min(320px, calc(100% - 36px));
+      color: var(--text-main);
+      background: var(--surface-strong);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow-lg);
+    }
+
+    .mobile-qr-link {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 38px;
-    }
-    #watchLaterSyncAll,
-    #favoritesSyncAll { min-inline-size: 190px; }
-    .saved-card-sync { min-inline-size: 68px; }
-    .saved-toggle svg,
-    .delight-save-toggle svg { width: 16px; height: 16px; }
-    .saved-toggle.watch-later-btn[aria-pressed="true"],
-    .delight-save-toggle.watch-later-btn[aria-pressed="true"] {
-      color: var(--brand, #fb7299);
-      background: var(--brand-soft, rgba(251, 114, 153, 0.12));
-    }
-    .saved-toggle.favorite-btn[aria-pressed="true"],
-    .delight-save-toggle.favorite-btn[aria-pressed="true"] {
-      color: #e8a33d;
-      background: rgba(232, 163, 61, 0.12);
-    }
-    .saved-toggle.favorite-btn[aria-pressed="true"] svg,
-    .delight-save-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
-
-    /* ── Favorites view (收藏夹) ───────────────────────────── */
-    .saved-card {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
-      border: 1px solid var(--border, rgba(0,0,0,0.08));
-      border-radius: 12px;
-      background: var(--surface, #fff);
-      margin-bottom: 8px;
-    }
-    .saved-card-open {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      text-align: left;
-      border: none;
-      background: transparent;
-      cursor: pointer;
-      padding: 0;
-    }
-    .saved-card-cover {
-      position: relative;
-      width: 84px;
-      aspect-ratio: 16 / 9;
-      flex: 0 0 84px;
-      overflow: hidden;
-      border-radius: 8px;
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 249, 255, 0.92)),
-        linear-gradient(145deg, rgba(251, 114, 153, 0.12), rgba(90, 169, 255, 0.12));
-      border: 1px solid rgba(230, 237, 248, 0.96);
-    }
-    .saved-card-cover img {
+      min-height: 96px;
       width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .saved-card-copy {
-      min-width: 0;
-      flex: 1;
-    }
-    .saved-card-title {
-      font-size: 13px;
-      line-height: 1.35;
-      max-height: 2.7em;
-      overflow: hidden;
-      color: var(--text, #1a1a1a);
-    }
-    .saved-card-up {
-      margin-top: 3px;
-      font-size: 11px;
-      color: var(--text-muted, #888);
-    }
-    .saved-card-remove {
-      flex-shrink: 0;
-      border: none;
-      background: transparent;
-      color: var(--text-muted, #888);
-      font-size: 12px;
-      cursor: pointer;
-      padding: 4px 8px;
-      border-radius: 8px;
-    }
-    .saved-card-remove:hover {
-      background: var(--brand-soft, rgba(200,85,61,0.1));
-      color: var(--brand, #c8553d);
-    }
-    .saved-sync-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 10px;
-    }
-    .saved-sync-status {
-      min-height: 1.4em;
-      color: var(--text-muted, #777);
-      font-size: 11px;
-    }
-    .saved-card-actions {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      flex-shrink: 0;
-    }
-    .saved-card-sync,
-    .saved-card-remove {
-      min-height: 36px;
-      border: 0;
-      border-radius: 8px;
-      padding: 6px 8px;
-      cursor: pointer;
-      color: var(--text-muted, #777);
-      background: transparent;
-    }
-    .saved-card-sync { color: var(--brand, #c8553d); }
-    .saved-card-sync:disabled { opacity: 0.45; cursor: not-allowed; }
-    .saved-card-sync:focus-visible,
-    .saved-card-remove:focus-visible,
-    .saved-sync-toolbar button:focus-visible {
-      outline: 2px solid var(--brand, #c8553d);
-      outline-offset: 2px;
-    }
-    .saved-sync-line {
-      display: flex;
-      gap: 5px;
-      align-items: center;
-      margin-top: 5px;
-      min-width: 0;
-      font-size: 10px;
-    }
-    .saved-sync-chip {
-      flex: 0 0 auto;
-      border-radius: 999px;
-      padding: 2px 6px;
-      background: rgba(120, 128, 145, 0.12);
-    }
-    .saved-sync-chip[data-tone="success"] { color: #1a7a4a; background: var(--lime-soft); }
-    .saved-sync-chip[data-tone="warning"] { color: #8a6520; background: var(--warning-soft); }
-    .saved-sync-chip[data-tone="error"] { color: #c0404e; background: rgba(239, 122, 134, 0.15); }
-    .saved-sync-chip[data-tone="info"] { color: var(--brand, #c8553d); background: var(--brand-soft); }
-    .saved-sync-target {
-      overflow: hidden;
-      color: var(--text-muted, #777);
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    @media (max-width: 520px), (pointer: coarse) {
-      .saved-toggle,
-      .delight-save-toggle { min-width: 44px; min-height: 44px; }
-      .saved-card-sync,
-      .saved-card-remove,
-      .saved-sync-toolbar button,
-      .saved-load-retry { min-width: 44px; min-height: 44px; }
+      border-radius: 14px;
+      color: var(--brand-strong);
+      background: var(--brand-soft);
+      font-weight: 800;
+      text-decoration: none;
     }
 
   </style>
@@ -5143,9 +2978,9 @@
             <p class="eyebrow">Bilibili Content Lens</p>
             <div class="brand-title-row">
               <h1>OpenBiliClaw</h1>
-              <div id="statusBadge" class="status-badge" data-tone="offline">
+              <div id="statusBadge" class="status-badge" data-tone="reconnecting" role="status">
                 <div id="statusDot" class="status-dot offline"></div>
-                <span id="statusLabel" class="status-label">未连接</span>
+                <span id="statusLabel" class="status-label">正在连接</span>
               </div>
             </div>
           </div>
@@ -5158,10 +2993,6 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
             <span class="mobile-button-label">手机版</span>
           </button>
-          <button id="messagesButton" class="messages-button" type="button" title="消息" aria-label="查看消息">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span id="messageBadge" class="message-badge" hidden>0</span>
-          </button>
           <button id="settingsGear" class="settings-gear" type="button" title="设置" aria-label="打开设置">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
@@ -5170,26 +3001,55 @@
       <div class="hero-sub">
         <p class="hero-copy">首页先放一边，这里是你最近更可能点开的。</p>
         <button id="starButton" class="gh-star" type="button" title="在 GitHub 给 OpenBiliClaw 点个 Star" aria-label="在 GitHub 给项目点 Star">
-          <span class="gh-star-left">
-            <svg class="gh-star-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.88 2.35.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-            <span>Star</span>
-          </span>
+          <span class="gh-star-left"><svg class="gh-star-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.88 2.35.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>Star</span></span>
+          <span id="starCount" class="gh-star-count" hidden></span>
         </button>
       </div>
     </header>
 
     <div class="tabs-shell">
       <div class="tab-bar" role="tablist" aria-label="Popup views">
-        <button id="tabRecommend" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="viewRecommend">推荐</button>
-        <button id="tabWatchLater" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewWatchLater">稍后</button>
-        <button id="tabFavorites" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewFavorites">收藏</button>
-        <button id="tabProfile" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewProfile">画像</button>
-        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">对话</button>
+        <button id="tabRecommend" class="tab-button is-active" type="button" role="tab" data-view="recommend" tabindex="0" aria-selected="true" aria-controls="viewRecommend">推荐</button>
+        <button id="tabWatchLater" class="tab-button" type="button" role="tab" data-view="watch_later" tabindex="-1" aria-selected="false" aria-controls="viewWatchLater">稍后</button>
+        <button id="tabFavorites" class="tab-button" type="button" role="tab" data-view="favorites" tabindex="-1" aria-selected="false" aria-controls="viewFavorites">收藏</button>
+        <button id="tabProfile" class="tab-button" type="button" role="tab" data-view="profile" tabindex="-1" aria-selected="false" aria-controls="viewProfile">画像</button>
+        <button id="tabChat" class="tab-button" type="button" role="tab" data-view="chat" tabindex="-1" aria-selected="false" aria-controls="viewChat">对话</button>
       </div>
     </div>
 
-    <main class="content">
-      <section id="viewRecommend" class="view" role="tabpanel" aria-labelledby="tabRecommend">
+    <main id="mainContent" class="content">
+      <section id="pairingPanel" class="view" hidden>
+        <article class="settings-section">
+          <div class="view-intro"><div class="view-kicker">Connect</div><h2>连接到你的后端</h2><p>输入安装时生成的扩展设备密钥。</p></div>
+          <form id="pairingForm" class="settings-section">
+            <label class="settings-field"><span>设备密钥</span><input id="deviceKey" type="password" autocomplete="off" required></label>
+            <button class="action-button action-primary" type="submit">配对并继续</button>
+          </form>
+        </article>
+        <article class="settings-section">
+          <div class="section-head"><div><h3>后端地址</h3><p>本机默认使用 127.0.0.1:8420。</p></div></div>
+          <form id="endpointForm" class="settings-section">
+            <label class="settings-field"><span>协议</span><select id="endpointScheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+            <label class="settings-field"><span>端口</span><input id="endpointPort" type="number" min="1" max="65535" required></label>
+            <label class="settings-field"><span>主机</span><input id="endpointHost" type="text" required></label>
+            <button class="action-button action-secondary" type="submit">保存地址</button>
+          </form>
+        </article>
+      </section>
+
+      <section id="onboardingPanel" class="view" hidden>
+        <article class="settings-section">
+          <div class="view-intro"><div class="view-kicker">First run</div><h2>第一次认识你</h2><p>选择已连接来源，完成导入、画像和首轮发现。</p></div>
+          <form id="onboardingForm" class="settings-section">
+            <div id="onboardingSources" class="init-sources source-grid"></div>
+            <div class="init-progress-track"><div id="onboardingBar" class="init-progress-bar"></div></div>
+            <div id="onboardingStatus" class="init-progress-label">等待开始</div>
+            <button id="onboardingStart" class="init-start-btn action-button action-primary" type="submit">开始初始化</button>
+          </form>
+        </article>
+      </section>
+
+      <section id="viewRecommend" class="view" data-view-panel="recommend" role="tabpanel" aria-labelledby="tabRecommend">
         <div class="recommendation-header-card">
           <div class="recommendation-header-top">
             <div class="recommendation-header-copy">
@@ -5199,236 +3059,74 @@
                   <h2>这几条，你大概会点开</h2>
                 </div>
               </div>
+              <p class="view-subtitle">依据证据画像排序，反馈会影响之后的结果。</p>
             </div>
             <button id="refreshRecommendationsButton" class="action-button action-secondary" type="button">换一批</button>
           </div>
           <div class="recommendation-summary-row">
             <div id="poolStatus" class="recommendation-status-row" hidden>
-              <div class="recommendation-status-chip" data-tone="neutral">
-                <span class="recommendation-status-label">当前可换</span>
-                <span id="poolAvailable" class="recommendation-status-value">还有 0 条可换</span>
-              </div>
-              <div class="recommendation-status-chip" data-tone="brand">
-                <span class="recommendation-status-label">最近补进</span>
-                <span id="poolReplenished" class="recommendation-status-value">刚补进 0 条</span>
-              </div>
-              <div class="recommendation-status-chip" data-tone="info">
-                <span class="recommendation-status-label">现在在忙</span>
-                <span id="poolTopics" class="recommendation-status-value">还在继续摸你的口味</span>
-              </div>
+              <div class="recommendation-status-chip" data-tone="neutral"><span class="recommendation-status-label">当前可换</span><span id="poolAvailable" class="recommendation-status-value">还有 0 条可换</span></div>
+              <div class="recommendation-status-chip" data-tone="brand"><span class="recommendation-status-label">最近补进</span><span id="poolReplenished" class="recommendation-status-value">刚补进 0 条</span></div>
+              <div class="recommendation-status-chip" data-tone="info"><span class="recommendation-status-label">现在在忙</span><span id="poolTopics" class="recommendation-status-value">还在继续摸你的口味</span></div>
             </div>
           </div>
         </div>
-        <div id="embeddingBanner" class="embedding-banner" hidden role="status">
-          <div class="embedding-banner-text">
-            <strong>语义去重未启用</strong>
-            <span>可能会刷到换皮重复的视频。启用本地 Ollama 向量化即可改善。</span>
-          </div>
-          <div class="embedding-banner-actions">
-            <button id="embeddingBannerEnable" type="button" class="embedding-banner-btn">
-              一键启用本地 Ollama
-            </button>
-            <button id="embeddingBannerDismiss" type="button" class="embedding-banner-dismiss" aria-label="关闭提示">
-              ✕
-            </button>
-          </div>
-        </div>
-        <div id="delightSlot" hidden></div>
         <div id="emptyState" class="empty-state" hidden>
           <h3 id="emptyTitle">还没刷出新东西</h3>
           <p id="emptyText">稍等一下，新的推荐马上来。</p>
-          <div id="initPanel" class="init-panel" hidden>
-            <div id="initSources" class="init-sources" hidden></div>
-            <ul id="initChecklist" class="init-checklist"></ul>
-            <div id="initProgress" class="init-progress" hidden>
-              <div class="init-progress-track">
-                <div id="initProgressBar" class="init-progress-bar"></div>
-              </div>
-              <p id="initProgressLabel" class="init-progress-label" role="status" aria-live="polite" aria-atomic="true"></p>
-            </div>
-            <p id="initStallHint" class="init-stall-hint" hidden></p>
-            <p id="initCliCommand" class="init-cli-command" hidden><code>docker exec -it openbiliclaw-backend openbiliclaw init</code></p>
-            <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
-            <p id="initStartReason" class="init-start-reason" hidden role="status" aria-live="polite" aria-atomic="true"></p>
-          </div>
         </div>
         <div id="recommendationList" class="recommendation-list"></div>
       </section>
 
-      <section id="viewWatchLater" class="view" role="tabpanel" aria-labelledby="tabWatchLater" hidden>
+      <section id="viewWatchLater" class="view" data-view-panel="watch_later" role="tabpanel" aria-labelledby="tabWatchLater" hidden>
         <div class="view-intro">
           <p class="view-kicker">Watch later</p>
           <h2 data-saved-heading tabindex="-1">稍后再看</h2>
-          <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
-          <div class="saved-sync-toolbar">
-            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
-            <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
-          </div>
+          <p class="view-subtitle">只保存在 OpenBiliClaw，不修改平台账户。</p>
         </div>
-        <div id="watchLaterEmpty" class="empty-state" hidden>
-          <h3>还没有稍后再看的内容</h3>
-          <p>在推荐或惊喜里点时钟图标，想晚点看的内容就会出现在这里。</p>
-        </div>
+        <div id="watchLaterEmpty" class="empty-state" hidden><h3>还没有稍后再看的内容</h3><p>从推荐页加入稍后再看，内容就会出现在这里。</p></div>
         <div id="watchLaterList" class="recommendation-list"></div>
       </section>
 
-      <section id="viewFavorites" class="view" role="tabpanel" aria-labelledby="tabFavorites" hidden>
+      <section id="viewFavorites" class="view" data-view-panel="favorites" role="tabpanel" aria-labelledby="tabFavorites" hidden>
         <div class="view-intro">
           <p class="view-kicker">Favorites</p>
           <h2 data-saved-heading tabindex="-1">我的收藏</h2>
-          <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
-          <div class="saved-sync-toolbar">
-            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
-            <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
-          </div>
+          <p class="view-subtitle">你想长期留下的内容都在这里，和稍后再看互相独立。</p>
         </div>
-        <div id="favoritesEmpty" class="empty-state" hidden>
-          <h3>还没有收藏</h3>
-          <p>在推荐或惊喜里点星标，收藏的内容就会出现在这里。</p>
-        </div>
+        <div id="favoritesEmpty" class="empty-state" hidden><h3>还没有收藏</h3><p>从推荐页收藏内容后，会出现在这里。</p></div>
         <div id="favoritesList" class="recommendation-list"></div>
       </section>
 
-      <section id="viewProfile" class="view" role="tabpanel" aria-labelledby="tabProfile" hidden>
-        <div class="view-intro">
-          <p class="view-kicker">Profile</p>
-          <h2>我感觉你大概是这样的</h2>
-          <p>不是光看你点过啥，我主要在看你会为哪种东西停下来。</p>
-        </div>
+      <section id="viewProfile" class="view" data-view-panel="profile" role="tabpanel" aria-labelledby="tabProfile" hidden>
+        <div class="view-intro"><p class="view-kicker">Evidence Profile</p><h2>我感觉你大概是这样的</h2><p>每个维度都来自可追溯证据；手动修改具有高置信度。</p></div>
         <div id="profileEditBar" class="profile-edit-bar" hidden>
-          <button id="profileEditToggle" class="action-button profile-edit-toggle" type="button">✏️ 编辑画像</button>
+          <button id="profileEditToggle" class="action-button profile-edit-toggle" type="button" aria-expanded="false">✏️ 校准画像</button>
           <span id="profileEditHint" class="profile-edit-hint" hidden>改完点「完成」收起</span>
         </div>
-        <div id="profileEmpty" class="empty-state" hidden>
-          <h3 id="profileEmptyTitle">画像还没攒起来</h3>
-          <p id="profileEmptyText">还没初始化。去「推荐」页点「开始初始化」，攒好画像再回来看。</p>
-        </div>
+        <div id="profileEmpty" class="empty-state" hidden><h3 id="profileEmptyTitle">画像还没攒起来</h3><p id="profileEmptyText">完成初始化后会建立证据画像。</p></div>
         <div id="profileCard" class="profile-card" hidden>
-          <!-- ── 综合叙事 ── -->
-          <div class="profile-summary">
-            <h3>这会儿的你</h3>
-            <div id="profilePortrait" class="profile-portrait"></div>
-          </div>
-
-          <!-- ── Core 层 ── -->
-          <div class="profile-layer-header">Core — 比较稳定的底色</div>
-          <div class="profile-group">
-            <h3>核心特质</h3>
-            <div id="profileTraits" class="chip-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>深层需求</h3>
-            <div id="profileNeeds" class="chip-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>MBTI</h3>
-            <div id="profileMBTI" class="mbti-container"></div>
-          </div>
-
-          <!-- ── Values 层 ── -->
-          <div class="profile-layer-header">Values — 你在内容里长期在找什么</div>
-          <div class="profile-group">
-            <h3>价值偏好</h3>
-            <div id="profileValues" class="chip-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>内在驱动力</h3>
-            <div id="profileMotivationalDrivers" class="chip-list"></div>
-          </div>
-
-          <!-- ── Interest 层 ── -->
-          <div class="profile-layer-header">Interest — 你最近在看什么</div>
-          <div class="profile-group">
-            <h3>感兴趣的方向</h3>
-            <div id="profileLikes" class="interest-tree"></div>
-          </div>
-          <div class="profile-group">
-            <h3>明显会避开</h3>
-            <div id="profileDislikes" class="interest-tree"></div>
-          </div>
-          <div class="profile-group">
-            <h3>常看的 UP 主</h3>
-            <div id="profileFavoriteUps" class="chip-list"></div>
-          </div>
-
-          <!-- ── Role 层 ── -->
-          <div class="profile-layer-header">Role — 这阵子的状态</div>
-          <div class="profile-group">
-            <h3>大致处在什么阶段</h3>
-            <p id="profileLifeStage" class="profile-phase-copy"></p>
-          </div>
-          <div class="profile-group">
-            <h3>这阵子更像在经历什么</h3>
-            <p id="profileCurrentPhase" class="profile-phase-copy"></p>
-          </div>
-
-          <!-- ── Surface 层 ── -->
-          <div class="profile-layer-header">Surface — 你怎么看内容</div>
-          <div class="profile-group">
-            <h3>认知风格</h3>
-            <div id="profileCognitiveStyle" class="chip-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>内容口味</h3>
-            <div id="profileStyle" class="style-bars"></div>
-          </div>
-          <div class="profile-group">
-            <h3>使用场景</h3>
-            <div id="profileContext" class="context-info"></div>
-          </div>
-          <div class="profile-group">
-            <h3>探索开放度</h3>
-            <div id="profileExplorationOpenness" class="exploration-bar-container">
-              <div class="exploration-bar">
-                <div class="exploration-bar-fill"></div>
-              </div>
-              <span class="exploration-bar-label"></span>
-            </div>
-          </div>
-
-          <!-- ── Cross-cutting ── -->
-          <div class="profile-layer-header">Speculate — 阿B 在试探的方向</div>
-          <div class="profile-group">
-            <h3>猜测兴趣</h3>
-            <div id="profileSpeculativeInterests" class="speculative-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>待确认避雷方向</h3>
-            <div id="profileSpeculativeAvoidances" class="speculative-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>阿B 最近新记住了什么</h3>
-            <div id="profileRecentMemory" class="cognition-list"></div>
-            <div class="cognition-history-footer">
-              <p id="profileRecentMemoryStatus" class="cognition-history-status" hidden></p>
-              <button id="profileRecentMemoryMore" class="cognition-history-more" type="button" hidden>
-                加载更多
-              </button>
-            </div>
-          </div>
-
-          <!-- ── Signals ── -->
-          <div class="profile-layer-header">Signals — 正在推断中</div>
-          <div class="profile-group">
-            <h3>当前活跃的洞察</h3>
-            <div id="profileActiveInsights" class="insight-list"></div>
-          </div>
-          <div class="profile-group">
-            <h3>近期观察到的</h3>
-            <div id="profileRecentAwareness" class="awareness-list"></div>
-          </div>
+          <div class="profile-summary"><h3>这会儿的你</h3><div id="profilePortrait" class="profile-portrait"></div></div>
+          <div class="profile-layer-header">Evidence — 从明确证据形成的偏好</div>
+          <div class="profile-group"><h3>画像维度</h3><div id="profileFacetsView" class="chip-list profile-facets"></div></div>
         </div>
-        <div id="profileEditPanel" class="profile-edit-panel" hidden></div>
+        <div id="profileEditPanel" class="profile-edit-panel" hidden>
+          <form id="profileForm" class="fields">
+            <label class="settings-field"><span>画像叙述</span><textarea id="profileNarrative" placeholder="描述你希望系统理解的偏好"></textarea></label>
+            <label class="settings-field"><span>画像维度（JSON）</span><textarea id="profileFacets" spellcheck="false" placeholder='[{"name":"interests","value":"纪录片","weight":0.9}]'></textarea></label>
+            <button class="action-button action-primary" type="submit">保存画像</button>
+          </form>
+        </div>
       </section>
 
-      <section id="viewChat" class="view" role="tabpanel" aria-labelledby="tabChat" hidden>
+      <section id="viewChat" class="view" data-view-panel="chat" role="tabpanel" aria-labelledby="tabChat" hidden>
+        <div class="view-intro"><p class="view-kicker">Conversation</p><h2>和阿B聊聊</h2><p>回复会实时显示；你可以决定本轮是否用于学习。</p></div>
         <div class="chat-shell">
-          <div id="chatMessages" class="chat-messages"></div>
+          <div class="section-head"><div><h3>当前对话</h3></div><button id="reloadChat" class="action-button action-secondary" type="button">历史</button></div>
+          <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
           <form id="chatForm" class="chat-form">
-            <label class="chat-input-shell">
-              <span class="chat-input-label">写点你的想法和口味</span>
-              <textarea id="chatInput" class="chat-input" rows="2" placeholder="说说你最近怎么想——你是什么样的人、怎么想、喜欢什么、讨厌什么，为什么会停下来，都可以直接说。"></textarea>
-            </label>
+            <label class="chat-input-shell"><span class="chat-input-label">写点你的想法和口味</span><textarea id="chatInput" class="chat-input" rows="2" placeholder="说点什么…" required></textarea></label>
+            <label class="settings-field-row"><input id="chatLearn" type="checkbox">用于学习</label>
             <button id="chatSendButton" class="action-button action-primary" type="submit">发出去</button>
             <p id="chatStatus" class="chat-status" aria-live="polite"></p>
           </form>
@@ -5436,19 +3134,15 @@
       </section>
     </main>
 
-    <!-- ── Mobile QR overlay ── -->
     <div id="mobileQrOverlay" class="mobile-overlay" hidden>
       <div class="mobile-header">
-        <div>
-          <p class="view-kicker">Mobile Web</p>
-          <h2>手机扫码打开</h2>
-        </div>
-        <button id="mobileQrBack" class="settings-back" type="button" title="返回" aria-label="关闭移动端二维码">&larr;</button>
+        <div><p class="view-kicker">Mobile Web</p><h2>手机扫码打开</h2></div>
+        <button id="mobileQrBack" class="settings-back" type="button" title="返回" aria-label="关闭移动端二维码">←</button>
       </div>
       <div class="mobile-qr-card">
         <div id="mobileQrCode" class="mobile-qr-code" aria-live="polite"></div>
         <p id="mobileQrUrl" class="mobile-url"></p>
-        <p id="mobileQrHint" class="mobile-hint" data-tone="info"></p>
+        <p id="mobileQrHint" class="mobile-hint" data-tone="info">让手机和后端处于同一网络，然后打开这个地址。</p>
         <div class="mobile-actions">
           <button id="mobileQrCopy" class="action-button action-secondary" type="button">复制链接</button>
           <button id="mobileQrOpen" class="action-button action-primary" type="button">打开页面</button>
@@ -5456,843 +3150,50 @@
       </div>
     </div>
 
-    <!-- ── Messages overlay ── -->
-    <div id="messagesOverlay" class="messages-overlay" hidden>
-      <div class="messages-header">
-        <h2>消息</h2>
-        <button id="messagesBack" class="settings-back" type="button" title="返回" aria-label="关闭消息">&larr;</button>
-      </div>
-      <div id="messagesList"></div>
-    </div>
-
-    <!-- ── Settings overlay ── -->
     <div id="settingsOverlay" class="settings-overlay" hidden>
-      <div class="settings-header">
-        <h2>后端设置</h2>
-        <button id="settingsBack" class="settings-back" type="button" title="返回" aria-label="关闭设置">&larr;</button>
-      </div>
-
+      <div class="settings-header"><h2>后端设置</h2><button id="settingsBack" class="settings-back" type="button" title="返回" aria-label="关闭设置">←</button></div>
       <div id="settingsToast" class="settings-toast" hidden></div>
-
       <div id="cfgBannerOffline" class="settings-banner" data-tone="warning" hidden></div>
       <div id="cfgBannerDegraded" class="settings-banner" data-tone="warning" hidden></div>
-      <div id="cfgBannerNoCache" class="settings-banner" data-tone="error" hidden></div>
-
       <div id="settingsIssues" class="settings-issues"></div>
-
-      <div class="settings-tabs" role="tablist" aria-label="后端设置分类">
-        <button id="settingsTabModels" class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelModels">模型</button>
-        <button id="settingsTabSources" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelSources">平台源</button>
-        <button id="settingsTabScheduler" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelScheduler">调度</button>
-        <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelGeneral">通用</button>
-        <button id="settingsTabLogging" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelLogging">日志</button>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button id="settingsTabModels" class="settings-tab is-active" type="button" role="tab" data-settings-tab="models" aria-selected="true" aria-controls="settingsPanelModels">AI</button>
+        <button id="settingsTabSources" class="settings-tab" type="button" role="tab" data-settings-tab="sources" aria-selected="false" aria-controls="settingsPanelSources">平台源</button>
+        <button id="settingsTabScheduler" class="settings-tab" type="button" role="tab" data-settings-tab="scheduler" aria-selected="false" aria-controls="settingsPanelScheduler">调度</button>
+        <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" data-settings-tab="general" aria-selected="false" aria-controls="settingsPanelGeneral">通用</button>
+        <button id="settingsTabLogging" class="settings-tab" type="button" role="tab" data-settings-tab="logging" aria-selected="false" aria-controls="settingsPanelLogging">日志</button>
       </div>
-
-      <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
-        <section class="settings-section popup-model-shell" aria-labelledby="popupModelHeading">
-          <div class="popup-model-heading">
-            <div>
-              <p class="eyebrow">有序路由</p>
-              <h3 id="popupModelHeading"><span class="section-icon">&#x1F916;</span> 模型路由</h3>
-            </div>
-            <span class="popup-model-authority">独立保存</span>
-          </div>
-          <p class="settings-hint">Primary 与 Fallback 使用同一条有序列表。点开一项后进入详情页，返回即可继续调整优先级。</p>
-
-          <div id="popupModelRouteTabs" class="popup-model-tabs" role="tablist" aria-label="模型类型">
-            <button class="is-active" type="button" role="tab" aria-selected="true" data-popup-model-route="chat">Chat</button>
-            <button type="button" role="tab" aria-selected="false" data-popup-model-route="embedding">Embedding</button>
-            <button type="button" role="tab" aria-selected="false" data-popup-model-route="runtime">Runtime</button>
-          </div>
-
-          <div id="popupModelRemoteBanner" class="popup-model-notice" data-tone="warning" hidden>
-            <div>
-              <strong>模型配置已有远端更新</strong>
-              <span>当前草稿仍保留；加载远端版本会放弃本地未保存内容。</span>
-            </div>
-            <button id="popupModelReloadRemote" class="settings-secondary-btn" type="button">加载远端</button>
-          </div>
-          <div id="popupModelOverrideNotice" class="popup-model-notice" data-tone="info" hidden></div>
-          <pre id="popupModelErrorSummary" class="popup-model-errors" role="alert" hidden></pre>
-
-          <fieldset id="popupModelEditorBoundary" class="popup-model-editor">
-            <section id="popupModelEmbeddingSharedSettings" class="popup-model-shared" hidden>
-              <div class="popup-model-section-heading">
-                <div>
-                  <strong>共享 Embedding 空间</strong>
-                  <span>所有 Provider 必须使用同一个模型、维度与相似度设置。</span>
-                </div>
-              </div>
-              <label class="settings-field-row">
-                <input id="popupModelEmbeddingEnabled" type="checkbox">
-                <span>启用 Embedding 路由</span>
-              </label>
-              <label class="settings-field">
-                <span>共享模型</span>
-                <input id="popupModelEmbeddingModel" type="text" autocomplete="off" placeholder="bge-m3">
-              </label>
-              <div class="popup-model-field-grid">
-                <label class="settings-field">
-                  <span>输出维度</span>
-                  <input id="popupModelEmbeddingDimension" type="number" min="1" step="1" placeholder="1024">
-                </label>
-                <label class="settings-field">
-                  <span>相似度阈值</span>
-                  <input id="popupModelEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
-                </label>
-              </div>
-              <label class="settings-field-row">
-                <input id="popupModelEmbeddingMultimodal" type="checkbox">
-                <span>启用多模态 Embedding</span>
-              </label>
-            </section>
-
-            <div id="popupModelRouteLayout" class="popup-model-route-layout" data-popup-model-view="route">
-              <section class="popup-model-route-page" aria-labelledby="popupModelRouteTitle">
-                <div class="popup-model-section-heading">
-                  <div>
-                    <strong id="popupModelRouteTitle">Chat 连接</strong>
-                    <span id="popupModelRouteHelp">第 1 项是 Primary，其余项依序作为 Fallback。</span>
-                  </div>
-                  <button id="popupModelAddConnection" class="settings-secondary-btn" type="button">添加</button>
-                </div>
-                <div id="popupModelRouteList" class="model-route-list" role="list"></div>
-              </section>
-
-              <section id="popupModelDetail" class="popup-model-detail-page" aria-labelledby="popupModelInspectorTitle" hidden>
-                <button id="popupModelDetailBack" class="popup-model-detail-back" type="button">&larr; 返回路由列表</button>
-                <div class="popup-model-detail-heading">
-                  <div>
-                    <span id="popupModelInspectorRole" class="popup-model-role">Primary</span>
-                    <h3 id="popupModelInspectorTitle">连接详情</h3>
-                  </div>
-                  <div class="popup-model-order-actions" aria-label="调整连接优先级">
-                    <button id="popupModelMoveUp" class="settings-secondary-btn" type="button">上移</button>
-                    <button id="popupModelMoveDown" class="settings-secondary-btn" type="button">下移</button>
-                    <button id="popupModelRemoveConnection" class="settings-secondary-btn popup-model-danger" type="button">移除</button>
-                  </div>
-                </div>
-
-                <div id="popupModelInspectorFields" class="popup-model-field-grid"></div>
-
-                <div class="popup-model-type-picker">
-                  <div class="popup-model-section-heading">
-                    <div>
-                      <strong>连接类型</strong>
-                      <span>先选协议、原生 SDK、本地 Runtime 或独立 OAuth。</span>
-                    </div>
-                  </div>
-                  <label class="settings-field">
-                    <span>搜索连接类型</span>
-                    <input id="popupModelTypeSearch" type="search" autocomplete="off" placeholder="搜索 OpenAI、Anthropic、OAuth…">
-                  </label>
-                  <div id="popupModelConnectionTypeGroups" class="model-type-groups" role="listbox" aria-label="连接类型"></div>
-                </div>
-
-                <div id="popupModelDescriptorFields" class="popup-model-field-grid"></div>
-                <div id="popupModelCredentialEditor" class="popup-model-credential" hidden></div>
-
-                <div class="settings-probe-row popup-model-probe">
-                  <button id="popupModelProbeButton" class="settings-secondary-btn" type="button">探测当前草稿</button>
-                  <span id="popupModelProbeStatus" class="settings-probe-status" aria-live="polite">尚未探测此精确草稿。</span>
-                </div>
-              </section>
-            </div>
-
-            <section id="popupModelRuntimeView" class="popup-model-runtime" hidden>
-              <div class="popup-model-section-heading">
-                <div>
-                  <strong>Chat Runtime</strong>
-                  <span>这些值属于模型路由，并随模型配置独立保存。</span>
-                </div>
-              </div>
-              <div class="popup-model-field-grid">
-                <label class="settings-field">
-                  <span>并发数</span>
-                  <input id="popupModelChatConcurrency" type="number" min="1" max="16" step="1">
-                </label>
-                <label class="settings-field">
-                  <span>超时（秒）</span>
-                  <input id="popupModelChatTimeout" type="number" min="10" max="600" step="10">
-                </label>
-              </div>
-              <div id="popupModelRuntimeSummary" class="popup-model-runtime-summary"></div>
-            </section>
-
-            <section id="popupModelMigrationPanel" class="popup-model-migration" hidden></section>
-          </fieldset>
-
-          <div class="popup-model-save-bar">
-            <span id="popupModelSaveStatus" class="settings-probe-status" aria-live="polite"></span>
-            <button id="popupModelSaveButton" class="settings-save" type="button">保存模型路由</button>
-          </div>
-        </section>
-      </div>
-
-      <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
-      <!-- Bilibili -->
-      <div class="settings-section settings-source-card" data-source-card="bilibili">
-        <h3><span class="section-icon">&#x1F4FA;</span> Bilibili</h3>
-        <div class="settings-field-row">
-          <input id="cfgBilibiliEnabled" type="checkbox">
-          <label for="cfgBilibiliEnabled">启用 Bilibili discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgBilibiliStatus" data-source-status="bilibili"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgBiliAuth">认证方式</label>
-          <select id="cfgBiliAuth">
-            <option value="cookie">Cookie</option>
-            <option value="qrcode">二维码</option>
-            <option value="none">无</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgBiliCookie">Cookie</label>
-          <textarea id="cfgBiliCookie" placeholder="从浏览器复制 Cookie 字符串"></textarea>
-        </div>
-        <div class="settings-field">
-          <label for="cfgBiliBrowserExecutable">agent-browser 路径</label>
-          <input id="cfgBiliBrowserExecutable" type="text" placeholder="留空使用全局安装">
-        </div>
-        <div class="settings-field-row">
-          <input id="cfgBiliBrowserHeaded" type="checkbox">
-          <label for="cfgBiliBrowserHeaded">调试：B 站登录时显示浏览器窗口</label>
-        </div>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="xiaohongshu">
-        <h3><span class="section-icon">&#x1F4D5;</span> 小红书</h3>
-        <div class="settings-field-row">
-          <input id="cfgXhsEnabled" type="checkbox">
-          <label for="cfgXhsEnabled">启用小红书 discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgXhsStatus" data-source-status="xiaohongshu"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgXhsDailySearchBudget">小红书每日搜索任务</label>
-          <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgXhsDailyCreatorBudget">小红书每日创作者任务</label>
-          <input id="cfgXhsDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-        <div class="settings-field">
-          <label for="cfgXhsTaskInterval">小红书任务间隔秒数</label>
-          <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="45">
-        </div>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="douyin">
-        <h3><span class="section-icon">&#x1F3B5;</span> 抖音</h3>
-        <div class="settings-field-row">
-          <input id="cfgDouyinEnabled" type="checkbox">
-          <label for="cfgDouyinEnabled">启用抖音 discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgDouyinStatus" data-source-status="douyin"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgDouyinCookie">Cookie</label>
-          <textarea id="cfgDouyinCookie" placeholder="从浏览器复制 Cookie 字符串（登录抖音后插件会自动同步）"></textarea>
-        </div>
-        <div class="settings-field">
-          <label for="cfgDouyinCookieEnv">抖音 Cookie 环境变量</label>
-          <input id="cfgDouyinCookieEnv" type="text" placeholder="OPENBILICLAW_DOUYIN_COOKIE">
-        </div>
-        <div class="settings-field">
-          <label for="cfgDouyinDailySearchBudget">抖音每日搜索任务</label>
-          <input id="cfgDouyinDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgDouyinDailyHotBudget">抖音每日热点任务</label>
-          <input id="cfgDouyinDailyHotBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgDouyinDailyFeedBudget">抖音每日推荐流任务</label>
-          <input id="cfgDouyinDailyFeedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-        <div class="settings-field">
-          <label for="cfgDouyinRequestInterval">抖音 direct 请求间隔秒数</label>
-          <input id="cfgDouyinRequestInterval" type="number" min="0" step="1" placeholder="2">
-        </div>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="youtube">
-        <h3><span class="section-icon">&#x25B6;</span> YouTube</h3>
-        <div class="settings-field-row">
-          <input id="cfgYoutubeEnabled" type="checkbox">
-          <label for="cfgYoutubeEnabled">启用 YouTube discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgYoutubeStatus" data-source-status="youtube"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgYoutubeDailySearchBudget">YouTube 搜索 query 预算</label>
-          <input id="cfgYoutubeDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgYoutubeDailyTrendingBudget">YouTube 热门候选预算</label>
-          <input id="cfgYoutubeDailyTrendingBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgYoutubeDailyChannelBudget">YouTube 订阅频道预算</label>
-          <input id="cfgYoutubeDailyChannelBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-        <div class="settings-field">
-          <label for="cfgYoutubeRequestInterval">YouTube 请求间隔秒数</label>
-          <input id="cfgYoutubeRequestInterval" type="number" min="0" step="1" placeholder="2">
-        </div>
-        <div class="settings-field">
-          <label for="cfgYoutubeMinInterval">YouTube 最小调度间隔分钟数</label>
-          <input id="cfgYoutubeMinInterval" type="number" min="0" step="1" placeholder="60">
-        </div>
-        <p class="settings-hint">YouTube 通过后端 producer 独立调度；预算按天限制 yt_search / yt_trending / yt_channel 的执行规模。</p>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="twitter">
-        <h3><span class="section-icon">&#x1D54F;</span> X (Twitter)</h3>
-        <div class="settings-field-row">
-          <input id="cfgTwitterEnabled" type="checkbox">
-          <label for="cfgTwitterEnabled">启用 X discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgTwitterStatus" data-source-status="twitter"><span class="src-dot">●</span> <span class="src-detail">X 来源状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgTwitterCookie">Cookie</label>
-          <textarea id="cfgTwitterCookie" placeholder="从浏览器复制 Cookie 字符串（登录 x.com 后插件会自动同步，需含 auth_token 和 ct0）"></textarea>
-        </div>
-        <div class="settings-field">
-          <label for="cfgTwitterCookieEnv">X Cookie 环境变量</label>
-          <input id="cfgTwitterCookieEnv" type="text" placeholder="OPENBILICLAW_X_COOKIE">
-        </div>
-        <div class="settings-field">
-          <label for="cfgTwitterDailySearchBudget">X 每日搜索任务</label>
-          <input id="cfgTwitterDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgTwitterDailyFeedBudget">X 每日 For-You 任务</label>
-          <input id="cfgTwitterDailyFeedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgTwitterDailyCreatorBudget">X 每日订阅作者任务</label>
-          <input id="cfgTwitterDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-        <div class="settings-field">
-          <label for="cfgTwitterRequestInterval">X 请求间隔秒数</label>
-          <input id="cfgTwitterRequestInterval" type="number" min="0" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgTwitterMinInterval">X 最小调度间隔分钟数</label>
-          <input id="cfgTwitterMinInterval" type="number" min="0" step="1" placeholder="60">
-        </div>
-        <p class="settings-hint">X 通过后端 cookie 回放独立调度；登录 x.com 后扩展会自动同步 auth_token / ct0。</p>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="zhihu">
-        <h3><span class="section-icon">&#x77E5;</span> 知乎</h3>
-        <div class="settings-field-row">
-          <input id="cfgZhihuEnabled" type="checkbox">
-          <label for="cfgZhihuEnabled">启用知乎 discovery</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgZhihuStatus" data-source-status="zhihu"><span class="src-dot">●</span> <span class="src-detail">知乎来源状态加载中…</span></p>
-        <div class="settings-field">
-          <label>知乎 discovery 分支</label>
-          <div class="settings-field-row">
-            <input id="cfgZhihuModeSearch" type="checkbox">
-            <label for="cfgZhihuModeSearch">搜索</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgZhihuModeHot" type="checkbox">
-            <label for="cfgZhihuModeHot">热榜</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgZhihuModeFeed" type="checkbox">
-            <label for="cfgZhihuModeFeed">首页</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgZhihuModeCreator" type="checkbox">
-            <label for="cfgZhihuModeCreator">作者</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgZhihuModeRelated" type="checkbox">
-            <label for="cfgZhihuModeRelated">相关</label>
-          </div>
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuDailySearchBudget">知乎每日搜索任务</label>
-          <input id="cfgZhihuDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuDailyHotBudget">知乎每日热榜任务</label>
-          <input id="cfgZhihuDailyHotBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuDailyFeedBudget">知乎每日首页任务</label>
-          <input id="cfgZhihuDailyFeedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuDailyCreatorBudget">知乎每日作者任务</label>
-          <input id="cfgZhihuDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuDailyRelatedBudget">知乎每日相关扩展</label>
-          <input id="cfgZhihuDailyRelatedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-        <div class="settings-field">
-          <label for="cfgZhihuRequestInterval">知乎请求间隔秒数</label>
-          <input id="cfgZhihuRequestInterval" type="number" min="0" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgZhihuMinInterval">知乎最小调度间隔分钟数</label>
-          <input id="cfgZhihuMinInterval" type="number" min="0" step="1" placeholder="60">
-        </div>
-        <p class="settings-hint">知乎通过已登录浏览器插件执行搜索 / 热榜 / 首页 / 作者 / 相关任务；后端只入队任务并接收结果。</p>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="reddit">
-        <h3><span class="section-icon">R</span> Reddit</h3>
-        <div class="settings-field-row">
-          <input id="cfgRedditEnabled" type="checkbox">
-          <label for="cfgRedditEnabled">启用 Reddit 来源</label>
-        </div>
-        <p class="settings-hint source-status-row" id="cfgRedditStatus" data-source-status="reddit"><span class="src-dot">●</span> <span class="src-detail">Reddit 来源状态加载中…</span></p>
-        <div class="settings-field">
-          <label for="cfgRedditBackend">后端</label>
-          <select id="cfgRedditBackend">
-            <option value="rdt">rdt-cli</option>
-            <option value="extension">OpenBiliClaw 插件</option>
-            <option value="opencli">OpenCLI extension</option>
-            <option value="auto">自动选择命令后端</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditCookie">Cookie</label>
-          <textarea id="cfgRedditCookie" placeholder="从浏览器复制 Cookie 字符串（登录 reddit.com 后插件会自动同步，需含 reddit_session）；留空不覆盖"></textarea>
-        </div>
-        <div class="settings-field">
-          <label>Reddit discovery 分支</label>
-          <div class="settings-field-row">
-            <input id="cfgRedditModeSearch" type="checkbox">
-            <label for="cfgRedditModeSearch">搜索</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgRedditModeHot" type="checkbox">
-            <label for="cfgRedditModeHot">热门</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgRedditModeSubreddit" type="checkbox">
-            <label for="cfgRedditModeSubreddit">Subreddit</label>
-          </div>
-          <div class="settings-field-row">
-            <input id="cfgRedditModeRelated" type="checkbox">
-            <label for="cfgRedditModeRelated">相关</label>
-          </div>
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditDailySearchBudget">Reddit 每日搜索条目</label>
-          <input id="cfgRedditDailySearchBudget" type="number" min="0" step="1" placeholder="300">
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditDailyHotBudget">Reddit 每日热门条目</label>
-          <input id="cfgRedditDailyHotBudget" type="number" min="0" step="1" placeholder="300">
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditDailySubredditBudget">Reddit 每日 subreddit 条目</label>
-          <input id="cfgRedditDailySubredditBudget" type="number" min="0" step="1" placeholder="300">
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditDailyRelatedBudget">Reddit 每日相关条目</label>
-          <input id="cfgRedditDailyRelatedBudget" type="number" min="0" step="1" placeholder="300">
-        </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。</p>
-        <div class="settings-field">
-          <label for="cfgRedditRequestInterval">Reddit 任务轮询间隔秒数</label>
-          <input id="cfgRedditRequestInterval" type="number" min="0" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgRedditMinInterval">Reddit 最小调度间隔分钟数</label>
-          <input id="cfgRedditMinInterval" type="number" min="0" step="1" placeholder="60">
-        </div>
-        <p class="settings-hint">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。默认每个分支每日 300 条。</p>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="browser">
-        <h3><span class="section-icon">&#x1F310;</span> 通用网页源</h3>
-        <div class="settings-field">
-          <label for="cfgSourcesBrowserCdp">通用网页 CDP URL</label>
-          <input id="cfgSourcesBrowserCdp" type="text" placeholder="http://localhost:9222">
-        </div>
-        <div class="settings-field-row">
-          <input id="cfgSourcesBrowserHeaded" type="checkbox">
-          <label for="cfgSourcesBrowserHeaded">通用网页回退浏览器显示窗口</label>
-        </div>
-      </div>
-
-      <div class="settings-section settings-source-card" data-source-card="pool">
-        <h3><span class="section-icon">&#x1F4E6;</span> 候选池来源占比</h3>
-        <div class="settings-field">
-          <label for="cfgPoolShareBilibili">候选池 B 站占比</label>
-          <input id="cfgPoolShareBilibili" type="number" min="1" step="1" placeholder="5">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareXhs">候选池小红书占比</label>
-          <input id="cfgPoolShareXhs" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareDouyin">候选池抖音占比</label>
-          <input id="cfgPoolShareDouyin" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareYoutube">候选池 YouTube 占比</label>
-          <input id="cfgPoolShareYoutube" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareTwitter">候选池 X 占比</label>
-          <input id="cfgPoolShareTwitter" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareZhihu">候选池知乎占比</label>
-          <input id="cfgPoolShareZhihu" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolShareReddit">候选池 Reddit 占比</label>
-          <input id="cfgPoolShareReddit" type="number" min="1" step="1" placeholder="1">
-        </div>
-        <div class="settings-actions">
-          <button id="cfgSuggestPoolShares" class="settings-save" type="button">按已有信号建议比例</button>
-        </div>
-      </div>
-      </div>
-
-      <div id="settingsPanelGeneral" class="settings-panel" data-settings-panel="general" role="tabpanel" aria-labelledby="settingsTabGeneral" hidden>
-      <!-- General -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x2699;&#xFE0F;</span> 通用</h3>
-        <div class="settings-field">
-          <label for="cfgBackendScheme">后端协议</label>
-          <select id="cfgBackendScheme">
-            <option value="http">HTTP（仅本机 / 局域网）</option>
-            <option value="https">HTTPS</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgBackendHost">后端地址</label>
-          <input id="cfgBackendHost" type="text" placeholder="127.0.0.1">
-          <p class="settings-hint">
-            默认 127.0.0.1（本机）。局域网或远程地址保存时会请求该地址的精确访问权限；公网地址必须使用 HTTPS。
-          </p>
-        </div>
-        <div class="settings-field">
-          <label for="cfgBackendPort">后端端口</label>
-          <input id="cfgBackendPort" type="number" min="1" max="65535" step="1" placeholder="8420">
-          <p class="settings-hint">
-            默认 8420。修改后需用 <code>openbiliclaw start --port &lt;同一端口&gt;</code> 启动后端。
-          </p>
-        </div>
-        <div class="settings-field" id="extLoginField">
-          <label for="cfgExtDeviceKey">设备访问密钥</label>
-          <p class="settings-hint" id="cfgExtLoginStatus">检测认证状态…</p>
-          <input id="cfgExtDeviceKey" type="password" placeholder="obc_ext_…" autocomplete="off">
-          <button id="cfgExtLoginBtn" type="button" class="settings-inline-btn">配对</button>
-          <p class="settings-hint">在后端运行 <code>openbiliclaw ext-key generate</code> 获取；密钥只保存在本扩展中。</p>
-        </div>
-        <div class="settings-field" id="authControlField">
-          <label>局域网访问密码</label>
-          <div class="settings-field-row">
-            <input id="cfgAuthEnabled" type="checkbox">
-            <span>开启后，手机 / 其他设备访问需登录密码（本机与本插件始终免登录）</span>
-          </div>
-          <input id="cfgAuthPassword" type="password" placeholder="设置 / 修改访问密码" autocomplete="new-password" hidden>
-          <button id="cfgAuthSave" type="button" class="settings-inline-btn" hidden>保存密码设置</button>
-          <p class="settings-hint" id="cfgAuthHint">读取鉴权状态中…</p>
-        </div>
-        <div class="settings-field" id="autostartControlField">
-          <label>开机自启动</label>
-          <div class="settings-field-row">
-            <input id="cfgAutostartEnabled" type="checkbox">
-            <span>登录系统时自动拉起 OpenBiliClaw 后端</span>
-          </div>
-          <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
-          <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
-        </div>
-        <div class="settings-field" id="savedSyncControlField">
-          <label>保存与平台同步</label>
-          <div class="settings-field-row">
-            <input id="cfgSavedAutoSync" type="checkbox">
-            <label for="cfgSavedAutoSync">保存时自动同步到对应平台</label>
-          </div>
-          <p class="settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
-          <p id="cfgSavedAutoSyncStatus" class="settings-probe-status" aria-live="polite"></p>
-        </div>
-        <div class="settings-field">
-          <label for="cfgLanguage">语言</label>
-          <select id="cfgLanguage">
-            <option value="zh">中文</option>
-            <option value="en">English</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgDataDir">数据目录</label>
-          <input id="cfgDataDir" type="text" placeholder="data">
-        </div>
-        <div class="settings-field">
-          <label for="cfgStorageDbPath">SQLite 数据库路径</label>
-          <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
-        </div>
-        <div class="settings-field">
-          <label for="cfgNetworkProxyMode">海外网络模式</label>
-          <select id="cfgNetworkProxyMode">
-            <option value="direct">直连（忽略系统代理）</option>
-            <option value="system">跟随系统代理</option>
-            <option value="custom">自定义代理</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgNetworkProxy">自定义代理地址</label>
-          <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
-        </div>
-        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
-        <div class="settings-probe-row">
-          <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
-          <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
-        </div>
-      </div>
-      </div>
-
-      <div id="settingsPanelScheduler" class="settings-panel" data-settings-panel="scheduler" role="tabpanel" aria-labelledby="settingsTabScheduler" hidden>
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x21BB;</span> 版本与更新</h3>
-        <div class="settings-status-grid" aria-label="后端更新状态">
-          <div class="settings-status-cell">
-            <span>后端当前</span>
-            <strong id="backendUpdateCurrent">—</strong>
-          </div>
-          <div class="settings-status-cell">
-            <span>后端最新</span>
-            <strong id="backendUpdateLatest">—</strong>
-          </div>
-          <div class="settings-status-cell">
-            <span>状态</span>
-            <strong id="backendUpdateState">unknown</strong>
-          </div>
-          <div class="settings-status-cell">
-            <span>上次检查</span>
-            <strong id="backendUpdateLastCheck">—</strong>
-          </div>
-        </div>
-        <p class="settings-hint">自动更新只作用于 git / AI 安装的后端源码：开启并保存后，后台定时检查可信 backend tag，满足安全条件才会快进、同步依赖并重启后端；安装包版本会提示下载新版安装包；Docker 版会提示拉取新镜像；浏览器扩展由商店自动更新或由 GitHub zip 用户手动重载。</p>
-        <div class="settings-actions">
-          <button id="backendUpdateCheck" type="button" class="settings-secondary-btn">立即检查</button>
-          <button id="backendUpdateApply" type="button" class="settings-secondary-btn" hidden>立即应用</button>
-          <a id="backendUpdateDownload" class="settings-secondary-btn" href="https://github.com/whiteguo233/OpenBiliClaw/releases" target="_blank" rel="noopener" hidden>前往下载新安装包</a>
-        </div>
-        <p class="settings-hint" id="backendUpdateModeHint" hidden></p>
-        <p class="settings-hint">最近错误：<span id="backendUpdateError">—</span></p>
-        <div class="settings-status-cell">
-          <span>插件版本</span>
-          <strong><span id="extensionVersionValue">—</span> · <a class="settings-link" href="https://github.com/whiteguo233/OpenBiliClaw/releases" target="_blank" rel="noopener">GitHub Releases</a></strong>
-        </div>
-      </div>
-      <!-- Scheduler -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x23F0;</span> 调度</h3>
-        <div class="settings-field-row">
-          <input id="cfgSchedulerEnabled" type="checkbox">
-          <label for="cfgSchedulerEnabled">停止后台 LLM 请求</label>
-        </div>
-        <p class="settings-hint">开启后会暂停定时发现、候选池预计算和画像更新中的 LLM / embedding 调用；推荐列表不再自动补充，候选池为空时可能暂时没有推荐，建议初始化完成并已有内容后再开启。</p>
-        <div class="settings-field-row">
-          <input id="cfgPauseOnDisconnect" type="checkbox">
-          <label for="cfgPauseOnDisconnect">关闭浏览器后停止后台</label>
-        </div>
-        <p class="settings-hint">开启后，当所有扩展窗口断开时，后台 LLM / embedding 工作会在宽限期后自动暂停；重新打开浏览器后恢复，离线期间不会自动补新内容。</p>
-        <div class="settings-field">
-          <label for="cfgExtensionDisconnectGrace">断开宽限秒数</label>
-          <input id="cfgExtensionDisconnectGrace" type="number" min="1" step="1" placeholder="90">
-        </div>
-        <div class="settings-field">
-          <label for="cfgPoolTarget">候选池目标数量</label>
-          <input id="cfgPoolTarget" type="number" min="1" max="600" placeholder="300">
-        </div>
-        <div class="settings-field">
-          <label for="cfgAccountSyncInterval">账户同步间隔小时</label>
-          <input id="cfgAccountSyncInterval" type="number" min="1" step="1" placeholder="6">
-        </div>
-        <div class="settings-field">
-          <label for="cfgRefreshCheckInterval">刷新轮询秒数</label>
-          <input id="cfgRefreshCheckInterval" type="number" min="15" step="1" placeholder="60">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSignalEventThreshold">行为触发阈值</label>
-          <input id="cfgSignalEventThreshold" type="number" min="1" step="1" placeholder="6">
-        </div>
-        <div class="settings-field">
-          <label for="cfgFeedbackBatchThreshold">反馈分析积累阈值</label>
-          <input id="cfgFeedbackBatchThreshold" type="number" min="1" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgTrendingRefreshHours">热门刷新小时</label>
-          <input id="cfgTrendingRefreshHours" type="number" min="1" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgExploreRefreshHours">探索刷新小时</label>
-          <input id="cfgExploreRefreshHours" type="number" min="1" step="1" placeholder="12">
-        </div>
-        <div class="settings-field">
-          <label for="cfgDiscoveryLimit">单轮发现上限</label>
-          <input id="cfgDiscoveryLimit" type="number" min="1" max="60" step="1" placeholder="30">
-        </div>
-        <div class="settings-field">
-          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
-          <select id="cfgKeywordGenerationMode">
-            <option value="legacy">经典</option>
-            <option value="hybrid">混合</option>
-            <option value="inspiration">灵感</option>
-          </select>
-        </div>
-        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
-        <div class="settings-field">
-          <label for="cfgCandidateEvalConcurrency">候选评估并发</label>
-          <input id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3">
-        </div>
-        <p class="settings-hint">范围 1–3，默认 3（每批最多 30 条、最多 90 条在途）；后端会为聊天等交互保留一个全局 LLM 槽位，实际并发可能更低。</p>
-        <div class="settings-field-row">
-          <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
-          <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>
-        </div>
-        <p class="settings-hint">开启后，支持图像输入的评估模型会把候选封面随文本一起判断；图片会先压缩，图文 batch 默认更小。</p>
-        <div class="settings-field">
-          <label for="cfgMultimodalBatchSize">图文批量大小</label>
-          <input id="cfgMultimodalBatchSize" type="number" min="1" max="12" step="1" placeholder="8">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageMaxPx">封面最大边 px</label>
-          <input id="cfgMultimodalImageMaxPx" type="number" min="128" max="768" step="1" placeholder="384">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageQuality">JPEG 质量</label>
-          <input id="cfgMultimodalImageQuality" type="number" min="40" max="90" step="1" placeholder="72">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageTimeout">封面超时秒数</label>
-          <input id="cfgMultimodalImageTimeout" type="number" min="1" max="20" step="1" placeholder="6">
-        </div>
-        <div class="settings-field">
-          <label for="cfgProactivePushInterval">主动推送轮询秒数</label>
-          <input id="cfgProactivePushInterval" type="number" min="30" step="1" placeholder="120">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculatorIdleInterval">猜测兴趣空闲检查分钟</label>
-          <input id="cfgSpeculatorIdleInterval" type="number" min="5" step="1" placeholder="30">
-        </div>
-        <div class="settings-field-row">
-          <input id="cfgAutoUpdate" type="checkbox">
-          <label for="cfgAutoUpdate">自动更新后端</label>
-        </div>
-        <p class="settings-hint">此开关不会更新浏览器插件；插件商店安装由浏览器处理，zip / 开发者模式加载需要手动下载新版并重新加载。</p>
-        <div class="settings-field">
-          <label for="cfgAutoUpdateInterval">自动更新检查间隔小时</label>
-          <input id="cfgAutoUpdateInterval" type="number" min="1" step="1" placeholder="6">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationInterval">猜测兴趣间隔分钟</label>
-          <input id="cfgSpeculationInterval" type="number" min="1" step="1" placeholder="10">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationTtl">猜测兴趣存活天数</label>
-          <input id="cfgSpeculationTtl" type="number" min="1" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationCooldown">猜测兴趣冷却天数</label>
-          <input id="cfgSpeculationCooldown" type="number" min="1" step="1" placeholder="7">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationThreshold">猜测确认阈值</label>
-          <input id="cfgSpeculationThreshold" type="number" min="1" step="1" placeholder="3">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationMaxActive">最大活跃猜测数</label>
-          <input id="cfgSpeculationMaxActive" type="number" min="1" step="1" placeholder="5">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationMaxPrimary">主要兴趣域上限</label>
-          <input id="cfgSpeculationMaxPrimary" type="number" min="1" step="1" placeholder="15">
-        </div>
-        <div class="settings-field">
-          <label for="cfgSpeculationMaxSecondary">次要兴趣项上限</label>
-          <input id="cfgSpeculationMaxSecondary" type="number" min="1" step="1" placeholder="60">
-        </div>
-      </div>
-      </div>
-
-      <div id="settingsPanelLogging" class="settings-panel" data-settings-panel="logging" role="tabpanel" aria-labelledby="settingsTabLogging" hidden>
-      <!-- Logging -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x1F4CB;</span> 日志</h3>
-        <div class="settings-field">
-          <label for="cfgLogLevel">控制台级别</label>
-          <select id="cfgLogLevel">
-            <option value="DEBUG">DEBUG</option>
-            <option value="INFO">INFO</option>
-            <option value="WARNING">WARNING</option>
-            <option value="ERROR">ERROR</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogFileLevel">文件级别</label>
-          <select id="cfgLogFileLevel">
-            <option value="DEBUG">DEBUG</option>
-            <option value="INFO">INFO</option>
-            <option value="WARNING">WARNING</option>
-            <option value="ERROR">ERROR</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogPath">完整日志路径</label>
-          <input id="cfgLogPath" type="text" placeholder="logs/openbiliclaw.log">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogMaxFileSize">单日志文件上限 MB</label>
-          <input id="cfgLogMaxFileSize" type="number" min="0" step="1" placeholder="100">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogBackupCount">日志备份份数</label>
-          <input id="cfgLogBackupCount" type="number" min="0" step="1" placeholder="1">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogAggregateBudget">日志目录预算 MB</label>
-          <input id="cfgLogAggregateBudget" type="number" min="0" step="1" placeholder="500">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogUnmanagedTruncate">单个非托管日志截断 MB</label>
-          <input id="cfgLogUnmanagedTruncate" type="number" min="0" step="1" placeholder="200">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLogUnmanagedMaxAge">非托管日志保留天数</label>
-          <input id="cfgLogUnmanagedMaxAge" type="number" min="0" step="1" placeholder="30">
-        </div>
-      </div>
-      </div>
-
-      <div id="settingsGeneralActions">
-        <p class="settings-note">通用配置保存后会尝试热重载；少数路径类设置仍建议重启后端确认。</p>
-        <div class="settings-actions">
-          <button id="settingsSave" class="settings-save" type="button">保存通用配置</button>
-        </div>
-      </div>
+      <form id="settingsForm" class="settings-scroll">
+        <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
+          <section class="settings-section">
+            <div class="section-head"><div><h3>AI 别名状态</h3><p>提供商、凭据、路由与预算在 LiteLLM 管理。</p></div><a id="litellmAdmin" class="settings-secondary-btn" target="_blank" rel="noreferrer" hidden>打开 LiteLLM Admin</a></div>
+            <div class="settings-hint">obc-interactive · obc-analysis · obc-embedding</div>
+            <div id="aliasHealth" class="settings-panel alias-grid"></div>
+          </section>
+          <div id="settingsAiFields"></div>
+        </div>
+        <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
+          <section class="settings-section">
+            <div class="section-head"><div><h3>内容来源</h3><p>仅展示每个平台真实声明的能力。</p></div><button id="refreshSources" class="settings-secondary-btn" type="button">刷新</button></div>
+            <div id="sourceList" class="settings-panel source-grid"></div>
+          </section>
+          <div id="settingsSourceFields"></div>
+        </div>
+        <div id="settingsPanelScheduler" class="settings-panel" data-settings-panel="scheduler" role="tabpanel" aria-labelledby="settingsTabScheduler" hidden><div id="settingsSchedulerFields"></div></div>
+        <div id="settingsPanelGeneral" class="settings-panel" data-settings-panel="general" role="tabpanel" aria-labelledby="settingsTabGeneral" hidden><div id="settingsGeneralFields"></div></div>
+        <div id="settingsPanelLogging" class="settings-panel" data-settings-panel="logging" role="tabpanel" aria-labelledby="settingsTabLogging" hidden><div id="settingsLoggingFields"></div></div>
+        <div class="settings-actions"><button class="settings-save" type="submit">保存设置</button></div>
+      </form>
     </div>
 
     <footer id="footerHintBar" class="footer" data-tone="info">
       <div class="footer-head">
-        <div class="footer-copy">
-          <p id="hintText" class="footer-hint" aria-live="polite">阿B 这会儿先替你盯着。</p>
-          <p id="headlineText" class="footer-headline">最近还没新动静，先多刷一阵。</p>
-        </div>
-        <button id="activityToggleButton" class="footer-toggle" type="button" aria-expanded="false">更多</button>
+        <div class="footer-copy"><p id="hintText" class="footer-hint" aria-live="polite">vNext · Web + Extension</p><p id="headlineText" class="footer-headline">阿B 正在替你整理新的发现。</p></div>
+        <button id="reconnect" class="footer-toggle" type="button">重新连接</button>
       </div>
-      <div id="activityHistory" class="footer-history" hidden></div>
     </footer>
   </div>
-
+  <div id="toast" class="settings-toast popup-toast" role="status" hidden></div>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

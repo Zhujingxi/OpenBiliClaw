@@ -29,8 +29,12 @@ RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml
     && pip install -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-COPY README.md config.example.toml ./
+COPY README.md ./
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY src ./src
+# The operational eval command consumes these versioned Pydantic Evals datasets.
+COPY evals ./evals
 
 # Dependencies are already satisfied by the layer above; this only
 # installs the openbiliclaw package itself, so rebuilds after source
@@ -40,11 +44,11 @@ RUN pip install --no-deps .
 EXPOSE 8420
 
 # Healthcheck via Python stdlib so we don't bloat the image with curl.
-# Hits /api/health every 30s after a 20s warmup. Docker / Compose use
+# Hits public vNext readiness every 30s after a 20s warmup. Docker / Compose use
 # this to report whether the backend is actually ready, not just running.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status == 200 else 1)" \
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/v1/system/readiness', timeout=4).status == 200 else 1)" \
     || exit 1
 
-CMD ["python", "-m", "openbiliclaw.docker_runtime", "openbiliclaw", "serve-api", "--host", "0.0.0.0", "--port", "8420"]
+CMD ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]
