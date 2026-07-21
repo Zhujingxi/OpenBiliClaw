@@ -38,7 +38,7 @@ from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
-from .pipeline import ProfileUpdatePipeline
+from .pipeline import ProfileUpdatePipeline, migrate_pipeline_deep_buffers
 from .posture_gate import PostureGate
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
@@ -276,6 +276,16 @@ class SoulEngine:
         # the database from the explicit arg or the memory manager's handle.
         self._ledger_database = database if database is not None else _memory_database(memory)
         self._ledger = ProfileLedger(self._ledger_database)
+        # Deep-line consolidation: one-time migration of any persisted VALUES/CORE
+        # pipeline buffer signals into awareness notes, then seal the deep buffers
+        # (P1 retired). Idempotent (marker + content-hash dedup) and best-effort —
+        # a failure never blocks engine construction. Runs before the first
+        # pipeline save so the raw deep-buffer keys are still on disk to read.
+        if data_dir is not None:
+            try:
+                migrate_pipeline_deep_buffers(data_dir, memory, self._ledger)
+            except Exception:
+                logger.warning("pipeline deep-buffer migration failed", exc_info=True)
         # Confusion state machine over the same database — drives the topic
         # freeze reflex at the dialogue preference write chokepoint (Phase 2).
         self._confusion_manager = ConfusionManager(self._ledger_database, self._ledger)

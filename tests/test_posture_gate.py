@@ -407,7 +407,10 @@ async def test_ap3_rebuild_off_proceeds_without_gate_call(tmp_path: Any) -> None
     assert engine._posture_gate.calls == []  # type: ignore[attr-defined]
 
 
-# --- Access point ②: pipeline VALUES/CORE layer --------------------------
+# --- Access point ② RETIRED: VALUES/CORE are sealed in update_layer ------
+# Deep-line consolidation (P1) removed the pipeline VALUES/CORE gate. A direct
+# update_layer call for either is a defensive no-op + WARNING; the gate is never
+# consulted, no layer mutates, and no downgrade insight is created.
 
 
 class _FakeBuilderRegistry:
@@ -423,7 +426,8 @@ class _FakeBuilder:
         self.registry = _FakeBuilderRegistry(content)
 
 
-async def test_ap2_values_enforce_downgrade_rolls_back_and_makes_insight(tmp_path: Any) -> None:
+async def test_ap2_values_layer_is_sealed(tmp_path: Any) -> None:
+    """update_layer(VALUES) is a no-op regardless of gate mode (P1 retired)."""
     from openbiliclaw.soul.layer_updaters import update_layer
     from openbiliclaw.soul.pipeline import OnionLayer
 
@@ -444,24 +448,26 @@ async def test_ap2_values_enforce_downgrade_rolls_back_and_makes_insight(tmp_pat
         posture_gate=gate,
     )
     assert result.changed is False
-    assert profile.values_layer.values == []  # rolled back
+    assert profile.values_layer.values == []  # never mutated
+    assert gate.calls == []  # gate never consulted (access point ② retired)
     hypotheses = memory.get_layer("insight").data.get("hypotheses", [])
-    assert hypotheses and hypotheses[0]["confidence"] == 0.5
+    assert hypotheses == []  # no downgrade insight — the updater never ran
 
 
-async def test_ap2_values_shadow_keeps_write(tmp_path: Any) -> None:
+async def test_ap2_core_layer_is_sealed(tmp_path: Any) -> None:
+    """update_layer(CORE) is a no-op — deep event-driven writes retired (P1)."""
     from openbiliclaw.soul.layer_updaters import update_layer
     from openbiliclaw.soul.pipeline import OnionLayer
 
     memory = MemoryManager(tmp_path)
     memory.initialize()
     profile = OnionProfile()
-    builder = _FakeBuilder('{"changed": true, "values": ["效率"], "reason": "x"}')
+    builder = _FakeBuilder('{"changed": true, "core_traits": ["好奇"], "reason": "x"}')
     gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))
     signals = [{"payload": {"event_type": "view", "title": "t", "content": "深度思考"}}]
 
     result = await update_layer(
-        layer=OnionLayer.VALUES,
+        layer=OnionLayer.CORE,
         signals=signals,
         profile=profile,
         memory=memory,
@@ -469,8 +475,9 @@ async def test_ap2_values_shadow_keeps_write(tmp_path: Any) -> None:
         profile_builder=builder,
         posture_gate=gate,
     )
-    assert result.changed is True
-    assert profile.values_layer.values == ["效率"]
+    assert result.changed is False
+    assert profile.core.core_traits == []  # never mutated
+    assert gate.calls == []
 
 
 async def test_ap2_role_layer_is_not_gated(tmp_path: Any) -> None:

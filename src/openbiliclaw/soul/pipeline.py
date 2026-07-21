@@ -252,11 +252,14 @@ _STATIC_LAYER_MAP: dict[SignalType, frozenset[OnionLayer]] = {
             OnionLayer.ROLE,
         }
     ),
+    # FEEDBACK no longer routes to VALUES (deep-line consolidation, P1 retired):
+    # deep profile change is driven exclusively by gated soul rebuild (access
+    # point ③) fed from validated hypotheses / feedback batches, never by a
+    # direct pipeline VALUES write.
     SignalType.FEEDBACK: frozenset(
         {
             OnionLayer.INTEREST,
             OnionLayer.SURFACE,
-            OnionLayer.VALUES,
         }
     ),
     SignalType.DIALOGUE_TURN: frozenset({OnionLayer.SURFACE, OnionLayer.INTEREST}),
@@ -279,13 +282,17 @@ _STATIC_LAYER_MAP: dict[SignalType, frozenset[OnionLayer]] = {
     SignalType.DIALOGUE_INSIGHT: frozenset(),  # Dynamic, see classify_signal
 }
 
-# Dialogue insight kind → target layers
+# Dialogue insight kind → target layers.
+# ``value`` / ``state`` are inert in the pipeline (empty target set) after the
+# deep-line consolidation (P1 retired): a deep self-report reaches the profile
+# only through the gated dialogue-deep-candidate path (access point ①) in the
+# SoulEngine, never through a pipeline VALUES/CORE buffer write.
 _DIALOGUE_INSIGHT_KIND_MAP: dict[str, frozenset[OnionLayer]] = {
     "interest": frozenset({OnionLayer.INTEREST}),
     "dislike": frozenset({OnionLayer.INTEREST}),
-    "value": frozenset({OnionLayer.VALUES}),
+    "value": frozenset(),
     "goal": frozenset({OnionLayer.ROLE}),
-    "state": frozenset({OnionLayer.CORE}),
+    "state": frozenset(),
 }
 
 
@@ -329,17 +336,20 @@ DEFAULT_THRESHOLDS: dict[OnionLayer, LayerThreshold] = {
     ),
 }
 
-# Layers that trigger portrait regeneration when changed
+# Layers that trigger portrait regeneration when changed. VALUES/CORE are
+# retired from the pipeline (deep-line consolidation) so this only ever fires
+# from the (now removed) deep path; kept as a harmless no-op guard.
 _PORTRAIT_TRIGGER_LAYERS = frozenset({OnionLayer.CORE, OnionLayer.VALUES})
 
-# Layers that participate in buffering (PORTRAIT is conditional, not buffered)
+# Layers that participate in buffering (PORTRAIT is conditional, not buffered).
+# VALUES/CORE are intentionally EXCLUDED: the pipeline no longer consumes deep
+# layers (P1 retired). A signal targeting VALUES/CORE is simply not buffered,
+# and ``update_layer`` seals those two layers with a defensive no-op + WARNING.
 _BUFFERED_LAYERS = frozenset(
     {
         OnionLayer.SURFACE,
         OnionLayer.INTEREST,
         OnionLayer.ROLE,
-        OnionLayer.VALUES,
-        OnionLayer.CORE,
     }
 )
 
@@ -558,6 +568,170 @@ def save_pipeline_state(
     }
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# P1 retirement — one-time deep-buffer migration (deep-line consolidation)
+# ---------------------------------------------------------------------------
+
+# Provenance prefix stamped onto every awareness note synthesised from a retired
+# VALUES/CORE pipeline buffer signal. ``AwarenessNote`` has no ``source`` field,
+# so provenance lives in the observation text — a deterministic, no-LLM stamp.
+_PIPELINE_DEEP_MIGRATION_PREFIX = "[migration:pipeline-deep]"
+# Idempotency marker persisted in pipeline_state.json. Once set, the migration
+# short-circuits. A crash between the note write and the marker write is still
+# safe: content-hash dedup makes a re-run add nothing new, and the deep buffer
+# keys are cleared in the same write as the marker.
+_PIPELINE_DEEP_MIGRATION_MARKER = "pipeline_deep_migrated"
+# The retired deep-layer persisted buffer keys, read VERBATIM (independent of
+# ``_BUFFERED_LAYERS`` which no longer lists them — spec r3/F5).
+_DEEP_MIGRATION_LAYER_KEYS = ("values", "core")
+
+
+def _normalize_migration_text(text: str) -> str:
+    """Cheap deterministic normaliser for content-hash dedup of migrated notes."""
+    return " ".join(str(text).split()).strip().lower()
+
+
+def _deep_signal_observation(layer_key: str, signal: dict[str, object]) -> str:
+    """Render a retired deep-buffer signal as an awareness observation (no LLM).
+
+    Pulls the human-readable fields the retired VALUES/CORE updaters used as
+    evidence (title / event_type / content) and stamps provenance so the note
+    is traceable back to the pipeline-deep migration.
+    """
+    raw_payload = signal.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    title = str(payload.get("title", "")).strip()
+    event_type = str(payload.get("event_type", "")).strip()
+    content = str(payload.get("content", "")).strip()
+    if title:
+        body = f"[{event_type}] {title}" if event_type else title
+    elif content:
+        body = content
+    else:
+        body = str(signal.get("id", "")).strip() or "(无文本证据)"
+    return f"{_PIPELINE_DEEP_MIGRATION_PREFIX} {layer_key}: {body}"
+
+
+def _deep_signal_source_event_ids(signal: dict[str, object]) -> list[int]:
+    """Best-effort event-id backfill for a migrated note (empty when absent)."""
+    raw_payload = signal.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    raw = payload.get("id", payload.get("event_id"))
+    if isinstance(raw, bool):
+        return []
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return [int(raw.strip())]
+    return []
+
+
+def migrate_pipeline_deep_buffers(
+    data_dir: Path,
+    memory: MemoryManager,
+    ledger: Any | None = None,
+) -> int:
+    """One-time migration of retired VALUES/CORE buffer signals to awareness.
+
+    Reads the persisted ``pipeline_state.json`` deep-buffer keys verbatim,
+    converts each signal deterministically into an awareness note (prefix
+    ``[migration:pipeline-deep]``, content-hash dedup), then — in a single
+    persistent write — clears the deep buffer keys and sets an idempotency
+    marker. Records one best-effort ledger row.
+
+    Returns the number of NEW awareness notes written (0 if already migrated or
+    nothing to migrate). Idempotent: the marker short-circuits re-runs, and a
+    crash before the marker write is safe (dedup + cleared keys).
+    """
+    from openbiliclaw.soul.profile import (
+        AwarenessNote,
+        awareness_note_from_dict,
+        awareness_note_to_dict,
+    )
+
+    state_path = data_dir / "memory" / "pipeline_state.json"
+    if not state_path.exists():
+        return 0
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return 0
+    if not isinstance(state, dict) or state.get(_PIPELINE_DEEP_MIGRATION_MARKER):
+        return 0
+    raw_buffers = state.get("buffers")
+    if not isinstance(raw_buffers, dict):
+        raw_buffers = {}
+
+    deep_signals: list[tuple[str, dict[str, object]]] = []
+    for key in _DEEP_MIGRATION_LAYER_KEYS:
+        buf = raw_buffers.get(key)
+        if not isinstance(buf, dict):
+            continue
+        raw_signals = buf.get("signals")
+        for sig in raw_signals if isinstance(raw_signals, list) else []:
+            if isinstance(sig, dict):
+                deep_signals.append((key, sig))
+
+    added = 0
+    if deep_signals:
+        awareness_layer = memory.get_layer("awareness")
+        raw_notes = awareness_layer.data.get("notes", [])
+        existing_notes = [awareness_note_from_dict(n) for n in raw_notes if isinstance(n, dict)]
+        seen = {_normalize_migration_text(n.observation) for n in existing_notes}
+        new_notes: list[AwarenessNote] = []
+        for layer_key, sig in deep_signals:
+            observation = _deep_signal_observation(layer_key, sig)
+            norm = _normalize_migration_text(observation)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            new_notes.append(
+                AwarenessNote(
+                    date=str(sig.get("timestamp", ""))[:10],
+                    observation=observation,
+                    note_id=uuid4().hex[:12],
+                    source_event_ids=_deep_signal_source_event_ids(sig),
+                    source_event_ids_approximate=False,
+                )
+            )
+        if new_notes:
+            # Step ①: durable note write (content-hash dedup ⇒ crash-safe re-run).
+            merged = existing_notes + new_notes
+            awareness_layer.data.clear()
+            awareness_layer.data["notes"] = [awareness_note_to_dict(n) for n in merged]
+            awareness_layer.save()
+            added = len(new_notes)
+
+    # Step ②: single persistent write — clear deep keys + set idempotency marker.
+    for key in _DEEP_MIGRATION_LAYER_KEYS:
+        buf = raw_buffers.get(key)
+        if isinstance(buf, dict):
+            buf["signals"] = []
+    state["buffers"] = raw_buffers
+    state[_PIPELINE_DEEP_MIGRATION_MARKER] = True
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except OSError:
+        logger.warning("pipeline deep migration: failed to persist marker/clear", exc_info=True)
+
+    if ledger is not None and deep_signals:
+        try:
+            ledger.record(
+                write_point="pipeline_deep_migration",
+                source="pipeline_migration",
+                before={"deep_signal_count": len(deep_signals)},
+                after={"awareness_notes_added": added},
+                source_refs=sorted({key for key, _ in deep_signals}) or ["pipeline_deep"],
+                outcome="success",
+            )
+        except Exception:  # pragma: no cover - ledger is best-effort
+            logger.debug("pipeline deep migration ledger record failed", exc_info=True)
+
+    return added
 
 
 # ---------------------------------------------------------------------------
