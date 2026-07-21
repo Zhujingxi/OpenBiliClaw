@@ -1673,6 +1673,88 @@ async def test_process_feedback_batch_rebuilds_profile_when_preference_changes_s
     assert profile_shift["expand_hint"] == "expandable"
 
 
+@pytest.mark.asyncio
+async def test_process_feedback_batch_rebuild_blocked_by_enforce_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P2: a feedback batch with a significant shift is now gated (access point ③).
+
+    An enforce reject abandons the rebuild — the soul profile is NOT rewritten,
+    even though preference changed significantly.
+    """
+    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.get_layer("preference").data.update(
+        {
+            "interests": [{"name": "科技", "category": "知识", "weight": 0.9}],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+    )
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "metadata": {"feedback_type": "dislike", "bvid": f"BV{index}"},
+            }
+        )
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "interests": [
+                {"name": "纪录片", "category": "知识", "weight": 0.95, "source": "feedback"},
+            ],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.7,
+            "disliked_topics": ["标题党"],
+            "favorite_up_users": [],
+        }
+
+    build_called = False
+
+    async def fake_build(**kwargs: object) -> object:
+        nonlocal build_called
+        build_called = True
+        raise AssertionError("rebuild must be abandoned by the enforce gate")
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    class _BlockingGate:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def evaluate(self, **kwargs: object) -> GateDecision:
+            self.calls.append(kwargs)
+            return GateDecision(verdict=DOWNGRADE, enforced=True)
+
+    gate = _BlockingGate()
+    engine._posture_gate = gate  # type: ignore[assignment]
+
+    result = await engine.process_feedback_batch_if_needed()
+
+    assert result["triggered"] is True
+    assert result["profile_rebuilt"] is False
+    assert build_called is False
+    assert gate.calls, "feedback-batch rebuild must consult access point ③"
+    assert gate.calls[0]["write_point"] == "feedback_soul_rebuild"
+
+
 def test_build_cognition_updates_falls_back_to_generic_context_when_signals_are_too_thin(
     tmp_path: Path,
 ) -> None:

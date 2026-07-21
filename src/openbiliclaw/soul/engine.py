@@ -39,7 +39,7 @@ from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
 from .pipeline import ProfileUpdatePipeline, migrate_pipeline_deep_buffers
-from .posture_gate import PostureGate
+from .posture_gate import ACCEPT, GateDecision, PostureGate
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
     INIT_COGNITION_CONTEXT_KEY,
@@ -62,6 +62,20 @@ logger = logging.getLogger(__name__)
 # Dialogue candidate kinds that write DEEP profile layers and therefore pass the
 # posture gate (access point ①). interest/dislike take the fast line unchanged.
 _DEEP_CANDIDATE_KINDS = frozenset({"goal", "value", "state"})
+
+# Soul-rebuild triggers (access point ③, generalized — spec r3/F4). Each drives
+# a full gated rebuild but carries a distinct ledger write point so the audit
+# trail distinguishes what caused it: dialogue learning, a feedback batch with a
+# significant preference shift (P2 — previously ungated), or a batch of
+# newly-confirmed hypotheses (the pending-rebuild state machine).
+_REBUILD_TRIGGER_DIALOGUE = "dialogue"
+_REBUILD_TRIGGER_FEEDBACK_BATCH = "feedback_batch"
+_REBUILD_TRIGGER_CONFIRMED_HYPOTHESES = "confirmed_hypotheses"
+_REBUILD_WRITE_POINT: dict[str, str] = {
+    _REBUILD_TRIGGER_DIALOGUE: "dialogue_soul_rebuild",
+    _REBUILD_TRIGGER_FEEDBACK_BATCH: "feedback_soul_rebuild",
+    _REBUILD_TRIGGER_CONFIRMED_HYPOTHESES: "hypotheses_soul_rebuild",
+}
 
 
 def _memory_database(memory: Any) -> Any | None:
@@ -1146,11 +1160,19 @@ class SoulEngine:
             )
 
         profile_rebuilt = False
-        if self._preference_changed_significantly(
-            existing_preference, updated_preference
-        ) and await self._gate_soul_rebuild(
-            existing_preference, updated_preference, candidate_refs
-        ):
+        rebuild_gate_ok = (
+            self._preference_changed_significantly(existing_preference, updated_preference)
+            and not (
+                await self._gate_soul_rebuild(
+                    trigger=_REBUILD_TRIGGER_DIALOGUE,
+                    existing_preference=existing_preference,
+                    updated_preference=updated_preference,
+                    source_refs=candidate_refs,
+                    context={"candidate_refs": candidate_refs},
+                )
+            ).blocks
+        )
+        if rebuild_gate_ok:
             # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
             try:
                 with self._ledger.action(
@@ -1292,7 +1314,22 @@ class SoulEngine:
             _entry.after = dict(updated_preference)
 
         profile_rebuilt = False
-        if self._preference_changed_significantly(existing_preference, updated_preference):
+        # P2 (spec r3/F4): a feedback batch with a significant preference shift
+        # now passes access point ③ — previously this rebuild bypassed every
+        # gate. off/shadow proceed; enforce downgrade/reject abandons the rebuild.
+        feedback_rebuild_ok = (
+            self._preference_changed_significantly(existing_preference, updated_preference)
+            and not (
+                await self._gate_soul_rebuild(
+                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
+                    existing_preference=existing_preference,
+                    updated_preference=updated_preference,
+                    source_refs=feedback_refs,
+                    context={"feedback_count": feedback_count, "feedback_refs": feedback_refs},
+                )
+            ).blocks
+        )
+        if feedback_rebuild_ok:
             # Ledger write point D5 #4b: feedback-batch full soul rebuild.
             try:
                 with self._ledger.action(
@@ -1987,43 +2024,57 @@ class SoulEngine:
 
     async def _gate_soul_rebuild(
         self,
+        *,
+        trigger: str,
         existing_preference: dict[str, object],
         updated_preference: dict[str, object],
-        candidate_refs: list[str],
-    ) -> bool:
-        """Access point ③: gate a full soul rebuild (Phase 3).
+        source_refs: list[str],
+        context: dict[str, object] | None = None,
+    ) -> GateDecision:
+        """Access point ③: gate a full soul rebuild (Phase 3, generalized r3/F4).
 
-        Returns True if the rebuild should proceed. ``off``/``shadow``/accept →
-        proceed; enforce downgrade/reject → abandon this rebuild (no hypothesis
-        to convert — a rebuild carries no single candidate) and record a ledger
-        row. ``off`` never calls the gate (byte-identical).
+        Shared by all three rebuild triggers (dialogue / feedback_batch /
+        confirmed_hypotheses). The judged snapshot carries the ``trigger``, its
+        ledger ``write_point``, an old-soul interest-diff summary, and the
+        trigger-specific ``context`` (dialogue candidates / feedback-batch
+        summary / confirmed-hypothesis list) so the gate sees the right
+        provenance. off never calls the gate (byte-identical) and returns an
+        ``accept`` decision; shadow/accept → proceed; enforce downgrade/reject →
+        abandon + ledger row.
+
+        Returns the :class:`GateDecision`. Callers proceed on ``not
+        decision.blocks``; the pending-rebuild state machine additionally reads
+        ``decision.is_error`` to keep vs clear its marker (F7).
         """
+        write_point = _REBUILD_WRITE_POINT.get(trigger, "soul_rebuild")
         if not self._posture_gate.enabled:
-            return True
+            return GateDecision(verdict=ACCEPT, enforced=False)
         core_memory = self._memory.get_core_memory()
         decision = await self._posture_gate.evaluate(
-            write_point="dialogue_soul_rebuild",
+            write_point=write_point,
             change={
                 "kind": "soul_rebuild",
+                "trigger": trigger,
+                "write_point": write_point,
                 "before_interests": existing_preference.get("interests", []),
                 "after_interests": updated_preference.get("interests", []),
+                "context": context or {},
             },
             core_memory=core_memory,
             ledger_digest=self._ledger_digest_for_gate(),
-            source_refs=candidate_refs,
+            source_refs=source_refs,
         )
         if decision.blocks:
             self._ledger.record(
-                write_point="dialogue_soul_rebuild",
+                write_point=write_point,
                 source="posture_gate",
-                before={"rebuild": "requested"},
+                before={"rebuild": "requested", "trigger": trigger},
                 after={"rebuild": "abandoned", "verdict": decision.verdict},
-                source_refs=candidate_refs,
+                source_refs=source_refs,
                 gate_verdict=decision.verdict,
                 outcome="failed",
             )
-            return False
-        return True
+        return decision
 
     @staticmethod
     def _candidate_ledger_refs(candidates: list[dict[str, object]]) -> list[str]:

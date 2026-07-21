@@ -388,23 +388,59 @@ async def test_ap3_rebuild_enforce_downgrade_abandons(tmp_path: Any) -> None:
     engine._posture_gate = _StubGate(  # type: ignore[assignment]
         "enforce", GateDecision(verdict=DOWNGRADE, enforced=True)
     )
-    proceed = await engine._gate_soul_rebuild({"interests": []}, {"interests": [{"name": "x"}]}, [])
-    assert proceed is False
+    decision = await engine._gate_soul_rebuild(
+        trigger="dialogue",
+        existing_preference={"interests": []},
+        updated_preference={"interests": [{"name": "x"}]},
+        source_refs=[],
+    )
+    assert decision.blocks is True
 
 
 async def test_ap3_rebuild_shadow_proceeds(tmp_path: Any) -> None:
     engine = _engine(tmp_path)
     engine._posture_gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))  # type: ignore[assignment]
-    proceed = await engine._gate_soul_rebuild({}, {"interests": [{"name": "x"}]}, [])
-    assert proceed is True
+    decision = await engine._gate_soul_rebuild(
+        trigger="dialogue",
+        existing_preference={},
+        updated_preference={"interests": [{"name": "x"}]},
+        source_refs=[],
+    )
+    assert decision.blocks is False
 
 
 async def test_ap3_rebuild_off_proceeds_without_gate_call(tmp_path: Any) -> None:
     engine = _engine(tmp_path)
     engine._posture_gate = _StubGate("off", GateDecision(verdict=REJECT, enforced=True))  # type: ignore[assignment]
-    proceed = await engine._gate_soul_rebuild({}, {"interests": [{"name": "x"}]}, [])
-    assert proceed is True
+    decision = await engine._gate_soul_rebuild(
+        trigger="dialogue",
+        existing_preference={},
+        updated_preference={"interests": [{"name": "x"}]},
+        source_refs=[],
+    )
+    assert decision.blocks is False
     assert engine._posture_gate.calls == []  # type: ignore[attr-defined]
+
+
+async def test_ap3_feedback_batch_trigger_uses_feedback_write_point(tmp_path: Any) -> None:
+    """P2: the feedback-batch trigger routes through access point ③ with its own
+    write point + trigger context (spec r3/F4)."""
+    engine = _engine(tmp_path)
+    stub = _StubGate("enforce", GateDecision(verdict=REJECT, enforced=True))
+    engine._posture_gate = stub  # type: ignore[assignment]
+    decision = await engine._gate_soul_rebuild(
+        trigger="feedback_batch",
+        existing_preference={"interests": []},
+        updated_preference={"interests": [{"name": "x"}]},
+        source_refs=["feedback_event:1"],
+        context={"feedback_count": 3},
+    )
+    assert decision.blocks is True
+    assert stub.calls, "gate must be consulted for the feedback-batch trigger"
+    call = stub.calls[0]
+    assert call["write_point"] == "feedback_soul_rebuild"
+    assert call["change"]["trigger"] == "feedback_batch"
+    assert call["change"]["context"] == {"feedback_count": 3}
 
 
 # --- Access point ② RETIRED: VALUES/CORE are sealed in update_layer ------
