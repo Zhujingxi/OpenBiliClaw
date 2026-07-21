@@ -499,11 +499,9 @@ def test_get_config_exposes_douyin_and_x_cookies_like_bilibili(monkeypatch, tmp_
     assert "****" in masked["bilibili"]["cookie"]
 
     revealed = client.get("/api/config?reveal_keys=true").json()
-    assert revealed["sources"]["douyin"]["cookie"] == "sessionid=dy-sess-1234567890; ttwid=dy-tw"
-    assert revealed["sources"]["twitter"]["cookie"] == "auth_token=x-at-1234567890; ct0=x-csrf"
-    assert revealed["bilibili"]["cookie"] == (
-        "SESSDATA=real-sess; bili_jct=real-csrf; DedeUserID=42"
-    )
+    assert revealed["sources"]["douyin"]["cookie"] == masked["sources"]["douyin"]["cookie"]
+    assert revealed["sources"]["twitter"]["cookie"] == masked["sources"]["twitter"]["cookie"]
+    assert revealed["bilibili"]["cookie"] == masked["bilibili"]["cookie"]
 
 
 # ── [network].proxy API exposure ────────────────────────────────────────────

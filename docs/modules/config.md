@@ -19,6 +19,8 @@ cp config.example.toml config.toml
 
 CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露异常，方便开发和部署排查。
 
+配置读取接口把所有 API Key、Cookie、令牌及代理 URL userinfo 视为**只写秘密**：`GET /api/config` 始终返回掩码；旧客户端携带的 `?reveal_keys=true` 仅作兼容参数接受，不能再导出原值。桌面 Web 与扩展只请求普通 `/api/config`，扩展写入 `chrome.storage` 的也只是掩码快照。设置输入留空或回传掩码仍表示“保持原值”，新值只通过 `PUT /api/config` 写入。
+
 ## 配置段落
 
 插件、桌面 Web 和移动 Web 的「保存时自动同步到对应平台」都从 API 读取，默认关闭。插件与移动 Web 的配置 GET/PUT 使用 AbortController 有界 timeout；插件的同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。移动 Web 使用模态设置对话框：Escape 可关闭、Tab 焦点留在对话框内，关闭后回到原设置按钮；配置 GET 超时或失败时保存与开关保持禁用，用户必须通过「重试加载」成功取得当前值后才能写回，避免用默认 false 覆盖未知远端状态。
@@ -451,7 +453,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 
 ### `[sources.douyin]`
 
-抖音专用 discovery 配置。初始化画像仍由浏览器扩展执行；本段控制 `openbiliclaw discover --source douyin` / `discover-douyin` 的内容发现。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/dy/cookie` 同步到 `data/douyin_cookie.json` 的值。设置页（插件 / 桌面 Web）的抖音卡片可查看并手动粘贴当前 Cookie：`GET /api/config` 的 `sources.douyin.cookie`（API-only 字段，非 `config.toml` 键）返回解析后的凭据（默认脱敏，`reveal_keys=true` 明文），`PUT /api/config` 把非空新值路由到 `data/douyin_cookie.json`。
+抖音专用 discovery 配置。初始化画像仍由浏览器扩展执行；本段控制 `openbiliclaw discover --source douyin` / `discover-douyin` 的内容发现。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/dy/cookie` 同步到 `data/douyin_cookie.json` 的值。设置页（插件 / 桌面 Web）可手动粘贴新 Cookie，但 `GET /api/config` 的 API-only `sources.douyin.cookie` 始终只返回脱敏预览（`reveal_keys=true` 也是兼容 no-op）；`PUT /api/config` 把非空、非掩码的新值路由到 `data/douyin_cookie.json`。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -480,7 +482,7 @@ YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 /
 
 ### `[sources.twitter]`
 
-X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 cookie 重放**（对标 `[sources.douyin]` 的 direct 模式），由后端 `XDiscoveryProducer` 调度 `search`（画像驱动关键词）/ `feed`（推荐流 For-You）/ `creator`（账号订阅）三个策略，把推文灌入统一候选池。行为采集（用户在 x.com 上自己的点赞 / 收藏 / 回复）走浏览器扩展 MAIN-world tap，与本段无关。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/x/cookie` 同步到 `data/x_cookie.json` 的 `auth_token` + `ct0`。设置页（插件 / 桌面 Web）的 X 卡片可查看并手动粘贴当前 Cookie：`GET /api/config` 的 `sources.twitter.cookie`（API-only 字段，非 `config.toml` 键）返回解析后的凭据（默认脱敏，`reveal_keys=true` 明文），`PUT /api/config` 把非空新值路由到 `data/x_cookie.json`，含 `auth_token` + `ct0` 的有效粘贴会同时解除 re-login 健康封锁。X 客户端 `XClient` 封装默认安装自带的 `twitter-cli`，只在 `enabled=true` 且真正 fetch 时 lazy import，`enabled=false` 路径绝不 import；`openbiliclaw[x]` 仍保留为兼容旧脚本的安装别名。
+X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 cookie 重放**（对标 `[sources.douyin]` 的 direct 模式），由后端 `XDiscoveryProducer` 调度 `search`（画像驱动关键词）/ `feed`（推荐流 For-You）/ `creator`（账号订阅）三个策略，把推文灌入统一候选池。行为采集（用户在 x.com 上自己的点赞 / 收藏 / 回复）走浏览器扩展 MAIN-world tap，与本段无关。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/x/cookie` 同步到 `data/x_cookie.json` 的 `auth_token` + `ct0`。设置页（插件 / 桌面 Web）可手动粘贴新 Cookie，但 `GET /api/config` 的 API-only `sources.twitter.cookie` 始终只返回脱敏预览（`reveal_keys=true` 也是兼容 no-op）；`PUT /api/config` 把非空、非掩码的新值路由到 `data/x_cookie.json`，含 `auth_token` + `ct0` 的有效粘贴会同时解除 re-login 健康封锁。X 客户端 `XClient` 封装默认安装自带的 `twitter-cli`，只在 `enabled=true` 且真正 fetch 时 lazy import，`enabled=false` 路径绝不 import；`openbiliclaw[x]` 仍保留为兼容旧脚本的安装别名。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -567,6 +569,8 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算为 `disabled / unverified / ready / partial / rate_limited / error`。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
 
 ### `[scheduler]`
+
+TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为真实布尔值。`enabled`、`pause_on_extension_disconnect`、`profile_consolidation_enabled`、`profile_consolidation_archive_enabled`、`auto_update_enabled`、`auto_update_allow_prerelease` 接受常见 `true/false/1/0`；空字符串或无法识别的值回到各字段默认值，绝不会把字符串 `""` 留到 API 响应后再触发类型校验错误。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|

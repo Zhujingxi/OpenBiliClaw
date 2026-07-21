@@ -6613,7 +6613,7 @@ def test_fetch_xhs_handles_timeout_status(monkeypatch: pytest.MonkeyPatch) -> No
         lambda task_id, *, max_wait_seconds: ([], {}, "timeout"),
     )
     result = runner.invoke(app, ["fetch-xhs"])
-    assert result.exit_code == 0  # timeout is not a hard failure
+    assert result.exit_code == 1
     assert "超时" in result.output
 
 
@@ -7139,6 +7139,20 @@ async def test_fetch_x_init_data_fetches_likes_and_bookmarks(monkeypatch, tmp_pa
     likes, bookmarks = await cli_module._fetch_x_init_data(likes_limit=5, bookmarks_limit=5)
     assert [t["id"] for t in likes] == ["1"]
     assert [t["id"] for t in bookmarks] == ["2"]
+
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
+
+    db = Database(tmp_path / "openbiliclaw.db")
+    db.initialize()
+    health = XSourceHealthStore(db).get()
+    assert health["state"] == "ok"
+    assert health["last_success_at"]
+    assert health["last_success_credential"] == credential_fingerprint(
+        "twitter", "auth_token=a; ct0=b"
+    )
+    db.close()
 
 
 def test_fetch_x_ingests_likes_and_bookmarks(runner, monkeypatch) -> None:

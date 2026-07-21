@@ -2482,11 +2482,17 @@ class TestBackendAPI:
 
         body = client.get("/api/sources/credentials?reveal_keys=true").json()
 
-        assert body["bilibili"]["value"] == "SESSDATA=bili; bili_jct=jct; DedeUserID=1;"
-        assert body["douyin"]["value"] == "msToken=dy; ttwid=tw;"
-        assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
+        # The legacy reveal flag is intentionally a no-op: settings snapshots
+        # report presence with a mask and never export the stored credential.
+        assert "SESSDATA=bili" not in body["bilibili"]["value"]
+        assert "msToken=dy" not in body["douyin"]["value"]
+        assert "auth_token=x" not in body["twitter"]["value"]
+        assert "*" in body["bilibili"]["value"]
+        assert "*" in body["douyin"]["value"]
+        assert "*" in body["twitter"]["value"]
         assert body["xiaohongshu"]["label"] == "xsec_token"
-        assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert body["xiaohongshu"]["value"] != "xhs-token"
+        assert "*" in body["xiaohongshu"]["value"]
         assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
@@ -2494,8 +2500,7 @@ class TestBackendAPI:
         assert body["bangumi"]["label"] == "可选个人令牌"
 
         masked = client.get("/api/sources/credentials").json()
-        assert masked["bilibili"]["value"] != body["bilibili"]["value"]
-        assert "*" in masked["bilibili"]["value"]
+        assert masked["bilibili"]["value"] == body["bilibili"]["value"]
 
     def test_sources_status_xhs_recent_login_state_ready_without_tokens(
         self, tmp_path: Path
@@ -4711,6 +4716,30 @@ class TestBackendAPI:
         assert data["items"][0]["danmaku_count"] == 890
         assert data["items"][0]["up_mid"] == 112233
         assert_publication(data["items"][0])
+
+    def test_recommendations_endpoint_coalesces_immediate_duplicate_reads(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def get_recommendations(
+                self, limit: int = 20, *, exclude_processed: bool = False
+            ) -> list[dict[str, object]]:
+                assert limit == 40
+                assert exclude_processed is True
+                self.reads += 1
+                return []
+
+        database = FakeDatabase()
+        app = create_app(database=database)
+        client = TestClient(app)
+
+        assert client.get("/api/recommendations").status_code == 200
+        assert client.get("/api/recommendations").status_code == 200
+
+        assert database.reads == 1
 
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
@@ -10315,7 +10344,8 @@ class TestBackendAPI:
         assert data["llm"]["default_provider"] == "gemini"
         assert data["llm"]["fallback_provider"] == "openai"
         assert "fallback_enabled" not in data["llm"]  # removed legacy flag
-        assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
+        assert data["llm"]["gemini"]["api_key"] != "test-gemini-key"
+        assert "*" in data["llm"]["gemini"]["api_key"]
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
         # Embedding fields
@@ -11036,10 +11066,10 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in emb["api_key"]
         assert "sk-embed-secret-1234567890" not in emb["api_key"]
 
-    def test_get_config_with_reveal_keys_returns_raw_secrets(self, monkeypatch, tmp_path) -> None:
-        """``GET /api/config?reveal_keys=true`` returns unmasked keys
-        for both new fields (openai_compatible.api_key + embedding.api_key).
-        Used by the popup when the user clicks "show" to edit."""
+    def test_get_config_reveal_keys_compat_flag_still_masks_secrets(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Legacy reveal requests remain compatible but never export secrets."""
         from openbiliclaw.config import (
             Config,
             EmbeddingConfig,
@@ -11059,8 +11089,10 @@ class TestEmbeddingAndCompatProviderE2E:
         client = self._make_client(monkeypatch, tmp_path, cfg)
 
         revealed = client.get("/api/config", params={"reveal_keys": "true"}).json()
-        assert revealed["llm"]["openai_compatible"]["api_key"] == "gsk-raw-1234567890"
-        assert revealed["llm"]["embedding"]["api_key"] == "sk-emb-raw-1234567890"
+        assert revealed["llm"]["openai_compatible"]["api_key"] != "gsk-raw-1234567890"
+        assert revealed["llm"]["embedding"]["api_key"] != "sk-emb-raw-1234567890"
+        assert "*" in revealed["llm"]["openai_compatible"]["api_key"]
+        assert "*" in revealed["llm"]["embedding"]["api_key"]
 
     # ── PUT round-trip: openai_compatible ───────────────────────────
 
@@ -14564,16 +14596,19 @@ class TestRecommendationsFirstPageTopUp:
         assert resp.status_code == 200
         assert served == []
 
-    def test_empty_history_bootstrap_is_not_debounced(self, tmp_path: Path) -> None:
+    def test_empty_history_bootstrap_is_coalesced_inside_snapshot_window(
+        self, tmp_path: Path
+    ) -> None:
         from fastapi.testclient import TestClient
 
-        # Fresh-install bootstrap keeps its original semantics: while the
-        # history stays empty every GET may retry the bootstrap serve.
+        # A restored browser session can reopen dozens of empty dashboards at
+        # once. They share one short snapshot window instead of each calling
+        # the side-effecting bootstrap serve path.
         app, served = self._make_app(tmp_path, history_rows=0)
         with TestClient(app) as client:
             client.get("/api/recommendations")
             client.get("/api/recommendations")
-        assert served == [10, 10]
+        assert served == [10]
 
 
 class TestEmbeddingDiagnosisAndRepair:

@@ -787,7 +787,7 @@ test("fetchProfileSummary forwards limit and cursor for cognition history pagina
   assert.equal(calls[0].options.method, "GET");
 });
 
-test("fetchConfig sends GET to /config with reveal_keys", async () => {
+test("fetchConfig requests the masked config snapshot", async () => {
   const calls: Array<{ url: string; options: any }> = [];
   globalThis.fetch = async (url: any, options: any) => {
     calls.push({ url, options });
@@ -813,7 +813,7 @@ test("fetchConfig sends GET to /config with reveal_keys", async () => {
   const result = await fetchConfig();
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config?reveal_keys=true");
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config");
   assert.equal(calls[0].options.method, "GET");
   assert.equal(result.llm.default_provider, "gemini");
   assert.equal(result.llm.gemini.api_key, "test-key");
@@ -1207,7 +1207,7 @@ test("popup-api requests honor configured backend host and port from chrome.stor
   try {
     await fetchConfig();
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config?reveal_keys=true");
+    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

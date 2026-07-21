@@ -507,6 +507,34 @@
   }
 
   /**
+   * Return an actionable problem for an enabled source, or ``null``.
+   *
+   * This is deliberately narrower than ``describeAccess``: ``unverified`` and
+   * ``syncing`` are normal lifecycle states, while a missing credential, a
+   * stale/failed verdict, a blocked request or platform throttling needs the
+   * user's attention. Keeping that distinction beside the shared access table
+   * makes the dashboard, desktop settings and extension agree on what counts
+   * as a problem without teaching any frontend platform-specific wording.
+   * The actual explanation remains the backend-owned ``item.detail``.
+   *
+   * @returns {{tone: string, label: string, detail: string}|null}
+   */
+  function describeSourceIssue(item, options) {
+    if (!item || typeof item !== "object" || item.enabled === false) return null;
+    const access = describeAccess(item, options);
+    const verification = text(item.auth && item.auth.verification);
+    const actionablePending = verification === "rate_limited";
+    const actionableTone = access.tone === "warning" || access.tone === "danger";
+    const unknownEnabledState = !access.known;
+    if (!actionablePending && !actionableTone && !unknownEnabledState) return null;
+    return {
+      tone: access.tone === "danger" ? "danger" : "warning",
+      label: access.label,
+      detail: access.detail || access.label,
+    };
+  }
+
+  /**
    * Whether a usable credential is stored for this source.
    *
    * Reads the orthogonal contract rather than any one platform's storage. The
@@ -665,7 +693,7 @@
     const detail = text(item.detail);
     const label = text(item.label) || "Cookie";
     const summary = text(item.summary)
-      || (available ? `${label} 已保存，展开查看` : detail || CREDENTIAL_UNAVAILABLE);
+      || (available ? `${label} 已保存（原值不回传）` : detail || CREDENTIAL_UNAVAILABLE);
     return {
       present: true,
       available,
@@ -694,6 +722,7 @@
     WRITABLE_FORM_KINDS,
     describeAccess,
     describeCredential,
+    describeSourceIssue,
     describeVerifiedAt,
     describeVerifyError,
     describeVerifyResult,

@@ -1792,7 +1792,7 @@ class ChatTurnListResponse(BaseModel):
 
 
 class LLMProviderConfigOut(BaseModel):
-    """LLM provider configuration (keys masked by default)."""
+    """LLM provider configuration (keys are always masked on reads)."""
 
     api_key: str = ""
     model: str = ""
@@ -1807,7 +1807,7 @@ class LLMProviderConfigOut(BaseModel):
 class EmbeddingConfigOut(BaseModel):
     provider: str = ""
     model: str = ""
-    # v0.3.32+ embedding owns its own credentials; api_key is masked.
+    # v0.3.32+ embedding owns its own credentials; api_key is always masked.
     api_key: str = ""
     base_url: str = ""
     output_dimensionality: int = 1024
@@ -1881,7 +1881,7 @@ class DouyinSourceConfigOut(BaseModel):
     enabled: bool = False
     mode: str = "direct"
     # Resolved Cookie header (env override, else data/douyin_cookie.json).
-    # Read-only mirror for the settings pages — masked unless reveal_keys.
+    # Read-only mirror for settings pages — always masked on API reads.
     # PUT routes a non-empty value to DouyinCookieManager, never config.toml.
     cookie: str = ""
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
@@ -1904,7 +1904,7 @@ class TwitterSourceConfigOut(BaseModel):
     enabled: bool = False
     mode: str = "cookie"
     # Resolved Cookie header (env override, else data/x_cookie.json).
-    # Read-only mirror for the settings pages — masked unless reveal_keys.
+    # Read-only mirror for settings pages — always masked on API reads.
     # PUT routes a non-empty value to XCookieManager, never config.toml.
     cookie: str = ""
     cookie_env: str = "OPENBILICLAW_X_COOKIE"

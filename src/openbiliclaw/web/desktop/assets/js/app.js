@@ -27,13 +27,13 @@
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
-      sourceCredentials: "/sources/credentials?reveal_keys=true",
+      sourceCredentials: "/sources/credentials",
       configProbe: "/config/probe-service",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
       embeddingRepair: "/embedding/repair",
-      config: "/config?reveal_keys=true",
+      config: "/config",
       watchLater: "/watch-later",
       favorites: "/favorites",
       profileEdit: "/profile/edit",
@@ -191,6 +191,10 @@
     let desktopRuntimeRecoveryInFlight = false;
     let desktopRuntimeGeneration = 0;
     let degradedRecoveryPresented = false;
+    const DESKTOP_RESUME_HYDRATE_TTL_MS = 15000;
+    let desktopBackendSessionInFlight = false;
+    let desktopLastHydratedAt = 0;
+    let desktopRuntimeReconnectTimer = null;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -237,6 +241,7 @@
 
     // 首次读取失败后的有界恢复；成功过一次就不再重试（后续由库存事件驱动）。
     function schedulePlatformAvailabilityRetry() {
+      if (document.hidden) return;
       if (state.platformAvailability) return;
       if (platformAvailabilityRetryTimer !== null) return;
       if (platformAvailabilityRetryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) return;
@@ -270,6 +275,10 @@
     }
 
     async function runBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationInFlight) {
         backendHydrationPending = true;
         return;
@@ -290,6 +299,10 @@
     }
 
     function scheduleBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationTimer !== null) window.clearTimeout(backendHydrationTimer);
       backendHydrationTimer = window.setTimeout(() => {
         backendHydrationTimer = null;
@@ -383,6 +396,7 @@
     }
 
     function scheduleDesktopRecommendationRecovery() {
+      if (document.hidden) return;
       if (state.videos.length > 0) {
         clearDesktopRecommendationRecovery("ready");
         return;
@@ -421,6 +435,7 @@
     }
 
     function scheduleDesktopRuntimeRecovery() {
+      if (document.hidden) return;
       if (desktopRuntimeLoadState !== "failed") return;
       if (desktopRuntimeRecoveryInFlight || desktopRuntimeRecoveryTimer !== null) return;
       if (desktopRuntimeRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
@@ -514,6 +529,10 @@
     }
 
     function scheduleActivityPageRefresh() {
+      if (document.hidden) {
+        activityPageRefreshPending = true;
+        return;
+      }
       if (activityPageRefreshTimer !== null) window.clearTimeout(activityPageRefreshTimer);
       activityPageRefreshTimer = window.setTimeout(() => {
         activityPageRefreshTimer = null;
@@ -1913,6 +1932,7 @@
 
     function scheduleInitStatusRefresh(delayMs = INIT_STATUS_POLL_MS) {
       clearInitPolling();
+      if (document.hidden) return;
       initPollTimer = window.setTimeout(() => {
         initPollTimer = null;
         void refreshInitStatus();
@@ -2265,11 +2285,19 @@
       favorite: createDesktopSavedTaskRuntime()
     };
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) {
-        for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      if (document.hidden) {
+        pauseDesktopBackendSession();
+        return;
       }
+      for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      restartDesktopFailedRecoveries();
+      if (initRefreshPending || state.initStatus?.running) {
+        scheduleInitStatusRefresh(0);
+      }
+      void startDesktopBackendSession();
     });
     window.addEventListener("pagehide", () => {
+      pauseDesktopBackendSession();
       for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
     }, { once: true });
     function saveDesktopItem(listKind, item) {
@@ -5963,8 +5991,11 @@ ${cardFeedbackBarHtml()}`;
         ? runtime.last_account_sync_issues
         : [];
       const severity = String(runtime?.last_account_sync_severity || "");
-      // Healthy installs (no error) show nothing — zero visual change.
-      if (!error && !kind && !issues.length) {
+      const sourceIssues = collectEnabledSourceIssues(state.sourceStatus);
+      // Healthy installs (no sync or source issue) show nothing — zero visual
+      // change. Pending verification alone is not an error and stays on the
+      // source card instead of turning the dashboard into an alarm panel.
+      if (!error && !kind && !issues.length && !sourceIssues.length) {
         el.hidden = true;
         el.textContent = "";
         el.classList.remove("is-auth-expired", "is-warning", "is-error");
@@ -5974,18 +6005,31 @@ ${cardFeedbackBarHtml()}`;
       // The backend renders the sentence so every surface says the same thing;
       // the literals here are only a fallback for an older backend.
       const message = String(runtime?.last_account_sync_message || "");
-      if (kind === "auth_expired") {
+      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
+      const accountDetail = message || (error || kind || issues.length
+        ? "账号同步遇到未分类异常，暂时无法确定具体环节"
+        : "");
+      const accountText = accountDetail && when
+        ? `${accountDetail}（上次同步 ${when}）`
+        : accountDetail;
+      const sourceText = sourceIssues.length
+        ? `来源接入：${sourceIssues.map((issue) => `${issue.source}：${issue.detail}`).join("；")}`
+        : "";
+      const combined = [accountText, sourceText].filter(Boolean).join("；");
+      const hasSourceDanger = sourceIssues.some((issue) => issue.tone === "danger");
+      if (kind === "auth_expired" && !hasSourceDanger) {
         el.classList.add("is-auth-expired", "is-warning");
         el.classList.remove("is-error");
-        el.textContent = message || "B 站登录已失效，账号同步已停止 — 请重新登录";
+        const fallback = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        el.textContent = [message ? accountText : fallback, sourceText].filter(Boolean).join("；");
         return;
       }
-      el.classList.toggle("is-warning", severity === "warning");
-      el.classList.toggle("is-error", severity !== "warning");
+      const hasAccountIssue = Boolean(error || kind || issues.length);
+      const warningOnly = !hasSourceDanger && (!hasAccountIssue || severity === "warning");
+      el.classList.toggle("is-warning", warningOnly);
+      el.classList.toggle("is-error", !warningOnly);
       el.classList.remove("is-auth-expired");
-      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
-      const detail = message || "账号同步遇到未分类异常，暂时无法确定具体环节";
-      el.textContent = when ? `${detail}（上次同步 ${when}）` : detail;
+      el.textContent = combined;
     }
 
     function applyRuntimeStatus(payload) {
@@ -6173,6 +6217,15 @@ ${cardFeedbackBarHtml()}`;
       bangumi: "bangumiEnabled"
     };
 
+    function collectEnabledSourceIssues(data) {
+      if (!data || typeof data !== "object") return [];
+      return SOURCE_STATUS_KEYS.flatMap((key) => {
+        const issue = SourceStatus.describeSourceIssue(data[key]);
+        if (!issue) return [];
+        return [{ ...issue, key, source: SourceStatus.sourceLabel(key) }];
+      });
+    }
+
     function setSourceBadge(badge, text, tone) {
       if (!badge) return;
       badge.textContent = text;
@@ -6275,6 +6328,7 @@ ${cardFeedbackBarHtml()}`;
       try { data = await requestJson("/sources/status"); } catch { data = null; }
       state.sourceStatus = data;
       renderSourcesStatusRows(data);
+      renderAccountSyncStatus(state.runtimeStatus);
     }
 
     function renderVerifyResult(statusEl, result) {
@@ -6326,7 +6380,6 @@ ${cardFeedbackBarHtml()}`;
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
-        const copyBtn = row.querySelector(".source-credential-copy");
         // Summary wording is the backend's, including 小红书's "a stored
         // content token is not a login" caveat. That caveat used to be a
         // per-platform branch right here, so only this page ever showed it —
@@ -6336,7 +6389,6 @@ ${cardFeedbackBarHtml()}`;
         row.dataset.formKind = view.form.kind;
         if (summary) summary.textContent = view.summary;
         if (value) value.value = view.value;
-        if (copyBtn) copyBtn.disabled = !view.canCopy;
       });
       // Not a display branch over the access enum: every other paste box gets
       // its "已保存/未保存" placeholder from the config snapshot in
@@ -6346,19 +6398,6 @@ ${cardFeedbackBarHtml()}`;
       // other platforms off the config snapshot — both beyond this change.
       setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
-
-    $("#sourceCredentialList")?.addEventListener("click", async (event) => {
-      const btn = event.target.closest(".source-credential-copy");
-      if (!btn || btn.disabled) return;
-      const value = btn.closest(".source-credential-row")?.querySelector(".source-credential-value")?.value?.trim() || "";
-      if (!value) return;
-      try {
-        await navigator.clipboard.writeText(value);
-        showToast("已复制当前凭据");
-      } catch {
-        showToast("复制失败：浏览器未授予剪贴板访问权限");
-      }
-    });
 
     async function renderSourceCredentials() {
       let data = null;
@@ -7336,7 +7375,23 @@ ${cardFeedbackBarHtml()}`;
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
     }
 
+    function scheduleDesktopRuntimeReconnect() {
+      if (document.hidden || desktopRuntimeReconnectTimer !== null) return;
+      desktopRuntimeReconnectTimer = window.setTimeout(() => {
+        desktopRuntimeReconnectTimer = null;
+        connectRuntimeStream();
+      }, 3000);
+    }
+
     function connectRuntimeStream() {
+      if (document.hidden) return;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      if (state.runtimeSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.runtimeSocket.readyState)) {
+        return;
+      }
       if (state.runtimeSocket) state.runtimeSocket.close();
       try {
         const socket = new WebSocket(getRuntimeStreamUrl());
@@ -7361,11 +7416,63 @@ ${cardFeedbackBarHtml()}`;
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
         });
         socket.addEventListener("close", () => {
-          if (state.runtimeSocket === socket) window.setTimeout(connectRuntimeStream, 3000);
+          if (state.runtimeSocket === socket) {
+            state.runtimeSocket = null;
+            scheduleDesktopRuntimeReconnect();
+          }
         });
         socket.addEventListener("error", () => { $("#statusLabel").textContent = "实时流断开"; });
       } catch {
         $("#statusLabel").textContent = "实时流不可用";
+      }
+    }
+
+    function pauseDesktopBackendSession() {
+      backendHydrationPending = true;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      for (const timer of [
+        backendHydrationTimer,
+        desktopRecommendationRecoveryTimer,
+        desktopRuntimeRecoveryTimer,
+        platformAvailabilityRetryTimer,
+        activityPageRefreshTimer,
+      ]) {
+        if (timer !== null) window.clearTimeout(timer);
+      }
+      backendHydrationTimer = null;
+      desktopRecommendationRecoveryTimer = null;
+      desktopRuntimeRecoveryTimer = null;
+      platformAvailabilityRetryTimer = null;
+      activityPageRefreshTimer = null;
+      clearInitPolling();
+      const socket = state.runtimeSocket;
+      state.runtimeSocket = null;
+      if (socket) socket.close();
+    }
+
+    async function startDesktopBackendSession({ forceHydrate = false } = {}) {
+      if (document.hidden || desktopBackendSessionInFlight) return;
+      desktopBackendSessionInFlight = true;
+      try {
+        await ensureAuthenticated();
+        const stale = Date.now() - desktopLastHydratedAt >= DESKTOP_RESUME_HYDRATE_TTL_MS;
+        if (forceHydrate || backendHydrationPending || !desktopLastHydratedAt || stale) {
+          await hydrateFromBackend();
+          desktopLastHydratedAt = Date.now();
+          backendHydrationPending = false;
+        }
+        if (!document.hidden) connectRuntimeStream();
+      } catch (error) {
+        console.error("后端数据加载失败", error);
+        $("#statusLabel").textContent = "后端数据加载失败";
+        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
+        showToast("后端数据加载失败，页面已保留离线数据");
+        if (!document.hidden) connectRuntimeStream();
+      } finally {
+        desktopBackendSessionInFlight = false;
       }
     }
 
@@ -8489,7 +8596,7 @@ ${cardFeedbackBarHtml()}`;
       if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
-        const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {
+        const result = await requestJsonStrict(ENDPOINTS.config, {
           method: "PUT",
           timeoutMs: 60000,
           headers: { "Content-Type": "application/json" },
@@ -8550,14 +8657,5 @@ ${cardFeedbackBarHtml()}`;
       $("#statusLabel").textContent = "首屏渲染失败";
       $("#runtimeSummary").textContent = error?.message || "请检查后端返回的数据结构。";
     }
-    ensureAuthenticated()
-      .then(() => hydrateFromBackend())
-      .then(connectRuntimeStream)
-      .catch((error) => {
-        console.error("后端数据加载失败", error);
-        $("#statusLabel").textContent = "后端数据加载失败";
-        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
-        showToast("后端数据加载失败，页面已保留离线数据");
-        connectRuntimeStream();
-      });
+    void startDesktopBackendSession({ forceHydrate: true });
     })();

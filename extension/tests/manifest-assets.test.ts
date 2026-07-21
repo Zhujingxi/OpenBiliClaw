@@ -2,6 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runtimeAssetCandidates } from "../src/shared/asset-prefix.ts";
+
+test("dynamic asset paths support both unpacked Chrome layouts", () => {
+  assert.deepEqual(runtimeAssetCandidates("main/dy-fetch-tap.js", "dist/"), [
+    "dist/main/dy-fetch-tap.js",
+    "main/dy-fetch-tap.js",
+  ]);
+  assert.deepEqual(runtimeAssetCandidates("main/dy-fetch-tap.js", ""), [
+    "main/dy-fetch-tap.js",
+  ]);
+});
 
 test("manifest icon assets exist", () => {
   const root = process.cwd();

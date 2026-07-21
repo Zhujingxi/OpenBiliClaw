@@ -257,6 +257,10 @@ _FIRST_PAGE_TOPUP_FLOOR = 10
 # polling clients must not re-run it every few seconds. An empty history
 # (fresh install) bypasses the debounce — matching the original bootstrap.
 _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
+# Collapse simultaneous boot reads from restored/stale browser tabs. The cache
+# is intentionally tiny: it is a load-shedding single-flight window, not a
+# user-visible freshness policy. Mutating recommendation routes invalidate it.
+_RECOMMENDATION_SNAPSHOT_TTL_SECONDS = 1.0
 _PROFILE_UPDATE_BACKFILL_LIMIT = 200
 _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
     "view",
@@ -1596,6 +1600,15 @@ def create_app(
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
     first_page_topup_attempted_at = 0.0
+    recommendation_snapshot_cache: RecommendationListResponse | None = None
+    recommendation_snapshot_cached_at = 0.0
+    recommendation_snapshot_lock = asyncio.Lock()
+
+    def _invalidate_recommendation_snapshot() -> None:
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        recommendation_snapshot_cache = None
+        recommendation_snapshot_cached_at = 0.0
+
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
@@ -4817,8 +4830,7 @@ def create_app(
                     )
         return EventIngestResponse(accepted=accepted, rejected=rejected)
 
-    @app.get("/api/recommendations", response_model=RecommendationListResponse)
-    async def recommendations() -> RecommendationListResponse:
+    async def _load_recommendations() -> RecommendationListResponse:
         nonlocal first_page_topup_attempted_at
 
         def _admission_min_score() -> float:
@@ -4942,7 +4954,45 @@ def create_app(
             ]
         )
 
+    @app.get("/api/recommendations", response_model=RecommendationListResponse)
+    async def recommendations() -> RecommendationListResponse:
+        """Return one coalesced recommendation snapshot.
+
+        Restored browser sessions can contain dozens of stale dashboard tabs.
+        When the backend comes back, those tabs all issue the same expensive
+        history/content join at once. A one-second cache plus single-flight
+        lock turns that burst into one database read while keeping interactive
+        mutations immediately visible through explicit invalidation.
+        """
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+
+        now = time.monotonic()
+        if (
+            recommendation_snapshot_cache is not None
+            and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+        ):
+            return recommendation_snapshot_cache.model_copy(deep=True)
+
+        async with recommendation_snapshot_lock:
+            now = time.monotonic()
+            if (
+                recommendation_snapshot_cache is not None
+                and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+            ):
+                return recommendation_snapshot_cache.model_copy(deep=True)
+            snapshot = await _load_recommendations()
+            recommendation_snapshot_cache = snapshot.model_copy(deep=True)
+            recommendation_snapshot_cached_at = time.monotonic()
+            return snapshot
+
     # ── Platform-neutral saved memberships and native sync ─────────
+
+    saved_state_snapshot_cache: dict[
+        tuple[SavedListKind, str], tuple[float, SavedItemStateResponse]
+    ] = {}
+
+    def _invalidate_saved_state(list_kind: SavedListKind, item_key: str) -> None:
+        saved_state_snapshot_cache.pop((list_kind, item_key), None)
 
     def _saved_service() -> Any:
         service = getattr(ctx, "saved_sync_service", None)
@@ -4974,19 +5024,29 @@ def create_app(
         list_kind: SavedListKind,
         item_key: str,
     ) -> SavedItemStateResponse:
+        cache_key = (list_kind, item_key)
+        cached = saved_state_snapshot_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS:
+            return cached[1].model_copy(deep=True)
         row = ctx.database.get_saved_membership(list_kind, item_key)
         if row is None:
-            return SavedItemStateResponse(saved=False, item_key=item_key)
-        return SavedItemStateResponse(
-            saved=True,
-            item_key=item_key,
-            sync_status=_safe_native_status(row.get("sync_status")),
-            sync_task_id=str(row.get("sync_task_id", "")),
-            resolved_action=str(row.get("resolved_action", "")),
-            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
-            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
-            error_message=_safe_result_text(row.get("last_error_message", "")),
-        )
+            response = SavedItemStateResponse(saved=False, item_key=item_key)
+        else:
+            response = SavedItemStateResponse(
+                saved=True,
+                item_key=item_key,
+                sync_status=_safe_native_status(row.get("sync_status")),
+                sync_task_id=str(row.get("sync_task_id", "")),
+                resolved_action=str(row.get("resolved_action", "")),
+                resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                error_message=_safe_result_text(row.get("last_error_message", "")),
+            )
+        if len(saved_state_snapshot_cache) >= 1000:
+            saved_state_snapshot_cache.clear()
+        saved_state_snapshot_cache[cache_key] = (now, response.model_copy(deep=True))
+        return response
 
     def _saved_list_item(row: dict[str, Any]) -> SavedListItem:
         return SavedListItem(
@@ -5050,6 +5110,7 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="invalid saved item") from exc
+        _invalidate_saved_state(list_kind, result.item_key)
         if result.sync_status == "pending" and result.sync_task_id:
             return SavedItemStateResponse(
                 saved=result.saved,
@@ -5093,6 +5154,7 @@ def create_app(
         payload: SavedItemKeyIn,
     ) -> SavedItemStateResponse:
         ctx.database.remove_saved_membership(list_kind, payload.item_key)
+        _invalidate_saved_state(list_kind, payload.item_key)
         return _saved_state_response(list_kind, payload.item_key)
 
     @app.get("/api/saved/{list_kind}/status", response_model=SavedItemStateResponse)
@@ -5744,6 +5806,7 @@ def create_app(
     async def reshuffle_recommendations(
         payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
     ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
         request_started = time.perf_counter()
         precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
@@ -5848,6 +5911,7 @@ def create_app(
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
         request_started = time.perf_counter()
         precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
@@ -7810,6 +7874,7 @@ def create_app(
             feedback_type=feedback_type,
             feedback_note=note,
         )
+        _invalidate_recommendation_snapshot()
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
@@ -10046,7 +10111,13 @@ def create_app(
 
     @app.get("/api/sources/credentials", response_model=SourcesCredentialsResponse)
     def sources_credentials(reveal_keys: bool = False) -> SourcesCredentialsResponse:
-        """Return current local Cookie / token snapshots for source settings pages."""
+        """Return masked local credential snapshots for settings pages.
+
+        ``reveal_keys`` remains a no-op for older desktop/extension builds.
+        Secrets are write-only: a same-origin settings read must not become a
+        bulk credential export.
+        """
+        del reveal_keys
         from openbiliclaw.api.source_auth.forms import (
             build_credential_form,
             credential_summary,
@@ -10092,7 +10163,7 @@ def create_app(
             form = build_credential_form(slug, cfg=cfg)
             return SourceCredentialItem(
                 label=label,
-                value=_mask_source_credential(value, reveal=reveal_keys or not secret),
+                value=_mask_source_credential(value, reveal=not secret),
                 available=available,
                 detail=detail,
                 form=form,
@@ -11349,7 +11420,14 @@ def create_app(
 
     @app.get("/api/config", response_model=ConfigResponse)
     def get_config(reveal_keys: bool = False) -> ConfigResponse:
-        """Return the current configuration (API keys masked by default)."""
+        """Return the current configuration with every secret masked.
+
+        Older clients append ``?reveal_keys=true``. Keep accepting that query
+        parameter so they continue to load, but never put raw API keys or
+        credential-bearing proxy userinfo in a browser-readable response.
+        Masked echoes are already treated as "keep existing" by PUT /api/config.
+        """
+        del reveal_keys
         from openbiliclaw.config import (
             _collect_config_issues,
             load_config,
@@ -11362,7 +11440,7 @@ def create_app(
         return _config_to_response(
             cfg,
             issues,
-            mask_keys=not reveal_keys,
+            mask_keys=True,
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
         )

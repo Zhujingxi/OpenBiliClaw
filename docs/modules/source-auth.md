@@ -16,6 +16,7 @@
 | 每平台 provider | `providers.py` 的 8 个纯函数取代 424 行 if/elif 聚合器（现 49 行） | ✅ |
 | Bangumi 接入契约 | 第 8 个平台接入：匿名公开 `auth_required=False` + 可选个人令牌 `live_probe` 验证 `/v0/me` | ✅ 见下方「Bangumi 的接入」 |
 | 显式验证动作 | `POST /api/sources/{slug}/verify`，8/8 平台可用，三态结果 | ✅ |
+| 并发安全的本地状态读取 | X 健康表首建单飞，读写使用短生命周期 SQLite connection；状态轮询不共享 connection | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
 | 三端共享渲染 | `web/shared/source-status.js`，desktop / popup / setup 引导页共用 | ✅ |
@@ -87,6 +88,8 @@ class SourceAuthContract(BaseModel):
 
 **`verified_at` 一律带时区，在后端归一。** 曾经有两种线格式：多数 provider 发 `datetime.now(UTC).isoformat()`（带 `+00:00`），而三处从 SQLite 读回时间戳的（X 的 `x_source_health`、知乎与 Reddit 的 `task_history`）发的是 `CURRENT_TIMESTAMP`——是 UTC 却不带时区标记。`Date.parse` 会把后者当本地时间，UTC+8 用户看到的**新鲜**结论会凭空老 8 小时，方向还正好反了：让最硬的证据显得最陈旧。现由 `SourceAuthContract` 的 `verified_at` field validator 统一补齐时区，**放在契约边界而不是各 provider 里**——这是所有契约的唯一必经之处，新 provider 无从绕过，移动 Web 与 CLI 也不必各自再防一次（CLAUDE.md pitfall #5：共享逻辑放后端）。无法解析的字符串**原样透传而非清空**：`""` 会被读成「从未验证」，还会触发 `check_legacy_consistency` 的新鲜度断言。前端 `normalizeTimestamp()` 保留为对老后端的防御。
 
+**活体探针有两个不同期限。** `PROBE_OK_TTL_SECONDS=60` 只回答“下一次显式验证能否复用这次结果”：超过 60 秒，再点测试连接必须重新访问平台，不能拿旧结论授权凭据写入。用户可见的成功证据则由 `_VERIFIED_FRESH_SECONDS=6h` 控制；一次真实成功不会在 61 秒时突然变成“验证已过期”，6 小时后才转 `stale`。失败仍使用 10 秒短窗口，让用户修复凭据后能尽快复验。provider 的实际判定与对外 `verify_ttl_seconds` 共用这套 6 小时可见窗口，避免“接口宣称 6 小时、页面 60 秒就过期”的分叉。
+
 三端出口不同，数据同源：桌面页给证据一个独立徽章（`.source-evidence-badge[data-rank]`）；侧边栏每源只有一行，用 `access.line` 把证据括号内联（`已验证（◆ 联网验证 · 3 分钟前）：…`）；setup 引导页在 B 站步骤打印同一份标签与证据。
 
 ### 端点
@@ -94,11 +97,15 @@ class SourceAuthContract(BaseModel):
 | 端点 | 说明 |
 | --- | --- |
 | `GET /api/sources/status` | 每平台 `SourceStatusItem`，含 `auth` 子对象；**纯读，绝不出网** |
-| `GET /api/sources/credentials` | 掩码凭据 + `form` 表单描述符 |
+| `GET /api/sources/credentials` | 只写秘密的掩码状态 + `form` 表单描述符；`reveal_keys=true` 兼容接受但不导出原值 |
 | `POST /api/sources/{slug}/verify` | 显式验证，返回契约 + `outcome` / `replayed` / `retry_after_seconds` |
 | `POST /api/sources/{slug}/credential` | 统一写入：结构校验 → 活体校验 → 落盘 → 广播 → 返回重算契约 |
 
 7 条老写入端点（`/api/bilibili/cookie`、`/api/sources/{dy,x,reddit}/cookie`、`/api/sources/xhs/tokens`、`/api/sources/{xhs,zhihu}/login-state`）保留为 `deprecated=True` 的内部转发，响应结构**逐字段冻结（值，不只是键集）**——它们有浏览器扩展在调用，而一个键还在、值被掏空的响应对只比对键集的测试是隐形的。`PUT /api/config` 的四处凭据写入同样委托统一校验门。
+
+**凭据读取是状态查询，不是秘密导出。** `GET /api/sources/credentials` 的 `available`、掩码预览、`summary` 与非敏感 Cookie 名称用于回答“是否已保存/由哪里管理”；秘密原值永不返回。历史 `reveal_keys` query 保留为 no-op，`form.actions` 不再包含 `copy`，桌面页面也不渲染复制按钮。新值只能走统一 credential 写入或配置 PUT；空值与掩码回显不会覆盖现有值。
+
+**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖八个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
 
 **任何写入面都没有降低校验强度的开关。** `POST /api/sources/{slug}/credential` 的 `validate_live` 已删——全仓零调用方（扩展、三端前端、CLI 都不发），等于给任何能连上 localhost 的东西一个关掉端点核心承诺的官方途径，不换来任何好处。老端点 `POST /api/bilibili/cookie` 的 `validate_with_bilibili` **仍接受但不再生效**：只删新端点而把隔壁一模一样的开关留着，等于那次删除只是装饰——「装机扩展总是发 true」描述的是扩展，不是所有能连上这个端口的东西；实测传 `false` 会让一份结构完整但已失效的 cookie 在探针零调用的情况下落盘。字段保留在协议上是因为装机扩展每次同步 cookie 都会发它，直接拒绝该键会 422 掉它们的同步；**「接受这个字段」与「这个字段能降低校验」是两件事**。`validate_credential()` 也随之删掉了 `live` 参数——能活体校验的平台一律活体校验，没有"少查一点"的入参。
 
@@ -122,11 +129,13 @@ class SourceAuthContract(BaseModel):
 
 **无法校验的绝不伪造。** 小红书与知乎后端只存一个 bool、零字节 cookie，其写入显式返回 `checked="none"` 加 `unverified_reason`，而不是假装校验过。
 
-**活体缓存按凭据判定，不按平台。** 写入门会复用 60 秒内的**正面**结论（抖音 `msToken` 频繁轮换，插件每次启动都重发整个 jar，每次都探测就是自造风控）。但复用只对**同一份凭据**成立：只按平台取缓存时，旧 cookie 的成功结论会替另一份结构完整却已失效的 cookie 背书，于是无效凭据一个网络请求都不发就落了盘——「无效凭据绝不落盘」在用户唯一看不见的那种情况下失效。`ProbeVerdict.credential_fingerprint` 存的是该平台**登录态字段**的 SHA-256（B 站 `SESSDATA`/`bili_jct`/`DedeUserID`，抖音 `sessionid`/`sessionid_ss`/`sid_tt`），字段名直接取自 `CREDENTIAL_SPECS` 的校验门，所以「什么算同一份凭据」与「校验门要求什么」不可能漂移；`msToken` 不在其中，轮换因此仍然命中缓存。写入门用 `peek_matching()`（**严格**：指纹不符或缺失一律重探，因为猜错的代价是死凭据落盘）；状态端点用 `contradicts()`（**宽松**：只有明确不符才丢弃，缺失指纹仍显示，因为它的暴露面被 60 秒 TTL 兜住且会自愈）。命中缓存的结论**不重新记录**，否则每次插件重发都会顺延自己的有效期，一份凭据可以永远「刚刚验证过」而实际从未复验。
+**活体缓存按凭据判定，不按平台。** 写入门会复用 60 秒内的**正面**结论（抖音 `msToken` 频繁轮换，插件每次启动都重发整个 jar，每次都探测就是自造风控）。但复用只对**同一份凭据**成立：只按平台取缓存时，旧 cookie 的成功结论会替另一份结构完整却已失效的 cookie 背书，于是无效凭据一个网络请求都不发就落了盘——「无效凭据绝不落盘」在用户唯一看不见的那种情况下失效。`ProbeVerdict.credential_fingerprint` 存的是该平台**登录态字段**的 SHA-256（B 站 `SESSDATA`/`bili_jct`/`DedeUserID`，抖音 `sessionid`/`sessionid_ss`/`sid_tt`），字段名直接取自 `CREDENTIAL_SPECS` 的校验门，所以「什么算同一份凭据」与「校验门要求什么」不可能漂移；`msToken` 不在其中，轮换因此仍然命中缓存。写入门用 `peek_matching()`（**严格**：指纹不符或缺失一律重探，因为猜错的代价是死凭据落盘）；状态端点用 `contradicts()`（**宽松**：只有明确不符才丢弃，缺失指纹仍显示；展示仍受 6 小时可见证据窗口约束，而凭据写入绝不会借用这个长窗口）。命中缓存的结论**不重新记录**，否则每次插件重发都会顺延自己的有效期，一份凭据可以永远「刚刚验证过」而实际从未复验。
 
 **X 的成功属于某一份凭据，不属于这个平台。** 只记「成功过」不记「谁成功的」，换 cookie 就会继承上一份的结论——实测新 cookie 直接拿到旧 cookie 的 `verified`**连时间戳都一字未变**。这与上一条按平台取缓存是同一个错误，只是换了个 store。`last_success_credential` 记下产生该成功的凭据指纹（由 producer 在解析 cookie、构造 `XClient` 的同一处绑定，所以「记录成功的那份凭据」就是「发出请求的那份凭据」），读取时与当前 cookie 比对，不符即非证据。**不挂在写入路径上而是比对身份**：cookie 也可能经环境变量或直接改 data file 变更，那些路径一个钩子都不经过；`clear_relogin_block()` 更救不了——健康行本就是 `ok` 时它返回 `False`，什么都不清。build 期绑定也是安全方向：若 cookie 变了而 producer 未重建，指纹仍跟着**真正在发请求**的那份凭据走,新 cookie 显示 `unverified` 而非冒领他人战绩。
 
 **X 的 `ok` 不等于验证通过。** `x_source_health` 的行是以 `state='ok'` 为**默认值**建出来的,所以「从未发过任何请求」与「上次请求成功」在 `state` 上完全同形。照 `ok` 直接映射 `verified`,意味着全新数据库里第一次写入的 X cookie——哪怕它几个月前就过期了——会立刻宣称 `verification=verified` + `verify_method=passive_health`,而 `passive_health` 恰恰是唯一无法主动重跑来自证的方式。现新增 `last_success_at` 列(只由 `record_success` 写),没有它就报 `unverified`。`clear_relogin_block()` 会**清空**该列：它是凭新 cookie 给出的乐观解封,不是用新 cookie 拿到的结果,留着旧成功等于让新凭据继承别人的战绩。迁移**不回填**——老行里没有任何信号能区分这两种情况,猜一个就是把同一个伪造推迟一次迁移;代价是升级后 X 显示 `unverified` 直到下一轮 discovery 成功。
+
+**X 健康表不能在状态请求的共享 connection 上做任何工作。** `/api/sources/status` 是同步 handler，会被 FastAPI 线程池并发执行；`check_same_thread=False` 只允许 connection 跨线程使用，不代表同一个 connection 可以同时 `CREATE/PRAGMA/SELECT`。真实 30 并发请求曾有 3 次返回 500（`sqlite3.Connection returned NULL`）。`XSourceHealthStore` 现对每个 `Database` 实例只单飞执行一次 schema 初始化，且初始化、读取、成功/失败写入、人工冷却覆盖均使用 `Database.open_connection()` 的短连接；`record_error()` 的计数读取与更新位于同一 `BEGIN IMMEDIATE` 事务，既避开共享 connection，也不丢连续 429 计数。
 
 ## Bangumi 的接入
 

@@ -6196,7 +6196,11 @@ async def _fetch_x_init_data(
     never hard-fail ``init``. Returns ``(likes, bookmarks)`` as
     ``tweet_to_dict`` dicts.
     """
+    import logging
+
     from openbiliclaw.config import load_config
+
+    logger = logging.getLogger("openbiliclaw.cli")
 
     cfg = load_config()
     x_cfg = getattr(getattr(cfg, "sources", None), "twitter", None)
@@ -6212,22 +6216,68 @@ async def _fetch_x_init_data(
         )
         return [], []
 
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
     from openbiliclaw.sources.x_client import XClient
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
 
     x_client = XClient(cookie=cookie)
+    health_db: Database | None = None
+    health_store: XSourceHealthStore | None = None
+    try:
+        health_db = Database(cfg.data_path / "openbiliclaw.db")
+        health_db.initialize()
+        health_store = XSourceHealthStore(
+            health_db,
+            credential_fingerprint=credential_fingerprint("twitter", cookie),
+        )
+    except Exception:
+        # Health evidence is observability, not a prerequisite for the user's
+        # read-only smoke/init fetch. Keep the request path available if the
+        # local status database is temporarily unavailable.
+        logger.debug("fetch-x: failed to open the shared X health store", exc_info=True)
+        if health_db is not None:
+            health_db.close()
+        health_db = None
+        health_store = None
+
+    def _record_success(strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_success(strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s success", strategy, exc_info=True)
+
+    def _record_error(exc: BaseException, strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_error(exc, strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s error", strategy, exc_info=True)
+
     likes: list[dict[str, Any]] = []
     bookmarks: list[dict[str, Any]] = []
-    if likes_limit > 0:
-        try:
-            likes = await x_client.likes(limit=likes_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
-    if bookmarks_limit > 0:
-        try:
-            bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
-    return likes, bookmarks
+    try:
+        if likes_limit > 0:
+            try:
+                likes = await x_client.likes(limit=likes_limit)
+                _record_success("likes")
+            except Exception as exc:
+                _record_error(exc, "likes")
+                console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
+        if bookmarks_limit > 0:
+            try:
+                bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
+                _record_success("bookmarks")
+            except Exception as exc:
+                _record_error(exc, "bookmarks")
+                console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
+        return likes, bookmarks
+    finally:
+        if health_db is not None:
+            health_db.close()
 
 
 def _load_extension_bangumi_identity() -> tuple[str, bool]:
@@ -8325,6 +8375,8 @@ def _run_single_source_bootstrap(
 
     events, scope_counts, status_label = collect(task_id)
     summary_renderer(scope_counts, status_label, len(events))
+    if status_label in {"timeout", "failed"}:
+        raise typer.Exit(code=1)
 
 
 @app.command("profile-consolidate")

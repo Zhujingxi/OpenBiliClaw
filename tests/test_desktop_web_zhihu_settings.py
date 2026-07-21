@@ -110,9 +110,13 @@ def test_desktop_current_credentials_render_in_collapsed_panels() -> None:
     ):
         assert f'data-source-credential="{source_key}"' in html
 
-    assert "/sources/credentials?reveal_keys=true" in js
+    assert 'sourceCredentials: "/sources/credentials"' in js
+    assert "reveal_keys=true" not in js
     # Status rows and credential rows now walk the same roster from the shared
     # module; they used to be two identical hand-kept arrays in this one file.
     assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert "renderSourceCredentials" in js
     assert "source-credential-value" in html
+    assert "后端不会把原始 Cookie、令牌或 API Key 回传到页面" in html
+    assert "source-credential-copy" not in html
+    assert "已复制当前凭据" not in js

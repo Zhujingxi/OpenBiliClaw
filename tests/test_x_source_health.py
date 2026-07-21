@@ -18,6 +18,9 @@ All tests run offline against a real on-disk :class:`Database`.
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -78,6 +81,49 @@ def test_default_state_is_ok(tmp_path: Path) -> None:
     assert health["state"] == OK
     assert health["consecutive_failures"] == 0
     assert health["feed_paused"] is False
+
+
+def test_repeated_store_construction_does_not_rerun_schema_sql(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    XSourceHealthStore(db)
+    statements: list[str] = []
+    db.conn.set_trace_callback(statements.append)
+
+    for _ in range(20):
+        XSourceHealthStore(db)
+
+    db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_concurrent_first_store_construction_initializes_schema_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    original = XSourceHealthStore._ensure_table
+    call_count = 0
+    call_lock = threading.Lock()
+    start = threading.Barrier(20)
+
+    def counted_ensure_table(store: XSourceHealthStore) -> None:
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+        time.sleep(0.02)
+        original(store)
+
+    monkeypatch.setattr(XSourceHealthStore, "_ensure_table", counted_ensure_table)
+
+    def construct() -> dict[str, object]:
+        start.wait()
+        return XSourceHealthStore(db).get()
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(lambda _: construct(), range(20)))
+
+    assert call_count == 1
+    assert all(result["state"] == OK for result in results)
 
 
 def test_record_success_clears_failures_and_cooldown(tmp_path: Path) -> None:

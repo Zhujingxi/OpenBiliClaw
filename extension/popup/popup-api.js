@@ -650,7 +650,7 @@ export async function respondToDelight(bvid, responseType, title = "", message =
 }
 
 export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
+  const config = await requestJson("/config", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }

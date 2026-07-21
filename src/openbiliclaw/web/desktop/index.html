@@ -442,48 +442,40 @@
               </div>
             </div>
           </div>
-          <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
+          <p class="settings-section-title">Cookie / 登录凭据状态</p>
+          <p class="settings-note-inline">默认折叠；这里只显示脱敏预览、凭据是否已保存以及非敏感的 Cookie 名称，后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
           <div id="sourceCredentialList" class="source-credential-list">
             <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bilibili<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>小红书<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>抖音<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>YouTube<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>知乎<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Reddit<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="bangumi">
-              <summary><strong>Bangumi<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bangumi<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
           </div>
           <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>

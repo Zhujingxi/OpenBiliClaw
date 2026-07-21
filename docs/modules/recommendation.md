@@ -40,6 +40,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | M122 来源优先补齐 | ✅ | 推荐选片时会先补齐不同 `source`，再限制重复 `style`，避免 `explore` 把 `search/trending` 挤出同一批结果 |
 | 平台定向推荐（PC Web） | ✅ | `serve / reshuffle / append`（含 `*_with_result`）新增默认空的 keyword-only `source_platform`。非空时只装载该 canonical 平台的候选、跳过跨平台保底补位，其余 curator 打分、amplification guard、embedding/MMR、topic/style/broad-topic 多样性、视觉加成、持久化与 shown 提交全部复用既有实现——平台作用域只缩小候选集合，绝不是"先生成混合批次再过滤结果"。返回前经 `_enforce_platform_scope()` 校验，发现跨平台行记 ERROR 并丢弃，不让泄漏进响应。省略该参数时调用形状与行为与引入前完全一致（对签名不确定的兼容对象也只在真的带平台时才传新关键字）。**仅 PC Web 有该交互**：移动 Web、扩展 popup / side panel 与 CLI 没有平台 Tab，继续走不带平台的兼容路径，行为不变 |
 | 平台库存徽标（PC Web） | ✅ | `GET /api/recommendations/platform-availability` 返回 `{total_available, by_platform}`，来自 storage 的单次隔离快照，`total_available == sum(by_platform)` 恒成立，且与平台定向选片同一 servability 口径。读取失败返回可诊断 5xx，前端保留上一次成功快照，绝不把失败当成全零 |
+| 恢复标签页读取合并 | ✅ | `GET /api/recommendations` 使用 1 秒进程内快照与 `asyncio.Lock` single-flight，把浏览器恢复几十个旧标签页时的同形昂贵历史读取合并为一次；返回值 deep-copy，reshuffle / append / feedback 会立即失效快照。逐卡 `/api/saved/{list_kind}/status` 采用同窗口有界短缓存，并在 save/remove 时按 item 失效，不改变交互一致性。 |
 | M123 上游来源配额补货 | ✅ | discovery pool 低于目标值时，runtime 会按前端可换口径计算来源缺口，并用 raw-material headroom 限制请求量，减少推荐层长期面对“explore 过满、trending 过少”的偏池子 |
 | M124 generate 路径丰富度修正 | ✅ | `generate_recommendations()` 现在也会先对缓存候选做来源均衡，再分阶段放宽 `topic/style/source` 约束，避免高分 `related_chain` 长时间吃掉整批名额 |
 | M125 pool 预生成推荐文案 | ✅ | discovery pool 现在会异步批量预生成 `expression/topic_label`，`reshuffle/append` 只消费预生成结果，缺失时返回空而不是写统一兜底 |

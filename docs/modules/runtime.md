@@ -46,6 +46,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | Activity feed 状态摘要 | ✅ | `/api/activity-feed` 聚合认知更新、反馈、推荐池补货和 live summary；未初始化且还没有推荐 / 可换池 / 补货产物时，普通 `/api/events` 不会新写入 pending signals，旧的 `pending_signal_events` 也不会抢占初始化提示。初始化后 pending 文案统一为“已记下 N 个新动作，下一轮补货会拿来参考”，表示 discovery refresh 水位，不表示画像待处理队列。 |
 | 桌面 Web 推荐卡链接与元信息 | ✅ | `/web` 推荐卡、稍后再看 / 收藏卡、消息抽屉内容和惊喜推荐封面都使用真实 `<a href target="_blank" rel="noopener noreferrer">`；点击上报同时绑定 `click` 与中键 `auxclick`，但不阻止浏览器原生中键 / Ctrl 或 Cmd 点击 / 右键菜单行为。`RecommendationOut` 增量暴露 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid`、发布时间与目录指标 `rating_score / rating_count / source_rank`；桌面卡片展示视频时长、真实互动和 Bangumi 评分 / 评分人数 / 排名，字段为 0 或缺失时整段隐藏，不在无数据卡片上显示空元信息。Bangumi 缺 URL 时回退 `https://bgm.tv/subject/<id>`；B 站且 `up_mid>0` 时 UP 主名跳到 `space.bilibili.com`，其它平台保持纯文本。 |
 | 桌面 Web 首屏渐进水合 | ✅ | 首屏以 `/api/ping` 判断连接，推荐与 runtime 状态各自返回即各自渲染；health / init / profile / activity / config 等次级读取不会挡住推荐卡。推荐消费后仍独立复读 runtime 库存，失败沿用 1/2/4/8 秒的资源级恢复。 |
+| 桌面标签页后台节流 | ✅ | 桌面 Web 以 `startDesktopBackendSession()` 作为 hydrate + runtime WebSocket 的可见性边界：隐藏状态启动零业务请求，进入后台即关闭 stream 并清理推荐/runtime/库存/activity/init 恢复定时器；恢复前台时按 15 秒 snapshot freshness 单飞 hydrate，再只建一个 CONNECTING/OPEN socket。后端 `/api/recommendations` 另用 1 秒 cache + `asyncio.Lock` 合并旧版/已加载标签页同时恢复造成的昂贵读取，并对 per-card saved status 做同窗口短缓存；reshuffle/append/feedback/save/remove 均失效对应缓存。 |
 | 桌面 Web 封面请求优先级 | ✅ | 桌面推荐仅前 4 张封面使用 `eager/high`，后续封面使用 `lazy/low`；Delight 保持 `eager/high`。 |
 | 桌面 Web 动效与布局稳定 | ✅ | 根滚动启用 `scrollbar-gutter: stable`，避免内容变长时顶栏横向抖动；消息 / 活动 / 手机二维码抽屉关闭进入 `.is-closing` 退出动画，快速开关会取消未完成 close；六个主分区切换使用短 `page-enter` 淡入。新增动效统一受 `prefers-reduced-motion: reduce` 保护。 |
 | 桌面 Web 暗色模式 | ✅ | `/web` 支持 `auto` / `light` / `dark` 三态主题，顶栏按钮和设置页分段控件共享 `obc.theme` 本地键；`auto` 不写 `data-theme`，交给 `prefers-color-scheme`，手动浅色 / 深色写入 `:root[data-theme=...]`。暗色实现只覆盖 CSS token（暖暗背景、前景、边框、语义色、overlay、shadow），不为单个组件分叉硬编码颜色；`<meta name="color-scheme" content="light dark">` 让原生控件和滚动条跟随主题。 |
@@ -386,7 +387,11 @@ status = service.get_runtime_status()
 
 `get_runtime_status()` 经 `/api/runtime-status` 下发 `last_account_sync_error_kind`、`last_account_sync_issues`、仅供诊断的原始 `last_account_sync_error`，以及后端统一计算的 `last_account_sync_message` / `last_account_sync_severity`。多阶段失败会按「域 + 原因」合并成逐项中文说明；全部属于登录生命周期或限流时为 warning，混入网络、接口、画像配置等故障时为 error。文案只在确实可自行恢复时承诺下一轮重试，需用户修复 Cookie、API Key、模型名或连接时给出对应动作；X-only 问题明确说明 B 站等来源不受影响。旧状态文件没有 issue 列表时继续回退旧 kind/detail 文案，畸形或未知 issue 会在 MemoryManager 与 runtime 边界归一化。桌面 Web 消费这些后端成品字段选择 warning/error 样式；扩展 popup / 移动 Web / CLI 目前不展示此横幅。
 
+桌面首页同时读取本地-only `/api/sources/status`，把它明确命名为「来源接入」后与上面的「账号同步」组合展示：八个平台中已启用来源的缺凭据、不完整、过期、失败、受阻、限流或未知状态会点名平台并原样显示后端 `detail`；正常的 `unverified` / `syncing` 不进入故障横幅。这样扩展心跳、公开源与命令行凭据状态都可定位，但不会被冒充为 `AccountSyncService` 的同步阶段。
+
 **X 定时增量**：仅在 `[sources.twitter].enabled=true` 且 `sources.x_auth.resolve_x_cookie` 解析到 Cookie 时，两处装配点才构造 `XClient`；同一 6h 周期内在 B 站各阶段之后拉取 likes / bookmarks（各上限 200，`_X_FETCH_LIMIT`），分别映射为 `like` / `favorite` 事件（`source_platform="twitter"`）。去重用状态集合 `x_like_ids` / `x_bookmark_ids`（归一化 tweet ID，取 URL 的 `/status/<id>` 尾段，兼容 `x.com/i/status/<id>` 与 `x.com/<handle>/status/<id>` 两种形态，集合上限 2000 保最新）；集合为空的首轮从 events 表已持久化的 X 事件播种，init 之后、首轮之前新增的 like 仍会正常发事件。API runtime 把 discovery producer 的同一 `XSourceHealthStore` 注入账号同步；OpenClaw 构造与 Cookie 指纹绑定的同类 store。每轮出网前先查 `is_ready()`，已在 429 cooldown、缺/过期 Cookie 或 403 block 时直接跳过；likes 首个失败会 `record_error()` 并在 store 变为不可用后取消 bookmarks，成功则 `record_success()`。X 子路径失败只记入 errors + WARN，不影响 B 站同步，反之亦然。
+
+手动 `openbiliclaw fetch-x` 使用同一健康表：每个实际执行的 likes/bookmarks 请求分别 `record_success(strategy=...)` 或 `record_error(...)`，并用当前真实发请求 Cookie 的指纹绑定证据。`--dry-run` 只禁止 memory 写入，不禁止这份请求健康证据；因此一次真实成功 smoke 后 `/api/sources/status` 可以立即显示 X 已由「请求反馈」验证，而不是必须等待 daemon 的下一轮 discovery。
 
 daemon 的 `sync_if_due()` 还受共享 `background_llm_work_allowed()` 约束：完整画像尚未生成时不会开始首次 account-sync，因此不会在 `/setup` 点击「开始初始化」之前先写入、分析同一批 B 站 bootstrap 历史；画像落盘且 guided init 终态后才恢复增量同步。显式运维调用 `sync_now()` 仍保留原语义。
 
@@ -468,7 +473,7 @@ B 站扩展搜索 producer 是 API 搜索的兜底，不是常驻主发现路径
 
 XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
-- 单任务内：`merge_result()` 合并 partial / final payload 时按 scope + 平台原生 ID / URL / title 去重，只把本次新增项返回给 API 传播。
+- 单任务内：`merge_result()` 合并 partial / final payload 时按 scope + 平台原生 ID / URL / title 去重，只把本次新增项返回给 API 传播。XHS 的 `scope_counts` 以扩展报告值和已合并 scope-aware canonical 行数两者较大值为准；因此两个互不重叠的 partial 即使各自都报告 `saved=5`，终态也会诚实显示 `saved=10`，同一笔记同时出现在 saved/liked 则保留为两个不同强信号。
 - 跨任务：API 在传播 bootstrap 事件前读取 `source_bootstrap_state.json`，跳过已经进入事件路径的 `xhs_seen_note_keys` / `dy_seen_video_keys` / `yt_seen_item_keys`。这样 `fetch-*`、`init` 或近期任务复用重复返回同一批收藏 / 历史时，不会再次写入 memory 或触发增量画像分析。
 
 ## 配置项

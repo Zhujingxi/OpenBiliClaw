@@ -13,9 +13,10 @@ gate enforces would be D6's drift rebuilt one layer up: the form would tell a
 user to include a cookie the validator does not want, or omit one it rejects
 for. The single place both read from is the platform's ``CredentialSpec``.
 
-**Actions are capabilities, not decoration.** Only three exist because only
-three are backed by something real: ``verify`` has a route for all 7 platforms,
-``copy`` needs a displayable value, and ``open_login_window`` needs a login page.
+**Actions are capabilities, not decoration.** ``verify`` has a route for every
+platform and ``open_login_window`` needs a login page. Stored credentials are
+write-only: masked status may be displayed, but a settings read must not export
+the original value, so ``copy`` is deliberately not advertised.
 ``clear`` — which the spec's field table listed as an example — is deliberately
 absent: nothing in the API can erase a stored credential, and shipping the
 button first and the endpoint later is how a UI starts lying.
@@ -67,10 +68,6 @@ def _actions(spec: CredentialSpec) -> list[FormAction]:
         # list would be a source the user cannot ask about at all.
         FormAction(action="verify", label="测试连接"),
     ]
-    if spec.form_kind != "none":
-        # Even ``extension_only`` platforms can surface a stored value (小红书's
-        # xsec_token), so copy is about *display*, not about writability.
-        actions.append(FormAction(action="copy", label="复制"))
     if spec.login_url:
         actions.append(FormAction(action="open_login_window", label="去登录", url=spec.login_url))
     return actions
@@ -124,5 +121,5 @@ def credential_summary(
         return detail or "当前没有可展示 Cookie"
     name = label or "Cookie"
     if form.kind == "extension_only":
-        return f"{name} 已保存（不代表账号登录），展开查看"
-    return f"{name} 已保存，展开查看"
+        return f"{name} 已保存（不代表账号登录；原值不回传）"
+    return f"{name} 已保存（原值不回传）"

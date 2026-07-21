@@ -306,6 +306,34 @@ test("每个 verification 都有 tone 与文案，rate_limited 不诬告凭据",
   assert.notEqual(limited.tone, "danger");
 });
 
+test("dashboard issue classification covers every enabled source without flagging normal pending states", () => {
+  const actionable = [
+    { state: "missing", auth: { credential: "none", verification: "unverified" } },
+    { state: "stale", auth: { credential: "present", verification: "stale" } },
+    { state: "error", auth: { credential: "present", verification: "failed" } },
+    { state: "blocked", auth: { credential: "present", verification: "blocked" } },
+    { state: "rate_limited", auth: { credential: "present", verification: "rate_limited" } },
+  ];
+  for (const item of actionable) {
+    const issue = SourceStatus.describeSourceIssue({
+      ...item,
+      enabled: true,
+      detail: `backend detail for ${item.state}`,
+    });
+    assert.ok(issue, item.state);
+    assert.equal(issue.detail, `backend detail for ${item.state}`);
+  }
+
+  for (const item of [
+    { state: "ready", auth: { credential: "present", verification: "verified" } },
+    { state: "unverified", auth: { credential: "present", verification: "unverified" } },
+    { state: "syncing", auth: { credential: "present", verification: "unverified" } },
+    { state: "missing", enabled: false, auth: { credential: "none", verification: "unverified" } },
+  ]) {
+    assert.equal(SourceStatus.describeSourceIssue({ enabled: true, ...item }), null, item.state);
+  }
+});
+
 // A side panel installed from the store can be pointed at a self-hosted backend
 // older than this contract, and a cached payload can predate it too. Neither
 // may blank the row out.
