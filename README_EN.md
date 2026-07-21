@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.181 (2026-07-20)**
+📌 Latest: **v0.3.182 (2026-07-21)**
 
-- **Recommendations are no longer dominated by one source** — pool shares are enforced end-to-end, closing the four blind spots that let Reddit fill all 300 slots while Bangumi / Douyin / YouTube sat at zero.
-- **Desktop web platform tabs are now a real recommendation scope** — "Shuffle / Load more" draws only from the selected platform, and each tab shows its true servable inventory.
-- **Delight picks wait for their real copy** — placeholder text is no longer promoted as a friend-style recommendation.
-- **Pacing tuned from real feedback** — initialization drops unreliable time estimates for elapsed time and true progress; the delight carousel slows from 4s to 60s.
+- **Sync errors now name the step and the cause** — the home page splits "account sync" from "source access" and points at the exact platform and reason instead of a bare "sync failed".
+- **An X rate limit only skips X** — it is no longer reported as a whole-account sync failure, and no longer bypasses the cooldown to keep requesting.
+- **"Shuffle" is a pure dedupe action again** — all three surfaces exclude the current cards instead of firing batch "dislike" events into your profile.
+- **Windows / macOS desktop upgrades really switch to the new build** — macOS ships an in-DMG installer that verifies signature and version, then swaps atomically and relaunches.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
