@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import logging
@@ -210,6 +211,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+
+_HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
+# First-round calibration (2026-07-22): three days matches the existing
+# object-level ask budget and makes "以后再说" durable without becoming a
+# permanent dismissal. Recalibrate after the first production month.
+_CONFIRMATION_OBJECT_COOLDOWN_HOURS = 72
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
 # provider call, so ``touch()`` proves that the wrapper/event loop still owns the
@@ -2264,9 +2271,86 @@ def create_app(
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
     running_chat_turn_tasks: set[str] = set()
 
+    def _dialogue_confirmation_state_path() -> Any:
+        from pathlib import Path
+
+        data_dir = getattr(ctx.memory_manager, "_data_dir", None) or config.data_path
+        return Path(data_dir) / "memory" / "dialogue_confirmation_state.json"
+
+    def _normalize_dialogue_confirmation_state(raw: object) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raw = {}
+        raw_objects = raw.get("objects", {})
+        objects = raw_objects if isinstance(raw_objects, dict) else {}
+        normalized_objects: dict[str, dict[str, str]] = {}
+        for raw_ref, raw_item in objects.items():
+            if not isinstance(raw_item, dict):
+                continue
+            ref = str(raw_ref).strip()
+            if not ref:
+                continue
+            normalized_objects[ref] = {
+                "last_asked_at": str(raw_item.get("last_asked_at", "")).strip(),
+                "deferred_until": str(raw_item.get("deferred_until", "")).strip(),
+            }
+        return {
+            "global_last_thrown_at": str(raw.get("global_last_thrown_at", "")).strip(),
+            "objects": normalized_objects,
+        }
+
+    def _load_dialogue_confirmation_state() -> dict[str, Any]:
+        path = _dialogue_confirmation_state_path()
+        if not path.exists():
+            return _normalize_dialogue_confirmation_state({})
+        try:
+            with open(path, encoding="utf-8") as state_file:
+                return _normalize_dialogue_confirmation_state(json.load(state_file))
+        except (OSError, ValueError):
+            logger.warning("Failed to load dialogue confirmation state; using defaults")
+            return _normalize_dialogue_confirmation_state({})
+
+    def _update_dialogue_confirmation_state(
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any]:
+        from openbiliclaw.memory.json_state import update_json_state
+
+        def apply(state: dict[str, Any]) -> dict[str, Any]:
+            mutate(state)
+            return state
+
+        return update_json_state(
+            _dialogue_confirmation_state_path(),
+            default_factory=lambda: _normalize_dialogue_confirmation_state({}),
+            normalize=_normalize_dialogue_confirmation_state,
+            serialize=_normalize_dialogue_confirmation_state,
+            mutate=apply,
+        )
+
+    def _defer_dialogue_confirmation(ref: str) -> str:
+        from datetime import UTC, datetime, timedelta
+
+        deferred_until = (
+            datetime.now(UTC) + timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
+        ).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            item["deferred_until"] = deferred_until
+
+        _update_dialogue_confirmation_state(mutate)
+        return deferred_until
+
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
-        if normalized in {"chat", "delight", "probe", "avoidance_probe", "confusion"}:
+        if normalized in {
+            "chat",
+            "delight",
+            "probe",
+            "avoidance_probe",
+            "confusion",
+            "hypothesis",
+        }:
             return normalized
         return "chat"
 
@@ -2300,9 +2384,45 @@ def create_app(
     def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
         get_chat_turn = _chat_db_method("get_chat_turn")
         if get_chat_turn is not None:
-            return cast("dict[str, Any] | None", get_chat_turn(turn_id))
+            row = cast("dict[str, Any] | None", get_chat_turn(turn_id))
+            if row is not None and _reconcile_chat_card_row(row):
+                row = cast("dict[str, Any] | None", get_chat_turn(turn_id))
+            return row
         row = fallback_chat_turns.get(turn_id)
         return dict(row) if row else None
+
+    def _reconcile_chat_card_row(row: dict[str, Any]) -> bool:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return False
+        if not isinstance(raw_payload, dict) or raw_payload.get("type") != "card":
+            return False
+        changed = False
+        ref = str(raw_payload.get("ref", "")).strip()
+        project = _chat_db_method("project_applied_card_settlement")
+        if ref and project is not None:
+            changed = int(project(ref) or 0) > 0
+        if str(raw_payload.get("state", "")) != "discussing":
+            return changed
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active_anchor = anchor_manager.current() if anchor_manager is not None else None
+        if active_anchor is not None and active_anchor.origin_turn_id == str(
+            row.get("turn_id", "")
+        ):
+            return changed
+        from datetime import UTC, datetime, timedelta
+
+        repair = _chat_db_method("repair_stale_chat_card_discussion")
+        if repair is not None:
+            repaired = repair(
+                str(row.get("turn_id", "")),
+                stale_before=datetime.now(UTC) - timedelta(minutes=5),
+            )
+            changed = bool(repaired) or changed
+        return changed
 
     def _list_chat_turn_rows(
         *,
@@ -2312,10 +2432,18 @@ def create_app(
     ) -> list[dict[str, Any]]:
         list_chat_turns = _chat_db_method("list_chat_turns")
         if list_chat_turns is not None:
-            return cast(
+            rows = cast(
                 "list[dict[str, Any]]",
                 list_chat_turns(session=session, scope=scope, limit=limit),
             )
+            reconciled = [_reconcile_chat_card_row(row) for row in rows]
+            changed = any(reconciled)
+            if changed:
+                rows = cast(
+                    "list[dict[str, Any]]",
+                    list_chat_turns(session=session, scope=scope, limit=limit),
+                )
+            return rows
         rows = [
             dict(row)
             for row in fallback_chat_turns.values()
@@ -2324,7 +2452,12 @@ def create_app(
         rows.sort(key=lambda row: (str(row.get("created_at", "")), str(row.get("turn_id", ""))))
         return rows[-max(1, int(limit)) :]
 
-    def _create_chat_turn_row(payload: ChatTurnIn, *, turn_id: str) -> dict[str, Any]:
+    def _create_chat_turn_row(
+        payload: ChatTurnIn,
+        *,
+        turn_id: str,
+        structured_payload: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
         create_chat_turn = _chat_db_method("create_chat_turn")
         if create_chat_turn is not None:
             return cast(
@@ -2336,6 +2469,7 @@ def create_app(
                     subject_id=payload.subject_id.strip(),
                     subject_title=payload.subject_title.strip(),
                     message=payload.message.strip(),
+                    payload=structured_payload or {},
                 ),
             )
 
@@ -2354,7 +2488,7 @@ def create_app(
                 "status": "pending",
                 "reply": "",
                 "error": "",
-                "payload": {},
+                "payload": dict(structured_payload or {}),
                 "created_at": now,
                 "updated_at": now,
             },
@@ -7085,11 +7219,22 @@ def create_app(
             concurrency.chat_active = True
         try:
             async with chat_turn_lock:
+                respond_kwargs: dict[str, object] = {
+                    "scope": turn.scope or "chat",
+                    "turn_id": turn.turn_id,
+                }
+                try:
+                    supports_session = (
+                        "session" in inspect.signature(ctx.dialogue.respond).parameters
+                    )
+                except (TypeError, ValueError):
+                    supports_session = False
+                if supports_session:
+                    respond_kwargs["session"] = turn.session
                 reply = await asyncio.wait_for(
                     ctx.dialogue.respond(
                         _contextual_chat_message(turn),
-                        scope=turn.scope or "chat",
-                        turn_id=turn.turn_id,
+                        **respond_kwargs,
                     ),
                     timeout=120,
                 )
@@ -7273,6 +7418,296 @@ def create_app(
             )
             await _publish_probe_event("confusion.chat", summary, turn.subject_id or label)
 
+    def _hypothesis_card_payload(payload: ChatTurnIn) -> dict[str, object]:
+        raw_evidence = payload.payload.get("evidence_refs", [])
+        evidence_refs = (
+            [str(item).strip() for item in raw_evidence if str(item).strip()]
+            if isinstance(raw_evidence, list)
+            else []
+        )
+        return {
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": payload.subject_id.strip(),
+            "title": payload.subject_title.strip(),
+            "evidence_refs": evidence_refs,
+            "actions": list(_HYPOTHESIS_CARD_ACTIONS),
+            "state": "pending",
+        }
+
+    def _card_terminal_state(verdict: str) -> str:
+        return "confirmed" if verdict.strip().lower() in {"confirm", "confirmed"} else "rejected"
+
+    def _card_action_response(
+        *,
+        outcome: str,
+        verdict: str,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state = _card_terminal_state(verdict)
+        response: dict[str, Any] = {
+            "ok": outcome != "processing",
+            "outcome": outcome,
+            "verdict": state,
+            "state": state if outcome != "processing" else "processing",
+        }
+        if result:
+            response.update(
+                {
+                    "matched": bool(result.get("matched", False)),
+                    "hypothesis": str(result.get("hypothesis", "")),
+                    "signal": str(result.get("signal", "")),
+                    "validated": bool(result.get("validated", False)),
+                    "confidence": float(result.get("confidence", 0.0)),
+                }
+            )
+        return response
+
+    def _feedback_result(feedback: dict[str, Any]) -> dict[str, Any]:
+        reader = getattr(ctx.soul_engine, "feedback_result", None)
+        if callable(reader):
+            result = reader(feedback)
+            if isinstance(result, dict):
+                return dict(result)
+        return {
+            "matched": False,
+            "hypothesis": str(feedback.get("hypothesis", "")),
+            "signal": str(feedback.get("signal", "")),
+            "validated": False,
+            "confidence": 0.0,
+        }
+
+    async def _settle_hypothesis(
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        if ctx.soul_engine is None:
+            raise HTTPException(status_code=503, detail="Soul engine not ready.")
+        database = ctx.database
+        required_methods = (
+            "try_create_card_settlement",
+            "get_card_settlement",
+            "claim_card_settlement",
+            "record_card_settlement_event",
+            "mark_card_settlement_segment",
+            "finish_card_settlement_marker",
+            "complete_card_settlement",
+            "project_applied_card_settlement",
+        )
+        if any(not callable(getattr(database, name, None)) for name in required_methods):
+            raise HTTPException(status_code=503, detail="Card settlement store is not ready.")
+
+        normalized_verdict = _card_terminal_state(requested_verdict)
+        inserted = bool(
+            database.try_create_card_settlement(
+                ref=ref,
+                verdict=normalized_verdict,
+                turn_id=turn_id,
+            )
+        )
+        settlement = database.get_card_settlement(ref)
+        if not isinstance(settlement, dict):
+            raise RuntimeError("Card settlement arbitration row disappeared")
+        stored_verdict = _card_terminal_state(str(settlement.get("verdict", "")))
+        signal = "confirm" if stored_verdict == "confirmed" else "reject"
+        feedback: dict[str, Any] = {"hypothesis": hypothesis, "signal": signal}
+        if int(settlement.get("applied", 0)) == 1:
+            database.project_applied_card_settlement(ref)
+            return _card_action_response(
+                outcome="already_settled",
+                verdict=stored_verdict,
+                result=_feedback_result(feedback),
+            )
+
+        from datetime import UTC, datetime
+
+        claim_token = uuid.uuid4().hex
+        claimed = bool(
+            database.claim_card_settlement(
+                ref=ref,
+                claim_token=claim_token,
+                now=datetime.now(UTC),
+            )
+        )
+        if not claimed:
+            settlement = database.get_card_settlement(ref)
+            if isinstance(settlement, dict) and int(settlement.get("applied", 0)) == 1:
+                database.project_applied_card_settlement(ref)
+                return _card_action_response(
+                    outcome="already_settled",
+                    verdict=str(settlement.get("verdict", stored_verdict)),
+                    result=_feedback_result(feedback),
+                )
+            return _card_action_response(outcome="processing", verdict=stored_verdict)
+
+        settlement = database.get_card_settlement(ref)
+        if not isinstance(settlement, dict):
+            raise RuntimeError("Claimed card settlement row disappeared")
+        event = {
+            "event_type": "feedback",
+            "title": hypothesis,
+            "metadata": {
+                **feedback,
+                "settlement_ref": ref,
+                "turn_id": turn_id,
+                "source": source,
+            },
+        }
+        if int(settlement.get("seg_event", 0)) == 0 and not bool(
+            database.record_card_settlement_event(
+                ref=ref,
+                claim_token=claim_token,
+                event=event,
+            )
+        ):
+            return _card_action_response(outcome="processing", verdict=stored_verdict)
+
+        if int(settlement.get("seg_object", 0)) == 0:
+            apply_object = getattr(ctx.soul_engine, "apply_feedback_object", None)
+            if not callable(apply_object):
+                raise RuntimeError("Soul engine lacks the fenced feedback object segment")
+            raw_result = await apply_object(feedback)
+            result = dict(raw_result) if isinstance(raw_result, dict) else {}
+            if not bool(
+                database.mark_card_settlement_segment(
+                    ref=ref,
+                    claim_token=claim_token,
+                    segment="object",
+                )
+            ):
+                return _card_action_response(outcome="processing", verdict=stored_verdict)
+        else:
+            result = _feedback_result(feedback)
+
+        if int(settlement.get("seg_marker", 0)) == 0:
+            mark_rebuild = getattr(ctx.soul_engine, "mark_feedback_rebuild", None)
+            if not callable(mark_rebuild):
+                raise RuntimeError("Soul engine lacks the fenced feedback marker segment")
+            await mark_rebuild(feedback, result)
+            if not bool(
+                database.finish_card_settlement_marker(
+                    ref=ref,
+                    claim_token=claim_token,
+                    source=source,
+                    hypothesis=hypothesis,
+                    verdict=stored_verdict,
+                    turn_id=turn_id,
+                    matched=bool(result.get("matched", False)),
+                )
+            ):
+                return _card_action_response(outcome="processing", verdict=stored_verdict)
+
+        if not bool(database.complete_card_settlement(ref=ref, claim_token=claim_token)):
+            latest = database.get_card_settlement(ref)
+            if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
+                database.project_applied_card_settlement(ref)
+                return _card_action_response(
+                    outcome="already_settled",
+                    verdict=str(latest.get("verdict", stored_verdict)),
+                    result=_feedback_result(feedback),
+                )
+            return _card_action_response(outcome="processing", verdict=stored_verdict)
+        database.project_applied_card_settlement(ref)
+        return _card_action_response(
+            outcome="applied" if inserted or claimed else "already_settled",
+            verdict=stored_verdict,
+            result=result,
+        )
+
+    def _defer_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
+        state = str(turn.payload.get("state", ""))
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active_anchor = anchor_manager.current() if anchor_manager is not None else None
+        if (
+            state == "discussing"
+            and anchor_manager is not None
+            and active_anchor is not None
+            and active_anchor.origin_turn_id == turn.turn_id
+        ):
+            anchor_manager.release(
+                reason="settled",
+                card_state="deferred",
+                expected_generation=active_anchor.generation,
+            )
+        elif state in {"pending", "discussing"}:
+            update_payload = _chat_db_method("update_chat_turn_payload_state")
+            if update_payload is None or not bool(
+                update_payload(
+                    turn.turn_id,
+                    expected_state=state,
+                    new_state="deferred",
+                )
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Card state changed; refresh and retry."
+                )
+        deferred_until = _defer_dialogue_confirmation(str(turn.payload.get("ref", "")))
+        return {
+            "ok": True,
+            "outcome": "deferred",
+            "verdict": "deferred",
+            "state": "deferred",
+            "deferred_until": deferred_until,
+        }
+
+    def _discuss_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is None:
+            raise HTTPException(status_code=503, detail="Dialogue anchor manager not ready.")
+        state = str(turn.payload.get("state", ""))
+        if state not in {"pending", "discussing"}:
+            return {
+                "ok": True,
+                "outcome": "already_settled",
+                "verdict": state,
+                "state": state,
+            }
+        from datetime import UTC, datetime
+
+        from openbiliclaw.soul.dialogue_anchor import ENTRY_CARD_DISCUSS
+
+        attempt_token = str(turn.payload.get("attempt_token", "")).strip()
+        if state == "pending":
+            attempt_token = uuid.uuid4().hex
+            begin = _chat_db_method("begin_chat_card_discussion")
+            if begin is None or not bool(
+                begin(turn.turn_id, attempt_token=attempt_token, now=datetime.now(UTC))
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Card state changed; refresh and retry."
+                )
+        active_anchor = anchor_manager.current()
+        if active_anchor is not None and active_anchor.origin_turn_id == turn.turn_id:
+            return {
+                "ok": True,
+                "outcome": "discussing",
+                "verdict": "discussing",
+                "state": "discussing",
+            }
+        try:
+            anchor_manager.establish(
+                kind="hypothesis",
+                ref=str(turn.payload.get("ref", "")),
+                origin_turn_id=turn.turn_id,
+                entry=ENTRY_CARD_DISCUSS,
+                attempt_token=attempt_token,
+            )
+        except Exception:
+            rollback = _chat_db_method("rollback_chat_card_discussion")
+            if rollback is not None:
+                rollback(turn.turn_id, attempt_token=attempt_token)
+            raise
+        return {
+            "ok": True,
+            "outcome": "discussing",
+            "verdict": "discussing",
+            "state": "discussing",
+        }
+
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:
             return
@@ -7314,6 +7749,14 @@ def create_app(
         message = payload.message.strip()
         if not message:
             raise HTTPException(status_code=422, detail="Chat message is required.")
+        normalized_scope = _normalize_chat_scope(payload.scope)
+        if normalized_scope == "hypothesis" and (
+            not payload.subject_id.strip() or not payload.subject_title.strip()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Hypothesis cards require subject_id and subject_title.",
+            )
         raw_turn_id = payload.turn_id.strip()
         turn_id = raw_turn_id or f"turn-{uuid.uuid4().hex}"
         existing = _get_chat_turn_row(turn_id)
@@ -7322,9 +7765,49 @@ def create_app(
             if turn.status == "pending":
                 asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
             return turn
+        if normalized_scope == "hypothesis":
+            row = _create_chat_turn_row(
+                payload,
+                turn_id=turn_id,
+                structured_payload=_hypothesis_card_payload(payload),
+            )
+            _complete_chat_turn_row(turn_id, reply="")
+            completed = _get_chat_turn_row(turn_id)
+            if completed is None:
+                raise RuntimeError("Completed hypothesis card disappeared")
+            return _normalize_chat_turn(completed)
         row = _create_chat_turn_row(payload, turn_id=turn_id)
         asyncio.create_task(_complete_durable_chat_turn(turn_id))
         return _normalize_chat_turn(row)
+
+    @app.post("/api/chat/cards/{turn_id}/action", response_model=None)
+    async def act_on_chat_card(
+        turn_id: str,
+        payload: Annotated[dict[str, object], Body()],
+    ) -> Response | dict[str, Any]:
+        action = str(payload.get("action", "")).strip().lower()
+        if action not in _HYPOTHESIS_CARD_ACTIONS:
+            raise HTTPException(status_code=422, detail="Unsupported card action.")
+        row = _get_chat_turn_row(turn_id.strip())
+        if row is None:
+            raise HTTPException(status_code=404, detail="Chat card not found.")
+        turn = _normalize_chat_turn(row)
+        if turn.payload.get("type") != "card" or turn.payload.get("kind") != "hypothesis":
+            raise HTTPException(status_code=409, detail="Chat turn is not a hypothesis card.")
+        if action == "defer":
+            return _defer_hypothesis_card(turn)
+        if action == "discuss":
+            return _discuss_hypothesis_card(turn)
+        result = await _settle_hypothesis(
+            ref=str(turn.payload.get("ref", "")).strip(),
+            hypothesis=str(turn.payload.get("title", "")).strip(),
+            requested_verdict=action,
+            turn_id=turn.turn_id,
+            source="card_action",
+        )
+        if result.get("outcome") == "processing":
+            return JSONResponse(status_code=202, content=result)
+        return result
 
     @app.get("/api/chat/turns", response_model=ChatTurnListResponse)
     async def list_chat_turns(
@@ -8219,14 +8702,14 @@ def create_app(
         )
 
     @app.post("/api/insights/feedback", response_model=InsightFeedbackResponse)
-    async def insight_feedback(payload: InsightFeedbackIn) -> InsightFeedbackResponse:
-        """Calibrate an insight hypothesis from a user confirm/reject.
+    async def insight_feedback(
+        payload: InsightFeedbackIn,
+        response: Response,
+    ) -> InsightFeedbackResponse:
+        """Deprecated compatibility forwarder for insight feedback.
 
-        The popup's insight cards surface ``active_insights`` (hypothesis +
-        confidence). This endpoint routes a confirm/reject back into
-        ``SoulEngine.update_from_feedback`` so the hypothesis is validated and
-        re-weighted (confirm → confidence ≥0.75; reject → ≤0.35), closing the
-        loop that was previously implemented but unwired.
+        New clients act on durable dialogue cards. Old clients retain the same
+        response shape while entering the identical fenced settlement path.
         """
         signal = payload.signal.strip().lower()
         if signal not in {"confirm", "like", "support", "reject", "dislike", "deny"}:
@@ -8236,15 +8719,40 @@ def create_app(
             raise HTTPException(status_code=422, detail="hypothesis is required.")
         if ctx.soul_engine is None:
             raise HTTPException(status_code=503, detail="Soul engine not ready.")
+        from openbiliclaw.soul.identity import build_hash8_map, insight_hash8
 
-        result = await ctx.soul_engine.update_from_feedback(
-            {"hypothesis": hypothesis, "signal": signal}
+        ref = insight_hash8(hypothesis)
+        load_insights = getattr(ctx.soul_engine, "_load_insights", None)
+        if callable(load_insights):
+            texts = [
+                str(getattr(item, "hypothesis", "")).strip()
+                for item in load_insights()
+                if str(getattr(item, "hypothesis", "")).strip()
+            ]
+            mapping = build_hash8_map(texts)
+            matched_ref = next(
+                (candidate_ref for candidate_ref, text in mapping.items() if text == hypothesis),
+                "",
+            )
+            if matched_ref:
+                ref = matched_ref
+        action = "confirm" if signal in {"confirm", "like", "support"} else "reject"
+        result = await _settle_hypothesis(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict=action,
+            turn_id=f"legacy-{uuid.uuid4().hex}",
+            source="legacy_endpoint",
         )
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = '</api/chat/pending-confirmations>; rel="successor-version"'
+        if result.get("outcome") == "processing":
+            response.status_code = 202
         return InsightFeedbackResponse(
-            ok=True,
+            ok=result.get("outcome") != "processing",
             matched=bool(result.get("matched", False)),
             hypothesis=str(result.get("hypothesis", hypothesis)),
-            signal=str(result.get("signal", signal)),
+            signal=str(result.get("signal", action)),
             validated=bool(result.get("validated", False)),
             confidence=float(result.get("confidence", 0.0)),
         )

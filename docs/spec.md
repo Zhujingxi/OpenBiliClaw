@@ -228,6 +228,8 @@ durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
                  → anchor snapshot(ref + generation) → existing insight extraction
                  → kind×relation matrix → hypothesis feedback / confusion FIFO settlement
                    confusion failure → replay_queue(max 5, head-fenced) → 12h recovery
+                 → hypothesis card action → ref arbitration → claim/fencing
+                   → event + object + rebuild-marker → applied-only cross-session projection
 
 degraded registry → provider-free ping(degraded) → static /web | /setup | /m
                   ├─ GET/PUT config → restart runtime
@@ -339,6 +341,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Cognitive profile pipeline: 单对话锚(ref+generation) + 归属矩阵 + 台账 │ │
+│  │       + 卡片 ref 仲裁/claim fencing/applied-only 投影                    │ │
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
@@ -438,7 +441,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │          discovery_candidates                                      │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache(item_key: nonblank partial unique + legacy blank repair)              │
-│          recommendations(item_key) / chat_turns / avoidance_state                             │
+│          recommendations(item_key) / chat_turns / card_settlements / avoidance_state          │
 │          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```

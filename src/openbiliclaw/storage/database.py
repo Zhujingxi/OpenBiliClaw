@@ -22,6 +22,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -987,11 +988,16 @@ CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
 -- Atomic arbitration record for durable dialogue-confirmation cards.  Wave A
 -- only reserves the winning verdict; later waves apply the side effects.
 CREATE TABLE IF NOT EXISTS card_settlements (
-    ref        TEXT PRIMARY KEY,
-    verdict    TEXT NOT NULL,
-    turn_id    TEXT NOT NULL,
-    applied    INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ref               TEXT PRIMARY KEY,
+    verdict           TEXT NOT NULL,
+    turn_id           TEXT NOT NULL,
+    applied           INTEGER NOT NULL DEFAULT 0,
+    apply_claim_at    TEXT,
+    apply_claim_token TEXT NOT NULL DEFAULT '',
+    seg_event         INTEGER NOT NULL DEFAULT 0,
+    seg_object        INTEGER NOT NULL DEFAULT 0,
+    seg_marker        INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Schema version tracking
@@ -2247,10 +2253,15 @@ class Database:
             raise ValueError(
                 f"Unsupported card payload transition: {expected_state!r} -> {new_state!r}"
             )
+        payload_expression = "json_set(payload, '$.state', ?)"
+        if expected_state == "discussing":
+            payload_expression = (
+                "json_set(json_remove(payload, '$.discussing_at', '$.attempt_token'), '$.state', ?)"
+            )
         cursor = self._execute_write(
-            """
+            f"""
             UPDATE chat_turns
-            SET payload = json_set(payload, '$.state', ?),
+            SET payload = {payload_expression},
                 updated_at = CURRENT_TIMESTAMP
             WHERE turn_id = ?
               AND json_valid(payload)
@@ -2276,13 +2287,361 @@ class Database:
         self._ensure_fresh_read()
         row = self.conn.execute(
             """
-            SELECT ref, verdict, turn_id, applied, created_at
+            SELECT ref, verdict, turn_id, applied,
+                   apply_claim_at, apply_claim_token,
+                   seg_event, seg_object, seg_marker, created_at
             FROM card_settlements
             WHERE ref = ?
             """,
             (ref,),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def claim_card_settlement(
+        self,
+        *,
+        ref: str,
+        claim_token: str,
+        now: datetime,
+    ) -> bool:
+        """Claim or take over one unapplied settlement with a fencing token."""
+        normalized_token = claim_token.strip()
+        if not normalized_token:
+            raise ValueError("Card settlement claim token is required")
+        normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        # r7 calibration: five minutes covers the synchronous three-segment
+        # apply path while bounding crash recovery. Revisit only with latency
+        # telemetry if the settlement path gains remote side effects.
+        stale_before = normalized_now - timedelta(minutes=5)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE card_settlements
+                SET apply_claim_at = ?, apply_claim_token = ?
+                WHERE ref = ?
+                  AND applied = 0
+                  AND (
+                      apply_claim_at IS NULL
+                      OR apply_claim_at = ''
+                      OR julianday(apply_claim_at) < julianday(?)
+                  )
+                """,
+                (
+                    normalized_now.astimezone(UTC).isoformat(),
+                    normalized_token,
+                    ref,
+                    stale_before.astimezone(UTC).isoformat(),
+                ),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) == 1
+        finally:
+            conn.close()
+
+    def record_card_settlement_event(
+        self,
+        *,
+        ref: str,
+        claim_token: str,
+        event: Mapping[str, Any],
+    ) -> bool:
+        """Atomically occupy ``seg_event`` and insert its feedback event.
+
+        The token+segment guarded UPDATE and event INSERT share one SQLite
+        transaction. A fenced or resumed executor therefore cannot create a
+        duplicate event between a separate check and write.
+        """
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        if not event_type:
+            raise ValueError("Settlement event type is required")
+        params = self._event_insert_params(event_type, event)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            occupied = conn.execute(
+                """
+                UPDATE card_settlements
+                SET seg_event = 1
+                WHERE ref = ?
+                  AND apply_claim_token = ?
+                  AND applied = 0
+                  AND seg_event = 0
+                """,
+                (ref, claim_token),
+            )
+            if int(occupied.rowcount or 0) != 1:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                INSERT INTO events (
+                    event_type, url, title, context, metadata,
+                    inferred_satisfaction, satisfaction_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                params,
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def mark_card_settlement_segment(
+        self,
+        *,
+        ref: str,
+        claim_token: str,
+        segment: str,
+    ) -> bool:
+        """Mark an idempotent non-event segment under the active fence."""
+        column = {"object": "seg_object", "marker": "seg_marker"}.get(segment.strip())
+        if column is None:
+            raise ValueError(f"Unsupported card settlement segment: {segment!r}")
+        cursor = self._execute_write(
+            f"""
+            UPDATE card_settlements
+            SET {column} = 1
+            WHERE ref = ?
+              AND apply_claim_token = ?
+              AND applied = 0
+              AND {column} = 0
+            """,
+            (ref, claim_token),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def finish_card_settlement_marker(
+        self,
+        *,
+        ref: str,
+        claim_token: str,
+        source: str,
+        hypothesis: str,
+        verdict: str,
+        turn_id: str,
+        matched: bool,
+    ) -> bool:
+        """Fence marker completion and its audit row in one transaction."""
+        before = {"hypothesis": hypothesis[:80], "verdict": verdict}
+        after = {"matched": matched}
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            marked = conn.execute(
+                """
+                UPDATE card_settlements
+                SET seg_marker = 1
+                WHERE ref = ?
+                  AND apply_claim_token = ?
+                  AND applied = 0
+                  AND seg_marker = 0
+                """,
+                (ref, claim_token),
+            )
+            if int(marked.rowcount or 0) != 1:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                INSERT INTO profile_update_ledger (
+                    write_point, source, before_summary, after_summary, diff,
+                    source_refs, outcome, turn_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "settle_insight",
+                    source,
+                    json.dumps(before, ensure_ascii=False, sort_keys=True),
+                    json.dumps(after, ensure_ascii=False, sort_keys=True),
+                    json.dumps({"changed_keys": ["matched"]}, sort_keys=True),
+                    json.dumps([hypothesis[:60]], ensure_ascii=False),
+                    "success" if matched else "failed",
+                    turn_id,
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_card_settlement(self, *, ref: str, claim_token: str) -> bool:
+        """Publish a fully completed settlement under the active fence."""
+        cursor = self._execute_write(
+            """
+            UPDATE card_settlements
+            SET applied = 1
+            WHERE ref = ?
+              AND apply_claim_token = ?
+              AND applied = 0
+              AND seg_event = 1
+              AND seg_object = 1
+              AND seg_marker = 1
+            """,
+            (ref, claim_token),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def project_applied_card_settlement(self, ref: str) -> int:
+        """Refresh every session's card projection from an applied receipt."""
+        row = self.get_card_settlement(ref)
+        if row is None or int(row.get("applied", 0)) != 1:
+            return 0
+        terminal = {
+            "confirm": "confirmed",
+            "confirmed": "confirmed",
+            "reject": "rejected",
+            "rejected": "rejected",
+        }.get(str(row.get("verdict", "")).strip().lower())
+        if terminal is None:
+            return 0
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
+                    '$.state', ?
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE json_valid(payload)
+              AND json_extract(payload, '$.type') = 'card'
+              AND json_extract(payload, '$.ref') = ?
+              AND json_extract(payload, '$.state') IN ('pending', 'discussing', 'deferred')
+            """,
+            (terminal, ref),
+        )
+        return int(cursor.rowcount or 0)
+
+    def begin_chat_card_discussion(
+        self,
+        turn_id: str,
+        *,
+        attempt_token: str,
+        now: datetime,
+    ) -> bool:
+        """CAS a pending card into one fenced discussion attempt."""
+        normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    payload,
+                    '$.state', 'discussing',
+                    '$.discussing_at', ?,
+                    '$.attempt_token', ?
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.type') = 'card'
+              AND json_extract(payload, '$.state') = 'pending'
+            """,
+            (normalized_now.astimezone(UTC).isoformat(), attempt_token, turn_id),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def rollback_chat_card_discussion(self, turn_id: str, *, attempt_token: str) -> bool:
+        """Compensate a failed anchor build without touching a newer attempt."""
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
+                    '$.state', 'pending'
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.state') = 'discussing'
+              AND json_extract(payload, '$.attempt_token') = ?
+            """,
+            (turn_id, attempt_token),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def validate_chat_card_discussion_attempt(self, turn_id: str, attempt_token: str) -> bool:
+        """Return whether a card still owns the supplied discuss attempt."""
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM chat_turns
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.type') = 'card'
+              AND json_extract(payload, '$.state') = 'discussing'
+              AND json_extract(payload, '$.attempt_token') = ?
+            """,
+            (turn_id, attempt_token),
+        ).fetchone()
+        return row is not None
+
+    def repair_stale_chat_card_discussion(
+        self,
+        turn_id: str,
+        *,
+        stale_before: datetime,
+    ) -> bool:
+        """Return an abandoned discussion to pending and clear its fence."""
+        normalized = (
+            stale_before if stale_before.tzinfo is not None else stale_before.replace(tzinfo=UTC)
+        )
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
+                    '$.state', 'pending'
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.type') = 'card'
+              AND json_extract(payload, '$.state') = 'discussing'
+              AND julianday(json_extract(payload, '$.discussing_at')) < julianday(?)
+            """,
+            (turn_id, normalized.astimezone(UTC).isoformat()),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def list_dialogue_history(
+        self,
+        *,
+        scopes: Sequence[str],
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return one cross-session completed cognition history."""
+        normalized_scopes = [str(scope).strip() for scope in scopes if str(scope).strip()]
+        if not normalized_scopes:
+            return []
+        self._ensure_fresh_read()
+        placeholders = ", ".join("?" for _ in normalized_scopes)
+        cursor = self.conn.execute(
+            f"""
+            SELECT turn_id, session, scope, subject_id, subject_title, message,
+                   status, reply, error, payload, created_at, updated_at
+            FROM (
+                SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE status = 'completed' AND scope IN ({placeholders})
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, insertion_rowid ASC
+            """,
+            [*normalized_scopes, max(1, int(limit))],
+        )
+        return [self._normalize_chat_turn_row(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
     # Profile update ledger (append-only audit trail)
@@ -8489,11 +8848,16 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
                 ON chat_turns(scope, subject_id, created_at);
             CREATE TABLE IF NOT EXISTS card_settlements (
-                ref        TEXT PRIMARY KEY,
-                verdict    TEXT NOT NULL,
-                turn_id    TEXT NOT NULL,
-                applied    INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ref               TEXT PRIMARY KEY,
+                verdict           TEXT NOT NULL,
+                turn_id           TEXT NOT NULL,
+                applied           INTEGER NOT NULL DEFAULT 0,
+                apply_claim_at    TEXT,
+                apply_claim_token TEXT NOT NULL DEFAULT '',
+                seg_event         INTEGER NOT NULL DEFAULT 0,
+                seg_object        INTEGER NOT NULL DEFAULT 0,
+                seg_marker        INTEGER NOT NULL DEFAULT 0,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         columns = {
@@ -8504,6 +8868,22 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE chat_turns ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
             )
+        settlement_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+        }
+        settlement_additions = {
+            "apply_claim_at": "TEXT",
+            "apply_claim_token": "TEXT NOT NULL DEFAULT ''",
+            "seg_event": "INTEGER NOT NULL DEFAULT 0",
+            "seg_object": "INTEGER NOT NULL DEFAULT 0",
+            "seg_marker": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column_name, column_type in settlement_additions.items():
+            if column_name not in settlement_columns:
+                self.conn.execute(
+                    f"ALTER TABLE card_settlements ADD COLUMN {column_name} {column_type}"
+                )
 
     def _ensure_profile_update_ledger_table(self) -> None:
         """Create the append-only profile write-point ledger for existing DBs."""

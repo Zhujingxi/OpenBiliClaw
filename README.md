@@ -596,7 +596,8 @@ background ─ background admission (default 3) ──────┘
                                                      └→ 终态后再调度可选探针
 
 持久对话：固定时间/payload → 单学习队列 → 单锚(ref+generation) → 归属矩阵
-                                              └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+                           ├→ 假设卡 ref 仲裁 → claim fencing → applied-only 跨 session 投影
+                           └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
 ```
@@ -616,7 +617,7 @@ background ─ background admission (default 3) ──────┘
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
-│ Soul 认知纪律：单对话锚 · 归属矩阵 · 疑惑 FIFO 重放 · 台账 · 深层门控(shadow) │
+│ Soul 认知纪律：单对话锚 · 卡片 claim/fencing · 疑惑 FIFO 重放 · 台账 · 深层门控(shadow) │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │

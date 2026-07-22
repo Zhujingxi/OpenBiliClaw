@@ -8,6 +8,7 @@ behaviour-equivalent for in-window sessions.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -230,6 +231,102 @@ def test_regurgitation_skipped_for_cli_session(tmp_path: Path) -> None:
     )
     dialogue._ensure_history_loaded()
     assert dialogue.history == []
+
+
+def test_regurgitation_is_one_history_across_sessions_and_confirmation_scopes(
+    tmp_path: Path,
+) -> None:
+    db = _db_with_turns(tmp_path)
+    db.create_chat_turn(
+        turn_id="popup-chat",
+        message="普通问题",
+        session="popup",
+        scope="chat",
+    )
+    db.complete_chat_turn("popup-chat", reply="普通回答")
+    db.create_chat_turn(
+        turn_id="web-card",
+        message="阿b 的猜测",
+        session="webui",
+        scope="hypothesis",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "abc12345",
+            "title": "用户偏爱深度内容",
+            "state": "pending",
+        },
+    )
+    db.complete_chat_turn("web-card", reply="")
+    db.create_chat_turn(
+        turn_id="web-confusion",
+        message="我只是把它当背景音",
+        session="webui",
+        scope="confusion",
+    )
+    db.complete_chat_turn("web-confusion", reply="明白了，这不代表稳定兴趣。")
+    db.create_chat_turn(
+        turn_id="excluded-probe",
+        message="探针",
+        session="popup",
+        scope="probe",
+    )
+    db.complete_chat_turn("excluded-probe", reply="不应进入认知历史")
+    db.conn.execute(
+        """
+        UPDATE chat_turns
+        SET created_at = CASE turn_id
+            WHEN 'popup-chat' THEN '2026-07-22 01:00:00'
+            WHEN 'web-card' THEN '2026-07-22 01:01:00'
+            WHEN 'web-confusion' THEN '2026-07-22 01:02:00'
+            ELSE '2026-07-22 01:03:00'
+        END
+        """
+    )
+    db.conn.commit()
+
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=object(),
+        session="popup",
+        database=db,  # type: ignore[arg-type]
+    )
+    dialogue._ensure_history_loaded()
+
+    assert [(turn.role, turn.content) for turn in dialogue.history] == [
+        ("user", "普通问题"),
+        ("agent", "普通回答"),
+        ("agent", "用户偏爱深度内容"),
+        ("user", "我只是把它当背景音"),
+        ("agent", "明白了，这不代表稳定兴趣。"),
+    ]
+
+
+async def test_durable_request_session_overrides_dialogue_default_for_learning() -> None:
+    learned: list[dict[str, object]] = []
+
+    class FakeSoul:
+        async def learn_from_dialogue(self, **payload: object) -> None:
+            learned.append(dict(payload))
+
+    class FakeService:
+        async def complete_socratic_dialogue(self, **_kwargs: object) -> object:
+            return type("Response", (), {"content": "收到"})()
+
+    dialogue = SocraticDialogue(  # type: ignore[arg-type]
+        llm=None,
+        soul_engine=FakeSoul(),
+        llm_service=FakeService(),
+        session="popup",
+    )
+
+    await dialogue.respond("来自桌面端", session="webui", turn_id="turn-web")
+    for _ in range(20):
+        if learned:
+            break
+        await asyncio.sleep(0)
+
+    assert learned[0]["session"] == "webui"
 
 
 # ---------------------------------------------------------------------------

@@ -970,6 +970,18 @@ class SoulEngine:
                 "metadata": feedback,
             }
         )
+        result = await self.apply_feedback_object(feedback)
+        await self.mark_feedback_rebuild(feedback, result)
+        return result
+
+    async def apply_feedback_object(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        """Apply only the idempotent hypothesis-object feedback segment.
+
+        Durable card settlement owns event receipt and rebuild-marker segments
+        separately, so it calls this method under its SQLite fencing token.
+        ``update_from_feedback`` remains the compatibility facade that executes
+        all three segments in the historical order.
+        """
         hypotheses = self._load_insights()
         target = self._normalize_text(str(feedback.get("hypothesis", "")))
         signal = str(feedback.get("signal", "")).strip().lower()
@@ -980,18 +992,15 @@ class SoulEngine:
             "validated": False,
             "confidence": 0.0,
         }
-        migrated = False
         for item in hypotheses:
             if self._normalize_text(item.hypothesis) != target:
                 continue
             if signal in {"confirm", "like", "support"}:
                 item.validated = True
                 item.confidence = min(1.0, round(max(item.confidence, 0.75), 4))
-                migrated = True
             elif signal in {"reject", "dislike", "deny"}:
                 item.validated = False
                 item.confidence = max(0.0, round(min(item.confidence, 0.35), 4))
-                migrated = True
             result["matched"] = True
             result["hypothesis"] = item.hypothesis
             result["validated"] = item.validated
@@ -999,14 +1008,6 @@ class SoulEngine:
             break
         if result["matched"]:
             self._save_insights(hypotheses)
-            # A confirm OR reject migration (single-point ownership, spec
-            # invariant 4) schedules a debounced gated rebuild: the filtered
-            # rebuild input changes (a confirm adds the hypothesis; a reject
-            # drops it), so the next rebuild reflects — or squeezes out — it.
-            if migrated:
-                await self._mark_rebuild_pending(
-                    [f"insight_feedback:{signal}:{str(result['hypothesis'])[:60]}"]
-                )
             # The insight layer is the source of truth, but get_profile()
             # (UI profile-summary + delight scoring) reads the windowed
             # ``active_insights`` snapshot cached on the soul layer. Without
@@ -1018,6 +1019,51 @@ class SoulEngine:
                 validated=bool(result["validated"]),
                 confidence=float(result["confidence"]),
             )
+        return result
+
+    async def mark_feedback_rebuild(
+        self,
+        feedback: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Apply the idempotent rebuild-marker segment for matched feedback."""
+        signal = str(feedback.get("signal", "")).strip().lower()
+        if not bool(result.get("matched", False)) or signal not in {
+            "confirm",
+            "like",
+            "support",
+            "reject",
+            "dislike",
+            "deny",
+        }:
+            return
+        await self._mark_rebuild_pending(
+            [f"insight_feedback:{signal}:{str(result.get('hypothesis', ''))[:60]}"]
+        )
+
+    def feedback_result(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        """Read the current hypothesis state without replaying a completed segment."""
+        target = self._normalize_text(str(feedback.get("hypothesis", "")))
+        signal = str(feedback.get("signal", "")).strip().lower()
+        result: dict[str, Any] = {
+            "matched": False,
+            "hypothesis": str(feedback.get("hypothesis", "")),
+            "signal": signal,
+            "validated": False,
+            "confidence": 0.0,
+        }
+        for item in self._load_insights():
+            if self._normalize_text(item.hypothesis) != target:
+                continue
+            result.update(
+                {
+                    "matched": True,
+                    "hypothesis": item.hypothesis,
+                    "validated": item.validated,
+                    "confidence": item.confidence,
+                }
+            )
+            break
         return result
 
     def _sync_insight_to_soul_snapshot(

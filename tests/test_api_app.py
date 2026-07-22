@@ -11113,6 +11113,444 @@ class TestBackendAPI:
         assert cfg.llm.deepseek.base_url == "https://api.deepseek.com"
 
 
+class TestDialogueConfirmationCards:
+    """Wave B Task 4: durable cards, fenced settlement, and projection."""
+
+    @staticmethod
+    def _build(tmp_path: Path):  # type: ignore[no-untyped-def]
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.engine import SoulEngine
+
+        class Registry:
+            async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+                return LLMResponse(content="[]", provider="fake")
+
+        class Dialogue:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def respond(
+                self,
+                message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del turn_id
+                self.calls.append((scope, session))
+                return f"回复：{message}"
+
+        memory = MemoryManager(tmp_path / "data")
+        memory.initialize()
+        engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+        dialogue = Dialogue()
+        app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=engine,
+            dialogue=dialogue,
+        )
+        return TestClient(app), memory, engine, dialogue
+
+    @staticmethod
+    def _seed_hypothesis(memory: object, hypothesis: str, confidence: float = 0.66) -> str:
+        from openbiliclaw.soul.identity import insight_hash8
+
+        layer = memory.get_layer("insight")
+        items = list(layer.data.get("hypotheses", []))
+        items.append(
+            {
+                "hypothesis": hypothesis,
+                "evidence": [f"依据：{hypothesis}"],
+                "confidence": confidence,
+                "validated": False,
+                "created_at": "2026-07-22",
+            }
+        )
+        layer.data["hypotheses"] = items
+        layer.save()
+        return insight_hash8(hypothesis)
+
+    @staticmethod
+    def _create_card(
+        client: object,
+        *,
+        turn_id: str,
+        ref: str,
+        hypothesis: str,
+        session: str = "popup",
+    ) -> dict[str, object]:
+        response = client.post(
+            "/api/chat/turns",
+            json={
+                "turn_id": turn_id,
+                "session": session,
+                "scope": "hypothesis",
+                "subject_id": ref,
+                "subject_title": hypothesis,
+                "message": "阿b 的猜测",
+                "payload": {"evidence_refs": [f"依据：{hypothesis}"]},
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_hypothesis_card_is_completed_structured_turn_and_skips_worker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, dialogue = self._build(tmp_path)
+        hypothesis = "用户偏爱追问底层原理"
+        ref = self._seed_hypothesis(memory, hypothesis)
+
+        card = self._create_card(
+            client,
+            turn_id="card-completed",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        time.sleep(0.03)
+
+        assert card["status"] == "completed"
+        assert card["scope"] == "hypothesis"
+        assert card["payload"] == {
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": ref,
+            "title": hypothesis,
+            "evidence_refs": [f"依据：{hypothesis}"],
+            "actions": ["confirm", "reject", "discuss", "defer"],
+            "state": "pending",
+        }
+        assert dialogue.calls == []
+
+    @pytest.mark.parametrize(
+        ("action", "terminal", "validated"),
+        [("confirm", "confirmed", True), ("reject", "rejected", False)],
+    )
+    def test_confirm_and_reject_apply_fenced_settlement(
+        self,
+        tmp_path: Path,
+        action: str,
+        terminal: str,
+        validated: bool,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"假设-{action}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id=f"card-{action}", ref=ref, hypothesis=hypothesis)
+
+        response = client.post(
+            f"/api/chat/cards/card-{action}/action",
+            json={"action": action},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "applied"
+        assert response.json()["state"] == terminal
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert settlement["applied"] == 1
+        assert (settlement["seg_event"], settlement["seg_object"], settlement["seg_marker"]) == (
+            1,
+            1,
+            1,
+        )
+        stored = next(
+            item
+            for item in memory.get_layer("insight").data["hypotheses"]
+            if item["hypothesis"] == hypothesis
+        )
+        assert stored["validated"] is validated
+        events = memory.query_events(event_types=["feedback"])
+        assert len(events) == 1
+        assert json.loads(events[0]["metadata"])["settlement_ref"] == ref
+
+    def test_defer_persists_cooldown_without_creating_settlement(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户也许偏爱长视频"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-defer", ref=ref, hypothesis=hypothesis)
+
+        response = client.post(
+            "/api/chat/cards/card-defer/action",
+            json={"action": "defer"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "deferred"
+        assert memory._database.get_card_settlement(ref) is None
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["objects"][ref]["deferred_until"]
+
+    @pytest.mark.parametrize("failure_stage", ["event", "object", "marker"])
+    def test_fault_injection_resumes_each_settlement_segment_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_stage: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"故障注入-{failure_stage}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            client,
+            turn_id=f"card-fault-{failure_stage}",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        app = client.app
+        client.close()
+        original_event = memory._database.record_card_settlement_event
+        original_object = engine.apply_feedback_object
+        original_marker = engine.mark_feedback_rebuild
+        failed = False
+
+        def fail_event_once(**kwargs: object) -> bool:
+            nonlocal failed
+            if failure_stage == "event" and not failed:
+                failed = True
+                raise RuntimeError("event fault")
+            return original_event(**kwargs)
+
+        async def fail_object_once(feedback: dict[str, object]) -> dict[str, object]:
+            nonlocal failed
+            if failure_stage == "object" and not failed:
+                failed = True
+                raise RuntimeError("object fault")
+            return await original_object(feedback)
+
+        async def fail_marker_once(feedback: dict[str, object], result: dict[str, object]) -> None:
+            nonlocal failed
+            if failure_stage == "marker" and not failed:
+                failed = True
+                raise RuntimeError("marker fault")
+            await original_marker(feedback, result)
+
+        monkeypatch.setattr(memory._database, "record_card_settlement_event", fail_event_once)
+        monkeypatch.setattr(engine, "apply_feedback_object", fail_object_once)
+        monkeypatch.setattr(engine, "mark_feedback_rebuild", fail_marker_once)
+        with TestClient(app, raise_server_exceptions=False) as fault_client:
+            first = fault_client.post(
+                f"/api/chat/cards/card-fault-{failure_stage}/action",
+                json={"action": "confirm"},
+            )
+            assert first.status_code == 500
+            partial = memory._database.get_card_settlement(ref)
+            assert partial is not None
+            expected_flags = {
+                "event": (0, 0, 0),
+                "object": (1, 0, 0),
+                "marker": (1, 1, 0),
+            }
+            assert (
+                partial["seg_event"],
+                partial["seg_object"],
+                partial["seg_marker"],
+            ) == expected_flags[failure_stage]
+            memory._database.conn.execute(
+                "UPDATE card_settlements SET apply_claim_at = '2000-01-01T00:00:00+00:00' "
+                "WHERE ref = ?",
+                (ref,),
+            )
+            memory._database.conn.commit()
+
+            retry = fault_client.post(
+                f"/api/chat/cards/card-fault-{failure_stage}/action",
+                json={"action": "confirm"},
+            )
+
+        assert retry.status_code == 200
+        assert retry.json()["outcome"] == "applied"
+        final = memory._database.get_card_settlement(ref)
+        assert final is not None
+        assert (final["seg_event"], final["seg_object"], final["seg_marker"], final["applied"]) == (
+            1,
+            1,
+            1,
+            1,
+        )
+        assert len(memory.query_events(event_types=["feedback"])) == 1
+
+    def test_unapplied_conflict_reports_processing_then_stale_takeover_applies_winner(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户会追问证据链"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-owner", ref=ref, hypothesis=hypothesis)
+        self._create_card(
+            client,
+            turn_id="card-contender",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+        assert memory._database.try_create_card_settlement(
+            ref=ref,
+            verdict="confirmed",
+            turn_id="card-owner",
+        )
+        assert memory._database.claim_card_settlement(
+            ref=ref,
+            claim_token="paused-owner",
+            now=datetime.now(UTC),
+        )
+
+        processing = client.post(
+            "/api/chat/cards/card-contender/action",
+            json={"action": "reject"},
+        )
+        assert processing.status_code == 202
+        assert processing.json()["outcome"] == "processing"
+        assert memory._database.get_chat_turn("card-contender")["payload"]["state"] == "pending"
+
+        memory._database.conn.execute(
+            "UPDATE card_settlements SET apply_claim_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE ref = ?",
+            (ref,),
+        )
+        memory._database.conn.commit()
+        takeover = client.post(
+            "/api/chat/cards/card-contender/action",
+            json={"action": "reject"},
+        )
+
+        assert takeover.status_code == 200
+        assert takeover.json()["verdict"] == "confirmed"
+        assert memory._database.get_chat_turn("card-owner")["payload"]["state"] == "confirmed"
+        assert memory._database.get_chat_turn("card-contender")["payload"]["state"] == "confirmed"
+
+    def test_applied_conflict_is_already_settled_and_refreshes_other_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户偏好机制分析"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-popup", ref=ref, hypothesis=hypothesis)
+        self._create_card(
+            client,
+            turn_id="card-webui",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+
+        assert (
+            client.post("/api/chat/cards/card-popup/action", json={"action": "confirm"}).status_code
+            == 200
+        )
+        conflict = client.post("/api/chat/cards/card-webui/action", json={"action": "reject"})
+
+        assert conflict.status_code == 200
+        assert conflict.json()["outcome"] == "already_settled"
+        assert conflict.json()["state"] == "confirmed"
+        popup = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        webui = client.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        assert [item["turn_id"] for item in popup] == ["card-popup"]
+        assert [item["turn_id"] for item in webui] == ["card-webui"]
+        assert popup[0]["payload"]["state"] == webui[0]["payload"]["state"] == "confirmed"
+
+    def test_discuss_cas_builds_anchor_and_failure_rolls_back(self, tmp_path: Path) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        first = "用户也许重视可证伪性"
+        first_ref = self._seed_hypothesis(memory, first)
+        self._create_card(client, turn_id="card-discuss-ok", ref=first_ref, hypothesis=first)
+
+        response = client.post("/api/chat/cards/card-discuss-ok/action", json={"action": "discuss"})
+        assert response.status_code == 200
+        assert response.json()["state"] == "discussing"
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.origin_turn_id == "card-discuss-ok"
+        payload = memory._database.get_chat_turn("card-discuss-ok")["payload"]
+        assert payload["attempt_token"]
+        assert payload["discussing_at"]
+
+        second = "用户也许偏爱长链条论证"
+        second_ref = self._seed_hypothesis(memory, second)
+        self._create_card(client, turn_id="card-discuss-fail", ref=second_ref, hypothesis=second)
+        original = engine._dialogue_anchor_manager.establish
+
+        def fail_establish(**_kwargs: object) -> object:
+            raise RuntimeError("anchor store unavailable")
+
+        engine._dialogue_anchor_manager.establish = fail_establish  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="anchor store unavailable"):
+                client.post(
+                    "/api/chat/cards/card-discuss-fail/action",
+                    json={"action": "discuss"},
+                )
+        finally:
+            engine._dialogue_anchor_manager.establish = original  # type: ignore[method-assign]
+
+        rolled_back = memory._database.get_chat_turn("card-discuss-fail")["payload"]
+        assert rolled_back["state"] == "pending"
+        assert "attempt_token" not in rolled_back
+
+    def test_stale_discussion_read_repair_clears_token_and_rejects_old_resume(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from openbiliclaw.soul.dialogue_anchor import ENTRY_CARD_DISCUSS
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户也许更信任一手资料"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-stale-discuss", ref=ref, hypothesis=hypothesis)
+        old = datetime.now(UTC) - timedelta(minutes=6)
+        assert memory._database.begin_chat_card_discussion(
+            "card-stale-discuss",
+            attempt_token="old-attempt",
+            now=old,
+        )
+
+        repaired = client.get("/api/chat/turns/card-stale-discuss")
+
+        assert repaired.status_code == 200
+        assert repaired.json()["payload"]["state"] == "pending"
+        assert "attempt_token" not in repaired.json()["payload"]
+        with pytest.raises(ValueError, match="discussion attempt"):
+            engine._dialogue_anchor_manager.establish(
+                kind="hypothesis",
+                ref=ref,
+                origin_turn_id="card-stale-discuss",
+                entry=ENTRY_CARD_DISCUSS,
+                attempt_token="old-attempt",
+            )
+
+    def test_legacy_feedback_forwards_to_common_settlement_with_deprecated_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户偏爱完整因果链"
+        ref = self._seed_hypothesis(memory, hypothesis)
+
+        response = client.post(
+            "/api/insights/feedback",
+            json={"hypothesis": hypothesis, "signal": "confirm"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["deprecation"] == "true"
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None and settlement["applied"] == 1
+        rows = memory._database.query_profile_ledger(days=1, limit=20)
+        settled = next(row for row in rows if row["write_point"] == "settle_insight")
+        assert settled["source"] == "legacy_endpoint"
+
+
 class TestEmbeddingAndCompatProviderE2E:
     """End-to-end coverage for the v0.3.32 changes through the HTTP boundary.
 

@@ -132,6 +132,7 @@ class SocraticDialogue:
         *,
         scope: str = "chat",
         turn_id: str = "",
+        session: str = "",
     ) -> str:
         """Generate a Socratic response to a user message.
 
@@ -149,6 +150,8 @@ class SocraticDialogue:
                 stays in its durable side effect; confusion settlement belongs
                 exclusively to the serialized dialogue-anchor processor.
             turn_id: Durable chat-turn id (idempotency observation key).
+            session: UI ownership label for this request. The cognitive history
+                remains shared across sessions.
 
         Returns:
             Agent's response.
@@ -192,7 +195,7 @@ class SocraticDialogue:
                 payload = {
                     "user_message": user_message,
                     "assistant_reply": reply,
-                    "session": self._session,
+                    "session": session.strip() or self._session,
                     "scope": scope,
                     "turn_id": turn_id,
                 }
@@ -302,27 +305,42 @@ class SocraticDialogue:
         self._history.clear()
 
     def _ensure_history_loaded(self) -> None:
-        """Regurgitate durable popup chat history once (spec Phase 1, r1 #3).
-
-        No-op unless this is a fresh popup session with a database and an empty
-        in-process history. Loads only completed ``scope='chat'`` turns, keeping
-        the last ``DIALOGUE_WINDOW_TURNS`` exchanges.
-        """
+        """Regurgitate the one durable cognition history across UI sessions."""
         if self._history_loaded:
             return
         self._history_loaded = True
-        if self._session != "popup" or self._database is None or self._history:
-            return
-        lister = getattr(self._database, "list_chat_turns", None)
-        if not callable(lister):
+        if self._session == "cli" or self._database is None or self._history:
             return
         try:
-            rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
+            history_lister = getattr(self._database, "list_dialogue_history", None)
+            if callable(history_lister):
+                rows = history_lister(
+                    scopes=("chat", "hypothesis", "confusion"),
+                    limit=DIALOGUE_WINDOW_TURNS,
+                )
+            else:
+                lister = getattr(self._database, "list_chat_turns", None)
+                if not callable(lister):
+                    return
+                rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
         except Exception:
             logger.debug("Failed to regurgitate durable chat history", exc_info=True)
             return
         for row in rows:
             if str(row.get("status", "")) != "completed":
+                continue
+            scope = str(row.get("scope", "chat")).strip()
+            payload = row.get("payload", {})
+            if scope == "hypothesis" and isinstance(payload, dict):
+                title = str(payload.get("title", "") or row.get("subject_title", "")).strip()
+                if title:
+                    self._history.append(
+                        DialogueTurn(
+                            role="agent",
+                            content=title,
+                            timestamp=str(row.get("created_at", "") or ""),
+                        )
+                    )
                 continue
             message = str(row.get("message", "")).strip()
             reply = str(row.get("reply", "")).strip()

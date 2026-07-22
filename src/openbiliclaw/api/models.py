@@ -1764,6 +1764,7 @@ class ChatTurnIn(BaseModel):
     scope: str = "chat"
     subject_id: str = ""
     subject_title: str = ""
+    payload: dict[str, object] = Field(default_factory=dict)
 
 
 class ChatTurnOut(BaseModel):

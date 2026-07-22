@@ -9,6 +9,7 @@ import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -40,7 +41,17 @@ def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -
         str(row["name"])
         for row in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
     }
-    assert {"ref", "verdict", "turn_id", "applied"} <= settlement_columns
+    assert {
+        "ref",
+        "verdict",
+        "turn_id",
+        "applied",
+        "apply_claim_at",
+        "apply_claim_token",
+        "seg_event",
+        "seg_object",
+        "seg_marker",
+    } <= settlement_columns
 
 
 def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> None:
@@ -74,6 +85,36 @@ def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> No
         str(row["name"]) for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
     }
     assert db.get_chat_turn("legacy-turn")["payload"] == {}
+
+
+def test_card_settlement_schema_migrates_wave_a_table(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-settlement.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE card_settlements (
+            ref TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO card_settlements (ref, verdict, turn_id)
+        VALUES ('abc12345', 'confirmed', 'legacy-card');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    row = db.get_card_settlement("abc12345")
+    assert row is not None
+    assert row["apply_claim_token"] == ""
+    assert row["seg_event"] == 0
+    assert row["seg_object"] == 0
+    assert row["seg_marker"] == 0
 
 
 @pytest.mark.parametrize(
@@ -164,6 +205,170 @@ def test_card_settlement_insert_or_ignore_arbitrates_across_connections(tmp_path
         ("rejected", "turn-reject"),
     }
     assert settlement["applied"] == 0
+
+
+def test_card_settlement_claim_fences_old_executor_and_event_is_atomic(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
+    assert db.try_create_card_settlement(
+        ref="abc12345",
+        verdict="confirmed",
+        turn_id="card-popup",
+    )
+    assert db.claim_card_settlement(
+        ref="abc12345",
+        claim_token="old-token",
+        now=now,
+    )
+
+    db.conn.execute(
+        "UPDATE card_settlements SET apply_claim_at = ? WHERE ref = ?",
+        ((now - timedelta(minutes=6)).isoformat(), "abc12345"),
+    )
+    db.conn.commit()
+    assert db.claim_card_settlement(
+        ref="abc12345",
+        claim_token="new-token",
+        now=now,
+    )
+
+    event = {
+        "event_type": "feedback",
+        "title": "用户偏爱深度内容",
+        "metadata": {"settlement_ref": "abc12345", "signal": "confirm"},
+    }
+    assert not db.record_card_settlement_event(
+        ref="abc12345",
+        claim_token="old-token",
+        event=event,
+    )
+    assert db.record_card_settlement_event(
+        ref="abc12345",
+        claim_token="new-token",
+        event=event,
+    )
+    assert not db.record_card_settlement_event(
+        ref="abc12345",
+        claim_token="new-token",
+        event=event,
+    )
+
+    row = db.get_card_settlement("abc12345")
+    assert row is not None
+    assert row["seg_event"] == 1
+    events = db.query_events(event_types=["feedback"])
+    assert len(events) == 1
+    assert json.loads(events[0]["metadata"])["settlement_ref"] == "abc12345"
+
+
+def test_card_settlement_segment_and_applied_writes_require_current_fence(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
+    db.try_create_card_settlement(ref="abc12345", verdict="rejected", turn_id="card-1")
+    assert db.claim_card_settlement(ref="abc12345", claim_token="winner", now=now)
+
+    assert db.record_card_settlement_event(
+        ref="abc12345",
+        claim_token="winner",
+        event={
+            "event_type": "feedback",
+            "title": "假设",
+            "metadata": {"settlement_ref": "abc12345"},
+        },
+    )
+    assert not db.mark_card_settlement_segment(
+        ref="abc12345",
+        claim_token="loser",
+        segment="object",
+    )
+    assert db.mark_card_settlement_segment(
+        ref="abc12345",
+        claim_token="winner",
+        segment="object",
+    )
+    assert db.finish_card_settlement_marker(
+        ref="abc12345",
+        claim_token="winner",
+        source="card_action",
+        hypothesis="假设",
+        verdict="rejected",
+        turn_id="card-1",
+        matched=True,
+    )
+    assert not db.complete_card_settlement(ref="abc12345", claim_token="loser")
+    assert db.complete_card_settlement(ref="abc12345", claim_token="winner")
+
+    row = db.get_card_settlement("abc12345")
+    assert row is not None
+    assert row["seg_object"] == 1
+    assert row["applied"] == 1
+
+
+def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    for session in ("popup", "webui"):
+        db.create_chat_turn(
+            turn_id=f"card-{session}",
+            message="阿b 的猜测",
+            session=session,
+            scope="hypothesis",
+            payload={"type": "card", "ref": "abc12345", "state": "pending"},
+        )
+    db.try_create_card_settlement(ref="abc12345", verdict="confirmed", turn_id="card-popup")
+
+    assert db.project_applied_card_settlement("abc12345") == 0
+    assert db.get_chat_turn("card-popup")["payload"]["state"] == "pending"
+
+    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
+    assert db.claim_card_settlement(ref="abc12345", claim_token="winner", now=now)
+    db.conn.execute(
+        "UPDATE card_settlements SET seg_event = 1, seg_object = 1, seg_marker = 1 "
+        "WHERE ref = 'abc12345'"
+    )
+    db.conn.commit()
+    assert db.complete_card_settlement(ref="abc12345", claim_token="winner")
+    assert db.project_applied_card_settlement("abc12345") == 2
+    assert db.get_chat_turn("card-popup")["payload"]["state"] == "confirmed"
+    assert db.get_chat_turn("card-webui")["payload"]["state"] == "confirmed"
+
+
+def test_discussion_attempt_token_is_cleared_by_stale_repair_and_fences_resume(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    started = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
+    db.create_chat_turn(
+        turn_id="card-discuss",
+        message="阿b 的猜测",
+        scope="hypothesis",
+        payload={"type": "card", "ref": "abc12345", "state": "pending"},
+    )
+
+    assert db.begin_chat_card_discussion(
+        "card-discuss",
+        attempt_token="attempt-old",
+        now=started,
+    )
+    assert db.validate_chat_card_discussion_attempt("card-discuss", "attempt-old")
+    assert not db.repair_stale_chat_card_discussion(
+        "card-discuss",
+        stale_before=started - timedelta(seconds=1),
+    )
+    assert db.repair_stale_chat_card_discussion(
+        "card-discuss",
+        stale_before=started + timedelta(minutes=5, seconds=1),
+    )
+    assert not db.validate_chat_card_discussion_attempt("card-discuss", "attempt-old")
+    payload = db.get_chat_turn("card-discuss")["payload"]
+    assert payload["state"] == "pending"
+    assert "attempt_token" not in payload
+    assert "discussing_at" not in payload
 
 
 def test_chat_turn_list_uses_rowid_for_equal_created_at(tmp_path: Path) -> None:
@@ -515,8 +720,6 @@ def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
 
 
 # --- recent_event_urls (cross-source dedup helper) -------------------------
-
-from datetime import UTC, datetime, timedelta  # noqa: E402
 
 
 def _insert_event_with_age(
