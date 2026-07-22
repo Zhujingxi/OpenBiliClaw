@@ -2148,6 +2148,188 @@ class Database:
             raise RuntimeError(f"Failed to create chat turn {turn_id!r}")
         return row
 
+    def get_chat_confirmation_turn(
+        self,
+        *,
+        ref: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        """Return the active confirmation entry for one ``(ref, session)``."""
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE session = ?
+                  AND subject_id = ?
+                  AND status = 'completed'
+                  AND json_valid(payload)
+                  AND json_extract(payload, '$.ref') = ?
+                  AND (
+                        (
+                            scope = 'hypothesis'
+                            AND json_extract(payload, '$.type') = 'card'
+                            AND json_extract(payload, '$.state') IN ('pending', 'discussing')
+                        )
+                        OR (
+                            scope = 'confusion'
+                            AND json_extract(payload, '$.type') = 'question'
+                        )
+                      )
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (session or "popup", ref, ref),
+            ).fetchone()
+            return self._normalize_chat_turn_row(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def get_chat_confirmation_attachment(
+        self,
+        *,
+        attached_to_turn_id: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        """Return a card/question already attached to one durable user turn."""
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE session = ?
+                  AND status = 'completed'
+                  AND json_valid(payload)
+                  AND json_extract(payload, '$.attached_to_turn_id') = ?
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT 1
+                """,
+                (session or "popup", attached_to_turn_id),
+            ).fetchone()
+            return self._normalize_chat_turn_row(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def create_chat_confirmation_turn(
+        self,
+        *,
+        turn_id: str,
+        session: str,
+        scope: str,
+        ref: str,
+        title: str,
+        message: str,
+        reply: str,
+        payload: Mapping[str, object],
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically deduplicate ``(ref, session)`` and insert a completed entry.
+
+        ``BEGIN IMMEDIATE`` serializes the lookup and INSERT across API workers.
+        The optional ``attached_to_turn_id`` payload key is checked first so a
+        crash after the card INSERT but before its user turn can resume without
+        selecting or attaching a second object.
+        """
+        normalized_scope = scope.strip()
+        if normalized_scope not in {"hypothesis", "confusion"}:
+            raise ValueError(f"Unsupported confirmation scope: {scope!r}")
+        normalized_session = session.strip() or "popup"
+        normalized_ref = ref.strip()
+        if not normalized_ref:
+            raise ValueError("Confirmation ref is required")
+        serialized_payload = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        attached_to_turn_id = str(payload.get("attached_to_turn_id", "")).strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row: sqlite3.Row | None = None
+            if attached_to_turn_id:
+                row = conn.execute(
+                    """
+                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                           status, reply, error, payload, created_at, updated_at
+                    FROM chat_turns
+                    WHERE session = ?
+                      AND status = 'completed'
+                      AND json_valid(payload)
+                      AND json_extract(payload, '$.attached_to_turn_id') = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    LIMIT 1
+                    """,
+                    (normalized_session, attached_to_turn_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                           status, reply, error, payload, created_at, updated_at
+                    FROM chat_turns
+                    WHERE session = ?
+                      AND subject_id = ?
+                      AND status = 'completed'
+                      AND json_valid(payload)
+                      AND json_extract(payload, '$.ref') = ?
+                      AND (
+                            (
+                                scope = 'hypothesis'
+                                AND json_extract(payload, '$.type') = 'card'
+                                AND json_extract(payload, '$.state')
+                                    IN ('pending', 'discussing')
+                            )
+                            OR (
+                                scope = 'confusion'
+                                AND json_extract(payload, '$.type') = 'question'
+                            )
+                          )
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (normalized_session, normalized_ref, normalized_ref),
+                ).fetchone()
+            if row is not None:
+                conn.commit()
+                return self._normalize_chat_turn_row(row), False
+            conn.execute(
+                """
+                INSERT INTO chat_turns (
+                    turn_id, session, scope, subject_id, subject_title,
+                    message, status, reply, error, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, '', ?)
+                """,
+                (
+                    turn_id,
+                    normalized_session,
+                    normalized_scope,
+                    normalized_ref,
+                    title.strip(),
+                    message,
+                    reply,
+                    serialized_payload,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE turn_id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+            if row is None:  # pragma: no cover - guarded by the INSERT above
+                raise RuntimeError(f"Failed to create confirmation turn {turn_id!r}")
+            conn.commit()
+            return self._normalize_chat_turn_row(row), True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
         """Mark a pending popup chat turn as completed."""
         self._execute_write(

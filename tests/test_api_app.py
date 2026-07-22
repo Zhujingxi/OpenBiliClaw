@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11549,6 +11550,407 @@ class TestDialogueConfirmationCards:
         rows = memory._database.query_profile_ledger(days=1, limit=20)
         settled = next(row for row in rows if row["write_point"] == "settle_insight")
         assert settled["source"] == "legacy_endpoint"
+
+
+class TestPendingDialogueConfirmations:
+    """Wave B Task 5: pending list, active open, and deterministic throws."""
+
+    @staticmethod
+    def _build(tmp_path: Path):  # type: ignore[no-untyped-def]
+        return TestDialogueConfirmationCards._build(tmp_path)
+
+    @staticmethod
+    def _seed_hypothesis(memory: object, title: str, confidence: float = 0.66) -> str:
+        return TestDialogueConfirmationCards._seed_hypothesis(memory, title, confidence)
+
+    @staticmethod
+    def _post_user_turn(
+        client: object,
+        *,
+        turn_id: str,
+        session: str = "popup",
+        message: str = "继续聊聊",
+    ) -> object:
+        return client.post(
+            "/api/chat/turns",
+            json={
+                "turn_id": turn_id,
+                "session": session,
+                "scope": "chat",
+                "message": message,
+            },
+        )
+
+    def test_pending_list_filters_high_priority_caps_three_and_has_count_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        high_refs = {
+            self._seed_hypothesis(memory, "高优先假设一", 0.91),
+            self._seed_hypothesis(memory, "高优先假设二", 0.81),
+            self._seed_hypothesis(memory, "高优先假设三", 0.71),
+            self._seed_hypothesis(memory, "高优先假设四", 0.61),
+        }
+        low_ref = self._seed_hypothesis(memory, "低置信假设", 0.59)
+        validated_ref = self._seed_hypothesis(memory, "已经确认的假设", 0.95)
+        insight = memory.get_layer("insight")
+        for item in insight.data["hypotheses"]:
+            if item["hypothesis"] == "已经确认的假设":
+                item["validated"] = True
+        insight.save()
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="高优先疑惑",
+            observation="这次行为与长期偏好相反",
+            interpretation_confidence=0.72,
+            evidence_refs=["event-7"],
+        )
+        memory._database.insert_confusion(
+            source="awareness",
+            topic="低优先疑惑",
+            observation="证据还很弱",
+            interpretation_confidence=0.49,
+        )
+
+        response = client.get("/api/chat/pending-confirmations")
+        count = client.get(
+            "/api/chat/pending-confirmations",
+            params={"count_only": 1},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 3
+        assert len(body["items"]) == 3
+        refs = {item["ref"] for item in body["items"]}
+        assert str(confusion_id) in refs
+        assert refs <= high_refs | {str(confusion_id)}
+        assert low_ref not in refs
+        assert validated_ref not in refs
+        assert count.status_code == 200
+        assert count.json() == {"count": 3}
+
+    def test_manual_open_three_items_ignores_both_cooldowns(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        refs = [
+            self._seed_hypothesis(memory, f"主动待聊-{index}", 0.66 + index / 100)
+            for index in range(3)
+        ]
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "global_last_thrown_at": datetime.now(UTC).isoformat(),
+                    "objects": {
+                        ref: {
+                            "last_asked_at": datetime.now(UTC).isoformat(),
+                            "deferred_until": "2099-01-01T00:00:00+00:00",
+                        }
+                        for ref in refs
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        opened = [
+            client.post(
+                f"/api/chat/pending-confirmations/{ref}/open",
+                json={"session": "popup"},
+            )
+            for ref in refs
+        ]
+
+        assert [response.status_code for response in opened] == [200, 200, 200]
+        assert len({response.json()["turn_id"] for response in opened}) == 3
+        assert all(response.json()["payload"]["state"] == "pending" for response in opened)
+        turns = client.get(
+            "/api/chat/turns",
+            params={"session": "popup", "scope": "hypothesis"},
+        ).json()["items"]
+        assert len(turns) == 3
+
+    def test_open_reuses_ref_in_same_session_and_creates_one_per_other_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "同一大脑多个屏幕", 0.73)
+
+        first = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        retry = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        other = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "webui"},
+        )
+
+        assert first.status_code == retry.status_code == other.status_code == 200
+        assert first.json()["turn_id"] == retry.json()["turn_id"]
+        assert other.json()["turn_id"] != first.json()["turn_id"]
+        assert (
+            len(
+                client.get(
+                    "/api/chat/turns",
+                    params={"session": "popup", "scope": "hypothesis"},
+                ).json()["items"]
+            )
+            == 1
+        )
+        assert (
+            len(
+                client.get(
+                    "/api/chat/turns",
+                    params={"session": "webui", "scope": "hypothesis"},
+                ).json()["items"]
+            )
+            == 1
+        )
+
+    def test_open_hypothesis_settlement_releases_anchor_and_leaves_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "主动打开后确认要解锚", 0.73)
+        opened = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        assert opened.status_code == 200
+        assert engine._dialogue_anchor_manager.current() is not None
+
+        settled = client.post(
+            f"/api/chat/cards/{opened.json()['turn_id']}/action",
+            json={"action": "confirm"},
+        )
+
+        assert settled.status_code == 200
+        assert settled.json()["state"] == "confirmed"
+        assert engine._dialogue_anchor_manager.current() is None
+        refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref not in refs
+
+    def test_confusion_open_ignores_ask_cooldown_and_builds_question_anchor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="收藏后马上退出",
+            observation="收藏动作和停留时长互相冲突",
+            interpretation="可能是代理行为",
+            interpretation_confidence=0.78,
+            evidence_refs=["event-11"],
+        )
+        memory._database.update_confusion(
+            confusion_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+
+        response = client.post(
+            f"/api/chat/pending-confirmations/{confusion_id}/open",
+            json={"session": "popup"},
+        )
+
+        assert response.status_code == 200
+        turn = response.json()
+        assert turn["scope"] == "confusion"
+        assert turn["status"] == "completed"
+        assert turn["payload"]["kind"] == "confusion"
+        assert turn["reply"]
+        confusion = memory._database.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn["turn_id"]
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.kind == "confusion"
+        assert anchor.ref == str(confusion_id)
+        assert anchor.origin_turn_id == turn["turn_id"]
+
+    def test_system_throw_global_12h_survives_restart_and_same_turn_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "系统抛出后要全局节流", 0.72)
+
+        first = self._post_user_turn(client, turn_id="user-global-1", session="popup")
+        assert first.status_code == 200
+        popup = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["scope"] for item in popup] == ["hypothesis", "chat"]
+        assert popup[0]["payload"]["ref"] == ref
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["global_last_thrown_at"]
+        client.close()
+        time.sleep(0.03)
+        memory._database.close()
+
+        client2, _memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        retry = self._post_user_turn(client2, turn_id="user-global-1", session="popup")
+        blocked = self._post_user_turn(client2, turn_id="user-global-2", session="webui")
+
+        assert retry.status_code == blocked.status_code == 200
+        popup_after = client2.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        webui_after = client2.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        assert [item["scope"] for item in popup_after] == ["hypothesis", "chat"]
+        assert [item["scope"] for item in webui_after] == ["chat"]
+
+    def test_concurrent_user_messages_atomically_claim_one_global_throw(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        first_client, memory, _engine, _dialogue = self._build(tmp_path)
+        self._seed_hypothesis(memory, "并发消息只能触发一次系统抛出", 0.74)
+        second_client = TestClient(first_client.app)
+
+        def send(index: int) -> int:
+            client = first_client if index == 0 else second_client
+            response = self._post_user_turn(
+                client,
+                turn_id=f"user-concurrent-{index}",
+                session=f"screen-{index}",
+            )
+            return response.status_code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = list(executor.map(send, range(2)))
+
+        assert statuses == [200, 200]
+        rows = memory._database.conn.execute(
+            "SELECT session FROM chat_turns WHERE scope = 'hypothesis'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_system_throw_requires_global_12h_and_object_72h(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "对象冷却要叠加全局冷却", 0.74)
+        assert (
+            self._post_user_turn(
+                client,
+                turn_id="user-object-1",
+                session="popup",
+            ).status_code
+            == 200
+        )
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["global_last_thrown_at"] = (datetime.now(UTC) - timedelta(hours=13)).isoformat()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        blocked = self._post_user_turn(
+            client,
+            turn_id="user-object-2",
+            session="webui",
+        )
+        assert blocked.status_code == 200
+        assert [
+            item["scope"]
+            for item in client.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        ] == ["chat"]
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["global_last_thrown_at"] = (datetime.now(UTC) - timedelta(hours=13)).isoformat()
+        state["objects"][ref]["last_asked_at"] = (
+            datetime.now(UTC) - timedelta(hours=73)
+        ).isoformat()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        allowed = self._post_user_turn(
+            client,
+            turn_id="user-object-3",
+            session="desktop-2",
+        )
+
+        assert allowed.status_code == 200
+        assert [
+            item["scope"]
+            for item in client.get("/api/chat/turns", params={"session": "desktop-2"}).json()[
+                "items"
+            ]
+        ] == ["hypothesis", "chat"]
+
+    def test_attachment_is_before_user_and_empty_or_retry_never_creates_extra_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        self._seed_hypothesis(memory, "附着必须稳定保序", 0.69)
+
+        empty = self._post_user_turn(
+            client,
+            turn_id="user-attach-empty",
+            message="   ",
+        )
+        assert empty.status_code == 422
+        assert client.get("/api/chat/turns", params={"session": "popup"}).json()["items"] == []
+
+        first = self._post_user_turn(client, turn_id="user-attach-1")
+        retry = self._post_user_turn(client, turn_id="user-attach-1")
+
+        assert first.status_code == retry.status_code == 200
+        turns = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["scope"] for item in turns] == ["hypothesis", "chat"]
+        assert turns[0]["payload"]["attached_to_turn_id"] == "user-attach-1"
+        assert turns[1]["turn_id"] == "user-attach-1"
+
+    def test_restart_repairs_card_inserted_before_user_without_duplicate_attachment(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        title = "崩溃缝隙也不能重复附着"
+        ref = self._seed_hypothesis(memory, title, 0.7)
+        memory._database.create_chat_turn(
+            turn_id="orphan-attachment",
+            session="popup",
+            scope="hypothesis",
+            subject_id=ref,
+            subject_title=title,
+            message="阿b 的猜测",
+            payload={
+                "type": "card",
+                "kind": "hypothesis",
+                "ref": ref,
+                "title": title,
+                "evidence_refs": [],
+                "actions": ["confirm", "reject", "discuss", "defer"],
+                "state": "pending",
+                "attached_to_turn_id": "user-after-crash",
+            },
+        )
+        memory._database.complete_chat_turn("orphan-attachment", reply="")
+        client.close()
+        memory._database.close()
+
+        client2, memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        response = self._post_user_turn(client2, turn_id="user-after-crash")
+
+        assert response.status_code == 200
+        turns = client2.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["turn_id"] for item in turns] == [
+            "orphan-attachment",
+            "user-after-crash",
+        ]
+        state = json.loads(
+            (memory2._data_dir / "memory" / "dialogue_confirmation_state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["global_last_thrown_at"]
+        assert state["objects"][ref]["last_asked_at"]
 
 
 class TestEmbeddingAndCompatProviderE2E:

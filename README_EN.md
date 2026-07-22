@@ -592,6 +592,7 @@ guided init: signals → preferences → full profile commit → discover → ev
                                                               └→ optional probes after terminal state
 
 durable dialogue: fixed time/payload → single learn queue → one anchor(ref+generation) → relation matrix
+                          ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
                           ├→ hypothesis ref arbitration → claim fencing → applied-only cross-session projection
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
@@ -614,7 +615,7 @@ durable dialogue: fixed time/payload → single learn queue → one anchor(ref+g
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Soul cognition: one dialogue anchor · card claim/fencing · confusion FIFO · ledger · deep posture gate (shadow) │
+│ Soul cognition: dual pending cooldown · one anchor · card claim/fencing · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │

@@ -20,6 +20,8 @@ guided init: signals → preferences → full profile commit
                                   → terminal → runtime schedules optional probes
 
 durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
+                 → pending≤3 → user open(no cooldown) | system 12h+object 72h
+                   → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
                  → kind×relation matrix → hypothesis feedback / confusion FIFO settlement
                    confusion failure → replay_queue(max 5, head-fenced) → 12h recovery
@@ -187,9 +189,10 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
-1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文；后端普通消息先写 `pending` 再交给 Dialogue worker。
-2. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker；confirm/reject 经 ref 仲裁、claim 与三段 fencing 完成结算，discuss 经持久化 attempt token 建锚，defer 只写对象冷却。
-3. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 可见历史；Dialogue prompt 则统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。
+1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
+2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。
+3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker；confirm/reject 经 ref 仲裁、claim 与三段 fencing 完成结算，discuss 经持久化 attempt token 建锚，defer 只写对象冷却。
+4. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 可见历史；Dialogue prompt 则统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。
 
 历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 
@@ -256,7 +259,7 @@ X 是第六个内容源，分两条独立通路：
 - `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未命中 `seen_items` 的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `maintain_pool_inventory()` 是 runtime 唯一 destructive maintenance 边界：`canonical available -> recover eligible suppressed -> protected IDs -> stale/explore/topic/source plans -> cross-table raw plan -> invariant validation -> commit`；恢复复用 canonical readiness，仅额外要求 `recommended_at IS NULL`，并按来源缺口、相关度、评分时间和稳定 ID 排序。每批最多修改 50 行，维护查询、持久化已看身份与动态 delight 阈值都接受同一显式 isolated connection；专属 worker 与 serve worker 分队列，绝不把共享 `Database.conn` 直接扔进 `to_thread()` 并发事务。
 - `load_pool_serve_snapshot_async()` / `persist_pool_serve_async()` 是交互读写边界：前者在一个一致只读事务中聚合推荐所需状态，后者在短 `BEGIN IMMEDIATE` 中原子写 recommendation + shown；交互锁等待按 8×250ms 有界，维护锁等待固定 75ms。
-- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。`card_settlements` 提供 ref 级 `INSERT OR IGNORE` 仲裁、5 分钟可接管 claim、三段 token fencing 与 `applied=1` 发布边界；event 段占位与事件 INSERT、marker 段与结算台账分别在同一 SQLite 事务完成。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描
+- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。`card_settlements` 提供 ref 级 `INSERT OR IGNORE` 仲裁、5 分钟可接管 claim、三段 token fencing 与 `applied=1` 发布边界；event 段占位与事件 INSERT、marker 段与结算台账分别在同一 SQLite 事务完成。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 
 ## 运行时数据库约束

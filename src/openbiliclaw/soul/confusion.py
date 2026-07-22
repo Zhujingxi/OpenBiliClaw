@@ -328,18 +328,21 @@ class ConfusionManager:
         *,
         ask_turn_id: str,
         now: datetime | None = None,
+        ignore_cooldown: bool = False,
     ) -> bool:
         """Claim the confusion into ``clarifying`` and stamp the ask time.
 
         Returns ``False`` if the 72h cooldown has not elapsed, if another
         confusion already holds the single clarifying slot (partial unique
         index), or if the row is not ``open``. The cooldown is persisted in
-        ``asked_at`` so it survives restarts.
+        ``asked_at`` so it survives restarts. ``ignore_cooldown`` is reserved
+        for the explicit pending-list open action; the database's global
+        ``clarifying <= 1`` constraint still applies.
         """
         if self._db is None:
             return False
         confusion = self.get(confusion_id)
-        if confusion is None or not self.can_ask(confusion, now=now):
+        if confusion is None or (not ignore_cooldown and not self.can_ask(confusion, now=now)):
             return False
         current = now or datetime.now()
         claimed = bool(

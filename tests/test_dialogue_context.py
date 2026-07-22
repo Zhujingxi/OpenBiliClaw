@@ -162,7 +162,7 @@ def test_chat_turn_out_exposes_structured_payload() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regurgitation (popup + scope='chat' + completed only)
+# Regurgitation (all UI sessions + completed chat/hypothesis/confusion)
 # ---------------------------------------------------------------------------
 
 
@@ -258,6 +258,22 @@ def test_regurgitation_is_one_history_across_sessions_and_confirmation_scopes(
         },
     )
     db.complete_chat_turn("web-card", reply="")
+    db.create_chat_confirmation_turn(
+        turn_id="popup-question",
+        session="popup",
+        scope="confusion",
+        ref="7",
+        title="收藏后马上退出",
+        message="",
+        reply="这次收藏和停留时长相反，你愿意说说吗？",
+        payload={
+            "type": "question",
+            "kind": "confusion",
+            "ref": "7",
+            "title": "收藏后马上退出",
+            "state": "clarifying",
+        },
+    )
     db.create_chat_turn(
         turn_id="web-confusion",
         message="我只是把它当背景音",
@@ -278,6 +294,7 @@ def test_regurgitation_is_one_history_across_sessions_and_confirmation_scopes(
         SET created_at = CASE turn_id
             WHEN 'popup-chat' THEN '2026-07-22 01:00:00'
             WHEN 'web-card' THEN '2026-07-22 01:01:00'
+            WHEN 'popup-question' THEN '2026-07-22 01:01:30'
             WHEN 'web-confusion' THEN '2026-07-22 01:02:00'
             ELSE '2026-07-22 01:03:00'
         END
@@ -297,6 +314,7 @@ def test_regurgitation_is_one_history_across_sessions_and_confirmation_scopes(
         ("user", "普通问题"),
         ("agent", "普通回答"),
         ("agent", "用户偏爱深度内容"),
+        ("agent", "这次收藏和停留时长相反，你愿意说说吗？"),
         ("user", "我只是把它当背景音"),
         ("agent", "明白了，这不代表稳定兴趣。"),
     ]

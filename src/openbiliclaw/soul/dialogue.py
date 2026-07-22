@@ -112,8 +112,9 @@ class SocraticDialogue:
         # Phase 1 durable-history regurgitation: after a restart the in-process
         # history is empty, but the durable popup ``chat_turns`` table holds the
         # completed exchanges. Lazily reload them once so a popup session keeps
-        # its thread across restarts. Only popup + scope='chat' + completed rows
-        # qualify (CLI has no DB; probe/confusion scopes carry prefixed context).
+        # its thread across restarts. Completed chat/hypothesis/confusion rows
+        # from every UI session qualify; session remains display ownership only
+        # (CLI has no DB and probe scopes remain excluded).
         self._database = database
         self._history_loaded = False
         self._respond_lock = asyncio.Lock()
@@ -338,6 +339,21 @@ class SocraticDialogue:
                         DialogueTurn(
                             role="agent",
                             content=title,
+                            timestamp=str(row.get("created_at", "") or ""),
+                        )
+                    )
+                continue
+            if (
+                scope == "confusion"
+                and isinstance(payload, dict)
+                and payload.get("type") == "question"
+            ):
+                question = str(row.get("reply", "")).strip()
+                if question:
+                    self._history.append(
+                        DialogueTurn(
+                            role="agent",
+                            content=question,
                             timestamp=str(row.get("created_at", "") or ""),
                         )
                     )

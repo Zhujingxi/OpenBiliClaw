@@ -18,6 +18,7 @@ import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 from uuid import UUID
@@ -213,6 +214,17 @@ _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
 _HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
+# First-round calibration (2026-07-22): 0.60 is the lower edge at which an
+# unvalidated hypothesis is concrete enough to ask about; open confusions use
+# 0.50 because their explicit contradiction is already stronger evidence.
+# The badge/list is deliberately capped at three to keep the entry lightweight.
+_PENDING_HYPOTHESIS_MIN_CONFIDENCE = 0.60
+_PENDING_CONFUSION_MIN_CONFIDENCE = 0.50
+_PENDING_CONFIRMATION_LIMIT = 3
+# First-round calibration (2026-07-22): at most two unsolicited entries per
+# day, while a particular object stays quiet for three days. Recalibrate from
+# observed defer rates after the first production month.
+_CONFIRMATION_GLOBAL_COOLDOWN_HOURS = 12
 # First-round calibration (2026-07-22): three days matches the existing
 # object-level ask budget and makes "以后再说" durable without becoming a
 # permanent dismissal. Recalibrate after the first production month.
@@ -2327,8 +2339,6 @@ def create_app(
         )
 
     def _defer_dialogue_confirmation(ref: str) -> str:
-        from datetime import UTC, datetime, timedelta
-
         deferred_until = (
             datetime.now(UTC) + timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
         ).isoformat()
@@ -2340,6 +2350,234 @@ def create_app(
 
         _update_dialogue_confirmation_state(mutate)
         return deferred_until
+
+    def _parse_confirmation_timestamp(raw: object) -> datetime | None:
+        value = str(raw or "").strip().replace("Z", "+00:00")
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _hypothesis_confirmation_items() -> list[dict[str, Any]]:
+        from openbiliclaw.soul.identity import build_hash8_map
+
+        loader = getattr(ctx.soul_engine, "_load_insights", None)
+        if not callable(loader):
+            return []
+        try:
+            hypotheses = list(loader())
+        except Exception:
+            logger.debug("Failed to load pending hypotheses", exc_info=True)
+            return []
+        by_title = {
+            str(getattr(item, "hypothesis", "")).strip(): item
+            for item in hypotheses
+            if str(getattr(item, "hypothesis", "")).strip()
+        }
+        ref_map = build_hash8_map(list(by_title))
+        settlement_reader = getattr(ctx.database, "get_card_settlement", None)
+        items: list[dict[str, Any]] = []
+        for ref, title in ref_map.items():
+            hypothesis = by_title[title]
+            try:
+                confidence = float(getattr(hypothesis, "confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if (
+                bool(getattr(hypothesis, "validated", False))
+                or confidence < _PENDING_HYPOTHESIS_MIN_CONFIDENCE
+            ):
+                continue
+            if callable(settlement_reader) and settlement_reader(ref) is not None:
+                continue
+            items.append(
+                {
+                    "kind": "hypothesis",
+                    "ref": ref,
+                    "title": title,
+                    "evidence_refs": [
+                        str(value).strip()
+                        for value in getattr(hypothesis, "evidence", [])
+                        if str(value).strip()
+                    ],
+                    "confidence": confidence,
+                    "created_at": str(getattr(hypothesis, "created_at", "") or ""),
+                }
+            )
+        return items
+
+    def _confusion_confirmation_item(confusion: Any) -> dict[str, Any] | None:
+        try:
+            confidence = float(getattr(confusion, "interpretation_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < _PENDING_CONFUSION_MIN_CONFIDENCE:
+            return None
+        topic = str(getattr(confusion, "topic", "") or "").strip()
+        observation = str(getattr(confusion, "observation", "") or "").strip()
+        title = topic or observation or "有件事我还没看懂"
+        return {
+            "kind": "confusion",
+            "ref": str(getattr(confusion, "id", "") or ""),
+            "title": title,
+            "observation": observation,
+            "interpretation": str(getattr(confusion, "interpretation", "") or "").strip(),
+            "evidence_refs": [
+                str(value).strip()
+                for value in getattr(confusion, "evidence_refs", [])
+                if str(value).strip()
+            ],
+            "confidence": confidence,
+            "created_at": "",
+        }
+
+    def _pending_confirmation_items(*, limit: int) -> list[dict[str, Any]]:
+        items = _hypothesis_confirmation_items()
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is not None:
+            try:
+                for confusion in confusion_manager.list_open():
+                    item = _confusion_confirmation_item(confusion)
+                    if item is not None:
+                        items.append(item)
+            except Exception:
+                logger.debug("Failed to load pending confusions", exc_info=True)
+        items.sort(
+            key=lambda item: (
+                -float(item.get("confidence", 0.0) or 0.0),
+                0 if item.get("kind") == "confusion" else 1,
+                str(item.get("ref", "")),
+            )
+        )
+        return items[: max(0, int(limit))]
+
+    def _pending_confirmation_by_ref(ref: str) -> dict[str, Any] | None:
+        normalized_ref = ref.strip()
+        if not normalized_ref:
+            return None
+        for item in _hypothesis_confirmation_items():
+            if item["ref"] == normalized_ref:
+                return item
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is None:
+            return None
+        try:
+            confusion_id = int(normalized_ref)
+        except ValueError:
+            return None
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status not in {"open", "clarifying"}:
+            return None
+        return _confusion_confirmation_item(confusion)
+
+    def _system_confirmation_window_open(
+        state: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> bool:
+        last = _parse_confirmation_timestamp(state.get("global_last_thrown_at", ""))
+        return last is None or now - last >= timedelta(hours=_CONFIRMATION_GLOBAL_COOLDOWN_HOURS)
+
+    def _system_confirmation_object_ready(
+        state: dict[str, Any],
+        *,
+        ref: str,
+        now: datetime,
+    ) -> bool:
+        objects = state.get("objects", {})
+        raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
+        item = raw_item if isinstance(raw_item, dict) else {}
+        deferred_until = _parse_confirmation_timestamp(item.get("deferred_until", ""))
+        if deferred_until is not None and now < deferred_until:
+            return False
+        last = _parse_confirmation_timestamp(item.get("last_asked_at", ""))
+        return last is None or now - last >= timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
+
+    def _mark_dialogue_confirmation_thrown(
+        ref: str,
+        *,
+        now: datetime,
+        preserve_existing: bool = False,
+    ) -> None:
+        timestamp = now.astimezone(UTC).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            if not preserve_existing or not str(state.get("global_last_thrown_at", "")).strip():
+                state["global_last_thrown_at"] = timestamp
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            if not preserve_existing or not str(item.get("last_asked_at", "")).strip():
+                item["last_asked_at"] = timestamp
+
+        _update_dialogue_confirmation_state(mutate)
+
+    def _claim_dialogue_confirmation_throw(ref: str, *, now: datetime) -> bool:
+        """Atomically reserve both persisted system-throw cooldown gates."""
+        claimed = False
+        timestamp = now.astimezone(UTC).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            nonlocal claimed
+            if not _system_confirmation_window_open(state, now=now):
+                return
+            if not _system_confirmation_object_ready(state, ref=ref, now=now):
+                return
+            state["global_last_thrown_at"] = timestamp
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            item["last_asked_at"] = timestamp
+            claimed = True
+
+        _update_dialogue_confirmation_state(mutate)
+        return claimed
+
+    def _get_chat_confirmation_turn(*, ref: str, session: str) -> dict[str, Any] | None:
+        getter = _chat_db_method("get_chat_confirmation_turn")
+        if getter is not None:
+            return cast("dict[str, Any] | None", getter(ref=ref, session=session))
+        for row in reversed(list(fallback_chat_turns.values())):
+            payload = row.get("payload", {})
+            if (
+                row.get("session") == session
+                and row.get("subject_id") == ref
+                and isinstance(payload, dict)
+                and payload.get("ref") == ref
+                and (
+                    payload.get("type") == "question"
+                    or (
+                        payload.get("type") == "card"
+                        and payload.get("state") in {"pending", "discussing"}
+                    )
+                )
+            ):
+                return dict(row)
+        return None
+
+    def _get_chat_confirmation_attachment(
+        *,
+        attached_to_turn_id: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        getter = _chat_db_method("get_chat_confirmation_attachment")
+        if getter is not None:
+            return cast(
+                "dict[str, Any] | None",
+                getter(attached_to_turn_id=attached_to_turn_id, session=session),
+            )
+        for row in fallback_chat_turns.values():
+            payload = row.get("payload", {})
+            if (
+                row.get("session") == session
+                and isinstance(payload, dict)
+                and payload.get("attached_to_turn_id") == attached_to_turn_id
+            ):
+                return dict(row)
+        return None
 
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
@@ -2494,6 +2732,231 @@ def create_app(
             },
         )
         return dict(fallback_chat_turns[turn_id])
+
+    def _confusion_question_reply(item: dict[str, Any]) -> str:
+        title = str(item.get("title", "")).strip() or "这件事"
+        observation = str(item.get("observation", "")).strip()
+        if observation:
+            return f"我对「{title}」有点没看懂：{observation}。你愿意说说实际情况吗？"
+        return f"我对「{title}」有点没看懂。你愿意说说实际情况吗？"
+
+    def _prepare_confusion_confirmation(
+        item: dict[str, Any],
+        *,
+        turn_id: str,
+        ignore_cooldown: bool,
+    ) -> bool:
+        """Claim/retarget one confusion; return whether this call claimed open."""
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is None:
+            raise HTTPException(status_code=503, detail="Confusion manager not ready.")
+        try:
+            confusion_id = int(str(item.get("ref", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Pending confirmation not found.") from exc
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status not in {"open", "clarifying"}:
+            raise HTTPException(status_code=409, detail="Confusion is no longer open.")
+        if confusion.status == "open":
+            claimed = bool(
+                confusion_manager.schedule_ask(
+                    confusion_id,
+                    ask_turn_id=turn_id,
+                    now=datetime.now(UTC),
+                    ignore_cooldown=ignore_cooldown,
+                )
+            )
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Another confusion already owns the clarifying slot.",
+                )
+            return True
+        if confusion.ask_turn_id != turn_id:
+            updater = getattr(ctx.database, "update_confusion", None)
+            if callable(updater):
+                updater(
+                    confusion_id,
+                    ask_turn_id=turn_id,
+                    asked_at=datetime.now(UTC).isoformat(),
+                )
+        return False
+
+    def _create_confirmation_turn(
+        item: dict[str, Any],
+        *,
+        session: str,
+        attached_to_turn_id: str = "",
+        user_initiated: bool,
+    ) -> tuple[ChatTurnOut, bool]:
+        normalized_session = session.strip() or "popup"
+        ref = str(item.get("ref", "")).strip()
+        kind = str(item.get("kind", "")).strip()
+        existing = _get_chat_confirmation_turn(ref=ref, session=normalized_session)
+        if existing is not None and not attached_to_turn_id:
+            if kind == "confusion":
+                _prepare_confusion_confirmation(
+                    item,
+                    turn_id=str(existing.get("turn_id", "")),
+                    ignore_cooldown=user_initiated,
+                )
+            row = existing
+            created = False
+        else:
+            if attached_to_turn_id:
+                stable_key = f"{normalized_session}\0{attached_to_turn_id}"
+                turn_id = f"confirmation-{uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex}"
+            else:
+                turn_id = f"confirmation-{uuid.uuid4().hex}"
+            claimed_open = False
+            if kind == "confusion":
+                claimed_open = _prepare_confusion_confirmation(
+                    item,
+                    turn_id=turn_id,
+                    ignore_cooldown=user_initiated,
+                )
+            structured_payload: dict[str, object]
+            if kind == "hypothesis":
+                structured_payload = {
+                    "type": "card",
+                    "kind": "hypothesis",
+                    "ref": ref,
+                    "title": str(item.get("title", "")).strip(),
+                    "evidence_refs": list(item.get("evidence_refs", [])),
+                    "actions": list(_HYPOTHESIS_CARD_ACTIONS),
+                    "state": "pending",
+                }
+                message = "阿b 的猜测"
+                reply = ""
+                scope = "hypothesis"
+            elif kind == "confusion":
+                structured_payload = {
+                    "type": "question",
+                    "kind": "confusion",
+                    "ref": ref,
+                    "title": str(item.get("title", "")).strip(),
+                    "evidence_refs": list(item.get("evidence_refs", [])),
+                    "state": "clarifying",
+                }
+                message = ""
+                reply = _confusion_question_reply(item)
+                scope = "confusion"
+            else:
+                raise HTTPException(status_code=404, detail="Pending confirmation not found.")
+            if attached_to_turn_id:
+                structured_payload["attached_to_turn_id"] = attached_to_turn_id
+            creator = _chat_db_method("create_chat_confirmation_turn")
+            try:
+                if creator is not None:
+                    row, created = creator(
+                        turn_id=turn_id,
+                        session=normalized_session,
+                        scope=scope,
+                        ref=ref,
+                        title=str(item.get("title", "")).strip(),
+                        message=message,
+                        reply=reply,
+                        payload=structured_payload,
+                    )
+                else:
+                    internal = ChatTurnIn(
+                        message=message,
+                        turn_id=turn_id,
+                        session=normalized_session,
+                        scope=scope,
+                        subject_id=ref,
+                        subject_title=str(item.get("title", "")).strip(),
+                    )
+                    row = _create_chat_turn_row(
+                        internal,
+                        turn_id=turn_id,
+                        structured_payload=structured_payload,
+                    )
+                    _complete_chat_turn_row(turn_id, reply=reply)
+                    row = _get_chat_turn_row(turn_id) or row
+                    created = True
+            except Exception:
+                if claimed_open:
+                    updater = getattr(ctx.database, "update_confusion", None)
+                    if callable(updater):
+                        updater(int(ref), status="open", ask_turn_id="")
+                raise
+            if kind == "confusion" and str(row.get("turn_id", "")) != turn_id:
+                updater = getattr(ctx.database, "update_confusion", None)
+                if callable(updater):
+                    updater(
+                        int(ref),
+                        ask_turn_id=str(row.get("turn_id", "")),
+                        asked_at=datetime.now(UTC).isoformat(),
+                    )
+
+        turn = _normalize_chat_turn(row)
+        should_anchor = user_initiated or kind == "confusion"
+        if should_anchor:
+            anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+            if anchor_manager is None:
+                raise HTTPException(status_code=503, detail="Dialogue anchor manager not ready.")
+            from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+
+            anchor_manager.establish(
+                kind=kind,
+                ref=ref,
+                origin_turn_id=turn.turn_id,
+                entry=ENTRY_PENDING_OPEN,
+            )
+        return turn, bool(created)
+
+    def _maybe_attach_system_confirmation(
+        payload: ChatTurnIn,
+        *,
+        turn_id: str,
+    ) -> ChatTurnOut | None:
+        normalized_session = payload.session.strip() or "popup"
+        existing_attachment = _get_chat_confirmation_attachment(
+            attached_to_turn_id=turn_id,
+            session=normalized_session,
+        )
+        now = datetime.now(UTC)
+        if existing_attachment is not None:
+            turn = _normalize_chat_turn(existing_attachment)
+            ref = str(turn.payload.get("ref", "")).strip()
+            if ref:
+                _mark_dialogue_confirmation_thrown(
+                    ref,
+                    now=now,
+                    preserve_existing=True,
+                )
+            return turn
+
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is not None and anchor_manager.current() is not None:
+            return None
+        state = _load_dialogue_confirmation_state()
+        if not _system_confirmation_window_open(state, now=now):
+            return None
+        for item in _pending_confirmation_items(limit=200):
+            ref = str(item.get("ref", "")).strip()
+            if not _system_confirmation_object_ready(state, ref=ref, now=now):
+                continue
+            if _get_chat_confirmation_turn(ref=ref, session=normalized_session) is not None:
+                continue
+            if not _claim_dialogue_confirmation_throw(ref, now=now):
+                return None
+            try:
+                turn, _created = _create_confirmation_turn(
+                    item,
+                    session=normalized_session,
+                    attached_to_turn_id=turn_id,
+                    user_initiated=False,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    return None
+                raise
+            if str(turn.payload.get("attached_to_turn_id", "")) != turn_id:
+                return None
+            return turn
+        return None
 
     def _complete_chat_turn_row(turn_id: str, *, reply: str) -> None:
         complete_chat_turn = _chat_db_method("complete_chat_turn")
@@ -7477,6 +7940,20 @@ def create_app(
             "confidence": 0.0,
         }
 
+    def _publish_hypothesis_settlement(ref: str, verdict: str) -> None:
+        ctx.database.project_applied_card_settlement(ref)
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is None:
+            return
+        active = anchor_manager.current()
+        if active is None or active.kind != "hypothesis" or active.ref != ref:
+            return
+        anchor_manager.release(
+            reason="settled",
+            card_state=_card_terminal_state(verdict),
+            expected_generation=active.generation,
+        )
+
     async def _settle_hypothesis(
         *,
         ref: str,
@@ -7516,7 +7993,7 @@ def create_app(
         signal = "confirm" if stored_verdict == "confirmed" else "reject"
         feedback: dict[str, Any] = {"hypothesis": hypothesis, "signal": signal}
         if int(settlement.get("applied", 0)) == 1:
-            database.project_applied_card_settlement(ref)
+            _publish_hypothesis_settlement(ref, stored_verdict)
             return _card_action_response(
                 outcome="already_settled",
                 verdict=stored_verdict,
@@ -7536,7 +8013,10 @@ def create_app(
         if not claimed:
             settlement = database.get_card_settlement(ref)
             if isinstance(settlement, dict) and int(settlement.get("applied", 0)) == 1:
-                database.project_applied_card_settlement(ref)
+                _publish_hypothesis_settlement(
+                    ref,
+                    str(settlement.get("verdict", stored_verdict)),
+                )
                 return _card_action_response(
                     outcome="already_settled",
                     verdict=str(settlement.get("verdict", stored_verdict)),
@@ -7604,14 +8084,17 @@ def create_app(
         if not bool(database.complete_card_settlement(ref=ref, claim_token=claim_token)):
             latest = database.get_card_settlement(ref)
             if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
-                database.project_applied_card_settlement(ref)
+                _publish_hypothesis_settlement(
+                    ref,
+                    str(latest.get("verdict", stored_verdict)),
+                )
                 return _card_action_response(
                     outcome="already_settled",
                     verdict=str(latest.get("verdict", stored_verdict)),
                     result=_feedback_result(feedback),
                 )
             return _card_action_response(outcome="processing", verdict=stored_verdict)
-        database.project_applied_card_settlement(ref)
+        _publish_hypothesis_settlement(ref, stored_verdict)
         return _card_action_response(
             outcome="applied" if inserted or claimed else "already_settled",
             verdict=stored_verdict,
@@ -7765,6 +8248,11 @@ def create_app(
             if turn.status == "pending":
                 asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
             return turn
+        if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
+            # Deterministic attachment boundary: the confirmation row is
+            # committed before the user's durable row, so equal-second
+            # timestamps are still ordered by SQLite rowid.
+            _maybe_attach_system_confirmation(payload, turn_id=turn_id)
         if normalized_scope == "hypothesis":
             row = _create_chat_turn_row(
                 payload,
@@ -7779,6 +8267,31 @@ def create_app(
         row = _create_chat_turn_row(payload, turn_id=turn_id)
         asyncio.create_task(_complete_durable_chat_turn(turn_id))
         return _normalize_chat_turn(row)
+
+    @app.get("/api/chat/pending-confirmations", response_model=None)
+    async def list_pending_confirmations(
+        count_only: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        items = _pending_confirmation_items(limit=_PENDING_CONFIRMATION_LIMIT)
+        if count_only:
+            return {"count": len(items)}
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/chat/pending-confirmations/{ref}/open", response_model=ChatTurnOut)
+    async def open_pending_confirmation(
+        ref: str,
+        payload: Annotated[dict[str, object], Body()],
+    ) -> ChatTurnOut:
+        item = _pending_confirmation_by_ref(ref)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Pending confirmation not found.")
+        session = str(payload.get("session", "popup")).strip() or "popup"
+        turn, _created = _create_confirmation_turn(
+            item,
+            session=session,
+            user_initiated=True,
+        )
+        return turn
 
     @app.post("/api/chat/cards/{turn_id}/action", response_model=None)
     async def act_on_chat_card(

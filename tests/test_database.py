@@ -207,6 +207,60 @@ def test_card_settlement_insert_or_ignore_arbitrates_across_connections(tmp_path
     assert settlement["applied"] == 0
 
 
+def test_confirmation_turn_deduplicates_ref_session_atomically_but_not_cross_session(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def create(index: int) -> tuple[dict[str, object], bool]:
+        barrier.wait(timeout=2)
+        return db.create_chat_confirmation_turn(
+            turn_id=f"card-{index}",
+            session="popup",
+            scope="hypothesis",
+            ref="abc12345",
+            title="并发打开同一假设",
+            message="阿b 的猜测",
+            reply="",
+            payload={
+                "type": "card",
+                "kind": "hypothesis",
+                "ref": "abc12345",
+                "title": "并发打开同一假设",
+                "state": "pending",
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(create, range(2)))
+
+    assert sorted(created for _row, created in results) == [False, True]
+    assert len({str(row["turn_id"]) for row, _created in results}) == 1
+    webui, created = db.create_chat_confirmation_turn(
+        turn_id="card-webui",
+        session="webui",
+        scope="hypothesis",
+        ref="abc12345",
+        title="并发打开同一假设",
+        message="阿b 的猜测",
+        reply="",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "abc12345",
+            "title": "并发打开同一假设",
+            "state": "pending",
+        },
+    )
+    assert created is True
+    assert webui["turn_id"] == "card-webui"
+    count = db.conn.execute(
+        "SELECT COUNT(*) FROM chat_turns WHERE subject_id = 'abc12345'"
+    ).fetchone()[0]
+    assert count == 2
+
+
 def test_card_settlement_claim_fences_old_executor_and_event_is_atomic(
     tmp_path: Path,
 ) -> None:

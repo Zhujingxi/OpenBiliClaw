@@ -225,6 +225,8 @@ guided init: signals → preferences → full profile commit
                                   → terminal → runtime schedules optional probes
 
 durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
+                 → pending≤3 → user open(no cooldown) | system 12h+object 72h
+                   → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
                  → kind×relation matrix → hypothesis feedback / confusion FIFO settlement
                    confusion failure → replay_queue(max 5, head-fenced) → 12h recovery
@@ -341,6 +343,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Cognitive profile pipeline: 单对话锚(ref+generation) + 归属矩阵 + 台账 │ │
+│  │       + 待聊≤3/主动零冷却/系统12h+对象72h/attached_to 去重             │ │
 │  │       + 卡片 ref 仲裁/claim fencing/applied-only 投影                    │ │
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
