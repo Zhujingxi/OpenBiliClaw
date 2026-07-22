@@ -2953,6 +2953,105 @@ async def test_anchor_generation_is_revalidated_after_llm_before_any_side_effect
     assert "stale dialogue anchor result discarded before side effects" in caplog.text
 
 
+def test_anchor_generation_cas_abandons_real_interleaving_before_first_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户偏好原始研究"
+    old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis=hypothesis)
+    validation_returned = threading.Event()
+    replacement_finished = threading.Event()
+    real_validate = engine._dialogue_anchor_manager.validate_snapshot
+    validate_calls = 0
+
+    def pause_after_post_llm_validation(ref: str, generation: int):  # type: ignore[no-untyped-def]
+        nonlocal validate_calls
+        validated = real_validate(ref, generation)
+        validate_calls += 1
+        if validate_calls == 2:
+            validation_returned.set()
+            assert replacement_finished.wait(timeout=5)
+        return validated
+
+    async def extract_with_settlement(**_kwargs: object) -> dict[str, object]:
+        return {
+            "candidates": [
+                {
+                    "kind": "interest",
+                    "content": "不应落库的旧代候选",
+                    "confidence": 0.99,
+                    "evidence": "generation race",
+                }
+            ],
+            "settles": [],
+            "anchor": {"relation": "support", "interpretation": "", "derived": []},
+        }
+
+    monkeypatch.setattr(
+        engine._dialogue_anchor_manager,
+        "validate_snapshot",
+        pause_after_post_llm_validation,
+    )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", extract_with_settlement)
+
+    def run_old_generation() -> dict[str, object]:
+        return asyncio.run(
+            engine.learn_from_dialogue(
+                user_message="我支持旧代判断",
+                assistant_reply="收到",
+                session="popup",
+                turn_id="generation-race",
+                anchor_ref=old.ref,
+                anchor_generation=old.generation,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool, caplog.at_level("WARNING"):
+        future = pool.submit(run_old_generation)
+        assert validation_returned.wait(timeout=5)
+        try:
+            assert (
+                engine._dialogue_anchor_manager.release(
+                    reason="replaced",
+                    expected_generation=old.generation,
+                )
+                == old
+            )
+            replacement = engine._dialogue_anchor_manager.establish(
+                kind="hypothesis",
+                ref=old.ref,
+                origin_turn_id=old.origin_turn_id,
+                entry=ENTRY_PENDING_OPEN,
+            )
+        finally:
+            replacement_finished.set()
+        result = future.result(timeout=5)
+
+    current = engine._dialogue_anchor_manager.current()
+    stored = engine._load_insights()[0]
+    assert current == replacement
+    assert replacement.generation == old.generation + 1
+    assert result["anchor_outcome"] == "stale"
+    assert stored.validated is False
+    assert stored.confidence == 0.6
+    assert memory._database.get_card_settlement(old.ref) is None
+    assert memory.load_insight_candidates() == []
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "pending"
+    rows = memory._database.query_profile_ledger(
+        days=1,
+        write_point="anchor_stale_generation_drop",
+    )
+    assert len(rows) == 1
+    assert rows[0]["source"] == "generation_cas"
+    assert "dialogue anchor relation fenced" in caplog.text
+
+
 # ===========================================================================
 # Pending confirmed-hypotheses rebuild state machine (deep-line consolidation)
 # ===========================================================================

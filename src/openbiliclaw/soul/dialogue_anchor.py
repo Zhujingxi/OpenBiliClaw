@@ -319,10 +319,12 @@ class DialogueAnchorManager:
         """Persist unrelated/ambiguous counters and release after two unrelated turns."""
         normalized_relation = relation.strip().lower()
         released: DialogueAnchor | None = None
+        updated: DialogueAnchor | None = None
         released_replays: list[dict[str, Any]] = []
+        generation_matched = False
 
         def mutate(state: dict[str, Any]) -> None:
-            nonlocal released
+            nonlocal generation_matched, released, updated
             anchor = DialogueAnchor.from_dict(state.get("anchor"))
             if anchor is None:
                 return
@@ -333,37 +335,42 @@ class DialogueAnchorManager:
                     anchor.generation,
                 )
                 return
+            generation_matched = True
             if normalized_relation == "unrelated":
-                updated = replace(
+                next_anchor = replace(
                     anchor,
                     unrelated_streak=anchor.unrelated_streak + 1,
                     ambiguous_count=0,
                 )
-                if updated.unrelated_streak >= _UNRELATED_RELEASE_TURNS:
+                if next_anchor.unrelated_streak >= _UNRELATED_RELEASE_TURNS:
                     released_replays.extend(
-                        self._prepare_release(updated, reason="unrelated", card_state="")
+                        self._prepare_release(next_anchor, reason="unrelated", card_state="")
                     )
-                    released = updated
+                    released = next_anchor
                     state["anchor"] = None
                 else:
-                    state["anchor"] = updated.to_dict()
+                    updated = next_anchor
+                    state["anchor"] = next_anchor.to_dict()
                 return
             if normalized_relation == "ambiguous":
-                updated = replace(
+                next_anchor = replace(
                     anchor,
                     unrelated_streak=0,
                     ambiguous_count=anchor.ambiguous_count + 1,
                 )
             else:
-                updated = replace(anchor, unrelated_streak=0, ambiguous_count=0)
-            state["anchor"] = updated.to_dict()
+                next_anchor = replace(anchor, unrelated_streak=0, ambiguous_count=0)
+            updated = next_anchor
+            state["anchor"] = next_anchor.to_dict()
 
         self._mutate_state(mutate)
         if released is not None:
             self._record_release(released, "unrelated")
             self._record_replay_drops(released, released_replays, reason="unrelated")
             return None
-        return self.current()
+        if not generation_matched:
+            return None
+        return updated
 
     def expire(self, *, now: datetime | None = None) -> bool:
         """Release an anchor whose absolute two-hour TTL has elapsed."""

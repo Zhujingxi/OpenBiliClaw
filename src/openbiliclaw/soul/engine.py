@@ -1077,6 +1077,7 @@ class SoulEngine:
         turn_id: str,
         source: str,
         derived: list[dict[str, object]] | None = None,
+        anchor_generation: int = 0,
     ) -> dict[str, Any]:
         """Settle one hypothesis through the shared ref-level fenced executor.
 
@@ -1085,14 +1086,24 @@ class SoulEngine:
         winning action payload so a later claimant resumes the *winner's*
         revise semantics rather than the contender's request.
         """
+        normalized_ref = ref.strip()
+        if anchor_generation <= 0:
+            active_anchor = self._dialogue_anchor_manager.current()
+            if (
+                active_anchor is not None
+                and active_anchor.kind == "hypothesis"
+                and active_anchor.ref == normalized_ref
+            ):
+                anchor_generation = active_anchor.generation
         return await self._settle_dialogue_object(
             kind="hypothesis",
-            ref=ref,
+            ref=normalized_ref,
             title=hypothesis,
             requested_verdict=requested_verdict,
             turn_id=turn_id,
             source=source,
             derived=derived,
+            anchor_generation=anchor_generation,
         )
 
     async def settle_confusion_answer(
@@ -1177,6 +1188,7 @@ class SoulEngine:
                 "title": title.strip(),
                 "action": verdict,
                 "derived": list(derived or []),
+                "anchor_generation": max(0, int(anchor_generation)),
                 "source": source,
             }
         elif normalized_kind == "confusion":
@@ -1464,18 +1476,31 @@ class SoulEngine:
         anchor = self._dialogue_anchor_manager.current()
         if anchor is None or anchor.kind != kind or anchor.ref != ref:
             return
+        try:
+            expected_generation = max(0, int(stored_payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError):
+            expected_generation = 0
+        if expected_generation <= 0 or anchor.generation != expected_generation:
+            logger.warning(
+                "dialogue settlement anchor release fenced: ref=%r receipt_generation=%s "
+                "active_generation=%s",
+                ref,
+                expected_generation,
+                anchor.generation,
+            )
+            return
         if kind == "hypothesis":
             verdict = str(settlement.get("verdict", "")).strip().lower()
             card_state = "confirmed" if verdict == "confirmed" else "rejected"
             self._dialogue_anchor_manager.release(
                 reason="settled",
                 card_state=card_state,
-                expected_generation=anchor.generation,
+                expected_generation=expected_generation,
             )
         else:
             self._dialogue_anchor_manager.release(
                 reason="settled",
-                expected_generation=anchor.generation,
+                expected_generation=expected_generation,
             )
 
     def _dialogue_settlement_response(
@@ -1664,6 +1689,13 @@ class SoulEngine:
                     decision=anchor_decision,
                     turn_id=turn_id,
                 )
+                if anchor_outcome == "stale":
+                    return self._stale_anchor_drop_result(
+                        anchor_ref=anchor_ref,
+                        anchor_generation=anchor_generation,
+                        turn_id=turn_id,
+                        phase="generation_cas",
+                    )
 
         # Process inventory settles (single ownership, spec §invariant 6): an
         # anchored turn belongs to the dialogue-anchor processor. Probe turns
@@ -2756,6 +2788,10 @@ class SoulEngine:
                 relation,
                 expected_generation=anchor.generation,
             )
+            if updated is None:
+                current = self._dialogue_anchor_manager.current()
+                if current is not None:
+                    return "stale"
             if anchor.kind == "confusion":
                 confusion_id = self._confusion_anchor_id(anchor)
                 if confusion_id:
@@ -2820,10 +2856,14 @@ class SoulEngine:
         # Every valid non-ambiguous relation resets both counters before its
         # object-specific side effect. A failed side effect leaves a clean,
         # still-active anchor for the next turn.
-        self._dialogue_anchor_manager.note_relation(
-            relation,
-            expected_generation=anchor.generation,
-        )
+        if (
+            self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            is None
+        ):
+            return "stale"
         if anchor.kind == "hypothesis":
             hypothesis = anchor_texts[0] if anchor_texts else ""
             if not hypothesis:
@@ -2836,6 +2876,7 @@ class SoulEngine:
                     requested_verdict=relation,
                     turn_id=turn_id,
                     source="dialogue_anchor",
+                    anchor_generation=anchor.generation,
                 )
                 if result.get("outcome") == "processing":
                     return "queued_failed"
@@ -2850,6 +2891,7 @@ class SoulEngine:
                     turn_id=turn_id,
                     source="dialogue_anchor",
                     derived=derived,
+                    anchor_generation=anchor.generation,
                 )
                 if result.get("outcome") == "processing":
                     return "queued_failed"
