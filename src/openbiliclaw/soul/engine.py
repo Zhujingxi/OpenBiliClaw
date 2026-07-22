@@ -1141,6 +1141,7 @@ class SoulEngine:
             "try_create_card_settlement",
             "get_card_settlement",
             "claim_card_settlement",
+            "card_settlement_claim_guard",
             "record_card_settlement_event",
             "mark_card_settlement_segment",
             "finish_card_settlement_marker",
@@ -1220,7 +1221,8 @@ class SoulEngine:
 
         claim_token = uuid4().hex
         claimed = bool(
-            database.claim_card_settlement(
+            await asyncio.to_thread(
+                database.claim_card_settlement,
                 ref=normalized_ref,
                 claim_token=claim_token,
                 now=datetime.now(UTC),
@@ -1283,52 +1285,71 @@ class SoulEngine:
             )
 
         if int(settlement.get("seg_object", 0)) == 0:
-            result = await self._apply_dialogue_settlement_object(
-                settlement=settlement,
-                payload=payload,
-            )
-            if result is None:
-                return self._dialogue_settlement_response(
-                    outcome="processing",
+            with database.card_settlement_claim_guard(
+                ref=normalized_ref,
+                claim_token=claim_token,
+            ) as owns_claim:
+                if not owns_claim:
+                    return self._dialogue_settlement_response(
+                        outcome="processing",
+                        settlement=database.get_card_settlement(normalized_ref) or settlement,
+                    )
+                result = await self._apply_dialogue_settlement_object(
                     settlement=settlement,
+                    payload=payload,
                 )
-            if not bool(
-                database.mark_card_settlement_segment(
-                    ref=normalized_ref,
-                    claim_token=claim_token,
-                    segment="object",
-                )
-            ):
-                return self._dialogue_settlement_response(
-                    outcome="processing",
-                    settlement=settlement,
-                )
+                if result is None:
+                    return self._dialogue_settlement_response(
+                        outcome="processing",
+                        settlement=settlement,
+                    )
+                if not bool(
+                    database.mark_card_settlement_segment(
+                        ref=normalized_ref,
+                        claim_token=claim_token,
+                        segment="object",
+                    )
+                ):
+                    return self._dialogue_settlement_response(
+                        outcome="processing",
+                        settlement=database.get_card_settlement(normalized_ref) or settlement,
+                    )
         else:
             result = self._read_dialogue_settlement_result(settlement, payload)
 
         if int(settlement.get("seg_marker", 0)) == 0:
-            if stored_kind == "hypothesis":
-                feedback = self._settlement_feedback(stored_title, stored_verdict)
-                await self.mark_feedback_rebuild(feedback, result)
-            if not bool(
-                database.finish_card_settlement_marker(
-                    ref=normalized_ref,
-                    claim_token=claim_token,
-                    source=stored_source,
-                    hypothesis=stored_title,
-                    verdict=stored_verdict,
-                    turn_id=str(settlement.get("turn_id", normalized_turn_id)),
-                    matched=bool(result.get("matched", False)),
-                    write_point=(
-                        "settle_insight" if stored_kind == "hypothesis" else "settle_confusion"
-                    ),
-                )
-            ):
-                return self._dialogue_settlement_response(
-                    outcome="processing",
-                    settlement=settlement,
-                    result=result,
-                )
+            with database.card_settlement_claim_guard(
+                ref=normalized_ref,
+                claim_token=claim_token,
+            ) as owns_claim:
+                if not owns_claim:
+                    return self._dialogue_settlement_response(
+                        outcome="processing",
+                        settlement=database.get_card_settlement(normalized_ref) or settlement,
+                        result=result,
+                    )
+                if stored_kind == "hypothesis":
+                    feedback = self._settlement_feedback(stored_title, stored_verdict)
+                    await self.mark_feedback_rebuild(feedback, result)
+                if not bool(
+                    database.finish_card_settlement_marker(
+                        ref=normalized_ref,
+                        claim_token=claim_token,
+                        source=stored_source,
+                        hypothesis=stored_title,
+                        verdict=stored_verdict,
+                        turn_id=str(settlement.get("turn_id", normalized_turn_id)),
+                        matched=bool(result.get("matched", False)),
+                        write_point=(
+                            "settle_insight" if stored_kind == "hypothesis" else "settle_confusion"
+                        ),
+                    )
+                ):
+                    return self._dialogue_settlement_response(
+                        outcome="processing",
+                        settlement=database.get_card_settlement(normalized_ref) or settlement,
+                        result=result,
+                    )
 
         if not bool(database.complete_card_settlement(ref=normalized_ref, claim_token=claim_token)):
             latest = database.get_card_settlement(normalized_ref)

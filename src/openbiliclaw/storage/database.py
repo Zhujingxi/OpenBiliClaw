@@ -19,8 +19,9 @@ import threading
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -40,6 +41,7 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.memory.json_state import exclusive_file_lock
 from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.saved_sync.identity import (
     canonical_source_platform,
@@ -84,6 +86,20 @@ if TYPE_CHECKING:
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
+
+_CARD_SETTLEMENT_LOCKS: dict[Path, threading.RLock] = {}
+_CARD_SETTLEMENT_LOCKS_GUARD = threading.Lock()
+
+
+def _card_settlement_process_lock(path: Path) -> threading.RLock:
+    """Return the process-local half of one database's settlement fence."""
+    key = path.resolve()
+    with _CARD_SETTLEMENT_LOCKS_GUARD:
+        lock = _CARD_SETTLEMENT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CARD_SETTLEMENT_LOCKS[key] = lock
+        return lock
 
 
 # Cap the probe so a long legitimate blurb never costs a full parse. Real
@@ -1306,6 +1322,9 @@ class Database:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
+        self._card_settlement_lock_path = self._db_path.with_name(
+            f".{self._db_path.name}.card-settlement.lock"
+        )
         self._conn: sqlite3.Connection | None = None
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
         self._preserve_read_transaction = False
@@ -2520,31 +2539,75 @@ class Database:
         # apply path while bounding crash recovery. Revisit only with latency
         # telemetry if the settlement path gains remote side effects.
         stale_before = normalized_now - timedelta(minutes=5)
-        conn = self.open_connection()
-        try:
-            cursor = conn.execute(
-                """
-                UPDATE card_settlements
-                SET apply_claim_at = ?, apply_claim_token = ?
-                WHERE ref = ?
-                  AND applied = 0
-                  AND (
-                      apply_claim_at IS NULL
-                      OR apply_claim_at = ''
-                      OR julianday(apply_claim_at) < julianday(?)
-                  )
-                """,
-                (
-                    normalized_now.astimezone(UTC).isoformat(),
-                    normalized_token,
-                    ref,
-                    stale_before.astimezone(UTC).isoformat(),
-                ),
-            )
-            conn.commit()
-            return int(cursor.rowcount or 0) == 1
-        finally:
-            conn.close()
+        with self._card_settlement_fence():
+            conn = self.open_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE card_settlements
+                    SET apply_claim_at = ?, apply_claim_token = ?
+                    WHERE ref = ?
+                      AND applied = 0
+                      AND (
+                          apply_claim_at IS NULL
+                          OR apply_claim_at = ''
+                          OR julianday(apply_claim_at) < julianday(?)
+                      )
+                    """,
+                    (
+                        normalized_now.astimezone(UTC).isoformat(),
+                        normalized_token,
+                        ref,
+                        stale_before.astimezone(UTC).isoformat(),
+                    ),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) == 1
+            finally:
+                conn.close()
+
+    @contextmanager
+    def _card_settlement_fence(self) -> Iterator[None]:
+        """Serialize claim takeover with guarded non-SQLite side effects."""
+        process_lock = _card_settlement_process_lock(self._card_settlement_lock_path)
+        with process_lock, exclusive_file_lock(self._card_settlement_lock_path) as acquired:
+            if not acquired:  # pragma: no cover - blocking mode always acquires
+                raise RuntimeError("Failed to acquire card settlement fence")
+            yield
+
+    @contextmanager
+    def card_settlement_claim_guard(
+        self,
+        *,
+        ref: str,
+        claim_token: str,
+    ) -> Iterator[bool]:
+        """Hold the takeover fence and yield whether ``claim_token`` still owns ``ref``.
+
+        The fence remains held through the caller's object/derived/marker side
+        effect and segment CAS. A lease takeover therefore happens wholly before
+        the side effect (which then sees ``False``) or after its durable segment
+        marker; it cannot split the two operations.
+        """
+        normalized_token = claim_token.strip()
+        if not normalized_token:
+            raise ValueError("Card settlement claim token is required")
+        with self._card_settlement_fence():
+            conn = self.open_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM card_settlements
+                    WHERE ref = ?
+                      AND apply_claim_token = ?
+                      AND applied = 0
+                    """,
+                    (ref, normalized_token),
+                ).fetchone()
+            finally:
+                conn.close()
+            yield row is not None
 
     def record_card_settlement_event(
         self,

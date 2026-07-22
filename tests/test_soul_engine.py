@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -3115,6 +3117,122 @@ async def test_rebuild_marker_write_failure_blocks_settlement_publication_and_cl
     assert (final["seg_marker"], final["applied"]) == (1, 1)
     assert marker_path.exists()
     assert memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "confirmed"
+
+
+def test_claim_takeover_fences_object_derived_and_ledger_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.identity import insight_hash8
+
+    first_memory = MemoryManager(tmp_path)
+    first_memory.initialize()
+    hypothesis = "用户只在意理论深度"
+    _seed_insight(first_memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    first_engine = SoulEngine(llm=FakeRegistry("{}"), memory=first_memory)
+
+    takeover_memory = MemoryManager(tmp_path)
+    takeover_memory.initialize()
+    takeover_engine = SoulEngine(llm=FakeRegistry("{}"), memory=takeover_memory)
+
+    paused_before_object = threading.Event()
+    resume_first = threading.Event()
+    real_record_event = first_memory._database.record_card_settlement_event
+
+    def record_then_pause(**kwargs: object) -> bool:
+        recorded = real_record_event(**kwargs)  # type: ignore[arg-type]
+        paused_before_object.set()
+        assert resume_first.wait(timeout=5)
+        return recorded
+
+    monkeypatch.setattr(first_memory._database, "record_card_settlement_event", record_then_pause)
+
+    object_calls = 0
+    object_calls_lock = threading.Lock()
+
+    def count_object_calls(engine: SoulEngine) -> None:
+        nonlocal object_calls
+        real_apply = engine.apply_feedback_object
+
+        async def counted(feedback: dict[str, object]) -> dict[str, object]:
+            nonlocal object_calls
+            with object_calls_lock:
+                object_calls += 1
+            return await real_apply(feedback)
+
+        monkeypatch.setattr(engine, "apply_feedback_object", counted)
+
+    count_object_calls(first_engine)
+    count_object_calls(takeover_engine)
+    derived = [
+        {
+            "content": "用户更看重能落地的深度",
+            "confidence": 0.82,
+            "evidence": "用户主动修正",
+        }
+    ]
+
+    def run_first() -> dict[str, object]:
+        return asyncio.run(
+            first_engine.settle_hypothesis(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="revise",
+                turn_id="lease-first",
+                source="card_action",
+                derived=derived,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first_future = pool.submit(run_first)
+        assert paused_before_object.wait(timeout=5)
+        first_memory._database.conn.execute(
+            "UPDATE card_settlements "
+            "SET apply_claim_at = '2000-01-01T00:00:00+00:00' WHERE ref = ?",
+            (ref,),
+        )
+        first_memory._database.conn.commit()
+        try:
+            takeover_result = asyncio.run(
+                takeover_engine.settle_hypothesis(
+                    ref=ref,
+                    hypothesis=hypothesis,
+                    requested_verdict="confirm",
+                    turn_id="lease-takeover",
+                    source="legacy_endpoint",
+                )
+            )
+        finally:
+            resume_first.set()
+        first_result = first_future.result(timeout=5)
+
+    receipt = first_memory._database.get_card_settlement(ref)
+    assert receipt is not None
+    assert takeover_result["outcome"] == "applied"
+    assert first_result["outcome"] == "processing"
+    assert (receipt["verdict"], receipt["applied"]) == ("revised", 1)
+    assert object_calls == 1
+    assert (
+        len(
+            first_memory._database.query_profile_ledger(
+                days=1,
+                write_point="anchor_revise_derived",
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            first_memory._database.query_profile_ledger(
+                days=1,
+                write_point="settle_insight",
+            )
+        )
+        == 1
+    )
+    assert len(first_memory._database.query_events(event_types=["feedback"])) == 1
 
 
 @pytest.mark.asyncio
