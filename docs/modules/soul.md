@@ -52,7 +52,7 @@
 | CognitionCycle 游标增量取数 | ✅ | 觉察/洞察改**内容游标 + 大批量**取数，取代旧固定窗口（觉察曾 `query_events(limit=50)`、洞察曾全量读觉察）。觉察按 `last_awareness_event_id`（写进 `cognition_cycle_state.json`）只读 `id > 水位` 的事件，无新事件即跳过不调 LLM；单批容量 `_AWARENESS_EVENT_BATCH_SIZE=300`（按 256k+ 长上下文模型设计，~100 token/事件，正常 12h 窗口单次调用即可，**不为几十个事件强行分批**），仅积压超 300 才分批、作为防超大积压的安全网；每批成功后**逐批推进水位**（中途失败不丢已处理批），首批附 10 条已处理事件作趋势上下文；积压超 `_AWARENESS_BACKLOG_CAP=900` 时水位跳到最新窗口并记 WARNING（不静默丢）。洞察按 `last_insight_awareness_index`（觉察 append-only 的位置游标）只读新觉察、单批 `_INSIGHT_NOTE_BATCH_SIZE=150`（cap 450），并把当前活跃假设作 `existing_hypotheses` 上下文透传（`build_insight_prompt` 新增形参，system 仍静态、缓存不破）。批量 LLM 调用用更大的 `_COGNITION_MAX_TOKENS=32768`，两个 analyzer 的 `analyze()` 新增 `max_tokens` 形参 |
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
-| SoulEngine.update_from_feedback() | ✅ | compatibility facade 仍按 feedback event → 假设对象 → rebuild marker 的历史顺序工作；三段分别提取为 `apply_feedback_object()`（confirm→validated+置信度≥0.75，reject→未验证+≤0.35）、`mark_feedback_rebuild()` 与只读 `feedback_result()`。公开 `settle_hypothesis()` / `settle_confusion_answer()` 是卡片、legacy 与对话锚唯一共同结算执行体：ref 仲裁后按赢家 payload 故障续做，`applied=1` 才发布对象与全端投影。对象段仍同步更新 soul 层 `active_insights` 快照。 |
+| SoulEngine.update_from_feedback() | ✅ | compatibility facade 仍按 feedback event → 假设对象 → rebuild marker 的历史顺序工作；三段分别提取为 `apply_feedback_object()`（confirm→validated+置信度≥0.75，reject→未验证+≤0.35）、`mark_feedback_rebuild()` 与只读 `feedback_result()`。公开 `settle_hypothesis(anchor_generation=0)` / `settle_confusion_answer()` / `settle_confusion()` / `settle_speculation()` 是卡片、legacy、对话锚与无锚 chat settles 的唯一共同结算入口：ref 仲裁后按赢家 payload 故障续做，`applied=1` 才发布对象与全端投影。对象段仍同步更新 soul 层 `active_insights` 快照。 |
 | SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
 | SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
 | 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
@@ -61,9 +61,9 @@
 | 画像更新台账（`soul/ledger.py`，v0.3.174+） | ✅ | `ProfileLedger` 是画像写点的**只追加审计观察者**：动作结束后一次 `INSERT` 到 `profile_update_ledger`，行含 `outcome(success\|failed)`、before/after 摘要、`diff`（top-level changed keys，≤2000 字符）、`source_refs`、`turn_id`（对话/结算幂等观察键），以及为后续 Wave 预留的 `gate_verdict`（Phase 3 shadow_*）/`held_id`（Phase 2）。台账为 **best-effort**：写失败只记 WARNING，绝不阻断底层画像写入。`action()` 上下文管理器包裹写入动作，正常出块记 success、异常记 failed 并**重新抛出**（不改变原控制流）。枚举写点见下「[画像写点台账挂钩清单](#画像写点台账挂钩清单)」。CLI 查询：`openbiliclaw ledger [--line] [--days] [--write-point]` |
 | 觉察证据链（`AwarenessNote.note_id / source_event_ids`，v0.3.174+） | ✅ | `AwarenessNote` 新增生成式 `note_id`（uuid hex 前 12）、`source_event_ids`（本轮 cursor 消费的事件 id）与 `source_event_ids_approximate`（归属为**按轮**非按 note——LLM 不把观察映射到具体事件，故整批挂到每条 note 并标注近似）。`analyze()` 新增可选 `source_event_ids`，觉察 prompt 一字不动（回放不变性）；`cognition_cycle` 传入每批事件 id。向后兼容:旧 note 缺字段默认空。是 Wave B 疑惑 evidence_refs 的前置 |
 | 对话学习串行队列（`soul/dialogue_learn_queue.py`，v0.3.174+） | ✅ | `learn_from_dialogue` 不再每轮 `asyncio.create_task`（相邻轮会交错 read/merge/write 共享偏好/画像）；改由 `DialogueLearnQueue` 单 worker 串行消费。worker **自持生命周期**（不入 `cancel_all` 注册表）：热重载在 `cancel_all` **之前** pause-drain 旧队列；drain 超时会抛给重载调用方，恢复旧队列接单并中止安装新 runtime，构建成功才停旧启新，构建失败同样回滚 resume 旧队列。进程退出经 shutdown 钩子 drain，超时后由 shutdown 强制取消 worker。`SocraticDialogue` 注入 queue 时投递、否则回退旧 detached-task 路径（CLI/OpenClaw） |
-| 对话确认入口与锚（Wave A–D，v0.3.182+） | ✅ | `DialogueAnchorManager` 持久化至多一个 `{kind,ref,generation,established_at,unrelated_streak,origin_turn_id,ambiguous_count}`，四种释放为结算、连续两轮 unrelated、2h TTL、replaced。card discuss 建锚前校验 durable payload 仍持有同一 `attempt_token`；读取校正清 token 后，停顿旧请求不能恢复建锚。学习任务入 LLM 前校验一次 ref+generation，LLM 返回后、任何对象/队列/候选副作用前再原子读取并同时校验一次；失配整批丢弃、WARNING 并写 `anchor_stale_generation_drop` 台账。待聊列表主动 open 以 `pending_open` 建锚且不受 12h/72h 时间 gate；系统疑惑提问也建锚，系统假设卡等待用户操作。Dialogue 回灌统一读取所有 session 的 completed `{chat,hypothesis,confusion}` scope（含 agent-only 疑惑 question，probe 仍排除），而 API turn 列表继续按 session 过滤；durable 请求把产生端 session 逐请求传给学习 payload。Wave D 后新客户端只在对话卡片主动结算假设，三处认知更新区与 CLI 列表均只读；deprecated legacy API 仅为旧客户端转发兼容。归属矩阵、ambiguous/Jaccard 防双计与 confusion FIFO 语义不变。 |
-| 对话窗口 + 时间事实（v0.3.182+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮。每个历史 turn 用创建时定死的本地绝对前缀 `[MM-DD HH:mm]`，SQLite 无时区 `created_at` 按 UTC 经单点函数转本地；当前时间只追加在当轮 user prompt 尾部，不改写历史前缀。回灌仍仅 popup + scope='chat' + completed 的 `chat_turns`；CLI 无 DB，probe/confusion scope 不回灌 |
-| 对话结算 settles（v0.3.182+） | ✅ | `build_dialogue_insight_prompt` 保持模块级静态 system + `sort_keys=True`，无锚输入/输出逐字节不变；有锚只在 user message 加 anchor 契约。`learn_from_dialogue` 仅在**无活锚的 scope='chat'** 处理检索式 settles；锚定轮跳过检索式 settles，`support/contradict/revise/answer` 由锚处理器转入与卡片 action 相同的 ref 仲裁、三段收据和 applied 投影路径，避免双计或画像/卡片分叉。普通 settles 仍按当轮 `active_list` 白名单调用既有 speculation/insight 入口并记录 `turn_id`。hash8=SHA-256(NFC+strip+空白折叠)hex 前 8，碰撞升 hex16 |
+| 对话确认入口与锚（Wave A–D，v0.3.182+） | ✅ | `DialogueAnchorManager` 持久化至多一个 `{kind,ref,generation,established_at,unrelated_streak,origin_turn_id,ambiguous_count}`，四种释放为结算、连续两轮 unrelated、2h TTL、replaced。card discuss 建锚前校验 durable payload 仍持有同一 `attempt_token`；读取校正清 token 后，停顿旧请求不能恢复建锚。学习任务入 LLM 前校验一次 ref+generation；LLM 返回后的首个持久副作用由 `note_relation(expected_generation=...)` 在同一状态锁内完成重读+CAS，engine 必须消费返回值，失配整批丢弃、WARNING 并写 `anchor_stale_generation_drop`。结算赢家 payload 固化 `anchor_generation`，applied 收据只能释放该代，同 ref 新锚不会被旧收据碰掉。待聊列表主动 open 以 `pending_open` 建锚且不受 12h/72h 时间 gate；系统疑惑提问也建锚，系统假设卡等待用户操作。Dialogue 回灌统一读取所有 session 的 completed `{chat,hypothesis,confusion}` scope（含 agent-only 疑惑 question，probe 仍排除），而 API turn 列表继续按 session 过滤；durable 请求把产生端 session 逐请求传给学习 payload。Wave D 后新客户端只在对话卡片主动结算假设，三处认知更新区与 CLI 列表均只读；deprecated legacy API 仅为旧客户端转发兼容。归属矩阵、ambiguous/Jaccard 防双计与 confusion FIFO 语义不变。 |
+| 对话窗口 + 时间事实（v0.3.182+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮。每个历史 turn 用创建时定死的本地绝对前缀 `[MM-DD HH:mm]`，SQLite 无时区 `created_at` 由公开 `format_dialogue_turn_timestamp(..., local_timezone=...)` 单点转本地；当前时间只追加在当轮 user prompt 尾部，不改写历史前缀。带数据库的非 CLI Dialogue 回灌所有 session 的 completed `chat/hypothesis/confusion`（probe 排除），API 可见列表仍按 session 过滤。 |
+| 对话结算 settles（v0.3.182+） | ✅ | `build_dialogue_insight_prompt(..., anchor=None)` 保持模块级静态 system + `sort_keys=True`，无锚输入/输出逐字节不变；非空 anchor 只在 user message 加契约。`learn_from_dialogue` 仅在**无活锚的 scope='chat'** 处理检索式 settles；锚定轮跳过检索式 settles，`support/contradict/revise/answer` 由锚处理器转入共同 ref 仲裁。普通 `speculation/insight/confusion` settles 也只能调用 `settle_speculation/settle_hypothesis/settle_confusion`，与卡片 action、legacy、锚共享赢家收据、claim 临界区、三段状态与 applied 投影，不得直调 speculator、`update_from_feedback` 或 `ConfusionManager.resolve`。白名单仍等于当轮 `active_list`，台账保留 `turn_id`；hash8=SHA-256(NFC+strip+空白折叠)hex 前 8，碰撞升 hex16。 |
 | 疑惑对象「看不懂」（`soul/confusion.py` + `confusions` 表，v0.3.175+） | ✅ | 当系统无法干净解读某行为时产出**疑惑**（不写画像，只驱动澄清与冻结）。两产生源：①觉察——`analyze_with_confusions()` + 独立 builder `build_awareness_with_confusions_prompt`（静态 system，入 invariance 清单；`analyze()`/`build_awareness_prompt` 一字不动，`cognition_cycle` 切新 API 属有意变更），候选 ≤2/轮、白名单校验落库；②推测僵局——`SpeculatorTickResult.stalemate`=expire 时 `0<confirmation_count<threshold`（现存字段判定），pipeline 转疑惑。状态机 `open→clarifying→resolved\|dismissed`（+TTL `expired`）；`clarifying` 全局 ≤1 由 partial unique index 跨连接原子保证。TTL 扫描并入 12h `cognition_cycle` |
 | 疑惑澄清三路 + 唯一结算所有者 + 冻结（v0.3.182+） | ✅ | **ask**：durable chat `scope="confusion"` 先 claim `clarifying` 并立即建锚，72h 冷却持久化于 `asked_at`；待聊列表的显式用户 open 可传 `ignore_cooldown`，只绕过时间冷却，数据库 partial unique index 的全局 `clarifying <= 1` 仍强制生效。API 完成侧效应不再调用 `resolve/defer`，唯一所有者是串行学习队列中的锚处理器。分类结果先写 `confusions.replay_queue`（FIFO、上限 5、超限逐出最旧并记 dropped 台账），队头失败保留，新轮只能入尾；成功后从队头续跑。四种锚释放都会清队列并记 dropped；12h `CognitionCycle` 先重放**任意状态的非空队列**（覆盖 resolve 已提交、pop 前崩溃的 terminal 行，并续做未 applied 对象收据），再扫描晚于 ask receipt 且 completed、尚无 payload receipt 的 classification gap。三出口仍为 `real_interest` / `proxy_behavior` / `dismissed`；两次 ambiguous 走 defer，恢复 open 行时不重复增加 defer_count。topic 冻结与 held-update 重放状态机保持不变。 |
 | 态势门控（`soul/posture_gate.py`，v0.3.176+） | ✅ | 深层写入一致性门控（Phase 3）。`build_posture_gate_prompt` 静态 system（三判定 accept/downgrade/reject + 「冲突不是错误是新假设」）+ `sort_keys`（入 invariance 清单）。`PostureGate` 三模式：`off`=完全旁路、**门控 LLM 零调用**、逐字节等价；`shadow`(默认)=**commit boundary 捕获不可变快照**（before/after/source_refs/gate_id），异步旁路任务只消费快照（判定前对活状态再写入不污染判定，带断言）、判定落台账 `shadow_*`、provider 异常/非法 JSON/非白名单 verdict 均落 `shadow_error`、**零延迟不阻塞原写入**；`enforce`=同步判定，同一组判定错误保守 downgrade 且 `GateDecision.is_error=True`，供重建调用方保留 marker 重试；只有明确白名单 accept/downgrade/reject（含真实 refusal）为 `is_error=False`。**深层线归一后**（见「深层影响唯一模式」），有效接入点为两条：①对话 goal/value/state 深层候选（interest/dislike 快线不过；downgrade 置信=confidence×0.6 转 insight）；③soul 整份重建，泛化承载三触发源（dialogue / feedback_batch / confirmed_hypotheses），downgrade/reject→放弃本次 rebuild + 台账。**接入点②（管线 VALUES/CORE 层 updater 门控）已随 P1 退役**：`update_layer` 对 VALUES/CORE 直接封死 no-op + WARNING，不再有逐层门控。新 caller `soul.posture_gate` 注册 usage recorder。enforce 受 save-time 三条件校验（见 config.md，`posture_gate_force_enforce` 逃生门） |
@@ -315,7 +315,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 | 6 | 12h 整理 应用 / 回滚 | `consolidation_apply` / `consolidation_revert` | `consolidator.run` / `consolidator.revert` |
 | 7 | init 全量建像（偏好 + soul） | `init_preference_build` / `init_soul_build` | `engine.analyze_events` / `engine.build_initial_profile` |
 | 8 | cognition sync（觉察/洞察 → soul） | `cognition_sync` | `cognition_cycle._sync_to_profile` |
-| — | 对话结算（Phase 1） | `settle_speculation` / `settle_insight` | `engine._process_dialogue_settles`（带 turn_id） |
+| — | 对话结算（Phase 1） | `settle_speculation` / `settle_insight` / `settle_confusion` | `Database.finish_card_settlement_marker`（所有入口共用 ref 收据，带 turn_id） |
 
 > `init_soul_build` 是实现中发现的清单外写点（原 clist #7 只点名偏好写入），已一并挂钩。CLI 观测：`openbiliclaw ledger --line` / 按写点聚合 `openbiliclaw ledger`；shadow 门控采数（Phase 3）：`SELECT gate_verdict, COUNT(*) FROM profile_update_ledger WHERE gate_verdict LIKE 'shadow_%' GROUP BY 1`。
 
@@ -817,6 +817,31 @@ learning = await engine.learn_from_dialogue(
 #   "profile_rebuilt": False,
 # }
 
+# 所有主动结算都走同一个 ref 仲裁器；anchor_generation=0 表示无锚入口。
+receipt = await engine.settle_hypothesis(
+    ref="2d0a6ff1",
+    hypothesis="用户重视原始研究",
+    requested_verdict="reject",
+    turn_id="card-42",
+    source="card_action",
+    anchor_generation=0,
+)
+assert receipt["outcome"] in {"applied", "already_settled", "processing"}
+
+await engine.settle_speculation(
+    ref="桌游",
+    requested_verdict="confirm",
+    turn_id="chat-42",
+    source="chat",
+)
+await engine.settle_confusion(
+    ref="7",
+    requested_verdict="reject",
+    note="chat_settle",
+    turn_id="chat-43",
+    source="chat",
+)
+
 updates = memory_manager.load_cognition_updates()
 # [
 #   {
@@ -839,6 +864,8 @@ updates = memory_manager.load_cognition_updates()
 ### SocraticDialogue
 
 ```python
+from zoneinfo import ZoneInfo
+
 from openbiliclaw.soul.dialogue import SocraticDialogue
 
 dialogue = SocraticDialogue(
@@ -846,9 +873,13 @@ dialogue = SocraticDialogue(
     soul_engine=engine,
     llm_service=service,
     session="cli",
+    local_timezone=ZoneInfo("Asia/Shanghai"),
 )
 
-reply = await dialogue.respond("我最近很喜欢看讲得很透的纪录片")
+reply = await dialogue.respond(
+    "我最近很喜欢看讲得很透的纪录片",
+    session="webui",
+)
 # reply: "我猜你喜欢的是那种能慢慢展开逻辑的讲述方式..."
 
 print(dialogue.history)  # [DialogueTurn(role="user", ...), DialogueTurn(role="agent", ...)]
@@ -856,6 +887,8 @@ dialogue.clear_history()
 ```
 
 `respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM 异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
+
+`respond(..., session="")` 可逐请求覆盖 UI ownership 标签；认知 history 仍跨 session 共享。`local_timezone` 与测试用 `now_provider` 固定历史时间事实，公开 `format_dialogue_turn_timestamp(timestamp, local_timezone=...)` 将 SQLite 的无时区 UTC 或带 offset 时间统一渲染为 `[MM-DD HH:mm]`，不读取当前时钟。
 
 ### DialogueAnchorManager / ConfusionManager
 
@@ -883,7 +916,7 @@ terminal = confusion_manager.process_anchor_settlement(
 )
 ```
 
-`snapshot()` 只暴露排队所需的 ref/generation fencing 字段。队头开始处理与 LLM 返回后各校验一次完整二元组；后一次位于所有副作用之前，同 ref 但新 generation 也必须视为 stale 丢弃并留台账。`process_anchor_settlement()` 会先持久入队再从 FIFO 队头执行；返回 `None` 表示副作用失败且已留队，并非吞掉或结算成功。`retry_anchor_settlements()` 供同一锚处理器与 12h 恢复路径续跑；API durable completion 路径不得直接调用 `resolve()` / `defer()`。
+`snapshot()` 只暴露排队所需的 ref/generation fencing 字段。队头开始处理先校验完整二元组；LLM 返回后的首副作用由 `note_relation(..., expected_generation=...)` 在状态锁内 CAS，调用方必须消费返回值，不能解锁后再重读。`process_anchor_settlement()` 会先持久入队再从 FIFO 队头执行；返回 `None` 表示副作用失败且已留队，并非吞掉或结算成功。`retry_anchor_settlements()` 供同一锚处理器与 12h 恢复路径续跑，`pending_dialogue_replays()` 暴露 12h 恢复扫描；API durable completion 路径不得直接调用 `resolve()` / `defer()`。
 
 新客户端的主动假设结算只能通过 durable 卡片 action 进入上述锚/仲裁链；画像/认知更新区不得直接调用 `SoulEngine.update_from_feedback()`。deprecated `POST /api/insights/feedback` 只作为旧客户端兼容层复用相同结算实现，并以 `source="legacy_endpoint"` 留台账。
 

@@ -25,7 +25,7 @@
 
 ## 一致性边界
 
-confirm/reject 的顺序固定为：`INSERT OR IGNORE` 仲裁 → claim token → event 原子占位+INSERT → 对象幂等段 → rebuild marker 幂等段+台账 → token-fenced `applied=1` → 跨 session 投影。只有 `applied=1` 可生成 confirmed/rejected 投影；旧执行者恢复后任何段写都会因 token 不匹配退出。
+confirm/reject 的顺序固定为：`INSERT OR IGNORE` 仲裁 → claim token → event 原子占位+INSERT → claim 临界区内对象/派生+segment CAS → claim 临界区内 rebuild marker+结算台账 → token-fenced `applied=1` → 跨 session 投影。卡片 action、legacy endpoint、锚关系与无锚 chat 的 speculation/insight/confusion settles 共用这条 ref 路径；只有 `applied=1` 可生成终态投影，旧执行者恢复后在每个非 SQLite 副作用前重读 token，失配立即退出。
 
 rebuild marker 使用同目录临时文件 `flush+fsync` 后原子替换；写盘失败会直接使本次请求失败，收据保持 `seg_marker=0/applied=0`，不会提前投影卡片。临时文件由写入端清理，后续超过 claim 租约的重试可从 marker 段接管续做。
 

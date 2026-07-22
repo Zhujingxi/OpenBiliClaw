@@ -19,7 +19,7 @@
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
 | 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error)` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）;`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回(newest-first,`source_refs` 解码回列表)。字段:`write_point`(写点名)、`source`、before/after 摘要、`diff`(≤2000 字符)、`turn_id`(对话/结算幂等观察键)、`gate_verdict`(Phase 3 shadow_*,预留)、`held_id`(Phase 2,预留)。索引:`(timestamp)` 与 `(write_point, timestamp)`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 幂等迁移双路径建表。写点挂钩清单见 `docs/modules/soul.md`。 |
-| Durable chat payload + 可接管对象结算（v0.3.182+） | ✅ | `chat_turns.payload` 承载结构化卡片/疑惑提问，列表以 `(created_at,rowid)` 稳定排序。`create_chat_confirmation_turn()` 在 `BEGIN IMMEDIATE` 内先查 `attached_to_turn_id`、再查 `(ref,session)`、最后插入 completed turn，保证并发 open 与“卡片先于用户消息”crash gap 均不重复；跨 session 各自产 turn。`card_settlements` 的 ref 仲裁行保存赢家 `payload`，并带 `apply_claim_at/apply_claim_token/seg_event/seg_object/seg_marker`；5 分钟后可由新 token 接管，接管者只续做持久化赢家的 hypothesis revise / confusion answer 语义，所有段标志与 `applied` 均带 token fencing。`record_card_settlement_event()` 把 `seg_event=1` 原子占位与 event INSERT 放在同一 SQLite 事务；对象/marker 段可幂等续做。marker 的 claim-fenced UPDATE **先独立提交**，结算台账再用另一事务 best-effort INSERT，失败只 WARNING，绝不回滚 marker/阻断 applied。`project_applied_card_settlement()` 只消费 `applied=1` 并批量刷新所有 session；discuss CAS 持久化 `discussing_at+attempt_token`，读取校正会清 token。 |
+| Durable chat payload + 可接管对象结算（v0.3.182+） | ✅ | `chat_turns.payload` 承载结构化卡片/疑惑提问，列表以 `(created_at,rowid)` 稳定排序。`create_chat_confirmation_turn()` 在 `BEGIN IMMEDIATE` 内先查 `attached_to_turn_id`、再查 `(ref,session)`、最后插入 completed turn，保证并发 open 与“卡片先于用户消息”crash gap 均不重复；跨 session 各自产 turn。`card_settlements` 的 ref 仲裁行保存 hypothesis/confusion/speculation 赢家 `payload`，并带 `apply_claim_at/apply_claim_token/seg_event/seg_object/seg_marker`；5 分钟后可由新 token 接管。`claim_card_settlement()` 与 `card_settlement_claim_guard()` 共用进程锁+跨进程文件锁：对象/派生/marker/台账副作用的 token 重读和对应 segment CAS 位于同一临界区，接管只能整体发生在其前或后。`record_card_settlement_event()` 把 `seg_event=1` 原子占位与 event INSERT 放在同一 SQLite 事务。marker 的 claim-fenced UPDATE **先独立提交**，结算台账再用另一事务 best-effort INSERT，失败只 WARNING，绝不回滚 marker/阻断 applied。`project_applied_card_settlement()` 只消费 `applied=1` 并批量刷新所有 session；discuss CAS 持久化 `discussing_at+attempt_token`，读取校正会清 token。 |
 | 态势门控 shadow 采数 + 代理折价（v0.3.176+） | ✅ | 认知画像流水线 Phase 3 / Wave B 遗留。`posture_gate_shadow_stats()` 从 `profile_update_ledger` 汇总 enforce save-time 校验所需的 shadow 判定统计：最早**有效**判定时间（`gate_verdict IN (shadow_accept, shadow_downgrade, shadow_reject)`，不含 `shadow_error`）+ 近 14 天 / 近 7 天有效判定数。`discount_events_by_confusion(evidence_refs)` 对可解析为事件 id 的 `evidence_refs` 关联 events 行 patch `metadata.discounted_by_confusion=true` + `signal_strength` 折至 0.2（`sources/event_format.apply_confusion_discount`，幂等）；非 id ref 跳过，不删行、不改其它列。供疑惑 `proxy_behavior` 出口调用。 |
 | 疑惑对象表 + 归属重放队列（`confusions`，v0.3.182+） | ✅ | 原有状态、72h ask 冷却、partial unique `clarifying≤1` 与 `held_updates` 保持；新增幂等迁移列 `replay_queue TEXT NOT NULL DEFAULT '[]'`。`enqueue_confusion_replay()` 在独立 `BEGIN IMMEDIATE` 中去重入尾、上限 5、返回最旧逐出项；`pop_confusion_replay_head(expected_id=...)` 只允许精确队头出队（顺序 fencing）；`clear_confusion_replay_queue()` 原子返回并清空。`list_pending_confusion_dialogue_replays()` **优先扫描任意 status 的非空 replay_queue**（覆盖 resolve commit→pop 之间崩溃后已 terminal 的行），剩余额度再查 `clarifying` 且 completed、晚于 `asked_at`、尚无 turn payload receipt 的 classification gap。`mark_confusion_dialogue_replay_processed()` 可在 turn 仍 pending 时先写幂等 receipt，完成后扫描不会重复计数。 |
 | Retraction 事件折价（离线重读面） | ✅ | `mark_positive_events_retracted(identity_urls, retracted_action, *, retraction_at)` 在独立短连接的一次事务中，对 `event_type == retracted_action` 且 URL 归一化 identity key（`sources/identity_keys.dedup_key`：tweet_id / bvid / mid / xhs note_id）命中、**且事件时间早于 `retraction_at`** 的行 patch `metadata.retracted=true` + `signal_strength=min(现值,0.2)`；事件时间不可得的行保守不标。无时间窗口（identity key 全局唯一），覆盖 `openbiliclaw init` 全量重建与 12h 认知整理等重读 events 表路径；不删行、不改 `event_type`/`url`。`latest_retraction_time_for(url, action)` 返回该 identity + action 最新的已存 retraction 事件时间，供落库路径对账迟到正向事件（account_sync 回填）。`retracted_action` 越界返回 0/None。 |
@@ -47,6 +47,23 @@
 | 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
+
+### 对象结算 claim 临界区
+
+```python
+claimed = db.claim_card_settlement(ref=ref, claim_token=token, now=now)
+if claimed:
+    with db.card_settlement_claim_guard(ref=ref, claim_token=token) as owns_claim:
+        if owns_claim:
+            apply_object_and_derived_side_effects()
+            db.mark_card_settlement_segment(
+                ref=ref,
+                claim_token=token,
+                segment="object",
+            )
+```
+
+`card_settlement_claim_guard()` 在 yield 前锁内重读 token，并一直持有与 lease takeover 相同的进程/文件锁；调用方必须消费 `owns_claim=False` 并立即退出。guard 用于不能与 SQLite 同事务提交的对象、派生文件、rebuild marker 与结算台账；event 段继续由 `record_card_settlement_event()` 的单事务 token CAS 保护。
 
 ### 对话锚与疑惑重放持久化
 

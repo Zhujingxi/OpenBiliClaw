@@ -597,7 +597,7 @@ background ─ background admission (default 3) ──────┘
 
 持久对话：固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → 单锚(ref+generation) → 归属矩阵
                            ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
-                           ├→ 卡片 action / 锚结算共用 ref 仲裁 → claim fencing → applied-only 跨 session 投影
+                           ├→ 卡片 / legacy / 锚 / 无锚 settles 共用 ref 仲裁 → claim guard → applied-only 跨 session 投影
                            └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
@@ -645,7 +645,7 @@ Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后
                                       │                      └新避雷：共享清池 → content_cache
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
 durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → anchor(ref,generation) → relation matrix
-                                                   └→ 与卡片共用 ref 仲裁；confusion 失败：FIFO≤5 → 12h 恢复
+                                                   └→ 卡片/legacy/锚/无锚 settles 共用 ref 仲裁；confusion 失败：FIFO≤5 → 12h 恢复
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
