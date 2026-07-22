@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.llm.service import _background_admission_bypass
@@ -4555,6 +4556,92 @@ def cost(
         "[dim]（费率为公开渠道估算,与 provider 实际账单可能差 ±20%。"
         "tail daemon 日志可以看每次调用的实时 [llm-cost] INFO 行,"
         "cache 命中率 < 30% 的 caller 在 by-caller 表里会标红。）[/dim]",
+    )
+
+
+def _fetch_pending_confirmation_snapshot() -> dict[str, Any]:
+    """Read the canonical pending-confirmation snapshot from the local API."""
+    import httpx
+
+    from openbiliclaw.config import load_config
+
+    port = load_config().api.port
+    url = f"http://127.0.0.1:{port}/api/chat/pending-confirmations"
+    try:
+        with httpx.Client(timeout=5.0, trust_env=False) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"无法读取 {url}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("待聊确认端点返回了无效对象。")
+    raw_items = payload.get("items", [])
+    raw_count = payload.get("count", 0)
+    if (
+        not isinstance(raw_items, list)
+        or not isinstance(raw_count, int)
+        or isinstance(raw_count, bool)
+    ):
+        raise RuntimeError("待聊确认端点返回了无效列表。")
+    items = [item for item in raw_items if isinstance(item, dict)]
+    if len(items) != len(raw_items):
+        raise RuntimeError("待聊确认端点返回了无效条目。")
+    return {"count": raw_count, "items": items}
+
+
+@app.command()
+def questions() -> None:
+    """只读查看当前待聊的假设与疑惑。"""
+    _require_runtime_config()
+    try:
+        snapshot = _fetch_pending_confirmation_snapshot()
+    except RuntimeError as exc:
+        _print_status_panel(
+            "error",
+            "无法读取待聊确认",
+            f"{exc}\n请确认本地 API 服务已启动。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    items = snapshot["items"]
+    _print_page_title("待聊确认", "只读列表 · 与本地 API 同步")
+    if not items:
+        _print_status_panel("info", "暂无待聊确认", "当前没有高优先级的假设或疑惑。")
+        return
+
+    table = Table(show_header=True, header_style="bold cyan", title="待确认的对话话题")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("类型", no_wrap=True)
+    table.add_column("话题")
+    table.add_column("置信度", justify="right", no_wrap=True)
+    table.add_column("依据")
+    table.add_column("Ref", no_wrap=True)
+    for index, item in enumerate(items, start=1):
+        kind = "疑惑" if str(item.get("kind", "")) == "confusion" else "猜测"
+        try:
+            confidence = float(item.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        raw_evidence = item.get("evidence_refs", [])
+        evidence = (
+            "、".join(str(value) for value in raw_evidence)
+            if isinstance(raw_evidence, list)
+            else ""
+        )
+        table.add_row(
+            str(index),
+            kind,
+            Text(str(item.get("title", "") or "（未命名）")),
+            f"{confidence:.0%}",
+            Text(evidence or "—"),
+            Text(str(item.get("ref", ""))),
+        )
+    console.print(table)
+    _print_status_panel(
+        "info",
+        f"共 {snapshot['count']} 条",
+        "此命令只读；请在插件或桌面端的对话确认入口继续处理。",
     )
 
 

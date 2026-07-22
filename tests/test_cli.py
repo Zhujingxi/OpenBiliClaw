@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 import typer
 from rich.console import Console
@@ -210,6 +211,112 @@ def test_ledger_write_point_filter(
     assert result.exit_code == 0
     assert "feedback_preference_overwrite" in result.output
     assert "dialogue_preference_overwrite" not in result.output
+
+
+def test_questions_command_lists_pending_confirmations_read_only(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "_fetch_pending_confirmation_snapshot",
+        lambda: {
+            "count": 2,
+            "items": [
+                {
+                    "kind": "hypothesis",
+                    "ref": "hyp-ref",
+                    "title": "你可能更看重一手证据",
+                    "confidence": 0.83,
+                    "evidence_refs": ["event-7", "event-9"],
+                },
+                {
+                    "kind": "confusion",
+                    "ref": "42",
+                    "title": "为什么最近跳过熟悉主题",
+                    "confidence": 0.61,
+                    "evidence_refs": [],
+                },
+            ],
+        },
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["questions"])
+
+    assert result.exit_code == 0
+    assert "待聊确认" in result.output
+    assert "猜测" in result.output
+    assert "疑惑" in result.output
+    assert "你可能更看重一手证据" in result.output
+    assert "为什么最近跳过熟悉主题" in result.output
+    assert "83%" in result.output
+    assert "event-7、event-9" in result.output
+    assert "确认" in result.output
+    assert "不准" not in result.output
+
+
+def test_questions_command_reports_empty_pending_list(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "_fetch_pending_confirmation_snapshot",
+        lambda: {"count": 0, "items": []},
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["questions"])
+
+    assert result.exit_code == 0
+    assert "暂无待聊确认" in result.output
+
+
+def test_fetch_pending_confirmation_snapshot_uses_configured_local_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            calls.append(("raise_for_status", None))
+
+        def json(self) -> dict[str, object]:
+            return {"count": 1, "items": [{"kind": "hypothesis", "ref": "h1"}]}
+
+    class FakeClient:
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> FakeResponse:
+            calls.append(("get", url))
+            return FakeResponse()
+
+    def fake_client(**kwargs: object) -> FakeClient:
+        calls.append(("client", kwargs))
+        return FakeClient()
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        lambda: SimpleNamespace(api=SimpleNamespace(port=8433)),
+    )
+    monkeypatch.setattr(httpx, "Client", fake_client)
+
+    snapshot = cli_module._fetch_pending_confirmation_snapshot()
+
+    assert snapshot == {"count": 1, "items": [{"kind": "hypothesis", "ref": "h1"}]}
+    assert calls == [
+        ("client", {"timeout": 5.0, "trust_env": False}),
+        ("get", "http://127.0.0.1:8433/api/chat/pending-confirmations"),
+        ("raise_for_status", None),
+    ]
 
 
 def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
