@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,157 @@ def _db(tmp_path: Path) -> Database:
     db = Database(tmp_path / "init.db")
     db.initialize()
     return db
+
+
+def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    columns = {
+        str(row["name"]): str(row["dflt_value"])
+        for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+    }
+
+    assert columns["payload"] == "'{}'"
+    settlement_columns = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert {"ref", "verdict", "turn_id", "applied"} <= settlement_columns
+
+
+def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-chat.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE chat_turns (
+            turn_id TEXT PRIMARY KEY,
+            session TEXT NOT NULL DEFAULT 'popup',
+            scope TEXT NOT NULL DEFAULT 'chat',
+            subject_id TEXT NOT NULL DEFAULT '',
+            subject_title TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            reply TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO chat_turns (turn_id, message) VALUES ('legacy-turn', '旧消息');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    assert "payload" in {
+        str(row["name"]) for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+    }
+    assert db.get_chat_turn("legacy-turn")["payload"] == {}
+
+
+@pytest.mark.parametrize(
+    ("initial", "target"),
+    [
+        ("pending", "confirmed"),
+        ("pending", "rejected"),
+        ("pending", "deferred"),
+        ("pending", "discussing"),
+        ("discussing", "confirmed"),
+        ("discussing", "rejected"),
+        ("discussing", "deferred"),
+        ("discussing", "pending"),
+    ],
+)
+def test_chat_turn_payload_state_cas_allows_declared_transitions(
+    tmp_path: Path,
+    initial: str,
+    target: str,
+) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(
+        turn_id=f"{initial}-{target}",
+        message="卡片",
+        payload={"type": "card", "state": initial, "marker": "preserved"},
+    )
+
+    assert db.update_chat_turn_payload_state(
+        f"{initial}-{target}",
+        expected_state=initial,
+        new_state=target,
+    )
+    payload = db.get_chat_turn(f"{initial}-{target}")["payload"]
+    assert payload == {"type": "card", "state": target, "marker": "preserved"}
+
+
+def test_chat_turn_payload_state_cas_rejects_stale_or_illegal_transition(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(
+        turn_id="card-cas",
+        message="卡片",
+        payload={"type": "card", "state": "pending"},
+    )
+
+    assert not db.update_chat_turn_payload_state(
+        "card-cas",
+        expected_state="discussing",
+        new_state="confirmed",
+    )
+    with pytest.raises(ValueError, match="Unsupported card payload transition"):
+        db.update_chat_turn_payload_state(
+            "card-cas",
+            expected_state="confirmed",
+            new_state="pending",
+        )
+    assert db.get_chat_turn("card-cas")["payload"]["state"] == "pending"
+
+
+def test_card_settlement_insert_or_ignore_arbitrates_across_connections(tmp_path: Path) -> None:
+    path = tmp_path / "settlement.db"
+    first = Database(path)
+    first.initialize()
+    second = Database(path)
+    second.initialize()
+    barrier = threading.Barrier(2)
+
+    def contend(db: Database, verdict: str, turn_id: str) -> bool:
+        barrier.wait()
+        return db.try_create_card_settlement(
+            ref="hypothesis:abc12345",
+            verdict=verdict,
+            turn_id=turn_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(
+            executor.map(
+                lambda args: contend(*args),
+                [(first, "confirmed", "turn-confirm"), (second, "rejected", "turn-reject")],
+            )
+        )
+
+    assert sorted(outcomes) == [False, True]
+    settlement = first.get_card_settlement("hypothesis:abc12345")
+    assert settlement is not None
+    assert (settlement["verdict"], settlement["turn_id"]) in {
+        ("confirmed", "turn-confirm"),
+        ("rejected", "turn-reject"),
+    }
+    assert settlement["applied"] == 0
+
+
+def test_chat_turn_list_uses_rowid_for_equal_created_at(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(turn_id="z-first", message="先插入")
+    db.create_chat_turn(turn_id="a-second", message="后插入")
+    db.conn.execute("UPDATE chat_turns SET created_at = '2026-07-22 01:00:00'")
+    db.conn.commit()
+
+    rows = db.list_chat_turns(limit=2)
+
+    assert [row["turn_id"] for row in rows] == ["z-first", "a-second"]
 
 
 def test_get_latest_init_run_none_when_empty(tmp_path: Path) -> None:

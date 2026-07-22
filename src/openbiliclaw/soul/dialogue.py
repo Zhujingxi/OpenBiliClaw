@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+    from datetime import tzinfo
 
     from openbiliclaw.llm.service import LLMService, ModuleOverride, SupportsComplete
     from openbiliclaw.soul.engine import SoulEngine
@@ -32,13 +34,42 @@ logger = logging.getLogger(__name__)
 DIALOGUE_WINDOW_TURNS = 20
 
 
+def _default_turn_timestamp() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def format_dialogue_turn_timestamp(
+    timestamp: str,
+    *,
+    local_timezone: tzinfo,
+) -> str:
+    """Render a recorded turn timestamp without consulting the current clock.
+
+    SQLite ``CURRENT_TIMESTAMP`` values are unmarked UTC. In-memory turns are
+    recorded with an explicit local offset. Both pass through this single,
+    injectable conversion point before becoming stable prompt bytes.
+    """
+    normalized = timestamp.strip().replace("Z", "+00:00")
+    if not normalized:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        logger.warning("Ignoring invalid dialogue turn timestamp %r", timestamp)
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone(local_timezone)
+    return f"[{local:%m-%d %H:%M}]"
+
+
 @dataclass
 class DialogueTurn:
     """A single turn in a dialogue."""
 
     role: str  # "user" | "agent"
     content: str
-    timestamp: str = ""
+    timestamp: str = field(default_factory=_default_turn_timestamp)
     extracted_insights: list[str] | None = None
 
 
@@ -67,12 +98,17 @@ class SocraticDialogue:
         module_overrides: Mapping[str, ModuleOverride] | None = None,
         learn_queue: Any | None = None,
         database: Any | None = None,
+        local_timezone: tzinfo | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        default_timezone = datetime.now().astimezone().tzinfo
+        self._local_timezone = local_timezone or default_timezone or UTC
+        self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         # Phase 1 durable-history regurgitation: after a restart the in-process
         # history is empty, but the durable popup ``chat_turns`` table holds the
         # completed exchanges. Lazily reload them once so a popup session keeps
@@ -119,17 +155,21 @@ class SocraticDialogue:
         async with self._respond_lock:
             self._ensure_history_loaded()
             history_length = len(self._history)
-            self._history.append(DialogueTurn(role="user", content=user_message))
+            turn_timestamp = self._local_now().isoformat()
+            self._history.append(
+                DialogueTurn(role="user", content=user_message, timestamp=turn_timestamp)
+            )
 
             try:
                 service = self._llm_service or self._build_service()
+                prompt_user_message = self._user_prompt_with_current_time(user_message)
 
                 # If tools are configured, try tool-calling path first
                 if self._tools and self._tool_dispatcher:
-                    reply = await self._respond_with_tools(service, user_message)
+                    reply = await self._respond_with_tools(service, prompt_user_message)
                 else:
                     response = await service.complete_socratic_dialogue(
-                        user_message=user_message,
+                        user_message=prompt_user_message,
                         history=self._history_to_messages(),
                         caller="soul.dialogue",
                     )
@@ -139,7 +179,13 @@ class SocraticDialogue:
                 logger.exception("Failed to generate Socratic dialogue response.")
                 raise
 
-            self._history.append(DialogueTurn(role="agent", content=reply))
+            self._history.append(
+                DialogueTurn(
+                    role="agent",
+                    content=reply,
+                    timestamp=self._local_now().isoformat(),
+                )
+            )
             learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
             if callable(learn_fn):
                 payload = {
@@ -281,8 +327,9 @@ class SocraticDialogue:
             reply = str(row.get("reply", "")).strip()
             if not message or not reply:
                 continue
-            self._history.append(DialogueTurn(role="user", content=message))
-            self._history.append(DialogueTurn(role="agent", content=reply))
+            timestamp = str(row.get("created_at", "") or "")
+            self._history.append(DialogueTurn(role="user", content=message, timestamp=timestamp))
+            self._history.append(DialogueTurn(role="agent", content=reply, timestamp=timestamp))
 
     def _history_to_messages(self) -> list[dict[str, str]]:
         """Convert prior dialogue turns to chat messages for the LLM.
@@ -296,13 +343,32 @@ class SocraticDialogue:
         window_messages = DIALOGUE_WINDOW_TURNS * 2
         if len(prior) > window_messages:
             prior = prior[-window_messages:]
-        return [
-            {
-                "role": "assistant" if turn.role == "agent" else turn.role,
-                "content": turn.content,
-            }
-            for turn in prior
-        ]
+        messages: list[dict[str, str]] = []
+        for turn in prior:
+            prefix = format_dialogue_turn_timestamp(
+                turn.timestamp,
+                local_timezone=self._local_timezone,
+            )
+            content = f"{prefix} {turn.content}" if prefix else turn.content
+            messages.append(
+                {
+                    "role": "assistant" if turn.role == "agent" else turn.role,
+                    "content": content,
+                }
+            )
+        return messages
+
+    def _local_now(self) -> datetime:
+        current = self._now_provider()
+        if current.tzinfo is None:
+            return current.replace(tzinfo=self._local_timezone)
+        return current.astimezone(self._local_timezone)
+
+    def _user_prompt_with_current_time(self, user_message: str) -> str:
+        current = self._local_now()
+        raw_offset = current.strftime("%z")
+        offset = f"{raw_offset[:3]}:{raw_offset[3:]}" if len(raw_offset) == 5 else raw_offset
+        return f"{user_message}\n\n当前时间:{current:%Y-%m-%d %H:%M} {offset}".rstrip()
 
     def _build_service(self) -> LLMService:
         """Create the shared LLM service when one is not injected."""

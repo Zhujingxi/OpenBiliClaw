@@ -8,8 +8,11 @@ behaviour-equivalent for in-window sessions.
 
 from __future__ import annotations
 
+import inspect
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from openbiliclaw.api.models import ChatTurnOut
 from openbiliclaw.soul.dialogue import DIALOGUE_WINDOW_TURNS, DialogueTurn, SocraticDialogue
 from openbiliclaw.soul.identity import build_hash8_map, insight_hash8
 from openbiliclaw.storage.database import Database
@@ -19,10 +22,16 @@ if TYPE_CHECKING:
 
 
 _FIXED_TURN_TIMESTAMP = "2026-07-22T09:30:00+08:00"
+_UTC_PLUS_8 = timezone(timedelta(hours=8))
 
 
 def _dialogue_with_history(exchanges: int) -> SocraticDialogue:
-    dialogue = SocraticDialogue(llm=None, soul_engine=object(), session="popup")  # type: ignore[arg-type]
+    dialogue = SocraticDialogue(  # type: ignore[arg-type]
+        llm=None,
+        soul_engine=object(),
+        session="popup",
+        local_timezone=_UTC_PLUS_8,
+    )
     for i in range(exchanges):
         dialogue._history.append(
             DialogueTurn(
@@ -70,6 +79,85 @@ def test_history_truncated_to_window_when_over_limit() -> None:
     # Oldest retained exchange is #5 (25 - 20).
     assert messages[0] == {"role": "user", "content": "[07-22 09:30] 用户消息5"}
     assert messages[-1] == {"role": "assistant", "content": "[07-22 09:30] 助手回复24"}
+
+
+def test_history_rendering_has_no_now_parameter() -> None:
+    assert "now" not in inspect.signature(SocraticDialogue._history_to_messages).parameters
+
+
+def test_regurgitated_utc_timestamp_uses_injected_local_timezone(tmp_path: Path) -> None:
+    db = _db_with_turns(tmp_path)
+    db.create_chat_turn(turn_id="utc-turn", message="用户", session="popup", scope="chat")
+    db.complete_chat_turn("utc-turn", reply="助手")
+    db.conn.execute(
+        "UPDATE chat_turns SET created_at = '2026-07-22 01:30:00' WHERE turn_id = 'utc-turn'"
+    )
+    db.conn.commit()
+    dialogue = SocraticDialogue(  # type: ignore[arg-type]
+        llm=None,
+        soul_engine=object(),
+        session="popup",
+        database=db,
+        local_timezone=_UTC_PLUS_8,
+    )
+    dialogue._ensure_history_loaded()
+    dialogue._history.append(DialogueTurn(role="user", content="当前轮"))
+
+    assert dialogue._history_to_messages() == [
+        {"role": "user", "content": "[07-22 09:30] 用户"},
+        {"role": "assistant", "content": "[07-22 09:30] 助手"},
+    ]
+
+
+async def test_current_time_is_only_appended_to_user_prompt_tail() -> None:
+    fixed_now = datetime(2026, 7, 22, 10, 45, tzinfo=_UTC_PLUS_8)
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.user_message = ""
+            self.history: list[dict[str, str]] = []
+
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str,
+        ) -> object:
+            self.user_message = user_message
+            self.history = history
+            return type("Response", (), {"content": "收到"})()
+
+    service = FakeService()
+    dialogue = SocraticDialogue(  # type: ignore[arg-type]
+        llm=None,
+        soul_engine=object(),
+        llm_service=service,
+        local_timezone=_UTC_PLUS_8,
+        now_provider=lambda: fixed_now,
+    )
+    dialogue._history.extend(
+        [
+            DialogueTurn(role="user", content="上一问", timestamp=_FIXED_TURN_TIMESTAMP),
+            DialogueTurn(role="agent", content="上一答", timestamp=_FIXED_TURN_TIMESTAMP),
+        ]
+    )
+
+    await dialogue.respond("现在几点？")
+
+    assert service.user_message.endswith("\n\n当前时间:2026-07-22 10:45 +08:00")
+    assert service.user_message.startswith("现在几点？")
+    assert all("当前时间:" not in message["content"] for message in service.history)
+    assert dialogue.history[-2].content == "现在几点？"
+
+
+def test_chat_turn_out_exposes_structured_payload() -> None:
+    turn = ChatTurnOut(
+        turn_id="card-1",
+        payload={"type": "card", "state": "pending"},
+    )
+
+    assert turn.model_dump()["payload"] == {"type": "card", "state": "pending"}
 
 
 # ---------------------------------------------------------------------------

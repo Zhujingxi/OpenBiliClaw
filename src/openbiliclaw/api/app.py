@@ -2271,6 +2271,13 @@ def create_app(
         return "chat"
 
     def _normalize_chat_turn(row: dict[str, Any]) -> ChatTurnOut:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw_payload = {}
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
         return ChatTurnOut(
             turn_id=str(row.get("turn_id", "")),
             session=str(row.get("session", "popup") or "popup"),
@@ -2281,6 +2288,7 @@ def create_app(
             reply=str(row.get("reply", "") or ""),
             status=str(row.get("status", "pending") or "pending"),
             error=str(row.get("error", "") or ""),
+            payload=payload,
             created_at=str(row.get("created_at", "") or ""),
             updated_at=str(row.get("updated_at", "") or ""),
         )
@@ -2346,6 +2354,7 @@ def create_app(
                 "status": "pending",
                 "reply": "",
                 "error": "",
+                "payload": {},
                 "created_at": now,
                 "updated_at": now,
             },

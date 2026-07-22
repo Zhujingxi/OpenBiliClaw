@@ -1778,6 +1778,7 @@ class ChatTurnOut(BaseModel):
     reply: str = ""
     status: str = "pending"
     error: str = ""
+    payload: dict[str, object] = Field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 

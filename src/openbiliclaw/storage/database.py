@@ -975,6 +975,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     status        TEXT NOT NULL DEFAULT 'pending',
     reply         TEXT NOT NULL DEFAULT '',
     error         TEXT NOT NULL DEFAULT '',
+    payload       TEXT NOT NULL DEFAULT '{}',
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -982,6 +983,16 @@ CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
     ON chat_turns(session, created_at, turn_id);
 CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
     ON chat_turns(scope, subject_id, created_at);
+
+-- Atomic arbitration record for durable dialogue-confirmation cards.  Wave A
+-- only reserves the winning verdict; later waves apply the side effects.
+CREATE TABLE IF NOT EXISTS card_settlements (
+    ref        TEXT PRIMARY KEY,
+    verdict    TEXT NOT NULL,
+    turn_id    TEXT NOT NULL,
+    applied    INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -2104,14 +2115,16 @@ class Database:
         scope: str = "chat",
         subject_id: str = "",
         subject_title: str = "",
+        payload: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Create a pending popup chat turn if it does not already exist."""
+        serialized_payload = json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True)
         self._execute_write(
             """
             INSERT OR IGNORE INTO chat_turns (
-                turn_id, session, scope, subject_id, subject_title, message, status
+                turn_id, session, scope, subject_id, subject_title, message, status, payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 turn_id,
@@ -2120,6 +2133,7 @@ class Database:
                 subject_id or "",
                 subject_title or "",
                 message,
+                serialized_payload,
             ),
         )
         row = self.get_chat_turn(turn_id)
@@ -2161,14 +2175,14 @@ class Database:
         cursor = self.conn.execute(
             """
             SELECT turn_id, session, scope, subject_id, subject_title, message,
-                   status, reply, error, created_at, updated_at
+                   status, reply, error, payload, created_at, updated_at
             FROM chat_turns
             WHERE turn_id = ?
             """,
             (turn_id,),
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        return self._normalize_chat_turn_row(row) if row else None
 
     def list_chat_turns(
         self,
@@ -2188,20 +2202,86 @@ class Database:
         cursor = self.conn.execute(
             f"""
             SELECT turn_id, session, scope, subject_id, subject_title, message,
-                   status, reply, error, created_at, updated_at
+                   status, reply, error, payload, created_at, updated_at
             FROM (
-                SELECT turn_id, session, scope, subject_id, subject_title, message,
-                       status, reply, error, created_at, updated_at
+                SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE {" AND ".join(clauses)}
-                ORDER BY created_at DESC, turn_id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT ?
             )
-            ORDER BY created_at ASC, turn_id ASC
+            ORDER BY created_at ASC, insertion_rowid ASC
             """,
             params,
         )
-        return [dict(row) for row in cursor.fetchall()]
+        return [self._normalize_chat_turn_row(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _normalize_chat_turn_row(row: sqlite3.Row) -> dict[str, Any]:
+        """Decode the additive chat payload while tolerating legacy/corrupt rows."""
+        normalized = dict(row)
+        raw_payload = normalized.get("payload", "{}")
+        try:
+            parsed = json.loads(str(raw_payload or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = {}
+        normalized["payload"] = parsed if isinstance(parsed, dict) else {}
+        return normalized
+
+    def update_chat_turn_payload_state(
+        self,
+        turn_id: str,
+        *,
+        expected_state: str,
+        new_state: str,
+    ) -> bool:
+        """Atomically move a card payload through its declared state graph."""
+        allowed_transitions = {
+            "pending": frozenset({"confirmed", "rejected", "deferred", "discussing"}),
+            "discussing": frozenset({"confirmed", "rejected", "deferred", "pending"}),
+        }
+        if new_state not in allowed_transitions.get(expected_state, frozenset()):
+            raise ValueError(
+                f"Unsupported card payload transition: {expected_state!r} -> {new_state!r}"
+            )
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(payload, '$.state', ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.state') = ?
+            """,
+            (new_state, turn_id, expected_state),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def try_create_card_settlement(self, *, ref: str, verdict: str, turn_id: str) -> bool:
+        """Atomically reserve one object verdict with SQLite INSERT OR IGNORE."""
+        cursor = self._execute_write(
+            """
+            INSERT OR IGNORE INTO card_settlements (ref, verdict, turn_id, applied)
+            VALUES (?, ?, ?, 0)
+            """,
+            (ref, verdict, turn_id),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def get_card_settlement(self, ref: str) -> dict[str, Any] | None:
+        """Return the durable settlement arbitration row for one object."""
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            """
+            SELECT ref, verdict, turn_id, applied, created_at
+            FROM card_settlements
+            WHERE ref = ?
+            """,
+            (ref,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # Profile update ledger (append-only audit trail)
@@ -8215,6 +8295,7 @@ class Database:
                 status        TEXT NOT NULL DEFAULT 'pending',
                 reply         TEXT NOT NULL DEFAULT '',
                 error         TEXT NOT NULL DEFAULT '',
+                payload       TEXT NOT NULL DEFAULT '{}',
                 created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -8222,7 +8303,22 @@ class Database:
                 ON chat_turns(session, created_at, turn_id);
             CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
                 ON chat_turns(scope, subject_id, created_at);
+            CREATE TABLE IF NOT EXISTS card_settlements (
+                ref        TEXT PRIMARY KEY,
+                verdict    TEXT NOT NULL,
+                turn_id    TEXT NOT NULL,
+                applied    INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+        }
+        if "payload" not in columns:
+            self.conn.execute(
+                "ALTER TABLE chat_turns ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _ensure_profile_update_ledger_table(self) -> None:
         """Create the append-only profile write-point ledger for existing DBs."""
