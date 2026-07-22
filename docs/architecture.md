@@ -24,9 +24,9 @@ durable dialogue → confirmation entry(pending list / cards)
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
-                 → kind×relation matrix → hypothesis feedback / confusion FIFO settlement
-                   confusion failure → replay_queue(max 5, head-fenced) → 12h recovery
-                 → hypothesis card action → ref arbitration → claim/fencing
+                 → kind×relation matrix ┐
+                 → hypothesis card action ┴→ shared ref arbitration → claim/fencing
+                   confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → event + object + rebuild-marker → applied-only cross-session projection
 
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
@@ -82,7 +82,7 @@ background refresh → maintenance DB worker / isolated connection
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建
 - 五层灵魂模型（事件→偏好→觉察→洞察→灵魂）
-- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线之上叠加统一审计与一致性纪律。**单锚**持久化 ref/generation 快照，合法归属矩阵复用既有对话提取调用；两轮 unrelated、2h TTL、replaced 或结算释放。**疑惑结算**只归串行锚处理器，API durable completion 不再直接 resolve/defer；classifier 输出先入 `confusions.replay_queue`（FIFO 5、队头 fencing、四类解锚清空台账），12h cycle 补扫 completed crash gap。**假设卡结算**以 ref 原子仲裁，5 分钟后才允许新 claim token 接管；event/object/rebuild-marker 三段逐段 fencing，只有 `applied=1` 才能跨 session 投影终态。**台账**仍是 best-effort 观察者；疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
+- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线之上叠加统一审计与一致性纪律。**单锚**持久化 ref/generation 快照，合法归属矩阵复用既有对话提取调用；两轮 unrelated、2h TTL、replaced 或结算释放。**对象结算**由卡片 action、legacy endpoint 与锚处理器共同进入 `SoulEngine` 的 ref 原子仲裁；仲裁行保存赢家 payload，5 分钟后新 claim token 只续做赢家的 revise/answer 语义；event/object/rebuild-marker 三段逐段 fencing，只有 `applied=1` 才发布画像并跨 session 投影。疑惑对象段仍先入 `confusions.replay_queue`（FIFO 5、队头 fencing、四类解锚清空台账），12h cycle 补扫 completed crash gap。**台账**仍是 best-effort 观察者；疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
 - 分类词表（`taxonomy.py`）：偏好层一级分类收敛到固定 `CATEGORY_VOCAB`，`PreferenceAnalyzer` 在写入前用精确命中 / embedding 最近邻 /「其他」兜底解析，避免自由文本分类污染长期画像。
 - 分类迁移与画像整理：`CategoryMigrator` 通过 `profile-consolidate --migrate-categories` 把存量自由分类迁到固定词表；`ProfileConsolidator` 的 12h 整理流程按 `(name, category)` 处理同名异义主题，支持 LLM 用 `{name, category}` 精确引用成员。
 - 用户画像覆盖层（`overrides.py`）：用户手动编辑存独立 `profile_overrides.json`，在读收口 `get_profile()` 与镜像收口 `sync_profile_files()` 叠加到 AI 画像之上（有效画像 = AI ⊕ 覆盖），画像重建不覆盖用户编辑；删 / 拉黑经有效 dislikes 影响 discovery / recommendation / delight 硬过滤（Phase 1 后端；编辑 UI 见 Phase 2/3）
@@ -192,7 +192,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
 2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
-3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker；confirm/reject 经 ref 仲裁、claim 与三段 fencing 完成结算，discuss 经持久化 attempt token 建锚，defer 只写对象冷却。
+3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker；confirm/reject 与锚处理器的 support/contradict/revise/answer 共用 ref 仲裁、claim 与三段 fencing，discuss 经持久化 attempt token 建锚，defer 只写对象冷却。
 4. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 可见历史；Dialogue prompt 则统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。
 
 历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
@@ -260,7 +260,7 @@ X 是第六个内容源，分两条独立通路：
 - `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未命中 `seen_items` 的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `maintain_pool_inventory()` 是 runtime 唯一 destructive maintenance 边界：`canonical available -> recover eligible suppressed -> protected IDs -> stale/explore/topic/source plans -> cross-table raw plan -> invariant validation -> commit`；恢复复用 canonical readiness，仅额外要求 `recommended_at IS NULL`，并按来源缺口、相关度、评分时间和稳定 ID 排序。每批最多修改 50 行，维护查询、持久化已看身份与动态 delight 阈值都接受同一显式 isolated connection；专属 worker 与 serve worker 分队列，绝不把共享 `Database.conn` 直接扔进 `to_thread()` 并发事务。
 - `load_pool_serve_snapshot_async()` / `persist_pool_serve_async()` 是交互读写边界：前者在一个一致只读事务中聚合推荐所需状态，后者在短 `BEGIN IMMEDIATE` 中原子写 recommendation + shown；交互锁等待按 8×250ms 有界，维护锁等待固定 75ms。
-- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。`card_settlements` 提供 ref 级 `INSERT OR IGNORE` 仲裁、5 分钟可接管 claim、三段 token fencing 与 `applied=1` 发布边界；event 段占位与事件 INSERT、marker 段与结算台账分别在同一 SQLite 事务完成。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描
+- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。`card_settlements` 提供 ref 级 `INSERT OR IGNORE` 仲裁并保存赢家 payload、5 分钟可接管 claim、三段 token fencing 与 `applied=1` 发布边界；event 段占位与事件 INSERT、marker 段与结算台账分别在同一 SQLite 事务完成。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 
 ## 运行时数据库约束

@@ -7898,62 +7898,6 @@ def create_app(
             "state": "pending",
         }
 
-    def _card_terminal_state(verdict: str) -> str:
-        return "confirmed" if verdict.strip().lower() in {"confirm", "confirmed"} else "rejected"
-
-    def _card_action_response(
-        *,
-        outcome: str,
-        verdict: str,
-        result: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        state = _card_terminal_state(verdict)
-        response: dict[str, Any] = {
-            "ok": outcome != "processing",
-            "outcome": outcome,
-            "verdict": state,
-            "state": state if outcome != "processing" else "processing",
-        }
-        if result:
-            response.update(
-                {
-                    "matched": bool(result.get("matched", False)),
-                    "hypothesis": str(result.get("hypothesis", "")),
-                    "signal": str(result.get("signal", "")),
-                    "validated": bool(result.get("validated", False)),
-                    "confidence": float(result.get("confidence", 0.0)),
-                }
-            )
-        return response
-
-    def _feedback_result(feedback: dict[str, Any]) -> dict[str, Any]:
-        reader = getattr(ctx.soul_engine, "feedback_result", None)
-        if callable(reader):
-            result = reader(feedback)
-            if isinstance(result, dict):
-                return dict(result)
-        return {
-            "matched": False,
-            "hypothesis": str(feedback.get("hypothesis", "")),
-            "signal": str(feedback.get("signal", "")),
-            "validated": False,
-            "confidence": 0.0,
-        }
-
-    def _publish_hypothesis_settlement(ref: str, verdict: str) -> None:
-        ctx.database.project_applied_card_settlement(ref)
-        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
-        if anchor_manager is None:
-            return
-        active = anchor_manager.current()
-        if active is None or active.kind != "hypothesis" or active.ref != ref:
-            return
-        anchor_manager.release(
-            reason="settled",
-            card_state=_card_terminal_state(verdict),
-            expected_generation=active.generation,
-        )
-
     async def _settle_hypothesis(
         *,
         ref: str,
@@ -7964,142 +7908,19 @@ def create_app(
     ) -> dict[str, Any]:
         if ctx.soul_engine is None:
             raise HTTPException(status_code=503, detail="Soul engine not ready.")
-        database = ctx.database
-        required_methods = (
-            "try_create_card_settlement",
-            "get_card_settlement",
-            "claim_card_settlement",
-            "record_card_settlement_event",
-            "mark_card_settlement_segment",
-            "finish_card_settlement_marker",
-            "complete_card_settlement",
-            "project_applied_card_settlement",
+        settle = getattr(ctx.soul_engine, "settle_hypothesis", None)
+        if not callable(settle):
+            raise HTTPException(status_code=503, detail="Card settlement executor is not ready.")
+        result = await settle(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
         )
-        if any(not callable(getattr(database, name, None)) for name in required_methods):
-            raise HTTPException(status_code=503, detail="Card settlement store is not ready.")
-
-        normalized_verdict = _card_terminal_state(requested_verdict)
-        inserted = bool(
-            database.try_create_card_settlement(
-                ref=ref,
-                verdict=normalized_verdict,
-                turn_id=turn_id,
-            )
-        )
-        settlement = database.get_card_settlement(ref)
-        if not isinstance(settlement, dict):
-            raise RuntimeError("Card settlement arbitration row disappeared")
-        stored_verdict = _card_terminal_state(str(settlement.get("verdict", "")))
-        signal = "confirm" if stored_verdict == "confirmed" else "reject"
-        feedback: dict[str, Any] = {"hypothesis": hypothesis, "signal": signal}
-        if int(settlement.get("applied", 0)) == 1:
-            _publish_hypothesis_settlement(ref, stored_verdict)
-            return _card_action_response(
-                outcome="already_settled",
-                verdict=stored_verdict,
-                result=_feedback_result(feedback),
-            )
-
-        from datetime import UTC, datetime
-
-        claim_token = uuid.uuid4().hex
-        claimed = bool(
-            database.claim_card_settlement(
-                ref=ref,
-                claim_token=claim_token,
-                now=datetime.now(UTC),
-            )
-        )
-        if not claimed:
-            settlement = database.get_card_settlement(ref)
-            if isinstance(settlement, dict) and int(settlement.get("applied", 0)) == 1:
-                _publish_hypothesis_settlement(
-                    ref,
-                    str(settlement.get("verdict", stored_verdict)),
-                )
-                return _card_action_response(
-                    outcome="already_settled",
-                    verdict=str(settlement.get("verdict", stored_verdict)),
-                    result=_feedback_result(feedback),
-                )
-            return _card_action_response(outcome="processing", verdict=stored_verdict)
-
-        settlement = database.get_card_settlement(ref)
-        if not isinstance(settlement, dict):
-            raise RuntimeError("Claimed card settlement row disappeared")
-        event = {
-            "event_type": "feedback",
-            "title": hypothesis,
-            "metadata": {
-                **feedback,
-                "settlement_ref": ref,
-                "turn_id": turn_id,
-                "source": source,
-            },
-        }
-        if int(settlement.get("seg_event", 0)) == 0 and not bool(
-            database.record_card_settlement_event(
-                ref=ref,
-                claim_token=claim_token,
-                event=event,
-            )
-        ):
-            return _card_action_response(outcome="processing", verdict=stored_verdict)
-
-        if int(settlement.get("seg_object", 0)) == 0:
-            apply_object = getattr(ctx.soul_engine, "apply_feedback_object", None)
-            if not callable(apply_object):
-                raise RuntimeError("Soul engine lacks the fenced feedback object segment")
-            raw_result = await apply_object(feedback)
-            result = dict(raw_result) if isinstance(raw_result, dict) else {}
-            if not bool(
-                database.mark_card_settlement_segment(
-                    ref=ref,
-                    claim_token=claim_token,
-                    segment="object",
-                )
-            ):
-                return _card_action_response(outcome="processing", verdict=stored_verdict)
-        else:
-            result = _feedback_result(feedback)
-
-        if int(settlement.get("seg_marker", 0)) == 0:
-            mark_rebuild = getattr(ctx.soul_engine, "mark_feedback_rebuild", None)
-            if not callable(mark_rebuild):
-                raise RuntimeError("Soul engine lacks the fenced feedback marker segment")
-            await mark_rebuild(feedback, result)
-            if not bool(
-                database.finish_card_settlement_marker(
-                    ref=ref,
-                    claim_token=claim_token,
-                    source=source,
-                    hypothesis=hypothesis,
-                    verdict=stored_verdict,
-                    turn_id=turn_id,
-                    matched=bool(result.get("matched", False)),
-                )
-            ):
-                return _card_action_response(outcome="processing", verdict=stored_verdict)
-
-        if not bool(database.complete_card_settlement(ref=ref, claim_token=claim_token)):
-            latest = database.get_card_settlement(ref)
-            if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
-                _publish_hypothesis_settlement(
-                    ref,
-                    str(latest.get("verdict", stored_verdict)),
-                )
-                return _card_action_response(
-                    outcome="already_settled",
-                    verdict=str(latest.get("verdict", stored_verdict)),
-                    result=_feedback_result(feedback),
-                )
-            return _card_action_response(outcome="processing", verdict=stored_verdict)
-        _publish_hypothesis_settlement(ref, stored_verdict)
-        return _card_action_response(
-            outcome="applied" if inserted or claimed else "already_settled",
-            verdict=stored_verdict,
-            result=result,
-        )
+        if not isinstance(result, dict):
+            raise RuntimeError("Card settlement executor returned an invalid result")
+        return dict(result)
 
     def _defer_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
         state = str(turn.payload.get("state", ""))

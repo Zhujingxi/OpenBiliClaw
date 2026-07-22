@@ -991,6 +991,7 @@ CREATE TABLE IF NOT EXISTS card_settlements (
     ref               TEXT PRIMARY KEY,
     verdict           TEXT NOT NULL,
     turn_id           TEXT NOT NULL,
+    payload           TEXT NOT NULL DEFAULT '{}',
     applied           INTEGER NOT NULL DEFAULT 0,
     apply_claim_at    TEXT,
     apply_claim_token TEXT NOT NULL DEFAULT '',
@@ -2453,14 +2454,26 @@ class Database:
         )
         return int(cursor.rowcount or 0) == 1
 
-    def try_create_card_settlement(self, *, ref: str, verdict: str, turn_id: str) -> bool:
+    def try_create_card_settlement(
+        self,
+        *,
+        ref: str,
+        verdict: str,
+        turn_id: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Atomically reserve one object verdict with SQLite INSERT OR IGNORE."""
         cursor = self._execute_write(
             """
-            INSERT OR IGNORE INTO card_settlements (ref, verdict, turn_id, applied)
-            VALUES (?, ?, ?, 0)
+            INSERT OR IGNORE INTO card_settlements (ref, verdict, turn_id, payload, applied)
+            VALUES (?, ?, ?, ?, 0)
             """,
-            (ref, verdict, turn_id),
+            (
+                ref,
+                verdict,
+                turn_id,
+                json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True),
+            ),
         )
         return int(cursor.rowcount or 0) == 1
 
@@ -2469,7 +2482,7 @@ class Database:
         self._ensure_fresh_read()
         row = self.conn.execute(
             """
-            SELECT ref, verdict, turn_id, applied,
+            SELECT ref, verdict, turn_id, payload, applied,
                    apply_claim_at, apply_claim_token,
                    seg_event, seg_object, seg_marker, created_at
             FROM card_settlements
@@ -2477,7 +2490,19 @@ class Database:
             """,
             (ref,),
         ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        result = dict(row)
+        raw_payload = result.get("payload")
+        if isinstance(raw_payload, str):
+            try:
+                decoded = json.loads(raw_payload)
+            except (TypeError, ValueError):
+                decoded = {}
+            result["payload"] = decoded if isinstance(decoded, dict) else {}
+        elif not isinstance(raw_payload, dict):
+            result["payload"] = {}
+        return result
 
     def claim_card_settlement(
         self,
@@ -2607,6 +2632,7 @@ class Database:
         verdict: str,
         turn_id: str,
         matched: bool,
+        write_point: str = "settle_insight",
     ) -> bool:
         """Fence marker completion and its audit row in one transaction."""
         before = {"hypothesis": hypothesis[:80], "verdict": verdict}
@@ -2637,7 +2663,7 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "settle_insight",
+                    write_point,
                     source,
                     json.dumps(before, ensure_ascii=False, sort_keys=True),
                     json.dumps(after, ensure_ascii=False, sort_keys=True),
@@ -2682,6 +2708,8 @@ class Database:
             "confirmed": "confirmed",
             "reject": "rejected",
             "rejected": "rejected",
+            "revise": "rejected",
+            "revised": "rejected",
         }.get(str(row.get("verdict", "")).strip().lower())
         if terminal is None:
             return 0
@@ -9033,6 +9061,7 @@ class Database:
                 ref               TEXT PRIMARY KEY,
                 verdict           TEXT NOT NULL,
                 turn_id           TEXT NOT NULL,
+                payload           TEXT NOT NULL DEFAULT '{}',
                 applied           INTEGER NOT NULL DEFAULT 0,
                 apply_claim_at    TEXT,
                 apply_claim_token TEXT NOT NULL DEFAULT '',
@@ -9055,6 +9084,7 @@ class Database:
             for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
         }
         settlement_additions = {
+            "payload": "TEXT NOT NULL DEFAULT '{}'",
             "apply_claim_at": "TEXT",
             "apply_claim_token": "TEXT NOT NULL DEFAULT ''",
             "seg_event": "INTEGER NOT NULL DEFAULT 0",

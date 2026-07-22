@@ -593,7 +593,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 
 durable dialogue: fixed time/payload → confirmation entry (pending list/cards) → single learn queue → one anchor(ref+generation) → relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
-                          ├→ hypothesis ref arbitration → claim fencing → applied-only cross-session projection
+                          ├→ card actions / anchor settlements share ref arbitration → claim fencing → applied-only cross-session projection
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
@@ -642,7 +642,7 @@ Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → ba
                                       │                      └new dislike: shared purge → content_cache
                                       └failure/timeout: rollback provisional history → safe error / failed turn
 durable turn → fixed time/payload → confirmation entry (pending list/cards) → single learn queue → anchor(ref,generation) → relation matrix
-                                                  └confusion failure: FIFO≤5 → 12h recovery
+                                                  └→ shared card ref arbitration; confusion failure: FIFO≤5 → 12h recovery
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

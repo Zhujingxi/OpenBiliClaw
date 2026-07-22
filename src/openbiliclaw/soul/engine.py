@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -114,6 +114,7 @@ _ANCHOR_RELATIONS_BY_KIND = {
     "hypothesis": frozenset({"support", "contradict", "revise", "ambiguous", "unrelated"}),
     "confusion": frozenset({"answer", "ambiguous", "unrelated"}),
 }
+_CONFUSION_SETTLEMENT_RESOLUTIONS = frozenset({"real_interest", "proxy_behavior", "dismissed"})
 
 
 def _dialogue_anchor_tokens(value: str) -> set[str]:
@@ -1065,6 +1066,424 @@ class SoulEngine:
             )
             break
         return result
+
+    async def settle_hypothesis(
+        self,
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        derived: list[dict[str, object]] | None = None,
+    ) -> dict[str, Any]:
+        """Settle one hypothesis through the shared ref-level fenced executor.
+
+        Durable card actions, the deprecated feedback endpoint, and dialogue
+        anchor relations all enter here. The arbitration row persists the
+        winning action payload so a later claimant resumes the *winner's*
+        revise semantics rather than the contender's request.
+        """
+        return await self._settle_dialogue_object(
+            kind="hypothesis",
+            ref=ref,
+            title=hypothesis,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+            derived=derived,
+        )
+
+    async def settle_confusion_answer(
+        self,
+        *,
+        ref: str,
+        confusion_id: int,
+        interpretation: str,
+        note: str,
+        turn_id: str,
+        source: str,
+        anchor_generation: int,
+    ) -> dict[str, Any]:
+        """Settle an anchored confusion answer through the same ref executor."""
+        return await self._settle_dialogue_object(
+            kind="confusion",
+            ref=ref,
+            title=f"confusion:{confusion_id}",
+            requested_verdict="answer",
+            turn_id=turn_id,
+            source=source,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            anchor_generation=anchor_generation,
+        )
+
+    async def _settle_dialogue_object(
+        self,
+        *,
+        kind: str,
+        ref: str,
+        title: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        derived: list[dict[str, object]] | None = None,
+        confusion_id: int = 0,
+        interpretation: str = "",
+        note: str = "",
+        anchor_generation: int = 0,
+    ) -> dict[str, Any]:
+        """Run arbitration, three fenced segments, publication, and projection."""
+        database = self._ledger_database
+        required_methods = (
+            "try_create_card_settlement",
+            "get_card_settlement",
+            "claim_card_settlement",
+            "record_card_settlement_event",
+            "mark_card_settlement_segment",
+            "finish_card_settlement_marker",
+            "complete_card_settlement",
+            "project_applied_card_settlement",
+        )
+        if database is None or any(
+            not callable(getattr(database, name, None)) for name in required_methods
+        ):
+            raise RuntimeError("Dialogue settlement store is not ready")
+
+        normalized_kind = kind.strip().lower()
+        normalized_request = requested_verdict.strip().lower()
+        normalized_ref = ref.strip()
+        normalized_turn_id = turn_id.strip()
+        if not normalized_ref:
+            raise ValueError("Dialogue settlement ref is required")
+        if normalized_kind == "hypothesis":
+            verdict = {
+                "confirm": "confirmed",
+                "confirmed": "confirmed",
+                "support": "confirmed",
+                "reject": "rejected",
+                "rejected": "rejected",
+                "contradict": "rejected",
+                "revise": "revised",
+                "revised": "revised",
+            }.get(normalized_request)
+            if verdict is None:
+                raise ValueError(f"Unsupported hypothesis settlement: {requested_verdict!r}")
+            winning_payload: dict[str, object] = {
+                "kind": "hypothesis",
+                "title": title.strip(),
+                "action": verdict,
+                "derived": list(derived or []),
+                "source": source,
+            }
+        elif normalized_kind == "confusion":
+            normalized_interpretation = interpretation.strip().lower()
+            if (
+                normalized_request != "answer"
+                or confusion_id <= 0
+                or normalized_interpretation not in _CONFUSION_SETTLEMENT_RESOLUTIONS
+            ):
+                raise ValueError("Unsupported confusion answer settlement")
+            verdict = f"answer:{normalized_interpretation}"
+            winning_payload = {
+                "kind": "confusion",
+                "title": title.strip(),
+                "action": "answer",
+                "confusion_id": confusion_id,
+                "interpretation": normalized_interpretation,
+                "note": note,
+                "anchor_generation": max(0, int(anchor_generation)),
+                "source": source,
+            }
+        else:
+            raise ValueError(f"Unsupported dialogue settlement kind: {kind!r}")
+
+        inserted = bool(
+            database.try_create_card_settlement(
+                ref=normalized_ref,
+                verdict=verdict,
+                turn_id=normalized_turn_id,
+                payload=winning_payload,
+            )
+        )
+        settlement = database.get_card_settlement(normalized_ref)
+        if not isinstance(settlement, dict):
+            raise RuntimeError("Dialogue settlement arbitration row disappeared")
+        if int(settlement.get("applied", 0)) == 1:
+            self._publish_dialogue_settlement(normalized_ref, settlement)
+            return self._dialogue_settlement_response(
+                outcome="already_settled",
+                settlement=settlement,
+            )
+
+        claim_token = uuid4().hex
+        claimed = bool(
+            database.claim_card_settlement(
+                ref=normalized_ref,
+                claim_token=claim_token,
+                now=datetime.now(UTC),
+            )
+        )
+        if not claimed:
+            settlement = database.get_card_settlement(normalized_ref)
+            if isinstance(settlement, dict) and int(settlement.get("applied", 0)) == 1:
+                self._publish_dialogue_settlement(normalized_ref, settlement)
+                return self._dialogue_settlement_response(
+                    outcome="already_settled",
+                    settlement=settlement,
+                )
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=settlement if isinstance(settlement, dict) else {},
+            )
+
+        settlement = database.get_card_settlement(normalized_ref)
+        if not isinstance(settlement, dict):
+            raise RuntimeError("Claimed dialogue settlement row disappeared")
+        stored_payload = settlement.get("payload")
+        payload = dict(stored_payload) if isinstance(stored_payload, dict) else {}
+        stored_kind = str(payload.get("kind", normalized_kind)).strip().lower()
+        stored_title = str(payload.get("title", title)).strip()
+        stored_source = str(payload.get("source", source)).strip() or source
+        stored_verdict = str(settlement.get("verdict", "")).strip().lower()
+        event_type = "feedback" if stored_kind == "hypothesis" else "confusion_settlement"
+        event_metadata: dict[str, object] = {
+            "settlement_ref": normalized_ref,
+            "settlement_kind": stored_kind,
+            "settlement_verdict": stored_verdict,
+            "turn_id": str(settlement.get("turn_id", normalized_turn_id)),
+            "source": stored_source,
+        }
+        if stored_kind == "hypothesis":
+            event_metadata.update(self._settlement_feedback(stored_title, stored_verdict))
+        else:
+            event_metadata.update(
+                {
+                    "confusion_id": payload.get("confusion_id", 0),
+                    "interpretation": payload.get("interpretation", ""),
+                }
+            )
+        event = {
+            "event_type": event_type,
+            "title": stored_title,
+            "metadata": event_metadata,
+        }
+        if int(settlement.get("seg_event", 0)) == 0 and not bool(
+            database.record_card_settlement_event(
+                ref=normalized_ref,
+                claim_token=claim_token,
+                event=event,
+            )
+        ):
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=settlement,
+            )
+
+        if int(settlement.get("seg_object", 0)) == 0:
+            result = await self._apply_dialogue_settlement_object(
+                settlement=settlement,
+                payload=payload,
+            )
+            if result is None:
+                return self._dialogue_settlement_response(
+                    outcome="processing",
+                    settlement=settlement,
+                )
+            if not bool(
+                database.mark_card_settlement_segment(
+                    ref=normalized_ref,
+                    claim_token=claim_token,
+                    segment="object",
+                )
+            ):
+                return self._dialogue_settlement_response(
+                    outcome="processing",
+                    settlement=settlement,
+                )
+        else:
+            result = self._read_dialogue_settlement_result(settlement, payload)
+
+        if int(settlement.get("seg_marker", 0)) == 0:
+            if stored_kind == "hypothesis":
+                feedback = self._settlement_feedback(stored_title, stored_verdict)
+                await self.mark_feedback_rebuild(feedback, result)
+            if not bool(
+                database.finish_card_settlement_marker(
+                    ref=normalized_ref,
+                    claim_token=claim_token,
+                    source=stored_source,
+                    hypothesis=stored_title,
+                    verdict=stored_verdict,
+                    turn_id=str(settlement.get("turn_id", normalized_turn_id)),
+                    matched=bool(result.get("matched", False)),
+                    write_point=(
+                        "settle_insight" if stored_kind == "hypothesis" else "settle_confusion"
+                    ),
+                )
+            ):
+                return self._dialogue_settlement_response(
+                    outcome="processing",
+                    settlement=settlement,
+                    result=result,
+                )
+
+        if not bool(database.complete_card_settlement(ref=normalized_ref, claim_token=claim_token)):
+            latest = database.get_card_settlement(normalized_ref)
+            if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
+                self._publish_dialogue_settlement(normalized_ref, latest)
+                return self._dialogue_settlement_response(
+                    outcome="already_settled",
+                    settlement=latest,
+                )
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=latest if isinstance(latest, dict) else settlement,
+                result=result,
+            )
+        latest = database.get_card_settlement(normalized_ref) or settlement
+        self._publish_dialogue_settlement(normalized_ref, latest)
+        return self._dialogue_settlement_response(
+            outcome="applied" if inserted or claimed else "already_settled",
+            settlement=latest,
+            result=result,
+        )
+
+    async def _apply_dialogue_settlement_object(
+        self,
+        *,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Apply the winner's idempotent object segment."""
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        verdict = str(settlement.get("verdict", "")).strip().lower()
+        title = str(payload.get("title", "")).strip()
+        if kind == "hypothesis":
+            feedback = self._settlement_feedback(title, verdict)
+            result = await self.apply_feedback_object(feedback)
+            if verdict == "revised":
+                await self._persist_anchor_derived_hypotheses(
+                    _as_dict_list(payload.get("derived")),
+                    turn_id=str(settlement.get("turn_id", "")),
+                )
+            return result
+        if kind != "confusion":
+            raise RuntimeError(f"Stored dialogue settlement kind is invalid: {kind!r}")
+        try:
+            confusion_id = int(payload.get("confusion_id", 0))
+            generation = max(0, int(payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Stored confusion settlement payload is invalid") from exc
+        terminal = self._confusion_manager.process_anchor_settlement(
+            confusion_id,
+            action="resolve",
+            interpretation=str(payload.get("interpretation", "")),
+            note=str(payload.get("note", "")),
+            turn_id=str(settlement.get("turn_id", "")),
+            anchor_generation=generation,
+        )
+        if terminal is None:
+            return None
+        return {
+            "matched": True,
+            "confusion_id": confusion_id,
+            "status": terminal,
+            "interpretation": str(payload.get("interpretation", "")),
+        }
+
+    def _read_dialogue_settlement_result(
+        self,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        if kind == "hypothesis":
+            return self.feedback_result(
+                self._settlement_feedback(
+                    str(payload.get("title", "")),
+                    str(settlement.get("verdict", "")),
+                )
+            )
+        try:
+            confusion_id = int(payload.get("confusion_id", 0))
+        except (TypeError, ValueError):
+            confusion_id = 0
+        confusion = self._confusion_manager.get(confusion_id) if confusion_id else None
+        return {
+            "matched": confusion is not None,
+            "confusion_id": confusion_id,
+            "status": confusion.status if confusion is not None else "",
+            "interpretation": str(payload.get("interpretation", "")),
+        }
+
+    @staticmethod
+    def _settlement_feedback(title: str, verdict: str) -> dict[str, Any]:
+        signal = "confirm" if verdict.strip().lower() == "confirmed" else "reject"
+        return {"hypothesis": title, "signal": signal}
+
+    def _publish_dialogue_settlement(
+        self,
+        ref: str,
+        settlement: dict[str, Any],
+    ) -> None:
+        """Publish only an applied receipt to projections and the active anchor."""
+        if int(settlement.get("applied", 0)) != 1:
+            return
+        payload = settlement.get("payload")
+        stored_payload = dict(payload) if isinstance(payload, dict) else {}
+        kind = str(stored_payload.get("kind", "hypothesis")).strip().lower()
+        if kind == "hypothesis":
+            database = self._ledger_database
+            project = getattr(database, "project_applied_card_settlement", None)
+            if callable(project):
+                project(ref)
+        anchor = self._dialogue_anchor_manager.current()
+        if anchor is None or anchor.kind != kind or anchor.ref != ref:
+            return
+        if kind == "hypothesis":
+            verdict = str(settlement.get("verdict", "")).strip().lower()
+            card_state = "confirmed" if verdict == "confirmed" else "rejected"
+            self._dialogue_anchor_manager.release(
+                reason="settled",
+                card_state=card_state,
+                expected_generation=anchor.generation,
+            )
+        else:
+            self._dialogue_anchor_manager.release(
+                reason="settled",
+                expected_generation=anchor.generation,
+            )
+
+    def _dialogue_settlement_response(
+        self,
+        *,
+        outcome: str,
+        settlement: dict[str, Any],
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = settlement.get("payload")
+        stored_payload = dict(payload) if isinstance(payload, dict) else {}
+        kind = str(stored_payload.get("kind", "hypothesis")).strip().lower()
+        stored_verdict = str(settlement.get("verdict", "")).strip().lower()
+        if kind == "confusion" or stored_verdict.startswith("answer:"):
+            public_verdict = "answered"
+        else:
+            public_verdict = "confirmed" if stored_verdict == "confirmed" else "rejected"
+        response: dict[str, Any] = {
+            "ok": outcome != "processing",
+            "outcome": outcome,
+            "verdict": public_verdict,
+            "settlement_verdict": stored_verdict,
+            "state": public_verdict if outcome != "processing" else "processing",
+        }
+        effective_result = result or self._read_dialogue_settlement_result(
+            settlement,
+            stored_payload,
+        )
+        response.update(effective_result)
+        return response
 
     def _sync_insight_to_soul_snapshot(
         self,
@@ -2302,34 +2721,32 @@ class SoulEngine:
                 logger.warning("dialogue hypothesis anchor has no resolvable object text")
                 return "kept_invalid"
             if relation in {"support", "contradict"}:
-                signal = "confirm" if relation == "support" else "reject"
-                result = await self.update_from_feedback(
-                    {"hypothesis": hypothesis, "signal": signal}
+                result = await self.settle_hypothesis(
+                    ref=anchor.ref,
+                    hypothesis=hypothesis,
+                    requested_verdict=relation,
+                    turn_id=turn_id,
+                    source="dialogue_anchor",
                 )
-                if not bool(result.get("matched", False)):
-                    return "kept_failed"
-                card_state = "confirmed" if relation == "support" else "rejected"
-                released = self._dialogue_anchor_manager.release(
-                    reason="settled",
-                    card_state=card_state,
-                    expected_generation=anchor.generation,
-                )
-                return card_state if released is not None else "stale"
+                if result.get("outcome") == "processing":
+                    return "queued_failed"
+                return str(result.get("state", "stale"))
             if relation == "revise":
-                result = await self.update_from_feedback(
-                    {"hypothesis": hypothesis, "signal": "reject"}
-                )
-                if not bool(result.get("matched", False)):
-                    return "kept_failed"
                 raw_derived = decision.get("derived")
                 derived = _as_dict_list(raw_derived)
-                await self._persist_anchor_derived_hypotheses(derived, turn_id=turn_id)
-                released = self._dialogue_anchor_manager.release(
-                    reason="settled",
-                    card_state="rejected",
-                    expected_generation=anchor.generation,
+                result = await self.settle_hypothesis(
+                    ref=anchor.ref,
+                    hypothesis=hypothesis,
+                    requested_verdict="revise",
+                    turn_id=turn_id,
+                    source="dialogue_anchor",
+                    derived=derived,
                 )
-                return "revised" if released is not None else "stale"
+                if result.get("outcome") == "processing":
+                    return "queued_failed"
+                if result.get("settlement_verdict") == "revised":
+                    return "revised"
+                return str(result.get("state", "stale"))
             return "kept_invalid"
 
         if relation != "answer":
@@ -2344,21 +2761,18 @@ class SoulEngine:
         confusion_id = self._confusion_anchor_id(anchor)
         if not confusion_id:
             return "kept_invalid"
-        terminal = self._confusion_manager.process_anchor_settlement(
-            confusion_id,
-            action="resolve",
+        result = await self.settle_confusion_answer(
+            ref=anchor.ref,
+            confusion_id=confusion_id,
             interpretation=interpretation,
             note="dialogue_anchor",
             turn_id=turn_id,
+            source="dialogue_anchor",
             anchor_generation=anchor.generation,
         )
-        if terminal is None:
+        if result.get("outcome") == "processing":
             return "queued_failed"
-        released = self._dialogue_anchor_manager.release(
-            reason="settled",
-            expected_generation=anchor.generation,
-        )
-        return "answered" if released is not None else "stale"
+        return "answered"
 
     async def _persist_anchor_derived_hypotheses(
         self,

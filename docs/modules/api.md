@@ -13,7 +13,7 @@
 | `GET /api/chat/turns/{turn_id}` | ✅ | 返回单个 durable turn，并执行与列表端点相同的 applied-only 投影/遗留讨论校正。 |
 | `GET /api/chat/pending-confirmations` | ✅ | 返回 `{"count":N,"items":[...]}`，只列未结算的高优先级对象且最多 3 条：未验证假设 `confidence>=0.60`、open 疑惑 `interpretation_confidence>=0.50`，按置信度降序。`?count_only=1` 只返回 `{"count":N}`，供 service worker badge 轻量轮询；`openbiliclaw questions` 读取完整响应且不复制筛选规则。用户主动列表不套用系统冷却。 |
 | `POST /api/chat/pending-confirmations/{ref}/open` | ✅ | body 为 `{"session":"popup|webui|..."}`。用户主动打开零冷却；假设生成 completed card，疑惑生成 completed question 并 claim `clarifying`，两者都以 `pending_open` 建锚。相同 `(ref,session)` 原子复用，跨 session 各自产 turn。 |
-| `POST /api/chat/cards/{turn_id}/action` | ✅ | body 为 `{"action":"confirm|reject|discuss|defer"}`。confirm/reject 走 ref 级原子仲裁与可接管三段 apply；discuss 先 CAS 写 `discussing_at+attempt_token` 再建锚，失败补偿回 pending；defer 只写 72h 对象冷却，不进入结算表。 |
+| `POST /api/chat/cards/{turn_id}/action` | ✅ | body 为 `{"action":"confirm|reject|discuss|defer"}`。confirm/reject 调用 `SoulEngine` 的共同对象结算器，和锚定 `support/contradict/revise/answer`、legacy endpoint 共用 ref 原子仲裁、可接管三段 apply 与 applied-only 全端投影；discuss 先 CAS 写 `discussing_at+attempt_token` 再建锚，失败补偿回 pending；defer 只写 72h 对象冷却，不进入结算表。 |
 | `POST /api/insights/feedback` | deprecated | 保留旧客户端响应结构，响应带 `Deprecation: true`，内部转发到同一结算路径，台账 `source="legacy_endpoint"`。 |
 
 ### 卡片 action 返回

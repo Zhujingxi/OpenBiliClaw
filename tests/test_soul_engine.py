@@ -2227,14 +2227,24 @@ def _seed_dialogue_anchor_hypothesis(
     from openbiliclaw.soul.identity import insight_hash8
 
     _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
     memory._database.create_chat_turn(
         turn_id=origin_turn_id,
         message="聊聊这个",
-        payload={"type": "card", "state": "discussing"},
+        scope="hypothesis",
+        subject_id=ref,
+        subject_title=hypothesis,
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": ref,
+            "title": hypothesis,
+            "state": "discussing",
+        },
     )
     return engine._dialogue_anchor_manager.establish(
         kind="hypothesis",
-        ref=insight_hash8(hypothesis),
+        ref=ref,
         origin_turn_id=origin_turn_id,
         entry=ENTRY_CARD_DISCUSS,
     )
@@ -2312,9 +2322,73 @@ async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
     stored = engine._load_insights()[0]
     assert stored.validated is validated
     assert stored.confidence == confidence
+    settlement = memory._database.get_card_settlement(anchor.ref)
+    assert settlement is not None
+    assert settlement["applied"] == 1
+    assert settlement["verdict"] == card_state
     assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == card_state
     assert engine._dialogue_anchor_manager.current() is None
     assert result["anchor_outcome"] == outcome
+
+
+async def test_hypothesis_anchor_obeys_existing_object_arbitration_and_projects_all_cards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视可证伪的证据"
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis=hypothesis)
+    memory._database.create_chat_turn(
+        turn_id="anchor-card-webui",
+        session="webui",
+        scope="hypothesis",
+        subject_id=anchor.ref,
+        subject_title=hypothesis,
+        message="阿b 的猜测",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": anchor.ref,
+            "title": hypothesis,
+            "state": "pending",
+        },
+    )
+    assert memory._database.try_create_card_settlement(
+        ref=anchor.ref,
+        verdict="rejected",
+        turn_id="card-reject-winner",
+        payload={
+            "kind": "hypothesis",
+            "title": hypothesis,
+            "action": "rejected",
+        },
+    )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract("support"))
+
+    result = await engine.learn_from_dialogue(
+        user_message="其实我支持这个判断",
+        assistant_reply="收到",
+        session="popup",
+        turn_id="anchor-support-loser",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    stored = engine._load_insights()[0]
+    receipt = memory._database.get_card_settlement(anchor.ref)
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "rejected",
+        "card-reject-winner",
+        1,
+    )
+    assert stored.validated is False
+    assert stored.confidence == 0.35
+    assert result["anchor_outcome"] == "rejected"
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "rejected"
+    assert memory._database.get_chat_turn("anchor-card-webui")["payload"]["state"] == "rejected"
 
 
 async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_derived(
@@ -2357,6 +2431,9 @@ async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_
     assert by_text["用户只在意理论深度"].confidence == 0.35
     assert by_text["用户更看重能落地的深度"].validated is True
     assert by_text["用户更看重能落地的深度"].confidence == 0.82
+    settlement = memory._database.get_card_settlement(anchor.ref)
+    assert settlement is not None
+    assert (settlement["verdict"], settlement["applied"]) == ("revised", 1)
     assert result["anchor_outcome"] == "revised"
     assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "rejected"
 
@@ -2398,6 +2475,10 @@ async def test_confusion_anchor_answer_resolves_matching_interpretation(
 
     assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
     assert memory._database.get_confusion(confusion_id)["resolution"] == "real_interest"
+    settlement = memory._database.get_card_settlement(anchor.ref)
+    assert settlement is not None
+    assert settlement["applied"] == 1
+    assert settlement["verdict"] == "answer:real_interest"
     assert engine._dialogue_anchor_manager.current() is None
     assert result["anchor_outcome"] == "answered"
 
