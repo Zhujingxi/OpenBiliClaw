@@ -60,3 +60,27 @@ test("mobile active insights are read-only in Wave C", () => {
   assert.match(profile, /insight-readonly/);
   assert.match(profile, /请在插件或桌面端的对话入口确认/);
 });
+
+test("popup and desktop cognition insights are read-only while the legacy endpoint remains", () => {
+  const popup = extensionFile("popup/popup.js");
+  const popupApi = extensionFile("popup/popup-api.js");
+  const popupHtml = extensionFile("popup/popup.html");
+  const desktop = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
+  const desktopCss = projectFile("src/openbiliclaw/web/desktop/assets/css/app.css");
+  const backend = projectFile("src/openbiliclaw/api/app.py");
+
+  assert.doesNotMatch(popup, /submitInsightFeedback/);
+  assert.doesNotMatch(popup, /handleInsightFeedback/);
+  assert.doesNotMatch(popup, /insight-action-btn/);
+  assert.doesNotMatch(popupApi, /submitInsightFeedback/);
+  assert.doesNotMatch(popupHtml, /\.insight-actions/);
+  assert.match(popup, /洞察区只读；请在对话的待聊确认入口继续/);
+
+  assert.doesNotMatch(desktop, /data-insight-action/);
+  assert.doesNotMatch(desktop, /bindInsightActions/);
+  assert.doesNotMatch(desktop, /respondInsightFeedback/);
+  assert.doesNotMatch(desktopCss, /\.insight-actions/);
+  assert.match(desktop, /洞察区只读；请在对话的待聊确认入口继续/);
+
+  assert.match(backend, /@app\.post\("\/api\/insights\/feedback"/);
+});
