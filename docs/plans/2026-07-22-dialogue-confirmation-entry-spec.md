@@ -1,69 +1,50 @@
 # 对话确认入口 Spec — 假设/疑惑在对话中确认:卡片、待聊列表、话题锚与归属判断
 
-**Created:** 2026-07-22(与用户五轮讨论定稿)
-**Scope:** `soul/dialogue.py`、`soul/dialogue_insight_analyzer.py`、`soul/engine.py`、`soul/confusion.py`、`llm/prompts.py`、`api/app.py`(durable chat 扩展 + 待聊列表端点)、`storage/database.py`(锚状态持久化)、`cli.py`(questions 命令)、前端 `extension/popup/` 与 `src/openbiliclaw/web/`(卡片渲染/待聊入口/角标)。基于分支 `feat/cognitive-profile-pipeline`(认知底座:疑惑/假设/门控/台账均已实现)。
-**Out of scope:** 探针(保留在推荐流,不迁入对话);系统级推送通知(角标即上限);移动 Web 卡片(跟进版,本版显式排除并在 PR 声明);对话原文跨会话语义检索(v2);多锚并行(同时最多 1 个锚)。
+**Created:** 2026-07-22(r2,codex 第一轮 12 findings 修订;与用户五轮讨论定稿)
+**Scope:** `soul/dialogue.py`、`soul/dialogue_anchor.py`(新)、`soul/dialogue_insight_analyzer.py`、`soul/dialogue_learn_queue.py`(锚快照)、`soul/engine.py`、`soul/confusion.py`、`llm/prompts.py`、`api/app.py`(durable chat 扩展/待聊端点/legacy 转发)、`api/models.py`(payload 模型)、`storage/database.py`(chat_turns payload 列迁移)、`cli.py`;前端三处:`extension/popup/` + `extension/src/background/`(角标决策表)、**桌面端 `src/openbiliclaw/web/desktop/assets/js/`**、移动端 `src/openbiliclaw/web/js/`(仅洞察按钮只读化,卡片跟进版)。基于分支 `feat/cognitive-profile-pipeline`。
+**Out of scope:** 探针迁移;系统推送;多锚;对话检索(v2);移动端卡片渲染(跟进版,但其洞察确认按钮只读化**在本版**,否则唯一入口不成立,r1/F11)。
 
 ## Goal
 
-认知底座落地后,假设/疑惑的用户确认面散落三处(苏格拉底提问、推荐流探针、认知更新区洞察卡片),且均为单轮单发,无多轮澄清能力。用户定稿的产品方向:**对话是唯一的主动确认入口**——
+(同 r1,产品方向不变:对话是唯一主动确认入口;假设卡片四按钮+多轮;疑惑纯聊;角标+待聊列表双轨节流;锚+归属判断零新增 LLM 调用;永续对话+时间事实化。)
 
-1. **假设**:对话流内嵌卡片,「是 / 不是 / 聊聊这个 / 以后再说」;点「聊聊」或直接回复进入**多轮**讨论,支持修正式结算。
-2. **疑惑**:苏格拉底口吻的提问气泡,**只聊不选**(开放澄清,不暴露候选解读列表)。
-3. **提醒**:插件角标(只计高优先级待确认项)+ 对话顶部「阿b 有 N 件事想聊」入口;**用户主动点开不受冷却,系统主动抛出受严格节流**。
-4. **多轮机制 = 同一条对话流 + 话题锚**:不建新通道不开线程;锚是会话级状态,归属判断合并进现有学习提取调用(零新增 LLM 调用)。
-5. **无 session 模式**:永续对话 + 逐轮相对时间戳(事实而非模式,无"重逢"判定)+ 朴素 TTL。
-
-验证:`pytest tests/test_dialogue_anchor.py tests/test_api_app.py tests/test_soul_engine.py -q`;popup/桌面 Web 卡片交互 Playwright 用例;真实端到端(本机对话结算一条假设、澄清一条疑惑)记录在 PR。
+r2 修正的关键事实:**`src/openbiliclaw/web/js/` 是移动端**(`api/app.py:13024` `/m → _web_dir`),桌面端是 `src/openbiliclaw/web/desktop/`(`api/app.py:12926`,`/web → _desktop_dir`);popup 用 `session="popup"`、桌面用 `session="webui"`(`desktop/assets/js/app.js:5713`);角标由 service worker 决策表控制(`extension/src/background/badge.ts`、`service-worker.ts:381 computeActionBadge`),不归 popup。
 
 ## Design invariants (MUST hold)
 
-1. **对话为唯一主动确认入口**:洞察确认卡片迁入对话流(认知更新区改只读);疑惑 ask 与假设讨论都发生在**现有唯一对话流**中——不新建通道、不建线程。探针保留在推荐流(隐形验证,非"确认入口")。
-2. **锚的生命周期(确定性,无模式)**:会话级 `anchor {kind: hypothesis|confusion, ref, established_at}`,同时最多 1 个。建立:系统抛出疑惑提问 / 用户点卡片「聊聊这个」/ 用户从待聊列表点开。解除(仅三条):①结算发生;②连续 2 轮 `relation=unrelated`;③绝对 TTL 2 小时(校准:覆盖一次完整讨论,首轮重校)。**锚失效不丢功能**——普通轮的检索式 settles 是保底路径(锚只是显式快路径)。锚状态持久化(重启随回灌恢复),所有建立/解除进台账。
-3. **归属判断合并进现有提取调用(零新增 LLM 调用)**:学习提取的输入增加「当前锚」段,输出增加 `anchor {relation: support|contradict|revise|answer|unrelated, interpretation?, derived[]}`。**防双计三道防线**:(a) prompt 指令:归锚内容禁止出现在 candidates;(b) 代码防御:candidates 与锚主题做规范化关键词重叠比对,重叠即丢 + WARNING;(c) 结算所有权:锚定轮不走检索式 settles,结算只经锚处理器(复用既有单一所有权规则)。`relation=revise` → 原假设 reject + 按 `derived` 派生修正假设(走既有 confirmed→门控通道)。解析失败/越界值:不结算、锚保持、candidates 丢弃 + WARNING。
-4. **打扰预算(双轨)**:系统主动抛出(卡片/疑惑提问)——一次抛出后**全局冷却 ≥12h**(校准),同对象 72h 冷却(既有),疑惑 clarifying 并发 ≤1(既有 DB 约束);**用户主动**(点角标/待聊列表/卡片按钮)不受任何冷却。角标只计高优先级项(置信度进入待确认区间的假设 + open 疑惑中优先级高者,预期 0-3)。
-5. **时间即事实**:对话窗口渲染每轮附相对时间标注(「3 天前」「刚刚」,由 `chat_turns.created_at`/内存轮时间戳确定性生成);**无任何间隔阈值判定、无重逢模式**。此为有意 prompt 变更:回放基线一次性更新并单独提交,时间标注函数确定性(注入固定 now 可测,禁止在渲染路径调用不可注入的当前时间)。
-6. **结算复用不重造**:卡片「是/不是」→ 既有 `update_from_feedback` confirm/reject(自然键定位);「以后再说」→ defer(复用探针忽略/冷却语义);疑惑结算 → 既有 resolve 三出口;全部进台账带 turn_id,幂等(重复点按状态不劣化)。
-7. **卡片即结构化 chat turn**:假设卡片 = durable chat turn 携带结构化 payload(`card: {kind, ref, title, evidence_refs, actions[]}`),前端按 payload 渲染;无卡片渲染能力的端(CLI)降级为文字 + 序号回复。scope 扩展 `"hypothesis"`(结算所有权归 durable 侧效应,与 confusion 同款)。
-8. **prompt-cache / 回放 / 台账 / 阈值出处 / LLM 输出防御**:沿用全部既有不变量;被触碰 builder 保持静态 system + invariance 清单;新常量(锚 TTL 2h、全局抛出冷却 12h、角标上限)带校准注释。
-9. **四端契约**:popup 侧边栏 + 桌面 Web 本版交付(卡片/待聊/角标);CLI `openbiliclaw questions` 只读列表;移动 Web 显式排除至跟进版(PR 声明)。
+1. **对话为唯一主动 UI 确认入口 + legacy 转发兼容(r2/F11)**:新客户端(popup/桌面/移动)全部移除洞察确认按钮(认知更新区只读);`POST /api/insights/feedback` 端点**保留并标记 deprecated**,服务端将其转发进与卡片 action 相同的结算路径,台账 `source="legacy_endpoint"`——旧客户端不破,唯一入口以"唯一主动 UI"定义。探针留在推荐流。
+2. **卡片与结算态的 durable source-of-truth(r2/F2)**:`chat_turns` 增 `payload TEXT`(JSON)列(幂等迁移):卡片 turn 的 `card {kind, ref, title, evidence_refs, actions, state}` 落库;结算后 patch `payload.state`(pending→confirmed|rejected|deferred 单向)。假设侧投放/冷却元数据(`last_asked_at / deferred_until` per hash8)持久化于 soul 状态存储(与 rebuild_pending 同风格);全局抛出冷却 12h 同处持久化。schema 迁移列入 plan Task。
+3. **卡片 turn 进现有流(r2/F3)**:回灌与前端 turn 列表的 scope 过滤集合扩展为 `{chat, hypothesis, confusion}`(渲染需要;probe 等仍排除);卡片 turn 落库时 `session` 取产生它的端(用户 open → 当前请求的 session;系统抛出 → 附着于用户下一条消息的 session,不凭空投递)。popup(`popup`)与桌面(`webui`)各自回灌自己 session 的轮次——现状即如此,卡片遵循同规则。
+4. **action 契约完整 + CAS 幂等(r2/F4)**:`POST /api/chat/cards/{turn_id}/action`,body `{action: confirm|reject|defer|discuss, expected_state: "pending"}`——以 **turn_id 为幂等键**、`payload.state` 做 first-writer-wins CAS(已非 expected_state 则不执行、返回当前态,HTTP 200 + `already_settled` 标记);`discuss` 不改 state,只建锚。confirm/reject → `update_from_feedback`;defer → 冷却记录(不变量 2 的持久化);全部台账带 turn_id。
+5. **锚快照与代次(r2/F5)**:anchor 携带单调递增 `generation`;学习队列 payload 捕获投递时刻的 `{anchor_ref, anchor_generation}`;锚处理器结算前校验 generation 与当前锚一致,不一致 → 丢弃该 relation + WARNING(排队期间换锚不误结算)。
+6. **锚生命周期四条解除(r2/F7)**:①结算;②连续 2 轮 `unrelated`;③TTL 2h;④**replaced**(新锚顶替,台账 released:replaced)。**confusion 解锚时(除结算外)状态回 `open`**——释放 clarifying 唯一槽,防止占死(`database.py` partial unique index 约束下的活性保证)。锚状态持久化+台账。
+7. **confusion 结算单一所有者(r2/F6)**:durable side-effect 路径的直接 `resolve/defer` **移除**,confusion 的结算统一归**锚处理器**(在学习队列内串行执行,天然有序);既有单轮情感分类器的输出并入锚处理器作为输入信号;plan 含旧 owner 移除与用例改写任务。假设卡片按钮结算走 action 端点(不变量 4)——按钮与锚处理器作用于不同对象状态机入口(按钮=confirm/reject 终态;锚=投票/修正),同一假设的并发由既有 `update_from_feedback` 幂等语义吸收。
+8. **归属判断可证伪(r2/F8)**:relation 枚举加 `ambiguous`(含糊:不结算、锚保持、允许一次追问;两次 ambiguous 计 defer)。kind×relation 合法矩阵入 spec(hypothesis: support/contradict/revise/ambiguous/unrelated;confusion: answer/ambiguous/unrelated;越界组合按 unrelated + WARNING)。防双计代码防御**具体定义**:candidates 内容与锚对象文本做「NFC 规范化 + 中文 bigram / 英文小写 token 分词 + Jaccard 重叠 ≥0.5 即丢弃 + WARNING」(校准注释,首轮重校;停用词表:的/了/是/在/我/有 + a/the/is 等);LLM prompt 指令与结算所有权两道防线不变。
+9. **时间即事实,且前缀稳定(r2/F9 重设计)**:历史轮渲染**绝对时间戳**(`[MM-DD HH:mm]`,turn 创建时定死,**永不随 now 改写**——prompt 前缀跨轮字节稳定,cache 不破);「现在几点」以「当前时间:...」注入 **user prompt 尾段**(每轮变但在末尾,不污染前缀);LLM 由两者自行推断"三天前"。时区契约:统一使用本地时区,`chat_turns.created_at`(SQLite CURRSENT_TIMESTAMP 为 UTC)读取时转换为本地——转换函数单点、可注入、有测试。回放基线一次性更新(有意变更)。
+10. **打扰双轨 + 角标归 SW(r2/F10)**:系统抛出全局冷却 ≥12h(持久化)+ 同对象 72h + clarifying ≤1;用户主动零冷却。**插件角标由 service worker 既有决策表扩展**(`badge.ts`/`computeActionBadge`):新增 pending-confirmations 信号(SW 定期轮询待聊端点 + runtime-stream 事件推动刷新),优先级:健康/错误类 badge > 待确认数字;离线/未初始化时不显示确认数。桌面端在对话入口显示计数(不涉 SW)。
+11. **结算复用/幂等/台账/prompt-cache/LLM 防御/阈值出处**:沿用既有全套不变量;新常量(锚 TTL 2h、全局冷却 12h、Jaccard 0.5、追问上限 1)带校准注释。
+12. **四端契约(r2/F1 修正)**:本版交付 popup + **桌面端(`web/desktop`)** 卡片/待聊/角标;**移动端(`web/js`)本版仅洞察按钮只读化**,卡片渲染跟进版(PR 声明);CLI `openbiliclaw questions` 只读。**README/README_EN 架构图无条件同步**(数据流变化,CLAUDE.md 强制,r2/F12)。
 
-## 现状要点(实现基准,分支代码)
+## kind × relation 合法矩阵(实现与测试对照)
 
-- 对话:单例永续流,窗口 20 轮 + popup/chat/completed 回灌;durable chat scope ∈ {chat, delight, probe, avoidance_probe, confusion};scope≠chat 跳过 settles,归 durable 侧效应结算。
-- 疑惑 ask 已有 `scope="confusion"` 单轮问答 + 情感分类结算;本 spec 将其升级为锚定多轮(单轮分类器保留为锚处理器的输入信号之一)。
-- 洞察确认:`update_from_feedback`(confirm≥0.75/reject≤0.35)由认知更新区 UI 驱动——迁移为对话卡片驱动,函数不变。
-- 学习提取:`DialogueInsightAnalyzer.extract` 已注入活跃清单、输出 candidates+settles;本 spec 扩展锚段与 anchor 输出。
-- 台账/疑惑表/门控/rebuild_pending 均已就位,本 spec 只消费不新建认知机制。
+| | support | contradict | revise | answer | ambiguous | unrelated |
+|---|---|---|---|---|---|---|
+| hypothesis 锚 | ✅投票+ | ✅投票- | ✅reject+派生 | ❌→unrelated | ✅追问/defer | ✅streak+1 |
+| confusion 锚 | ❌→unrelated | ❌→unrelated | ❌→unrelated | ✅resolve(命中解读) | ✅追问/defer | ✅streak+1 |
 
-## 交互设计定稿(供实现对照)
+## 交互设计定稿
 
-- **假设卡片**:标题「阿b 的猜测」+ 假设内容 + 可展开依据(evidence_refs → 台账链摘要)+ 四按钮。已结算态原地替换(「✓ 已确认,阿b 记下了」)。
-- **疑惑提问**:普通聊天气泡 + 轻标识(小图标),无按钮无选项;回答含糊可追问一句,两次不理会转静默(defer 计数既有)。
-- **待聊列表**:对话顶部入口「阿b 有 N 件事想和你聊聊 ›」,展开为卡片列表;点某条 → 该对象立即以卡片/提问形式进入对话流并建锚。
-- **角标**:插件图标 badge = 高优先级待确认数;桌面 Web 在对话入口同位显示。
-- **多轮示例契约**(验收对照):「聊聊→反驳→修正→确认」四轮完成修正式结算;中途插入无关问题(锚保持 1 轮)后回归话题可续;连续 2 轮无关静默解锚。
+(同 r1:卡片四按钮、疑惑纯聊气泡、待聊列表入口、已结算态原地替换、多轮示例契约「聊聊→反驳→修正→确认」。)
 
-## Phase / Wave
+## Wave
 
 | Wave | 内容 | Tier |
 | --- | --- | --- |
-| A | 时间戳渲染(基线更新)+ 锚状态与生命周期 + 归属判断扩展(后端核心) | MUST |
-| B | 假设卡片 turn(scope="hypothesis" + payload + 结算端点)+ 疑惑锚定多轮升级 + 待聊列表/角标 API + 抛出冷却 | MUST |
-| C | 前端:popup + 桌面 Web(卡片渲染/待聊入口/角标/已结算态)+ 洞察卡片迁移(旧区只读) | MUST |
-| D | CLI `questions` + 文档 + 真实端到端 | MUST(收尾) |
+| A | chat_turns payload 迁移 + 绝对时间戳渲染(基线更新)+ 锚(四条解除/代次/持久化)+ 归属判断(矩阵/ambiguous/Jaccard 防御)+ confusion 所有权收归 | MUST |
+| B | 卡片 turn(scope 扩展/进流/session 规则)+ action 端点(CAS)+ 待聊列表/角标 API + 双轨冷却(持久化)+ legacy 转发 | MUST |
+| C | 前端:popup(卡片/待聊/SW 角标信号)+ 桌面端 `web/desktop`(卡片/待聊/计数)+ 移动端洞察按钮只读化 | MUST |
+| D | CLI questions + 认知更新区只读迁移收尾 + 文档(含 README 双语图无条件)+ 真实端到端 | MUST(收尾) |
 
-每 Wave 完成其文档子集方可交付(soul.md 对话确认入口小节、api 文档、extension.md、cli.md、changelog;架构图:对话线增"确认入口"注记)。
+## Expected impact / Documentation obligations
 
-## Expected impact
-
-| Lever | Effect |
-| --- | --- |
-| 确认入口收敛 | 三处散落 → 对话唯一入口;洞察卡片迁移完成 |
-| 多轮澄清 | 疑惑/假设从单轮单发 → 锚定多轮,支持修正式结算 |
-| 提醒 | 从"等你撞见" → 角标 + 待聊列表(主动权在用户,系统抛出受 12h 全局冷却) |
-| 时间感 | 逐轮时间戳,无模式无阈值 |
-
-## Documentation obligations
-
-`docs/modules/soul.md`(确认入口 + 锚)、`docs/modules/extension.md`(角标/卡片)、`docs/modules/cli.md`(questions)、API 文档相应端点、`docs/architecture.md`/`docs/spec.md` 对话线注记(README 图若不含对话粒度则声明不触发)、`docs/changelog.md`。隐私:无新采集面,不触发。
+(同 r1,增:README/README_EN 图无条件同步;`docs/modules/api.md` 或对应 API 文档新端点;移动端只读化写入 changelog。)
