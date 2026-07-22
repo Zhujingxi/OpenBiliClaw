@@ -27,6 +27,8 @@
 
 confirm/reject 的顺序固定为：`INSERT OR IGNORE` 仲裁 → claim token → event 原子占位+INSERT → 对象幂等段 → rebuild marker 幂等段+台账 → token-fenced `applied=1` → 跨 session 投影。只有 `applied=1` 可生成 confirmed/rejected 投影；旧执行者恢复后任何段写都会因 token 不匹配退出。
 
+rebuild marker 使用同目录临时文件 `flush+fsync` 后原子替换；写盘失败会直接使本次请求失败，收据保持 `seg_marker=0/applied=0`，不会提前投影卡片。临时文件由写入端清理，后续超过 claim 租约的重试可从 marker 段接管续做。
+
 系统抛出的两个 gate 必须同时满足：距上次全局抛出至少 12 小时，且同 ref 的 `last_asked_at` / `deferred_until` 已超过 72 小时；两者持久化在 `memory/dialogue_confirmation_state.json`。用户主动 open 明确绕过这两个时间 gate，但疑惑仍受数据库 `clarifying <= 1` 约束。附着 turn 与用户 turn 同秒时，以 `(created_at,rowid)` 保证卡/问题在前；空消息校验与既有 `turn_id` 幂等检查均发生在附着前。
 
 ## 客户端入口约束（Wave D）

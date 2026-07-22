@@ -329,7 +329,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 
 **重建输入过滤**：所有 soul 重建（dialogue / feedback_batch / confirmed_hypotheses）只纳入 `validated=True 且 confidence>=0.75` 的假设（`_rebuild_active_insights`）——rejected/未验证假设对重建不可见，因此一次 reject 的下一次重建会把旧结论**挤出**。
 
-**rebuild_pending 状态机**（`engine.py`，持久化于 `memory/rebuild_pending_state.json`）：`update_from_feedback` 是 confirm/reject 的单一入口，两者都置 `rebuild_pending {set_at, trigger_refs, retry_count}`（新迁移重新置标=「新证据重开」，重置 retry）。去抖 `_DEEP_REBUILD_DEBOUNCE_HOURS=6` 后由 12h 认知循环 / 下一次对话学习 / 反馈批触发门控重建（trigger=`confirmed_hypotheses`）。清标语义：门控 accept+重建成功→清标；真实 downgrade/reject（`is_error=False`）→清标 + 记 `last_gate_refusal`（本批放弃，新 confirm/reject 重开，无无限重试）；LLM/解析异常或重建异常（`is_error=True`）→保留 pending、`retry_count+1`，达 `_REBUILD_MAX_RETRIES=2` 后清标 + WARNING（有界）。构建期间释放锁允许并发 re-mark，用 `set_at` compare-and-swap 对账；重启后 `_rebuild_running` 复位、marker 持久化自动恢复。
+**rebuild_pending 状态机**（`engine.py`，持久化于 `memory/rebuild_pending_state.json`）：`update_from_feedback` 是 confirm/reject 的单一入口，两者都置 `rebuild_pending {set_at, trigger_refs, retry_count}`（新迁移重新置标=「新证据重开」，重置 retry）。去抖 `_DEEP_REBUILD_DEBOUNCE_HOURS=6` 后由 12h 认知循环 / 下一次对话学习 / 反馈批触发门控重建（trigger=`confirmed_hypotheses`）。清标语义：门控 accept+重建成功→清标；真实 downgrade/reject（`is_error=False`）→清标 + 记 `last_gate_refusal`（本批放弃，新 confirm/reject 重开，无无限重试）；LLM/解析异常或重建异常（`is_error=True`）→保留 pending、`retry_count+1`，达 `_REBUILD_MAX_RETRIES=2` 后清标 + WARNING（有界）。构建期间释放锁允许并发 re-mark，用 `set_at` compare-and-swap 对账；重启后 `_rebuild_running` 复位、marker 持久化自动恢复。marker 写盘使用同目录 `.tmp`、`flush+fsync` 与原子替换；序列化或文件系统失败会 WARNING 并向上传播，临时文件在 `finally` 清理。共同结算器因此不会越过失败的 marker 段发布 `applied=1`，接管重试从 `seg_marker=0` 续做。
 
 ## 画像更新逻辑详解
 

@@ -3027,6 +3027,88 @@ async def test_confirm_and_reject_both_mark_rebuild_pending(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_rebuild_marker_write_failure_blocks_settlement_publication_and_cleans_tmp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path as FilePath
+
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视可靠证据"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    memory._database.create_chat_turn(
+        turn_id="marker-failure-card",
+        scope="hypothesis",
+        subject_id=ref,
+        subject_title=hypothesis,
+        message="阿b 的猜测",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": ref,
+            "title": hypothesis,
+            "state": "pending",
+        },
+    )
+    real_replace = FilePath.replace
+
+    def fail_rebuild_marker_replace(self: FilePath, target: FilePath) -> FilePath:
+        if self.name == "rebuild_pending_state.json.tmp":
+            raise OSError("injected marker replace failure")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(FilePath, "replace", fail_rebuild_marker_replace)
+
+    with pytest.raises(OSError, match="injected marker replace failure"):
+        await engine.settle_hypothesis(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="confirm",
+            turn_id="marker-failure-card",
+            source="card_action",
+        )
+
+    partial = memory._database.get_card_settlement(ref)
+    assert partial is not None
+    assert (
+        partial["seg_event"],
+        partial["seg_object"],
+        partial["seg_marker"],
+        partial["applied"],
+    ) == (1, 1, 0, 0)
+    assert memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "pending"
+    marker_path = tmp_path / "memory" / "rebuild_pending_state.json"
+    assert not marker_path.exists()
+    assert not marker_path.with_name(f"{marker_path.name}.tmp").exists()
+
+    monkeypatch.setattr(FilePath, "replace", real_replace)
+    memory._database.conn.execute(
+        "UPDATE card_settlements SET apply_claim_at = '2000-01-01T00:00:00+00:00' WHERE ref = ?",
+        (ref,),
+    )
+    memory._database.conn.commit()
+    recovered = await engine.settle_hypothesis(
+        ref=ref,
+        hypothesis=hypothesis,
+        requested_verdict="confirm",
+        turn_id="marker-failure-card",
+        source="card_action",
+    )
+
+    assert recovered["state"] == "confirmed"
+    final = memory._database.get_card_settlement(ref)
+    assert final is not None
+    assert (final["seg_marker"], final["applied"]) == (1, 1)
+    assert marker_path.exists()
+    assert memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "confirmed"
+
+
+@pytest.mark.asyncio
 async def test_rebuild_input_filters_unvalidated_and_low_confidence(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
@@ -2311,14 +2312,26 @@ class SoulEngine:
         path = self._rebuild_state_path()
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp")
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             tmp_path.replace(path)
-        except OSError:
-            logger.debug("Failed to save rebuild pending state", exc_info=True)
+        except (OSError, TypeError, ValueError):
+            logger.warning("Failed to save rebuild pending state", exc_info=True)
+            raise
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to clean rebuild pending temp file: %s",
+                    tmp_path,
+                    exc_info=True,
+                )
 
     async def _mark_rebuild_pending(self, trigger_refs: list[str]) -> None:
         """Set/refresh the pending marker (confirm & reject single point, inv 4).
