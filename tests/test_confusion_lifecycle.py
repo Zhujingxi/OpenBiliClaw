@@ -368,6 +368,54 @@ def test_replay_queue_survives_restart_and_head_pop_is_fenced(tmp_path: Path) ->
     ]
 
 
+def test_terminal_confusion_with_unpopped_head_is_recovered_by_fallback_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    manager = ConfusionManager(db, ledger=ProfileLedger(db))
+    confusion_id = db.insert_confusion(topic="崩溃窗", observation="resolve 已提交但尚未 pop")
+    assert db.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-22T01:00:00+00:00",
+    )
+    db.enqueue_confusion_replay(
+        confusion_id,
+        {
+            "replay_id": "crash-turn",
+            "turn_id": "crash-turn",
+            "action": "resolve",
+            "interpretation": "real_interest",
+            "note": "commit-before-pop",
+            "anchor_generation": 1,
+        },
+    )
+    real_pop = db.pop_confusion_replay_head
+
+    def crash_after_resolve(_confusion_id: int, *, expected_id: str) -> bool:
+        del expected_id
+        assert db.get_confusion(_confusion_id)["status"] == "resolved"
+        raise RuntimeError("crash after resolve commit")
+
+    monkeypatch.setattr(db, "pop_confusion_replay_head", crash_after_resolve)
+    with pytest.raises(RuntimeError, match="crash after resolve commit"):
+        manager.retry_anchor_settlements(confusion_id)
+
+    crashed = db.get_confusion(confusion_id)
+    assert crashed["status"] == "resolved"
+    assert [item["turn_id"] for item in crashed["replay_queue"]] == ["crash-turn"]
+    pending = manager.pending_dialogue_replays()
+    assert len(pending) == 1
+    assert pending[0]["confusion_id"] == confusion_id
+    assert pending[0]["has_replay_queue"] == 1
+
+    monkeypatch.setattr(db, "pop_confusion_replay_head", real_pop)
+    restarted = ConfusionManager(db, ledger=ProfileLedger(db))
+    assert restarted.retry_anchor_settlements(confusion_id) == "resolved"
+    assert restarted.get(confusion_id).replay_queue == []
+
+
 @pytest.mark.parametrize("reason", ["replaced", "ttl", "settled", "unrelated"])
 def test_every_anchor_release_clears_confusion_replay_queue_with_ledger(
     tmp_path: Path,

@@ -2500,7 +2500,62 @@ class SoulEngine:
             except (TypeError, ValueError):
                 continue
             confusion = self._confusion_manager.get(confusion_id)
-            if confusion is None or confusion.status != "clarifying":
+            if confusion is None:
+                continue
+            if confusion.replay_queue:
+                settlement_reader = getattr(
+                    self._ledger_database,
+                    "get_card_settlement",
+                    None,
+                )
+                settlement = (
+                    settlement_reader(str(confusion_id)) if callable(settlement_reader) else None
+                )
+                settlement_payload = (
+                    settlement.get("payload") if isinstance(settlement, dict) else None
+                )
+                if (
+                    isinstance(settlement, dict)
+                    and int(settlement.get("applied", 0)) == 0
+                    and isinstance(settlement_payload, dict)
+                    and str(settlement_payload.get("kind", "")) == "confusion"
+                ):
+                    try:
+                        generation = max(
+                            0,
+                            int(settlement_payload.get("anchor_generation", 0)),
+                        )
+                    except (TypeError, ValueError):
+                        generation = 0
+                    result = await self.settle_confusion_answer(
+                        ref=str(confusion_id),
+                        confusion_id=confusion_id,
+                        interpretation=str(settlement_payload.get("interpretation", "")),
+                        note=str(settlement_payload.get("note", "")),
+                        turn_id=str(settlement.get("turn_id", row.get("turn_id", ""))),
+                        source=str(settlement_payload.get("source", "recovery")),
+                        anchor_generation=generation,
+                    )
+                    if result.get("outcome") == "processing":
+                        continue
+                    processed += 1
+                    continue
+                terminal = self._confusion_manager.retry_anchor_settlements(confusion_id)
+                if terminal is None:
+                    continue
+                anchor = self._dialogue_anchor_manager.current()
+                if (
+                    anchor is not None
+                    and anchor.kind == "confusion"
+                    and anchor.ref == str(confusion_id)
+                ):
+                    self._dialogue_anchor_manager.release(
+                        reason="settled",
+                        expected_generation=anchor.generation,
+                    )
+                processed += 1
+                continue
+            if confusion.status != "clarifying":
                 continue
             anchor = self._dialogue_anchor_manager.current()
             if anchor is None:
@@ -2519,20 +2574,6 @@ class SoulEngine:
                     anchor.ref,
                 )
                 continue
-            if confusion.replay_queue:
-                terminal = self._confusion_manager.retry_anchor_settlements(
-                    confusion_id,
-                    expected_generation=anchor.generation,
-                )
-                if terminal is None:
-                    continue
-                self._dialogue_anchor_manager.release(
-                    reason="settled",
-                    expected_generation=anchor.generation,
-                )
-                processed += 1
-                continue
-
             anchor_context, anchor_texts = self._build_dialogue_anchor_context(anchor)
             label = str(row.get("subject_title") or row.get("subject_id") or "这个方向")
             user_message = f"[关于我有点困惑的「{label}」的澄清] {str(row.get('message', ''))}"

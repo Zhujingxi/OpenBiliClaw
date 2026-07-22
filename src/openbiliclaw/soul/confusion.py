@@ -560,7 +560,12 @@ class ConfusionManager:
                 continue
             try:
                 if action == "defer":
-                    self.defer(confusion_id)
+                    # A crash after defer's status update but before the FIFO
+                    # pop leaves an open row with the same head. Treat that as
+                    # the already-applied object segment so recovery does not
+                    # increment defer_count twice.
+                    if confusion.status != "open":
+                        self.defer(confusion_id)
                     terminal = "deferred"
                 else:
                     terminal = self.resolve(

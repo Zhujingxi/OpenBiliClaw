@@ -3247,19 +3247,57 @@ class Database:
         *,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Return completed clarifying replies newer than their ask receipt."""
+        """Return durable queue heads plus completed-turn attribution gaps.
+
+        A resolve commits before the historical, separate FIFO pop. If the
+        process dies in that window the confusion is already terminal, so a
+        ``status='clarifying'``-only scan can never see its non-empty queue.
+        Queue recovery therefore covers *every* status; the narrower completed
+        turn scan remains limited to clarifying rows with an empty queue.
+        """
         self._ensure_fresh_read()
-        rows = self.conn.execute(
+        normalized_limit = max(1, int(limit))
+        queued_rows = self.conn.execute(
+            """
+            SELECT c.id AS confusion_id,
+                   c.ask_turn_id AS ask_turn_id,
+                   COALESCE(t.turn_id, json_extract(c.replay_queue, '$[0].turn_id'), '')
+                       AS turn_id,
+                   COALESCE(t.session, '') AS session,
+                   COALESCE(t.subject_id, CAST(c.id AS TEXT)) AS subject_id,
+                   COALESCE(t.subject_title, c.topic) AS subject_title,
+                   COALESCE(t.message, '') AS message,
+                   COALESCE(t.reply, '') AS reply,
+                   COALESCE(t.created_at, c.created_at) AS created_at,
+                   COALESCE(t.updated_at, c.updated_at) AS updated_at,
+                   1 AS has_replay_queue
+            FROM confusions AS c
+            LEFT JOIN chat_turns AS t
+              ON t.turn_id = json_extract(c.replay_queue, '$[0].turn_id')
+            WHERE json_valid(c.replay_queue)
+              AND json_array_length(c.replay_queue) > 0
+            ORDER BY c.updated_at ASC, c.id ASC
+            LIMIT ?
+            """,
+            (normalized_limit,),
+        ).fetchall()
+        remaining = max(0, normalized_limit - len(queued_rows))
+        gap_rows = self.conn.execute(
             """
             SELECT c.id AS confusion_id,
                    c.ask_turn_id AS ask_turn_id,
                    t.turn_id, t.session, t.subject_id, t.subject_title,
-                   t.message, t.reply, t.created_at, t.updated_at
+                   t.message, t.reply, t.created_at, t.updated_at,
+                   0 AS has_replay_queue
             FROM confusions AS c
             JOIN chat_turns AS t
               ON t.scope = 'confusion'
              AND t.subject_id = CAST(c.id AS TEXT)
             WHERE c.status = 'clarifying'
+              AND (
+                    NOT json_valid(c.replay_queue)
+                    OR json_array_length(c.replay_queue) = 0
+                  )
               AND t.status = 'completed'
               AND julianday(t.updated_at) > julianday(COALESCE(c.asked_at, c.created_at))
               AND CASE
@@ -3273,9 +3311,12 @@ class Database:
             ORDER BY t.updated_at ASC, t.rowid ASC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (remaining,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        rows = [dict(row) for row in queued_rows]
+        rows.extend(dict(row) for row in gap_rows)
+        rows.sort(key=lambda row: (str(row.get("updated_at", "")), str(row.get("turn_id", ""))))
+        return rows[:normalized_limit]
 
     def mark_confusion_dialogue_replay_processed(self, turn_id: str) -> bool:
         """Receipt attribution in the turn payload, including while it is pending."""
