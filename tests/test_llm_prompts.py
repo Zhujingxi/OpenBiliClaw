@@ -732,6 +732,12 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
                 assistant_reply="听起来不错",
                 core_memory={"a": 1},
                 active_list={"speculations": [{"domain": "桌游"}]},
+                anchor={
+                    "kind": "hypothesis",
+                    "ref": "abcd1234",
+                    "text": "用户喜欢桌游",
+                    "generation": 1,
+                },
             ),
             dict(
                 user_message="不想再看带货了",

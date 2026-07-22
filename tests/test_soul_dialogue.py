@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,18 @@ from openbiliclaw.llm.service import (
     ModuleOverride,
 )
 from openbiliclaw.soul.dialogue import DialogueTurn, SocraticDialogue
+
+_CURRENT_TIME_SUFFIX = re.compile(r"\n\n当前时间:\d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}$")
+
+
+def _raw_user_message(prompt_user_message: str) -> str:
+    return prompt_user_message.partition("\n\n当前时间:")[0]
+
+
+def _assert_prompt_user_message(prompt_user_message: object, expected: str) -> None:
+    assert isinstance(prompt_user_message, str)
+    assert _raw_user_message(prompt_user_message) == expected
+    assert _CURRENT_TIME_SUFFIX.search(prompt_user_message)
 
 
 class FakeSoulEngine:
@@ -75,7 +88,10 @@ async def test_dialogue_respond_appends_user_and_agent_turns() -> None:
     assert len(dialogue.history) == 2
     assert dialogue.history[0].role == "user"
     assert dialogue.history[1].role == "agent"
-    assert service.calls[0]["user_message"] == "我最近很喜欢看讲得很透的纪录片。"
+    _assert_prompt_user_message(
+        service.calls[0]["user_message"],
+        "我最近很喜欢看讲得很透的纪录片。",
+    )
     assert soul_engine.learn_calls == [
         "cli:我最近很喜欢看讲得很透的纪录片。->我猜你喜欢的是那种能慢慢展开逻辑的讲述方式。"
     ]
@@ -129,10 +145,13 @@ async def test_dialogue_respond_passes_prior_history_to_service() -> None:
     await dialogue.respond("尤其是那种会解释为什么会这样的视频。")
 
     history = service.calls[1]["history"]
-    assert history == [
-        {"role": "user", "content": "我喜欢能讲清来龙去脉的视频。"},
-        {"role": "assistant", "content": "听起来你更在意内容背后的结构和动机。"},
-    ]
+    assert isinstance(history, list)
+    assert [message["role"] for message in history] == ["user", "assistant"]
+    assert history[0]["content"].endswith(" 我喜欢能讲清来龙去脉的视频。")
+    assert history[1]["content"].endswith(" 听起来你更在意内容背后的结构和动机。")
+    assert all(
+        re.match(r"^\[\d{2}-\d{2} \d{2}:\d{2}\] ", message["content"]) for message in history
+    )
 
 
 @pytest.mark.asyncio
@@ -205,7 +224,7 @@ async def test_concurrent_typed_failure_does_not_remove_successful_turn() -> Non
             history: list[dict[str, str]],
             caller: str = "",
         ) -> LLMResponse:
-            if user_message == "成功消息":
+            if _raw_user_message(user_message) == "成功消息":
                 success_started.set()
                 await release_success.wait()
                 return LLMResponse(content="成功回复")
@@ -248,7 +267,7 @@ async def test_concurrent_cancellation_does_not_orphan_successful_tool_turn() ->
     class OverlappingToolService:
         async def complete_with_tools(self, **kwargs: object) -> LLMResponse:
             user_message = str(kwargs["user_input"])
-            if user_message == "取消消息":
+            if _raw_user_message(user_message) == "取消消息":
                 cancelled_started.set()
                 await release_cancelled.wait()
                 return LLMResponse(content="不应返回")
@@ -329,7 +348,8 @@ async def test_cancellation_while_waiting_does_not_start_or_mutate_turn() -> Non
     release.set()
     assert await success_task == "成功回复"
 
-    assert service.messages == ["成功消息"]
+    assert len(service.messages) == 1
+    _assert_prompt_user_message(service.messages[0], "成功消息")
     assert [(turn.role, turn.content) for turn in dialogue.history] == [
         ("user", "成功消息"),
         ("agent", "成功回复"),

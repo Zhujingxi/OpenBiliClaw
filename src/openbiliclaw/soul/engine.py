@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,7 +33,7 @@ from .cognition_cycle import (
 )
 from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
-from .dialogue_anchor import DialogueAnchorManager
+from .dialogue_anchor import DialogueAnchor, DialogueAnchorManager
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
@@ -94,6 +96,44 @@ _DEEP_REBUILD_DEBOUNCE_HOURS = 6
 _REBUILD_MAX_RETRIES = 2
 # Cap on the confirmed-hypothesis list carried in the gate snapshot context.
 _REBUILD_CONTEXT_HYPOTHESIS_CAP = 12
+
+# First-round calibration (2026-07-22): 0.5 rejects clear paraphrases without
+# suppressing a side topic that merely shares one generic word. Recalibrate
+# after the first production month or any tokenizer/model swap.
+_ANCHOR_CANDIDATE_JACCARD_THRESHOLD = 0.5
+# Product calibration (2026-07-22): one clarification is enough to distinguish
+# hesitation from avoidance without turning the dialogue into an interrogation.
+_ANCHOR_AMBIGUOUS_FOLLOW_UP_LIMIT = 1
+_CHINESE_STOPWORDS = frozenset("的了是在我有")
+_ENGLISH_STOPWORDS = frozenset(
+    {"a", "the", "is", "am", "are", "of", "to", "and", "i", "have", "in"}
+)
+_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+_ENGLISH_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_ANCHOR_RELATIONS_BY_KIND = {
+    "hypothesis": frozenset({"support", "contradict", "revise", "ambiguous", "unrelated"}),
+    "confusion": frozenset({"answer", "ambiguous", "unrelated"}),
+}
+
+
+def _dialogue_anchor_tokens(value: str) -> set[str]:
+    normalized = unicodedata.normalize("NFC", value).lower()
+    tokens = {
+        token for token in _ENGLISH_TOKEN_RE.findall(normalized) if token not in _ENGLISH_STOPWORDS
+    }
+    for run in _CJK_RUN_RE.findall(normalized):
+        filtered = "".join(character for character in run if character not in _CHINESE_STOPWORDS)
+        tokens.update(filtered[index : index + 2] for index in range(max(0, len(filtered) - 1)))
+    return tokens
+
+
+def _dialogue_anchor_jaccard(left: str, right: str) -> float:
+    left_tokens = _dialogue_anchor_tokens(left)
+    right_tokens = _dialogue_anchor_tokens(right)
+    union = left_tokens | right_tokens
+    if not union:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(union)
 
 
 def _memory_database(memory: Any) -> Any | None:
@@ -1035,7 +1075,6 @@ class SoulEngine:
         settled by the durable side-effect path (single ownership). ``turn_id``
         is stamped on the ledger rows as an idempotency observation key.
         """
-        del anchor_ref, anchor_generation  # Consumed by the Task 2 relation handler.
         await self._memory.propagate_event(
             {
                 "event_type": "dialogue",
@@ -1049,31 +1088,73 @@ class SoulEngine:
             }
         )
         active_list, insight_hash_map = self._build_dialogue_active_list()
-        try:
-            extract_result = await self._dialogue_insight_analyzer.extract(
-                user_message=user_message,
-                assistant_reply=assistant_reply,
-                core_memory=self._memory.get_core_memory(),
-                active_list=active_list,
+        active_anchor: DialogueAnchor | None = None
+        anchor_context: dict[str, object] | None = None
+        anchor_texts: list[str] = []
+        if anchor_ref or anchor_generation:
+            self._dialogue_anchor_manager.expire()
+            active_anchor = self._dialogue_anchor_manager.validate_snapshot(
+                anchor_ref,
+                anchor_generation,
             )
+            if active_anchor is not None:
+                anchor_context, anchor_texts = self._build_dialogue_anchor_context(active_anchor)
+        anchor_decision: dict[str, object] | None = None
+        try:
+            if anchor_context is None:
+                # Preserve the pre-anchor invocation bytes/signature exactly.
+                extract_result = await self._dialogue_insight_analyzer.extract(
+                    user_message=user_message,
+                    assistant_reply=assistant_reply,
+                    core_memory=self._memory.get_core_memory(),
+                    active_list=active_list,
+                )
+            else:
+                extract_result = await self._dialogue_insight_analyzer.extract(
+                    user_message=user_message,
+                    assistant_reply=assistant_reply,
+                    core_memory=self._memory.get_core_memory(),
+                    active_list=active_list,
+                    anchor=anchor_context,
+                )
             # Tolerate the legacy list return as well as the new
             # {"candidates", "settles"} dict.
             if isinstance(extract_result, dict):
-                extracted = list(extract_result.get("candidates", []))
-                settles = list(extract_result.get("settles", []))
+                extracted = _as_dict_list(extract_result.get("candidates"))
+                settles = _as_dict_list(extract_result.get("settles"))
+                raw_anchor_decision = extract_result.get("anchor")
+                if isinstance(raw_anchor_decision, dict):
+                    anchor_decision = raw_anchor_decision
             else:
-                extracted = list(extract_result)
+                extracted = [dict(item) for item in extract_result if isinstance(item, dict)]
                 settles = []
         except DialogueInsightAnalysisError:
             logger.exception("Failed to extract dialogue insight candidates.")
             extracted = []
             settles = []
 
+        anchor_outcome = ""
+        if active_anchor is not None:
+            extracted = self._filter_anchor_overlap_candidates(extracted, anchor_texts)
+            if anchor_decision is None:
+                logger.warning(
+                    "dialogue anchor decision missing/invalid; keeping generation=%s",
+                    active_anchor.generation,
+                )
+                anchor_outcome = "kept_invalid"
+            else:
+                anchor_outcome = await self._process_dialogue_anchor_decision(
+                    anchor=active_anchor,
+                    anchor_texts=anchor_texts,
+                    decision=anchor_decision,
+                    turn_id=turn_id,
+                )
+
         # Process settles (single ownership, spec §invariant 6): only plain
         # scope="chat" turns settle here — probe / confusion durable turns are
         # settled by the durable side-effect path, so skip to avoid double
         # settling.
-        if scope == "chat" and settles:
+        if scope == "chat" and settles and active_anchor is None:
             await self._process_dialogue_settles(
                 settles=settles,
                 active_list=active_list,
@@ -1091,12 +1172,15 @@ class SoulEngine:
             item for item in merged_candidates if self._candidate_ready_for_learning(item)
         ]
         if not eligible_candidates:
-            return {
-                "event_logged": True,
-                "candidate_count": len(extracted),
-                "preference_updated": False,
-                "profile_rebuilt": False,
-            }
+            return self._with_anchor_outcome(
+                {
+                    "event_logged": True,
+                    "candidate_count": len(extracted),
+                    "preference_updated": False,
+                    "profile_rebuilt": False,
+                },
+                anchor_outcome,
+            )
 
         # Posture-gate access point ① (Phase 3): interest/dislike take the fast
         # line unchanged; goal/value/state deep candidates pass the gate. In
@@ -1106,12 +1190,15 @@ class SoulEngine:
         # insight hypotheses (confidence × 0.6).
         gated_candidates = await self._gate_dialogue_candidates(eligible_candidates)
         if not gated_candidates:
-            return {
-                "event_logged": True,
-                "candidate_count": len(extracted),
-                "preference_updated": False,
-                "profile_rebuilt": False,
-            }
+            return self._with_anchor_outcome(
+                {
+                    "event_logged": True,
+                    "candidate_count": len(extracted),
+                    "preference_updated": False,
+                    "profile_rebuilt": False,
+                },
+                anchor_outcome,
+            )
 
         preference_layer = self._memory.get_layer("preference")
         existing_preference = dict(preference_layer.data)
@@ -1271,12 +1358,15 @@ class SoulEngine:
         except Exception:
             logger.debug("pending rebuild trigger (dialogue) failed", exc_info=True)
 
-        return {
-            "event_logged": True,
-            "candidate_count": len(extracted),
-            "preference_updated": True,
-            "profile_rebuilt": profile_rebuilt,
-        }
+        return self._with_anchor_outcome(
+            {
+                "event_logged": True,
+                "candidate_count": len(extracted),
+                "preference_updated": True,
+                "profile_rebuilt": profile_rebuilt,
+            },
+            anchor_outcome,
+        )
 
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
         """Reanalyze preference/profile after enough new feedback has accumulated."""
@@ -1898,6 +1988,270 @@ class SoulEngine:
             return datetime.fromisoformat(value)
         except ValueError:
             return None
+
+    def _build_dialogue_anchor_context(
+        self,
+        anchor: DialogueAnchor,
+    ) -> tuple[dict[str, object], list[str]]:
+        """Resolve an anchor ref to the object text injected into the existing LLM call."""
+        texts: list[str] = []
+        if anchor.kind == "hypothesis":
+            hypotheses = [item.hypothesis for item in self._load_insights() if item.hypothesis]
+            hypothesis_by_ref = build_hash8_map(hypotheses)
+            hypothesis = hypothesis_by_ref.get(anchor.ref, "")
+            if hypothesis:
+                texts.append(hypothesis)
+            else:
+                logger.warning("dialogue hypothesis anchor ref no longer resolves: %s", anchor.ref)
+        else:
+            try:
+                confusion_id = int(anchor.ref.rsplit(":", maxsplit=1)[-1])
+            except ValueError:
+                confusion_id = 0
+            confusion = self._confusion_manager.get(confusion_id) if confusion_id else None
+            if confusion is not None:
+                texts.extend(
+                    text
+                    for text in (
+                        confusion.topic.strip(),
+                        confusion.observation.strip(),
+                        confusion.interpretation.strip(),
+                    )
+                    if text
+                )
+            else:
+                logger.warning("dialogue confusion anchor ref no longer resolves: %s", anchor.ref)
+        context = {
+            "kind": anchor.kind,
+            "ref": anchor.ref,
+            "generation": anchor.generation,
+            "text": texts[0] if texts else "",
+            "object_texts": texts,
+            "ambiguous_count": anchor.ambiguous_count,
+        }
+        return context, texts
+
+    def _filter_anchor_overlap_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        anchor_texts: list[str],
+    ) -> list[dict[str, object]]:
+        """Drop candidates that duplicate anchored content (second defence)."""
+        if not anchor_texts:
+            return candidates
+        kept: list[dict[str, object]] = []
+        for candidate in candidates:
+            content = str(candidate.get("content", "")).strip()
+            overlap = max(
+                (_dialogue_anchor_jaccard(content, anchor_text) for anchor_text in anchor_texts),
+                default=0.0,
+            )
+            if overlap >= _ANCHOR_CANDIDATE_JACCARD_THRESHOLD:
+                logger.warning(
+                    "dialogue candidate overlaps dialogue anchor (jaccard=%.3f); dropped: %s",
+                    overlap,
+                    content[:80],
+                )
+                continue
+            kept.append(candidate)
+        return kept
+
+    async def _process_dialogue_anchor_decision(
+        self,
+        *,
+        anchor: DialogueAnchor,
+        anchor_texts: list[str],
+        decision: dict[str, object],
+        turn_id: str,
+    ) -> str:
+        """Apply one matrix-validated anchor relation without another LLM call."""
+        raw_relation = decision.get("relation")
+        relation = raw_relation.strip() if isinstance(raw_relation, str) else ""
+        allowed = _ANCHOR_RELATIONS_BY_KIND.get(anchor.kind, frozenset())
+        all_relations = frozenset().union(*_ANCHOR_RELATIONS_BY_KIND.values())
+        if relation not in all_relations:
+            logger.warning("dialogue anchor decision dropped in engine: relation=%r", raw_relation)
+            return "kept_invalid"
+        if relation not in allowed:
+            logger.warning(
+                "dialogue anchor relation outside kind matrix in engine: kind=%s relation=%s; "
+                "coercing to unrelated",
+                anchor.kind,
+                relation,
+            )
+            relation = "unrelated"
+
+        if relation == "unrelated":
+            updated = self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            return "unrelated" if updated is not None else "released_unrelated"
+
+        if relation == "ambiguous":
+            updated = self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            if updated is None:
+                return "stale"
+            if updated.ambiguous_count <= _ANCHOR_AMBIGUOUS_FOLLOW_UP_LIMIT:
+                self._ledger.record(
+                    write_point="anchor_follow_up",
+                    source="dialogue_anchor",
+                    after={"ambiguous_count": updated.ambiguous_count},
+                    source_refs=[f"{anchor.kind}:{anchor.ref}"],
+                    turn_id=turn_id,
+                )
+                return "follow_up"
+            if anchor.kind == "hypothesis":
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    card_state="deferred",
+                    expected_generation=anchor.generation,
+                )
+            else:
+                confusion_id = self._confusion_anchor_id(anchor)
+                if confusion_id:
+                    self._confusion_manager.defer(confusion_id)
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    expected_generation=anchor.generation,
+                )
+            return "deferred" if released is not None else "stale"
+
+        # Every valid non-ambiguous relation resets both counters before its
+        # object-specific side effect. A failed side effect leaves a clean,
+        # still-active anchor for the next turn.
+        self._dialogue_anchor_manager.note_relation(
+            relation,
+            expected_generation=anchor.generation,
+        )
+        if anchor.kind == "hypothesis":
+            hypothesis = anchor_texts[0] if anchor_texts else ""
+            if not hypothesis:
+                logger.warning("dialogue hypothesis anchor has no resolvable object text")
+                return "kept_invalid"
+            if relation in {"support", "contradict"}:
+                signal = "confirm" if relation == "support" else "reject"
+                result = await self.update_from_feedback(
+                    {"hypothesis": hypothesis, "signal": signal}
+                )
+                if not bool(result.get("matched", False)):
+                    return "kept_failed"
+                card_state = "confirmed" if relation == "support" else "rejected"
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    card_state=card_state,
+                    expected_generation=anchor.generation,
+                )
+                return card_state if released is not None else "stale"
+            if relation == "revise":
+                result = await self.update_from_feedback(
+                    {"hypothesis": hypothesis, "signal": "reject"}
+                )
+                if not bool(result.get("matched", False)):
+                    return "kept_failed"
+                raw_derived = decision.get("derived")
+                derived = _as_dict_list(raw_derived)
+                await self._persist_anchor_derived_hypotheses(derived, turn_id=turn_id)
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    card_state="rejected",
+                    expected_generation=anchor.generation,
+                )
+                return "revised" if released is not None else "stale"
+            return "kept_invalid"
+
+        if relation != "answer":
+            return "kept_invalid"
+        interpretation = str(decision.get("interpretation", "")).strip()
+        if interpretation not in {"real_interest", "proxy_behavior", "dismissed"}:
+            logger.warning(
+                "dialogue confusion answer has invalid interpretation=%r",
+                interpretation,
+            )
+            return "kept_invalid"
+        confusion_id = self._confusion_anchor_id(anchor)
+        if not confusion_id:
+            return "kept_invalid"
+        terminal = self._confusion_manager.resolve(
+            confusion_id,
+            resolution=interpretation,
+            note="dialogue_anchor",
+        )
+        if terminal is None:
+            return "kept_failed"
+        released = self._dialogue_anchor_manager.release(
+            reason="settled",
+            expected_generation=anchor.generation,
+        )
+        return "answered" if released is not None else "stale"
+
+    async def _persist_anchor_derived_hypotheses(
+        self,
+        derived: list[dict[str, object]],
+        *,
+        turn_id: str,
+    ) -> None:
+        """Persist revise-derived hypotheses into the confirmed rebuild path."""
+        existing = self._load_insights()
+        by_text = {self._normalize_text(item.hypothesis): item for item in existing}
+        trigger_refs: list[str] = []
+        changed = False
+        for item in derived:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            confidence = max(0.75, min(1.0, self._to_float(item.get("confidence", 0.0))))
+            evidence = str(item.get("evidence", "")).strip()
+            normalized = self._normalize_text(content)
+            hypothesis = by_text.get(normalized)
+            if hypothesis is None:
+                hypothesis = InsightHypothesis(
+                    hypothesis=content,
+                    evidence=[evidence] if evidence else [],
+                    confidence=round(confidence, 4),
+                    validated=True,
+                    created_at=datetime.now().isoformat(),
+                )
+                existing.append(hypothesis)
+                by_text[normalized] = hypothesis
+            else:
+                hypothesis.validated = True
+                hypothesis.confidence = round(max(hypothesis.confidence, confidence), 4)
+                if evidence and evidence not in hypothesis.evidence:
+                    hypothesis.evidence.append(evidence)
+            changed = True
+            trigger_refs.append(f"anchor_revise:{content[:60]}")
+            self._ledger.record(
+                write_point="anchor_revise_derived",
+                source="dialogue_anchor",
+                after={"hypothesis": content, "confidence": hypothesis.confidence},
+                source_refs=[content[:60]],
+                turn_id=turn_id,
+            )
+        if not changed:
+            return
+        self._save_insights(existing)
+        await self._mark_rebuild_pending(trigger_refs)
+
+    @staticmethod
+    def _confusion_anchor_id(anchor: DialogueAnchor) -> int:
+        try:
+            return int(anchor.ref.rsplit(":", maxsplit=1)[-1])
+        except ValueError:
+            logger.warning("dialogue confusion anchor has malformed ref=%r", anchor.ref)
+            return 0
+
+    @staticmethod
+    def _with_anchor_outcome(
+        result: dict[str, object],
+        outcome: str,
+    ) -> dict[str, object]:
+        if outcome:
+            result["anchor_outcome"] = outcome
+        return result
 
     def _merge_insight_candidates(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ from openbiliclaw.soul.dialogue_anchor import (
     ENTRY_PENDING_OPEN,
     DialogueAnchorManager,
 )
+from openbiliclaw.soul.dialogue_insight_analyzer import DialogueInsightAnalyzer
 from openbiliclaw.soul.ledger import ProfileLedger
 from openbiliclaw.storage.database import Database
 
@@ -342,3 +344,115 @@ def test_generation_remains_monotonic_after_release(tmp_path: Path) -> None:
     )
 
     assert second.generation == first.generation + 1
+
+
+def test_no_anchor_dialogue_insight_prompt_bytes_match_pre_task_baseline() -> None:
+    from openbiliclaw.llm.prompts import build_dialogue_insight_prompt
+
+    messages = build_dialogue_insight_prompt(
+        user_message="我最近在玩桌游",
+        assistant_reply="听起来你很享受",
+        core_memory={"soul": "重视深度"},
+        active_list={"speculations": [{"domain": "桌游"}]},
+    )
+    raw = json.dumps(messages, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+    assert hashlib.sha256(raw.encode()).hexdigest() == (
+        "cb16707401107cba2d0820da6db3652aebcaca2c562175150f90076df1a24e2a"
+    )
+
+
+def test_anchored_prompt_adds_contract_only_to_user_message() -> None:
+    from openbiliclaw.llm.prompts import build_dialogue_insight_prompt
+
+    base = build_dialogue_insight_prompt(
+        user_message="不完全是这样",
+        assistant_reply="你愿意修正一下吗？",
+        core_memory={},
+        active_list={},
+    )
+    anchored = build_dialogue_insight_prompt(
+        user_message="不完全是这样",
+        assistant_reply="你愿意修正一下吗？",
+        core_memory={},
+        active_list={},
+        anchor={
+            "kind": "hypothesis",
+            "ref": "abcd1234",
+            "text": "用户偏好深度内容",
+            "generation": 2,
+        },
+    )
+
+    assert anchored[0] == base[0]
+    assert "<current_anchor>" in anchored[1]["content"]
+    assert '"relation": "support"' in anchored[1]["content"]
+    assert "归锚内容禁止重复写进 candidates" in anchored[1]["content"]
+
+
+class _UnusedStructuredRegistry:
+    async def complete_structured_task(self, **_: object) -> object:  # pragma: no cover
+        raise AssertionError("parser tests do not call the registry")
+
+
+@pytest.mark.parametrize(
+    ("kind", "relation", "expected"),
+    [
+        ("hypothesis", "support", "support"),
+        ("hypothesis", "contradict", "contradict"),
+        ("hypothesis", "revise", "revise"),
+        ("hypothesis", "ambiguous", "ambiguous"),
+        ("hypothesis", "unrelated", "unrelated"),
+        ("confusion", "answer", "answer"),
+        ("confusion", "ambiguous", "ambiguous"),
+        ("confusion", "unrelated", "unrelated"),
+        ("hypothesis", "answer", "unrelated"),
+    ],
+)
+def test_anchor_relation_parser_enforces_kind_matrix(
+    kind: str,
+    relation: str,
+    expected: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    analyzer = DialogueInsightAnalyzer(_UnusedStructuredRegistry())  # type: ignore[arg-type]
+
+    with caplog.at_level("WARNING"):
+        result = analyzer._parse_response(
+            json.dumps(
+                {
+                    "candidates": [],
+                    "settles": [],
+                    "anchor": {
+                        "relation": relation,
+                        "interpretation": "real_interest",
+                        "derived": [],
+                    },
+                }
+            ),
+            anchor_kind=kind,
+        )
+
+    assert result["anchor"]["relation"] == expected  # type: ignore[index]
+    if relation != expected:
+        assert "outside kind matrix" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw_anchor",
+    [None, {}, {"relation": "made_up"}, {"relation": 42}],
+)
+def test_bad_anchor_output_keeps_decision_empty(
+    raw_anchor: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    analyzer = DialogueInsightAnalyzer(_UnusedStructuredRegistry())  # type: ignore[arg-type]
+
+    with caplog.at_level("WARNING"):
+        result = analyzer._parse_response(
+            json.dumps({"candidates": [], "settles": [], "anchor": raw_anchor}),
+            anchor_kind="hypothesis",
+        )
+
+    assert result["anchor"] is None
+    assert "anchor decision dropped" in caplog.text

@@ -1062,12 +1062,40 @@ core_memory、这轮对话、以及 active_list 都在 user 消息里给出。
 """.strip()
 
 
+_DIALOGUE_ANCHOR_USER_CONTRACT = """
+<anchor_contract>
+这轮处于单一话题锚中。除原有 candidates / settles 外，还要返回 anchor 判断：
+- relation 只允许 support / contradict / revise / answer / ambiguous / unrelated；
+- hypothesis 锚只允许 support / contradict / revise / ambiguous / unrelated；
+- confusion 锚只允许 answer / ambiguous / unrelated；
+- confusion 的 answer 必须把 interpretation 写成 real_interest / proxy_behavior / dismissed 之一；
+- revise 可在 derived 中给出修正后的假设；其他 relation 的 derived 返回空数组；
+- 归锚内容禁止重复写进 candidates，也不要再用 settles 结算锚对象；
+- 不确定归属时返回 ambiguous，明确岔题才返回 unrelated。
+
+anchor 字段格式：
+{
+  "relation": "support",
+  "interpretation": "",
+  "derived": [
+    {
+      "content": "修正后的假设",
+      "confidence": 0.82,
+      "evidence": "用户本轮的明确修正"
+    }
+  ]
+}
+</anchor_contract>
+""".strip()
+
+
 def build_dialogue_insight_prompt(
     *,
     user_message: str,
     assistant_reply: str,
     core_memory: dict[str, object],
     active_list: dict[str, object] | None = None,
+    anchor: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
     """Build a structured prompt for extracting candidate insights from dialogue.
 
@@ -1076,14 +1104,25 @@ def build_dialogue_insight_prompt(
     ``id``). The system prompt is a module-level constant; all per-call data is
     ordered most-stable-first in the user message (prompt-cache convention).
     """
-    user_prompt = "\n\n".join(
+    user_sections = [
+        "<core_memory>",
+        json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
+        "</core_memory>",
+        "<active_list>",
+        json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
+        "</active_list>",
+    ]
+    if anchor:
+        user_sections.extend(
+            [
+                "<current_anchor>",
+                json.dumps(anchor, ensure_ascii=False, indent=2, sort_keys=True),
+                "</current_anchor>",
+                _DIALOGUE_ANCHOR_USER_CONTRACT,
+            ]
+        )
+    user_sections.extend(
         [
-            "<core_memory>",
-            json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
-            "</core_memory>",
-            "<active_list>",
-            json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
-            "</active_list>",
             "<dialogue_turn>",
             json.dumps(
                 {
@@ -1097,6 +1136,7 @@ def build_dialogue_insight_prompt(
             "</dialogue_turn>",
         ]
     )
+    user_prompt = "\n\n".join(user_sections)
     return [
         {"role": "system", "content": _DIALOGUE_INSIGHT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

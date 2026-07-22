@@ -2211,6 +2211,424 @@ async def test_settles_confirm_is_idempotent(
     assert "桌游" not in active
 
 
+# ---------------------------------------------------------------------------
+# Dialogue confirmation anchor: relation matrix + overlap defence
+# ---------------------------------------------------------------------------
+
+
+def _seed_dialogue_anchor_hypothesis(
+    memory: MemoryManager,
+    engine: SoulEngine,
+    *,
+    hypothesis: str,
+    origin_turn_id: str = "anchor-card",
+):  # type: ignore[no-untyped-def]
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CARD_DISCUSS
+    from openbiliclaw.soul.identity import insight_hash8
+
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    memory._database.create_chat_turn(
+        turn_id=origin_turn_id,
+        message="聊聊这个",
+        payload={"type": "card", "state": "discussing"},
+    )
+    return engine._dialogue_anchor_manager.establish(
+        kind="hypothesis",
+        ref=insight_hash8(hypothesis),
+        origin_turn_id=origin_turn_id,
+        entry=ENTRY_CARD_DISCUSS,
+    )
+
+
+def _anchor_extract(
+    relation: str | None,
+    *,
+    interpretation: str = "",
+    derived: list[dict[str, object]] | None = None,
+    candidates: list[dict[str, object]] | None = None,
+    settles: list[dict[str, object]] | None = None,
+):  # type: ignore[no-untyped-def]
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
+        anchor: dict[str, object],
+    ) -> dict[str, object]:
+        del user_message, assistant_reply, core_memory, active_list
+        assert anchor["kind"] in {"hypothesis", "confusion"}
+        decision = None
+        if relation is not None:
+            decision = {
+                "relation": relation,
+                "interpretation": interpretation,
+                "derived": list(derived or []),
+            }
+        return {
+            "candidates": list(candidates or []),
+            "settles": list(settles or []),
+            "anchor": decision,
+        }
+
+    return fake_extract
+
+
+@pytest.mark.parametrize(
+    ("relation", "validated", "confidence", "card_state", "outcome"),
+    [
+        ("support", True, 0.75, "confirmed", "confirmed"),
+        ("contradict", False, 0.35, "rejected", "rejected"),
+    ],
+)
+async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relation: str,
+    validated: bool,
+    confidence: float,
+    card_state: str,
+    outcome: str,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(
+        memory,
+        engine,
+        hypothesis="用户重视深度内容",
+    )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract(relation))
+
+    result = await engine.learn_from_dialogue(
+        user_message="这是我的明确回答",
+        assistant_reply="明白了",
+        session="popup",
+        turn_id="anchor-turn",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    stored = engine._load_insights()[0]
+    assert stored.validated is validated
+    assert stored.confidence == confidence
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == card_state
+    assert engine._dialogue_anchor_manager.current() is None
+    assert result["anchor_outcome"] == outcome
+
+
+async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_derived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(
+        memory,
+        engine,
+        hypothesis="用户只在意理论深度",
+    )
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract(
+            "revise",
+            derived=[
+                {
+                    "content": "用户更看重能落地的深度",
+                    "confidence": 0.82,
+                    "evidence": "用户主动修正",
+                }
+            ],
+        ),
+    )
+
+    result = await engine.learn_from_dialogue(
+        user_message="不是只要理论，我更看重能落地",
+        assistant_reply="这个修正很关键",
+        session="popup",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    by_text = {item.hypothesis: item for item in engine._load_insights()}
+    assert by_text["用户只在意理论深度"].validated is False
+    assert by_text["用户只在意理论深度"].confidence == 0.35
+    assert by_text["用户更看重能落地的深度"].validated is True
+    assert by_text["用户更看重能落地的深度"].confidence == 0.82
+    assert result["anchor_outcome"] == "revised"
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "rejected"
+
+
+async def test_confusion_anchor_answer_resolves_matching_interpretation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="桌游", observation="连续浏览")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-22T01:00:00+00:00",
+    )
+    anchor = engine._dialogue_anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id="question",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("answer", interpretation="real_interest"),
+    )
+
+    result = await engine.learn_from_dialogue(
+        user_message="是真的喜欢",
+        assistant_reply="明白",
+        session="popup",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
+    assert memory._database.get_confusion(confusion_id)["resolution"] == "real_interest"
+    assert engine._dialogue_anchor_manager.current() is None
+    assert result["anchor_outcome"] == "answered"
+
+
+async def test_second_ambiguous_hypothesis_turn_defers_after_one_follow_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="用户偏好长视频")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("ambiguous"),
+    )
+    kwargs = {
+        "user_message": "也许吧",
+        "assistant_reply": "你可以再想想",
+        "session": "popup",
+        "anchor_ref": anchor.ref,
+        "anchor_generation": anchor.generation,
+    }
+
+    first = await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    current = engine._dialogue_anchor_manager.current()
+    second = await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+
+    assert first["anchor_outcome"] == "follow_up"
+    assert current is not None and current.ambiguous_count == 1
+    assert second["anchor_outcome"] == "deferred"
+    assert engine._dialogue_anchor_manager.current() is None
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "deferred"
+
+
+async def test_two_unrelated_turns_release_anchor_and_restore_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="用户偏好长视频")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("unrelated"),
+    )
+    kwargs = {
+        "user_message": "先问个别的",
+        "assistant_reply": "好",
+        "session": "popup",
+        "anchor_ref": anchor.ref,
+        "anchor_generation": anchor.generation,
+    }
+
+    first = await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    second = await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+
+    assert first["anchor_outcome"] == "unrelated"
+    assert second["anchor_outcome"] == "released_unrelated"
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("anchor_text", "candidate_text"),
+    [
+        ("用户喜欢深度技术内容", "喜欢深度技术内容"),
+        ("prefers deep technical analysis", "deep technical analysis"),
+    ],
+)
+async def test_anchor_overlap_candidate_is_dropped_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    anchor_text: str,
+    candidate_text: str,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis=anchor_text)
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract(
+            "ambiguous",
+            candidates=[
+                {
+                    "kind": "interest",
+                    "content": candidate_text,
+                    "confidence": 0.2,
+                    "evidence": "same turn",
+                }
+            ],
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        await engine.learn_from_dialogue(
+            user_message="继续聊",
+            assistant_reply="好",
+            session="popup",
+            anchor_ref=anchor.ref,
+            anchor_generation=anchor.generation,
+        )
+
+    assert memory.load_insight_candidates() == []
+    assert "overlaps dialogue anchor" in caplog.text
+
+
+async def test_stopwords_do_not_false_positive_anchor_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="AI is a tool")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract(
+            "ambiguous",
+            candidates=[
+                {
+                    "kind": "state",
+                    "content": "the tool is useful",
+                    "confidence": 0.2,
+                    "evidence": "旁支",
+                }
+            ],
+        ),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="顺便说一句",
+        assistant_reply="收到",
+        session="popup",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    assert [item["content"] for item in memory.load_insight_candidates()] == ["the tool is useful"]
+
+
+async def test_anchored_turn_skips_retrieval_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="用户偏好长视频")
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract(
+            "ambiguous",
+            settles=[{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}],
+        ),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="桌游不错，但先聊原话题",
+        assistant_reply="好",
+        session="popup",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    assert "桌游" in {item.domain for item in engine._speculator.get_active_speculations()}
+
+
+async def test_missing_anchor_decision_keeps_anchor_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    anchor = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="用户偏好长视频")
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract(None))
+
+    result = await engine.learn_from_dialogue(
+        user_message="含糊输入",
+        assistant_reply="收到",
+        session="popup",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    assert engine._dialogue_anchor_manager.current() == anchor
+    assert result["anchor_outcome"] == "kept_invalid"
+
+
+async def test_stale_anchor_snapshot_is_ignored_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="旧假设")
+    current = engine._dialogue_anchor_manager.establish(
+        kind="hypothesis",
+        ref="new-ref",
+        origin_turn_id="",
+        entry=ENTRY_PENDING_OPEN,
+    )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _settles_extract([]))
+
+    with caplog.at_level("WARNING"):
+        result = await engine.learn_from_dialogue(
+            user_message="排队中的旧轮",
+            assistant_reply="旧回复",
+            session="popup",
+            anchor_ref=old.ref,
+            anchor_generation=old.generation,
+        )
+
+    assert engine._dialogue_anchor_manager.current() == current
+    assert "anchor_outcome" not in result
+    assert "stale dialogue anchor snapshot" in caplog.text
+
+
 # ===========================================================================
 # Pending confirmed-hypotheses rebuild state machine (deep-line consolidation)
 # ===========================================================================
