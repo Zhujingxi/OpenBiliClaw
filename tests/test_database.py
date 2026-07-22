@@ -362,6 +362,64 @@ def test_card_settlement_segment_and_applied_writes_require_current_fence(
     assert row["applied"] == 1
 
 
+def test_card_settlement_ledger_failure_cannot_roll_back_marker_or_block_apply(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = _db(tmp_path)
+    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
+    ref = "ledger-best-effort"
+    assert db.try_create_card_settlement(
+        ref=ref,
+        verdict="confirmed",
+        turn_id="card-ledger-failure",
+    )
+    assert db.claim_card_settlement(ref=ref, claim_token="winner", now=now)
+    assert db.record_card_settlement_event(
+        ref=ref,
+        claim_token="winner",
+        event={
+            "event_type": "feedback",
+            "title": "台账不是真相源",
+            "metadata": {"settlement_ref": ref},
+        },
+    )
+    assert db.mark_card_settlement_segment(
+        ref=ref,
+        claim_token="winner",
+        segment="object",
+    )
+    db.conn.execute(
+        """
+        CREATE TRIGGER reject_settlement_ledger
+        BEFORE INSERT ON profile_update_ledger
+        WHEN NEW.write_point = 'settle_insight'
+        BEGIN
+            SELECT RAISE(ABORT, 'injected ledger failure');
+        END
+        """
+    )
+    db.conn.commit()
+
+    with caplog.at_level("WARNING"):
+        assert db.finish_card_settlement_marker(
+            ref=ref,
+            claim_token="winner",
+            source="card_action",
+            hypothesis="台账不是真相源",
+            verdict="confirmed",
+            turn_id="card-ledger-failure",
+            matched=True,
+        )
+
+    marked = db.get_card_settlement(ref)
+    assert marked is not None
+    assert marked["seg_marker"] == 1
+    assert db.complete_card_settlement(ref=ref, claim_token="winner")
+    assert db.get_card_settlement(ref)["applied"] == 1
+    assert "best-effort, settlement continues" in caplog.text
+
+
 def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
     tmp_path: Path,
 ) -> None:

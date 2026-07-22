@@ -2634,7 +2634,12 @@ class Database:
         matched: bool,
         write_point: str = "settle_insight",
     ) -> bool:
-        """Fence marker completion and its audit row in one transaction."""
+        """Fence marker completion, then append its audit row best-effort.
+
+        The marker is settlement state; the ledger is only an observer. They
+        deliberately use separate transactions so an unavailable/corrupt
+        ledger can never roll back the marker or block ``applied=1``.
+        """
         before = {"hypothesis": hypothesis[:80], "verdict": verdict}
         after = {"matched": matched}
         conn = self.open_connection()
@@ -2654,7 +2659,16 @@ class Database:
             if int(marked.rowcount or 0) != 1:
                 conn.commit()
                 return False
-            conn.execute(
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        ledger_conn = self.open_connection()
+        try:
+            ledger_conn.execute(
                 """
                 INSERT INTO profile_update_ledger (
                     write_point, source, before_summary, after_summary, diff,
@@ -2673,13 +2687,19 @@ class Database:
                     turn_id,
                 ),
             )
-            conn.commit()
-            return True
+            ledger_conn.commit()
         except Exception:
-            conn.rollback()
-            raise
+            if ledger_conn.in_transaction:
+                ledger_conn.rollback()
+            logger.warning(
+                "card settlement ledger write failed for ref=%s "
+                "(best-effort, settlement continues)",
+                ref,
+                exc_info=True,
+            )
         finally:
-            conn.close()
+            ledger_conn.close()
+        return True
 
     def complete_card_settlement(self, *, ref: str, claim_token: str) -> bool:
         """Publish a fully completed settlement under the active fence."""
