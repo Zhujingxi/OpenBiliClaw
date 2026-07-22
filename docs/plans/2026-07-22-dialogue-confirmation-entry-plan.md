@@ -2,17 +2,17 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-22-dialogue-confirmation-entry-spec.md`](./2026-07-22-dialogue-confirmation-entry-spec.md)
-> **Status:** r5 — codex 第四轮 F28-F31 已修订,待第五轮 review
+> **Status:** r6 — codex 第五轮 F32-F36 已修订,待第六轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6)→ Wave D(Task 7)。每 Wave 完成其文档子集方可交付。
 > **Tech:** Python:仓库 `.venv/bin/python` + worktree 根 + `PYTHONPATH=$PWD/src`(import 自查);测试前 `mv config.toml /tmp/dce_config_stash.toml`,结束**必须还原并 diff 确认原件**(5070 字节含 source_incremental_hours);`ruff format/check src/ tests/`;`mypy src/`(strict)。扩展:`cd extension && npm test && npm run typecheck && npm run build`。**桌面端 = `src/openbiliclaw/web/desktop/assets/js/`(session="webui"),移动端 = `src/openbiliclaw/web/js/`(本版仅只读化)**。
 
 **Invariants that MUST hold — re-read before each task:**
 
 - 唯一主动 UI 入口 + legacy 端点转发兼容(source=legacy_endpoint 台账)。
-- 结算表原子仲裁 + 可接管 claim(5min 超时 UPDATE 单语句接管)+ 逐段完成标志跳段续做 + 投影只认 applied=1(applied=0 显示处理中);payload 状态机全路径;discuss=先 CAS 后建锚、失败回滚、discussing 无活锚读取时校正;投影结算后批量 patch+读取兜底;卡片 turn 即 completed。
-- 一个大脑多个屏幕:单一 history 回灌全部 {chat,hypothesis,confusion} completed turn 不分 session;前端按 session 过滤显示;durable 逐请求传 session;附着=用户消息处理流程内先 INSERT 卡片,排序 (created_at, rowid),同 ref pending 卡片去重。
+- 结算:仲裁 INSERT OR IGNORE;冲突分流(applied=1→already_settled;=0→接管路径,不谎报终态);claim+fencing token(段写带 token WHERE,旧执行者被拒);每段自身幂等;投影只认 applied=1;discuss 先 CAS(记 discussing_at)同请求建锚、校正带 5min 宽限;投影批量 patch+读取兜底。
+- 一个大脑多个屏幕:单一 history 回灌全部 {chat,hypothesis,confusion} completed turn 不分 session;前端按 session 过滤显示;durable 逐请求传 session;附着=消息处理流程内先 INSERT 卡片,排序 (created_at, rowid);去重范围 **(ref, session)**(跨 session 各自产卡,投影由结算表统一)。
 - 锚:≤1;解除四条;confusion 非结算解锚回 open;generation 快照失配丢弃;anchor 含 origin_turn_id(结算时 patch 来源卡片终态)与 ambiguous_count(非 ambiguous 清零)。
-- confusion 结算唯一所有者=锚处理器;失败不吞:pending_replay_turn_id 单值游标,后续轮先补放保序,12h 扫描兜底,锚释放清空+台账。
+- confusion 结算唯一所有者=锚处理器;失败不吞:replay_queue 持久有序小队列(上限5),队头依序处理失败停原位,新轮入队尾不越序,四种锚释放清空+台账,12h 兜底。
 - kind×relation 合法矩阵(见 spec);ambiguous 追问 ≤1,两次计 defer;Jaccard(NFC+中文 bigram/英文 token,停用词表)≥0.5 丢 candidates+WARNING。
 - 历史轮=绝对时间戳(创建时定死,前缀字节稳定);当前时间只进 user prompt 尾段;UTC→本地转换单点可注入。
 - 双轨冷却持久化(全局 12h + 同对象 72h);用户主动零冷却;角标=SW 决策表扩展,健康类优先。
@@ -61,11 +61,11 @@
 
 ### Task 3: confusion 结算所有权收归 + Wave A 文档 gate
 
-**Files:** `api/app.py`(durable confusion 直接 resolve/defer 移除;分类器输出并入;抛出即建锚)、`soul/confusion.py`(锚处理器结算入口统一)、`storage/database.py`(confusions 增 `pending_replay_turn_id` 单值游标列,幂等迁移,r5/F29)、`soul/cognition_cycle.py`(12h 扫描:clarifying 且有晚于 receipt 的 completed 回复 → 重放归属,幂等,r3/F14);既有用例改写;文档 gate。
+**Files:** `api/app.py`(durable confusion 直接 resolve/defer 移除;分类器输出并入;抛出即建锚)、`soul/confusion.py`(锚处理器结算入口统一)、`storage/database.py`(confusions 增 `replay_queue` 持久有序小队列列(JSON 上限 5),幂等迁移,r6/F34)、`soul/cognition_cycle.py`(12h 扫描:clarifying 且有晚于 receipt 的 completed 回复 → 重放归属,幂等,r3/F14);既有用例改写;文档 gate。
 
 **Steps:**
 
-- [ ] Failing test:confusion 抛出 → 锚建立;回复经锚处理器处理;durable 旧路径零调用断言;**有序重放(r5/F29):T1 失败记 pending_replay → T2 到达先补放 T1 再处理 T2(顺序断言);锚 replaced/TTL 释放清空游标+台账 dropped;12h 扫描兜底幂等**。
+- [ ] Failing test:confusion 抛出 → 锚建立;回复经锚处理器处理;durable 旧路径零调用断言;**持久有序重放(r6/F34):T1 失败入队 → T2 到达入队尾 → T1 再失败 T2 不越序 → T1 成功后 T2 续;四种锚释放(replaced/TTL/结算/unrelated)清空+台账 dropped;扫描兜底幂等;上限 5 逐出**。
 - [ ] 改写既有单轮结算用例为锚定语义;`pytest tests/test_confusion_lifecycle.py tests/test_api_app.py -q` 全绿。
 - [ ] Wave A 文档 gate。
 
@@ -81,7 +81,7 @@
 
 **Steps:**
 
-- [ ] Failing tests:卡片 turn 创建(completed+worker guard);action 四种(**可接管两段提交:仲裁→claim(5min 超时接管测试)→逐段标志跳段续做→applied=1+CAS;故障注入各段+同 turn 并发重试恰一 claim,r5/F28**);同 ref 并发相反 action 恰一赢;**投影只认 applied=1(applied=0 显示处理中)+ 结算后批量 patch + 读取兜底 + 跨 session 刷新**;discuss 顺序/回滚/无活锚读取校正(r5/F30);legacy 转发等价+source 区分。
+- [ ] Failing tests:卡片 turn 创建(completed+worker guard);action 四种(**冲突分流:applied=1→already_settled、=0→接管(r6/F32);claim+fencing:旧执行者段写被 token 拒(r6/F33);故障注入各段含「段成功标志未写崩溃→重做且段幂等不双写」;5min 超时接管**);同 ref 并发相反 action 恰一赢;投影只认 applied=1+批量 patch+读取兜底+跨 session 刷新;discuss 顺序/回滚/**5min 宽限校正(r6/F35)**;**跨 session open 各自产卡正向测试(r6/F36)**;legacy 转发等价。
 - [ ] Failing tests(进流,r4/F26):回灌含 hypothesis/confusion scope 轮次(probe 仍排除);**跨 session 单一 history 回灌**(popup+webui 的 completed turn 全部进同一 history,时间序);前端列表按 session 过滤仅影响显示(API 过滤参数测试)。
 - [ ] Confirm FAIL → 实现 → PASS;回归 + ruff + mypy。
 
@@ -93,7 +93,7 @@
 
 **Steps:**
 
-- [ ] Failing tests:列表口径 + `?count_only=1` 轻响应;open 连开 3 条零冷却(**同 ref pending 卡片去重复用**);系统抛出 12h 持久化;72h 叠加;附着语义(处理流程内先 INSERT 卡片、(created_at,rowid) 保序、无用户消息不凭空产 turn、重启/重试不重复附着,r3/F18)。
+- [ ] Failing tests:列表口径 + `?count_only=1`;open 连开 3 条零冷却(**(ref,session) 去重:同端复用、跨端各自产卡,r6/F36**);系统抛出 12h 持久化;72h 叠加;附着语义((created_at,rowid) 保序、无用户消息不凭空产 turn、重启/重试不重复附着)。
 - [ ] Confirm FAIL → 实现 → PASS;回归 + ruff + mypy;Wave B 文档 gate。
 
 **Acceptance:** 双轨矩阵+附着 ≥7 用例。
