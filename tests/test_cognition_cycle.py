@@ -16,7 +16,6 @@ day. The tests here lock in two behaviors:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -46,7 +45,6 @@ class _FlakyAwarenessAnalyzer:
         preference: dict[str, object],
         soul_profile: dict[str, object],
         max_tokens: int = 0,
-        source_event_ids: list[int] | None = None,
     ) -> list[Any]:
         self.call_count += 1
         if self.call_count <= self._fail_first_n:
@@ -54,24 +52,6 @@ class _FlakyAwarenessAnalyzer:
         from openbiliclaw.soul.profile import awareness_note_from_dict
 
         return [awareness_note_from_dict(item) for item in self._succeed_payload]
-
-    async def analyze_with_confusions(
-        self,
-        *,
-        events: list[dict[str, object]],
-        preference: dict[str, object],
-        soul_profile: dict[str, object],
-        max_tokens: int = 0,
-        source_event_ids: list[int] | None = None,
-    ) -> tuple[list[Any], list[dict[str, Any]]]:
-        notes = await self.analyze(
-            events=events,
-            preference=preference,
-            soul_profile=soul_profile,
-            max_tokens=max_tokens,
-            source_event_ids=source_event_ids,
-        )
-        return notes, []
 
     def merge_notes(self, existing: list[Any], incoming: list[Any]) -> list[Any]:
         return list(existing) + list(incoming)
@@ -255,14 +235,9 @@ class _RecordingAwarenessAnalyzer:
         preference: dict[str, object],
         soul_profile: dict[str, object],
         max_tokens: int = 0,
-        source_event_ids: list[int] | None = None,
     ) -> list[Any]:
         self.calls.append([dict(e) for e in events])
         self.max_tokens_seen.append(max_tokens)
-        self.source_event_ids_seen: list[list[int] | None] = getattr(
-            self, "source_event_ids_seen", []
-        )
-        self.source_event_ids_seen.append(source_event_ids)
         if self._fail_after_success is not None and self._success_count >= self._fail_after_success:
             raise AwarenessGenerationError("simulated failure after N successes")
         self._success_count += 1
@@ -276,24 +251,6 @@ class _RecordingAwarenessAnalyzer:
                 emotion_guess="",
             )
         ]
-
-    async def analyze_with_confusions(
-        self,
-        *,
-        events: list[dict[str, object]],
-        preference: dict[str, object],
-        soul_profile: dict[str, object],
-        max_tokens: int = 0,
-        source_event_ids: list[int] | None = None,
-    ) -> tuple[list[Any], list[dict[str, Any]]]:
-        notes = await self.analyze(
-            events=events,
-            preference=preference,
-            soul_profile=soul_profile,
-            max_tokens=max_tokens,
-            source_event_ids=source_event_ids,
-        )
-        return notes, []
 
     def merge_notes(self, existing: list[Any], incoming: list[Any]) -> list[Any]:
         return list(existing) + list(incoming)
@@ -545,174 +502,3 @@ async def test_insight_cursor_processes_only_new_notes_with_existing_context(
     assert len(rec.calls) == 2
     assert rec.calls[1]["notes"] == ["觉察3", "觉察4"]  # cursor skipped 0..2
     assert state["last_insight_awareness_index"] == 5
-
-
-# ---------------------------------------------------------------------------
-# Phase 5 / Task 9: early trigger, single-flight, atomic state, watermark
-# ---------------------------------------------------------------------------
-
-
-def _insert_comment(memory: MemoryManager, text: str) -> None:
-    memory._database.insert_event(  # noqa: SLF001 — test seeding
-        "comment",
-        title=text,
-        context=text,
-        metadata={"source_platform": "bilibili"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_early_trigger_on_event_backlog(tmp_path: Path) -> None:
-    """>=30 unrefined events pull awareness ahead of the 12h throttle."""
-    memory = _seed_memory(tmp_path, event_count=0)
-    rec = _RecordingAwarenessAnalyzer()
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=rec,  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=12 * 3600,
-    )
-    now = datetime(2026, 7, 17, 12, 0, 0)
-    # First run establishes the schedule (no events → throttled after run).
-    await cycle.run_if_due(now=now)
-    rec.calls.clear()
-
-    # Time is NOT due (same instant), but a fresh backlog forces a run.
-    _add_events(memory, 30)
-    result = await cycle.run_if_due(now=now)
-    assert result.ran is True
-    assert len(rec.calls) >= 1
-
-
-@pytest.mark.asyncio
-async def test_early_trigger_on_strong_signal(tmp_path: Path) -> None:
-    """A single authored comment is a strong signal → early awareness pass."""
-    memory = _seed_memory(tmp_path, event_count=0)
-    rec = _RecordingAwarenessAnalyzer()
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=rec,  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=12 * 3600,
-    )
-    now = datetime(2026, 7, 17, 12, 0, 0)
-    await cycle.run_if_due(now=now)
-    rec.calls.clear()
-
-    _insert_comment(memory, "这个作者讲得太好了")
-    result = await cycle.run_if_due(now=now)
-    assert result.ran is True
-    assert len(rec.calls) >= 1
-
-
-@pytest.mark.asyncio
-async def test_no_early_trigger_below_threshold(tmp_path: Path) -> None:
-    """A handful of passive events below the threshold stays throttled."""
-    memory = _seed_memory(tmp_path, event_count=0)
-    rec = _RecordingAwarenessAnalyzer()
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=rec,  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=12 * 3600,
-    )
-    now = datetime(2026, 7, 17, 12, 0, 0)
-    await cycle.run_if_due(now=now)
-    rec.calls.clear()
-
-    _add_events(memory, 5)  # passive views, below the 30 threshold
-    result = await cycle.run_if_due(now=now)
-    assert result.throttled is True
-    assert rec.calls == []
-
-
-class _GatedAwarenessAnalyzer:
-    """Holds the run lock until released, to prove single-flight behaviour."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-        self._release = asyncio.Event()
-
-    def release(self) -> None:
-        self._release.set()
-
-    async def analyze_with_confusions(
-        self,
-        *,
-        events: list[dict[str, object]],
-        preference: dict[str, object],
-        soul_profile: dict[str, object],
-        max_tokens: int = 0,
-        source_event_ids: list[int] | None = None,
-    ) -> tuple[list[Any], list[dict[str, Any]]]:
-        self.calls += 1
-        await self._release.wait()
-        return [], []
-
-    def merge_notes(self, existing: list[Any], incoming: list[Any]) -> list[Any]:
-        return list(existing) + list(incoming)
-
-
-@pytest.mark.asyncio
-async def test_single_flight_runs_exactly_once(tmp_path: Path) -> None:
-    """Overlapping run_if_due calls execute the awareness pass exactly once."""
-    memory = _seed_memory(tmp_path, event_count=3)
-    gated = _GatedAwarenessAnalyzer()
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=gated,  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=60,
-    )
-    now = datetime(2026, 7, 17, 12, 0, 0)
-    first = asyncio.ensure_future(cycle.run_if_due(now=now))
-    await asyncio.sleep(0.02)  # let the first acquire the lock and block on the gate
-    second = await cycle.run_if_due(now=now)  # sees the lock held → skips
-    gated.release()
-    first_result = await first
-
-    assert second.throttled is True
-    assert first_result.ran is True
-    assert gated.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_watermark_not_advanced_on_failure(tmp_path: Path) -> None:
-    """A failing awareness batch leaves the watermark unadvanced (redo next tick)."""
-    memory = _seed_memory(tmp_path, event_count=3)
-    rec = _RecordingAwarenessAnalyzer(fail_after_success=0)  # first batch raises
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=rec,  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=60,
-    )
-    now = datetime(2026, 7, 17, 12, 0, 0)
-    result = await cycle.run_if_due(now=now)
-    assert any("awareness" in err.lower() for err in result.errors)
-    state = cycle._load_state()  # noqa: SLF001
-    # Watermark stays at 0 so the next tick reprocesses the same events.
-    assert _coerce_int_state(state.get("last_awareness_event_id", 0)) == 0
-    assert "last_awareness_at" not in state
-
-
-def _coerce_int_state(value: object) -> int:
-    return int(value) if isinstance(value, (int, float, str)) and str(value).isdigit() else 0
-
-
-def test_state_write_is_atomic(tmp_path: Path) -> None:
-    """_save_state renames a temp file into place, leaving no .tmp residue."""
-    memory = _seed_memory(tmp_path, event_count=0)
-    cycle = CognitionCycle(
-        memory=memory,
-        awareness_analyzer=_RecordingAwarenessAnalyzer(),  # type: ignore[arg-type]
-        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
-        min_interval_seconds=60,
-    )
-    cycle._save_state({"last_awareness_event_id": 42})  # noqa: SLF001
-    path = cycle._state_path()  # noqa: SLF001
-    assert path is not None and path.exists()
-    tmp = path.with_name(f"{path.name}.tmp")
-    assert not tmp.exists(), "temp file must be renamed away, not left behind"
-    reloaded = cycle._load_state()  # noqa: SLF001
-    assert reloaded["last_awareness_event_id"] == 42

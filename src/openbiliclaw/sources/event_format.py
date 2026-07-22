@@ -161,35 +161,6 @@ def apply_retraction_discount(metadata: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-# A behaviour attributed to a confusion that resolved as proxy / misread is
-# discounted the same way a retraction is — its evidence should no longer drive
-# preference weight. Calibrated to the retraction floor (0.2) for symmetry;
-# revisit if the retraction floor moves (pitfall #3).
-CONFUSION_DISCOUNTED_STRENGTH = RETRACTION_DISCOUNTED_STRENGTH
-
-
-def apply_confusion_discount(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``metadata`` flagged discounted-by-confusion.
-
-    Mirrors :func:`apply_retraction_discount`: idempotent, never re-inflates
-    ``signal_strength``. Marks ``discounted_by_confusion=true`` (distinct from
-    the retraction flag so the two provenances stay auditable).
-    """
-    result = dict(metadata)
-    result["discounted_by_confusion"] = True
-    raw = result.get("signal_strength")
-    try:
-        current = float(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        current = None
-    result["signal_strength"] = (
-        CONFUSION_DISCOUNTED_STRENGTH
-        if current is None
-        else min(current, CONFUSION_DISCOUNTED_STRENGTH)
-    )
-    return result
-
-
 def _metadata_is_retracted(metadata: Any) -> bool:
     """True when the event's metadata carries a truthy ``retracted`` flag.
 

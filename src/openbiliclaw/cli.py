@@ -891,8 +891,6 @@ def _build_soul_engine() -> Any:
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
-        posture_gate_mode=cfg.soul.posture_gate_mode,
-        posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
         llm_concurrency_gate=_build_llm_concurrency_gate(),
@@ -1047,15 +1045,6 @@ def _build_discovery_engine() -> Any:
     from openbiliclaw.config import load_config
 
     cfg = load_config()
-    # Topic-lifecycle serialization switch (spec Phase 4); default off.
-    from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
-
-    set_topic_lifecycle_serialization(
-        str(getattr(getattr(cfg, "soul", None), "topic_lifecycle_serialization", "off"))
-        .strip()
-        .lower()
-        == "on"
-    )
     registry = _build_registry()
     llm_service = LLMService(
         registry=registry,
@@ -4555,99 +4544,6 @@ def cost(
         "[dim]（费率为公开渠道估算,与 provider 实际账单可能差 ±20%。"
         "tail daemon 日志可以看每次调用的实时 [llm-cost] INFO 行,"
         "cache 命中率 < 30% 的 caller 在 by-caller 表里会标红。）[/dim]",
-    )
-
-
-@app.command()
-def ledger(
-    days: int = typer.Option(30, "--days", min=1, max=365, help="统计窗口(天)"),
-    line: bool = typer.Option(False, "--line", help="逐行明细模式(默认按写点聚合计数)"),
-    write_point: str = typer.Option(
-        "", "--write-point", help="只看某个写点(如 dialogue_preference_overwrite)"
-    ),
-    limit: int = typer.Option(200, "--limit", min=1, max=2000, help="逐行模式最多返回行数"),
-) -> None:
-    """查看画像更新台账(profile_update_ledger)。
-
-    每个画像写点(对话学习 / 反馈批 / 12h 整理 / init 建像 / 管线各层 /
-    推测确认 / 觉察同步)在动作结束后追加一行,含 ``outcome``(success|failed)、
-    before/after 摘要与 source_refs。台账为只追加审计底座(v0.3.174+)。
-
-    默认按写点聚合显示条数与成功率;``--line`` 显示逐行明细。
-    """
-    _print_page_title("画像更新台账", f"最近 {days} 天")
-    _ensure_runtime_database_healthy()
-    db = _get_runtime_database()
-
-    rows = db.query_profile_ledger(days=days, write_point=write_point, limit=limit)
-    if not rows:
-        _print_status_panel(
-            "info",
-            "暂无数据",
-            "这台机器最近没有画像写入记录。\n台账从 v0.3.174+ 开始记录,旧的画像更新不会回填。",
-        )
-        return
-
-    if line:
-        line_table = Table(
-            show_header=True, header_style="bold cyan", title="逐行明细 (ledger --line)"
-        )
-        line_table.add_column("时间", no_wrap=True)
-        line_table.add_column("写点", no_wrap=True)
-        line_table.add_column("来源")
-        line_table.add_column("结果", justify="center")
-        line_table.add_column("turn_id", no_wrap=True)
-        line_table.add_column("source_refs")
-        for row in rows:
-            outcome = str(row["outcome"])
-            outcome_cell = (
-                f"[green]{outcome}[/green]" if outcome == "success" else f"[red]{outcome}[/red]"
-            )
-            refs = row.get("source_refs") or []
-            refs_text = ", ".join(str(ref) for ref in refs)[:60]
-            line_table.add_row(
-                str(row["timestamp"]),
-                str(row["write_point"]),
-                str(row["source"]),
-                outcome_cell,
-                str(row["turn_id"]) or "[dim]—[/dim]",
-                refs_text or "[dim]—[/dim]",
-            )
-        console.print(line_table)
-        console.print()
-        _print_status_panel(
-            "info",
-            f"近 {days} 天",
-            f"共 [bold]{len(rows)}[/bold] 行(最多显示 {limit})。",
-        )
-        return
-
-    # Aggregate mode: count per write_point with success/failed split.
-    agg: dict[str, dict[str, int]] = {}
-    for row in rows:
-        wp = str(row["write_point"])
-        bucket = agg.setdefault(wp, {"success": 0, "failed": 0})
-        outcome = str(row["outcome"])
-        bucket[outcome if outcome in bucket else "success"] += 1
-    agg_table = Table(show_header=True, header_style="bold green", title="按写点聚合 (ledger)")
-    agg_table.add_column("写点", no_wrap=True)
-    agg_table.add_column("成功", justify="right")
-    agg_table.add_column("失败", justify="right")
-    agg_table.add_column("合计", justify="right", style="bold yellow")
-    for wp in sorted(agg):
-        bucket = agg[wp]
-        total = bucket["success"] + bucket["failed"]
-        failed_cell = (
-            f"[red]{bucket['failed']}[/red]" if bucket["failed"] else str(bucket["failed"])
-        )
-        agg_table.add_row(wp, str(bucket["success"]), failed_cell, str(total))
-    console.print(agg_table)
-    console.print()
-    _print_status_panel(
-        "info",
-        f"近 {days} 天",
-        f"共 [bold]{len(rows)}[/bold] 行,{len(agg)} 个写点。"
-        "\n[dim]用 --line 看逐行明细,--write-point 过滤单个写点。[/dim]",
     )
 
 

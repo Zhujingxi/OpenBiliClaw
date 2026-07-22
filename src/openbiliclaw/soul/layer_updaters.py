@@ -68,13 +68,6 @@ def _json_object(value: object) -> dict[str, JSONValue]:
     return value if isinstance(value, dict) else {}
 
 
-# Deep layers are SEALED from event-driven pipeline writes (deep-line
-# consolidation — P1 retired). VALUES/CORE change only via a gated soul rebuild
-# (access point ③); a direct ``update_layer`` call for either is a defensive
-# no-op + WARNING, so no future wiring can re-open the bypass (invariant 1, F3).
-_SEALED_DEEP_LAYERS = frozenset({OnionLayer.VALUES, OnionLayer.CORE})
-
-
 async def update_layer(
     *,
     layer: OnionLayer,
@@ -85,29 +78,12 @@ async def update_layer(
     profile_builder: ProfileBuilder,
     embedding_service: Any | None = None,
     llm_service: Any | None = None,
-    posture_gate: Any | None = None,
 ) -> LayerUpdateResult:
-    """Dispatch to the appropriate layer updater.
-
-    VALUES/CORE are sealed: a direct call for either is a defensive no-op with a
-    WARNING — the event-driven pipeline no longer writes deep layers (access
-    point ② retired); they change only through a gated soul rebuild. The
-    ``posture_gate`` parameter is accepted for signature stability but is no
-    longer consulted here.
-    """
-    if layer in _SEALED_DEEP_LAYERS:
-        logger.warning(
-            "update_layer called for sealed deep layer %s; ignoring "
-            "(P1 retired — deep change flows only through a gated soul rebuild)",
-            getattr(layer, "value", layer),
-        )
-        return LayerUpdateResult(layer=layer, changed=False)
-
+    """Dispatch to the appropriate layer updater."""
     updater: LayerUpdater | None = _LAYER_UPDATERS.get(layer)
     if updater is None:
         return LayerUpdateResult(layer=layer, changed=False)
-
-    result = await updater(
+    return await updater(
         signals=signals,
         profile=profile,
         memory=memory,
@@ -115,32 +91,6 @@ async def update_layer(
         profile_builder=profile_builder,
         embedding_service=embedding_service,
         llm_service=llm_service,
-    )
-
-    # Ledger write point D5 #3: pipeline per-layer updater persistence. One row
-    # per layer that actually changed (a no-op update writes nothing).
-    if result.changed:
-        _record_layer_ledger(memory=memory, layer=layer, result=result)
-    return result
-
-
-def _record_layer_ledger(
-    *,
-    memory: MemoryManager,
-    layer: OnionLayer,
-    result: LayerUpdateResult,
-) -> None:
-    from openbiliclaw.soul.ledger import ProfileLedger
-
-    ledger = ProfileLedger(getattr(memory, "_database", None))
-    layer_name = getattr(layer, "value", str(layer))
-    ledger.record(
-        write_point="pipeline_layer_update",
-        source=f"pipeline:{layer_name}",
-        before={"layer": layer_name},
-        after={"layer": layer_name, "changes": list(result.changes)},
-        source_refs=list(result.changes) or [f"layer:{layer_name}"],
-        outcome="success",
     )
 
 
@@ -688,12 +638,10 @@ async def regenerate_portrait(
 # Updater dispatch table
 # ---------------------------------------------------------------------------
 
-# VALUES/CORE are intentionally absent (deep-line consolidation — P1 retired):
-# ``update_layer`` seals them before dispatch. ``_update_values`` / ``_update_core``
-# remain defined (delta-prompt logic retained for direct tooling / potential
-# rebuild-input reuse) but are no longer wired into the event-driven pipeline.
 _LAYER_UPDATERS: dict[OnionLayer, LayerUpdater] = {
     OnionLayer.SURFACE: _update_surface,
     OnionLayer.INTEREST: _update_interest,
     OnionLayer.ROLE: _update_role,
+    OnionLayer.VALUES: _update_values,
+    OnionLayer.CORE: _update_core,
 }

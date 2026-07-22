@@ -133,22 +133,6 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
-def _build_dialogue_learn_handler(soul_engine: Any) -> Any:
-    """Build the async handler the dialogue learn queue invokes per turn.
-
-    Wraps ``learn_from_dialogue`` in the background-admission bypass so an
-    interactive correction still runs when background admission is parked.
-    """
-
-    async def _handler(**payload: Any) -> None:
-        from openbiliclaw.llm.service import _background_admission_bypass
-
-        with _background_admission_bypass():
-            await soul_engine.learn_from_dialogue(**payload)
-
-    return _handler
-
-
 def _build_account_sync_x_components(
     config: Any,
     database: Any,
@@ -344,10 +328,6 @@ class RuntimeContext:
     saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
-    # Phase 1: single-worker serial queue for dialogue learning. Self-owned
-    # lifecycle (NOT in the cancel_all registry). Rebuilt on hot-reload with
-    # pause-drain-before-cancel_all / resume-on-rollback semantics.
-    dialogue_learn_queue: Any = None
     discovery_engine: Any = None
     recommendation_engine: Any = None
     runtime_controller: Any = None
@@ -535,15 +515,6 @@ class RuntimeContext:
         so no endpoint handler can interleave during the attribute-
         assignment sweep.
         """
-        # Phase 1: pause-drain the OLD dialogue learn queue BEFORE cancel_all so
-        # no queued learn is lost and no in-flight learn is interrupted. The
-        # worker is self-owned (not in the registry), so cancel_all never
-        # touches it — on a construction failure below we ``resume`` it.
-        old_learn_queue = self.dialogue_learn_queue
-        if old_learn_queue is not None:
-            with suppress(Exception):
-                await old_learn_queue.pause_and_drain(timeout=30)
-
         # Keep a running guided-init task alive across rebuild — config writes
         # are gated during init, but this is the belt-and-suspenders exemption
         # so an init in flight is never silently cancelled (gui-init spec §5c).
@@ -553,20 +524,7 @@ class RuntimeContext:
                 "Hot-reload: cancelled %d background task(s) before rebuild",
                 cancelled,
             )
-        try:
-            self._rebuild_components(new_config)
-        except Exception:
-            # Rollback: the new runtime was not installed. Resume the old queue
-            # (its worker survived cancel_all) so learning keeps working.
-            if old_learn_queue is not None:
-                with suppress(Exception):
-                    old_learn_queue.resume()
-            raise
-        else:
-            # New queue is installed and started — stop the old one for good.
-            if old_learn_queue is not None:
-                with suppress(Exception):
-                    await old_learn_queue.shutdown(timeout=30)
+        self._rebuild_components(new_config)
 
     def _rebuild_components(self, new_config: Config) -> None:
         """Synchronous component construction shared by hot-reload and startup.
@@ -685,10 +643,6 @@ class RuntimeContext:
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             satisfaction_filter_enabled=satisfaction_filter_enabled,
-            posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
-            posture_gate_force_enforce=bool(
-                getattr(soul_cfg, "posture_gate_force_enforce", False)
-            ),
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
             llm_concurrency_gate=new_llm_gate,
@@ -1274,12 +1228,10 @@ class RuntimeContext:
             x_health_store=account_sync_x_health,
         )
 
-        # 10. Dialogue (with source management tools) + serial learn queue
-        from openbiliclaw.soul.dialogue_learn_queue import DialogueLearnQueue
+        # 10. Dialogue (with source management tools)
         from openbiliclaw.sources.tools import SOURCE_TOOLS, SourceToolDispatcher
 
         source_tool_dispatcher = SourceToolDispatcher(self.database)
-        new_learn_queue = DialogueLearnQueue(_build_dialogue_learn_handler(new_soul_engine))
         new_dialogue = SocraticDialogue(
             llm=None,
             soul_engine=new_soul_engine,
@@ -1287,8 +1239,6 @@ class RuntimeContext:
             session="popup",
             tools=SOURCE_TOOLS,
             tool_dispatcher=source_tool_dispatcher,
-            learn_queue=new_learn_queue,
-            database=self.database,
         )
 
         # 11. Auto-update service
@@ -1327,9 +1277,6 @@ class RuntimeContext:
         self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
-        # Start the new queue's self-owned worker (not in cancel_all registry).
-        new_learn_queue.start()
-        self.dialogue_learn_queue = new_learn_queue
         self.discovery_engine = new_discovery_engine
         self.recommendation_engine = new_recommendation_engine
         self.runtime_controller = new_runtime_controller

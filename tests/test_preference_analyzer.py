@@ -1734,15 +1734,11 @@ async def test_engine_analyze_events_forwards_progress_callback() -> None:
     from unittest.mock import AsyncMock
 
     from openbiliclaw.soul.engine import SoulEngine
-    from openbiliclaw.soul.ledger import ProfileLedger
 
     engine = SoulEngine.__new__(SoulEngine)
     engine._preference_analyzer = AsyncMock()  # type: ignore[attr-defined]
     engine._preference_analyzer.analyze_events = AsyncMock(return_value={})
     engine._init_cognition_context = {}  # type: ignore[attr-defined]
-    # __new__ bypasses __init__; the init_preference_build write point (Wave A)
-    # touches the best-effort ledger, so give it a no-op (database=None) one.
-    engine._ledger = ProfileLedger(None)  # type: ignore[attr-defined]
 
     class _Layer:
         data: dict[str, object] = {}

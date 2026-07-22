@@ -333,9 +333,6 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
-│  │     Cognitive profile pipeline: 深层线归一(深层唯一模式:假设→门控下 soul 重建) + 台账 │ │
-│  │       + confusions 疑惑「看不懂」(澄清/冻结/held 重放) + PostureGate 深层门控 │ │
-│  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
 │  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi producers: 按平台缺口独立补池 │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │

@@ -8,8 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -29,18 +28,14 @@ from .cognition_cycle import (
 from .cognition_cycle import (
     CognitionCycle,
 )
-from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
 )
-from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
-from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
-from .pipeline import ProfileUpdatePipeline, migrate_pipeline_deep_buffers
-from .posture_gate import ACCEPT, GateDecision, PostureGate
+from .pipeline import ProfileUpdatePipeline
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
     INIT_COGNITION_CONTEXT_KEY,
@@ -59,52 +54,6 @@ from .profile_builder import ProfileBuilder
 from .speculator import InterestSpeculator
 
 logger = logging.getLogger(__name__)
-
-# Dialogue candidate kinds that write DEEP profile layers and therefore pass the
-# posture gate (access point ①). interest/dislike take the fast line unchanged.
-_DEEP_CANDIDATE_KINDS = frozenset({"goal", "value", "state"})
-
-# Soul-rebuild triggers (access point ③, generalized — spec r3/F4). Each drives
-# a full gated rebuild but carries a distinct ledger write point so the audit
-# trail distinguishes what caused it: dialogue learning, a feedback batch with a
-# significant preference shift (P2 — previously ungated), or a batch of
-# newly-confirmed hypotheses (the pending-rebuild state machine).
-_REBUILD_TRIGGER_DIALOGUE = "dialogue"
-_REBUILD_TRIGGER_FEEDBACK_BATCH = "feedback_batch"
-_REBUILD_TRIGGER_CONFIRMED_HYPOTHESES = "confirmed_hypotheses"
-_REBUILD_WRITE_POINT: dict[str, str] = {
-    _REBUILD_TRIGGER_DIALOGUE: "dialogue_soul_rebuild",
-    _REBUILD_TRIGGER_FEEDBACK_BATCH: "feedback_soul_rebuild",
-    _REBUILD_TRIGGER_CONFIRMED_HYPOTHESES: "hypotheses_soul_rebuild",
-}
-
-# A hypothesis only shapes a soul rebuild once it is validated AND confident
-# (spec invariant 3 / r3/F1). Rejected or unvalidated hypotheses are invisible
-# to every rebuild, so a reject's next rebuild squeezes an old conclusion out.
-_REBUILD_MIN_CONFIDENCE = 0.75
-# Debounce between a confirm/reject migration and the gated rebuild it schedules
-# (spec r3/F3). 6h sits between conversational cadence and the 12h cognition
-# loop — first-round calibration, re-tune after the first production month
-# (pitfall #3).
-_DEEP_REBUILD_DEBOUNCE_HOURS = 6
-# Bounded retry for a pending rebuild that keeps hitting a transient LLM/parse
-# error (is_error path). After this many failures the marker is cleared with a
-# WARNING so a persistently broken provider can't wedge the pending state.
-_REBUILD_MAX_RETRIES = 2
-# Cap on the confirmed-hypothesis list carried in the gate snapshot context.
-_REBUILD_CONTEXT_HYPOTHESIS_CAP = 12
-
-
-def _memory_database(memory: Any) -> Any | None:
-    """Resolve the SQLite database handle a memory manager owns (may be None)."""
-    return getattr(memory, "_database", None)
-
-
-def _as_dict_list(raw_value: object) -> list[dict[str, object]]:
-    if not isinstance(raw_value, list):
-        return []
-    return [item for item in raw_value if isinstance(item, dict)]
-
 
 SOURCE_LABELS = {
     "feedback": "推荐反馈",
@@ -204,8 +153,6 @@ class SoulEngine:
         profile_consolidation_like_target_soft: int = 450,
         profile_consolidation_archive_enabled: bool = True,
         feedback_batch_threshold: int = 3,
-        posture_gate_mode: str = "shadow",
-        posture_gate_force_enforce: bool = False,
         database: Any | None = None,
     ) -> None:
         self._llm = llm
@@ -213,14 +160,6 @@ class SoulEngine:
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
         self._feedback_batch_lock = asyncio.Lock()
-        # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
-        # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
-        # prevents overlapping builds while the lock is released for the long
-        # LLM build (compare-and-swap on ``set_at`` reconciles a concurrent
-        # re-mark). Restart recovery is automatic: the marker persists to disk
-        # and ``_rebuild_running`` resets to False on construction.
-        self._rebuild_pending_lock = asyncio.Lock()
-        self._rebuild_running = False
         self._module_overrides = dict(module_overrides or {})
         self._llm_concurrency = llm_concurrency
         self._llm_concurrency_gate = llm_concurrency_gate
@@ -279,9 +218,6 @@ class SoulEngine:
                 if cognition_cycle_interval_seconds is not None
                 else _DEFAULT_COG_INTERVAL
             ),
-            # 12h-loop fallback trigger for the debounced confirmed-hypotheses
-            # rebuild (spec invariant 4). Bound method; only invoked at run time.
-            pending_rebuild_hook=self.run_pending_rebuild_if_due,
         )
         self._profile_consolidator: ProfileConsolidator | None = None
         if profile_consolidation_enabled:
@@ -313,51 +249,6 @@ class SoulEngine:
         # and expose a deterministic wait hook for tests / shutdown.
         self._background_edit_tasks: set[asyncio.Task[Any]] = set()
         self._init_cognition_context: dict[str, object] = {}
-        # Phase 0 audit ledger. Best-effort observer over profile write points;
-        # a ledger failure is logged at WARNING and never blocks a write. Resolve
-        # the database from the explicit arg or the memory manager's handle.
-        self._ledger_database = database if database is not None else _memory_database(memory)
-        self._ledger = ProfileLedger(self._ledger_database)
-        # Deep-line consolidation: one-time migration of any persisted VALUES/CORE
-        # pipeline buffer signals into awareness notes, then seal the deep buffers
-        # (P1 retired). Idempotent (marker + content-hash dedup) and best-effort —
-        # a failure never blocks engine construction. Runs before the first
-        # pipeline save so the raw deep-buffer keys are still on disk to read.
-        if data_dir is not None:
-            try:
-                migrate_pipeline_deep_buffers(data_dir, memory, self._ledger)
-            except Exception:
-                logger.warning("pipeline deep-buffer migration failed", exc_info=True)
-        # Confusion state machine over the same database — drives the topic
-        # freeze reflex at the dialogue preference write chokepoint (Phase 2).
-        self._confusion_manager = ConfusionManager(self._ledger_database, self._ledger)
-        # Wire the same ledger into the speculator so promote/confirm/reject
-        # write points (D5 #5) land in the same audit trail.
-        attach_ledger = getattr(self._speculator, "attach_ledger", None)
-        if callable(attach_ledger):
-            attach_ledger(self._ledger)
-        # Phase 3 posture gate over deep writes (dialogue deep candidates /
-        # pipeline VALUES+CORE / soul rebuild). shadow (default) is a zero-delay
-        # async side-channel; off is a byte-identical bypass. The pipeline shares
-        # the same instance so its VALUES/CORE updater gates through it.
-        self._posture_gate = PostureGate(
-            mode=posture_gate_mode,
-            registry=self._llm_service,
-            ledger=self._ledger,
-            background_tasks=self._background_edit_tasks,
-        )
-        set_gate = getattr(self._pipeline, "set_posture_gate", None)
-        if callable(set_gate):
-            set_gate(self._posture_gate)
-        # Held-replay crash recovery (Wave B, r5/R4-1): any held update left in
-        # ``replaying`` at construction is a leftover from a previously crashed
-        # session — reconcile it to ``applied_unverified`` (never resubmit;
-        # prefer under- to double-counting). Fresh replays created later in THIS
-        # session are consumed by ``replay_held_updates`` instead. Best-effort.
-        try:
-            self._confusion_manager.recover_replaying()
-        except Exception:
-            logger.debug("held-replay crash recovery failed", exc_info=True)
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or update the embedding service after construction.
@@ -413,23 +304,9 @@ class SoulEngine:
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
-        # Ledger write point D5 #7: full-preference (re)build from raw events —
-        # the init bootstrap and any full-events re-analysis both land here.
-        existing_preference = dict(preference_layer.data)
-        # Topic-lifecycle (Phase 4): carry lifecycle metadata forward and count
-        # this analysis as evidence (new topics enter trial; sustained/dormant
-        # topics transition). Best-effort — never breaks the analysis path.
-        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
-        with self._ledger.action(
-            write_point="init_preference_build",
-            source="init",
-            before=existing_preference,
-            source_refs=[f"events:{len(events)}"],
-        ) as _entry:
-            preference_layer.data.clear()
-            preference_layer.data.update(updated_preference)
-            preference_layer.save()
-            _entry.after = dict(updated_preference)
+        preference_layer.data.clear()
+        preference_layer.data.update(updated_preference)
+        preference_layer.save()
         logger.info(
             "analyze_events done: events=%d elapsed=%.1fs",
             len(events),
@@ -470,19 +347,9 @@ class SoulEngine:
         profile = OnionProfile.from_legacy(legacy_profile)
         profile.populate_from_flat_preference(preference_layer)
         soul_layer = self._memory.get_layer("soul")
-        # Ledger write point (extra, discovered during Phase 0 — clist item 7
-        # "init 全量建像" also covers the soul-layer bootstrap write here).
-        existing_soul = dict(soul_layer.data)
-        with self._ledger.action(
-            write_point="init_soul_build",
-            source="init",
-            before=existing_soul,
-            source_refs=[f"history:{len(history)}"],
-        ) as _entry:
-            soul_layer.data.clear()
-            soul_layer.data.update(profile.to_dict())
-            soul_layer.save()
-            _entry.after = dict(soul_layer.data)
+        soul_layer.data.clear()
+        soul_layer.data.update(profile.to_dict())
+        soul_layer.save()
         self._memory.sync_profile_files(profile)
         self._init_cognition_context = {}
         logger.info(
@@ -759,70 +626,6 @@ class SoulEngine:
         except Exception:
             logger.exception("learned-dislike pool purge failed")
 
-    def _apply_topic_lifecycle_evidence(
-        self,
-        existing_preference: dict[str, Any],
-        updated_preference: dict[str, Any],
-    ) -> None:
-        """Overlay topic-lifecycle metadata onto a freshly analysed preference.
-
-        Carries lifecycle fields forward from ``existing_preference`` and counts
-        this analysis as one unit of evidence per surviving/new topic (new →
-        trial; sustained → active; dormant → active). Best-effort: any failure
-        is logged at DEBUG and never breaks the analysis path. Each transition
-        is recorded to the ledger (write point ``topic_lifecycle``).
-        """
-        try:
-            from openbiliclaw.soul.topic_lifecycle import apply_evidence
-
-            existing_interests = [
-                item for item in existing_preference.get("interests", []) if isinstance(item, dict)
-            ]
-            updated_interests = updated_preference.get("interests")
-            if not isinstance(updated_interests, list):
-                return
-            merged, transitions = apply_evidence(existing_interests, updated_interests)
-            updated_preference["interests"] = merged
-            for tr in transitions:
-                self._ledger.record(
-                    write_point="topic_lifecycle",
-                    source="evidence",
-                    before={"topic": tr.name, "state": tr.from_state},
-                    after={"topic": tr.name, "state": tr.to_state},
-                    source_refs=[f"reason:{tr.reason}"],
-                )
-        except Exception:
-            logger.debug("topic lifecycle evidence overlay failed", exc_info=True)
-
-    def _archive_disliked_topics(
-        self,
-        updated_preference: dict[str, Any],
-        disliked_topics: list[str],
-    ) -> None:
-        """Archive interests matching newly disliked topics (归档+避雷).
-
-        The interest is archived, not deleted — it survives for audit/revert but
-        stops competing for prompt slots. Best-effort; ledgers each transition.
-        """
-        try:
-            from openbiliclaw.soul.topic_lifecycle import archive_topics
-
-            interests = updated_preference.get("interests")
-            if not isinstance(interests, list):
-                return
-            archived, transitions = archive_topics(interests, disliked_topics)
-            updated_preference["interests"] = archived
-            for tr in transitions:
-                self._ledger.record(
-                    write_point="topic_lifecycle",
-                    source="dislike",
-                    before={"topic": tr.name, "state": tr.from_state},
-                    after={"topic": tr.name, "state": tr.to_state},
-                    source_refs=[f"reason:{tr.reason}"],
-                )
-        except Exception:
-            logger.debug("topic lifecycle dislike-archive failed", exc_info=True)
-
     def _sync_speculators_for_edit(self, *, target: str, op: str, value: object) -> None:
         """Keep the interest / avoidance speculators consistent with the edit.
 
@@ -933,18 +736,15 @@ class SoulEngine:
             "validated": False,
             "confidence": 0.0,
         }
-        migrated = False
         for item in hypotheses:
             if self._normalize_text(item.hypothesis) != target:
                 continue
             if signal in {"confirm", "like", "support"}:
                 item.validated = True
                 item.confidence = min(1.0, round(max(item.confidence, 0.75), 4))
-                migrated = True
             elif signal in {"reject", "dislike", "deny"}:
                 item.validated = False
                 item.confidence = max(0.0, round(min(item.confidence, 0.35), 4))
-                migrated = True
             result["matched"] = True
             result["hypothesis"] = item.hypothesis
             result["validated"] = item.validated
@@ -952,14 +752,6 @@ class SoulEngine:
             break
         if result["matched"]:
             self._save_insights(hypotheses)
-            # A confirm OR reject migration (single-point ownership, spec
-            # invariant 4) schedules a debounced gated rebuild: the filtered
-            # rebuild input changes (a confirm adds the hypothesis; a reject
-            # drops it), so the next rebuild reflects — or squeezes out — it.
-            if migrated:
-                await self._mark_rebuild_pending(
-                    [f"insight_feedback:{signal}:{str(result['hypothesis'])[:60]}"]
-                )
             # The insight layer is the source of truth, but get_profile()
             # (UI profile-summary + delight scoring) reads the windowed
             # ``active_insights`` snapshot cached on the soul layer. Without
@@ -1016,17 +808,8 @@ class SoulEngine:
         user_message: str,
         assistant_reply: str,
         session: str,
-        scope: str = "chat",
-        turn_id: str = "",
     ) -> dict[str, object]:
-        """Persist a chat turn and update long-term understanding when warranted.
-
-        ``scope`` / ``turn_id`` (Phase 1) are threaded from the durable chat
-        path. ``scope`` defaults to ``"chat"``; only ``"chat"`` turns run the
-        ``settles`` inventory settling (Task 3) — probe / confusion scopes are
-        settled by the durable side-effect path (single ownership). ``turn_id``
-        is stamped on the ledger rows as an idempotency observation key.
-        """
+        """Persist a chat turn and update long-term understanding when warranted."""
         await self._memory.propagate_event(
             {
                 "event_type": "dialogue",
@@ -1039,38 +822,15 @@ class SoulEngine:
                 },
             }
         )
-        active_list, insight_hash_map = self._build_dialogue_active_list()
         try:
-            extract_result = await self._dialogue_insight_analyzer.extract(
+            extracted = await self._dialogue_insight_analyzer.extract(
                 user_message=user_message,
                 assistant_reply=assistant_reply,
                 core_memory=self._memory.get_core_memory(),
-                active_list=active_list,
             )
-            # Tolerate the legacy list return as well as the new
-            # {"candidates", "settles"} dict.
-            if isinstance(extract_result, dict):
-                extracted = list(extract_result.get("candidates", []))
-                settles = list(extract_result.get("settles", []))
-            else:
-                extracted = list(extract_result)
-                settles = []
         except DialogueInsightAnalysisError:
             logger.exception("Failed to extract dialogue insight candidates.")
             extracted = []
-            settles = []
-
-        # Process settles (single ownership, spec §invariant 6): only plain
-        # scope="chat" turns settle here — probe / confusion durable turns are
-        # settled by the durable side-effect path, so skip to avoid double
-        # settling.
-        if scope == "chat" and settles:
-            await self._process_dialogue_settles(
-                settles=settles,
-                active_list=active_list,
-                insight_hash_map=insight_hash_map,
-                turn_id=turn_id,
-            )
 
         merged_candidates = self._merge_insight_candidates(
             self._memory.load_insight_candidates(),
@@ -1082,21 +842,6 @@ class SoulEngine:
             item for item in merged_candidates if self._candidate_ready_for_learning(item)
         ]
         if not eligible_candidates:
-            return {
-                "event_logged": True,
-                "candidate_count": len(extracted),
-                "preference_updated": False,
-                "profile_rebuilt": False,
-            }
-
-        # Posture-gate access point ① (Phase 3): interest/dislike take the fast
-        # line unchanged; goal/value/state deep candidates pass the gate. In
-        # ``off`` this is a no-op (byte-identical feed); in ``shadow`` every deep
-        # candidate stays but its judgement is recorded asynchronously; only
-        # ``enforce`` drops rejected candidates and demotes downgraded ones to
-        # insight hypotheses (confidence × 0.6).
-        gated_candidates = await self._gate_dialogue_candidates(eligible_candidates)
-        if not gated_candidates:
             return {
                 "event_logged": True,
                 "candidate_count": len(extracted),
@@ -1120,7 +865,7 @@ class SoulEngine:
                         "occurrences": item.get("occurrences", 1),
                     },
                 }
-                for item in gated_candidates
+                for item in eligible_candidates
             ],
             existing_preference=existing_preference,
         )
@@ -1135,61 +880,15 @@ class SoulEngine:
             if str(item).strip()
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
-        candidate_refs = self._candidate_ledger_refs(eligible_candidates)
-        # Topic freeze (Phase 2): a topic under an unresolved confusion must not
-        # be further reinforced. New/upgraded weights for frozen topics are held
-        # back here (existing weights untouched); no-op when nothing is frozen,
-        # so a confusion-free database yields a byte-identical write.
-        try:
-            frozen_topics = self._confusion_manager.frozen_topics()
-        except Exception:
-            frozen_topics = set()
-        if frozen_topics:
-            updated_preference, held_updates = apply_confusion_freeze(
-                before=existing_preference,
-                after=updated_preference,
-                frozen_topics=frozen_topics,
-            )
-            if held_updates:
-                try:
-                    self._confusion_manager.record_held_updates(held_updates)
-                except Exception:
-                    logger.debug("Failed to record held confusion updates", exc_info=True)
-        # Topic-lifecycle (Phase 4): count this dialogue as evidence, then
-        # archive any newly disliked topic (归档+避雷). Archive wins over the
-        # evidence promotion for the same topic.
-        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
-        if newly_added_dislikes:
-            self._archive_disliked_topics(updated_preference, newly_added_dislikes)
-        # Ledger write point D5 #1a: dialogue-driven preference overwrite.
-        with self._ledger.action(
-            write_point="dialogue_preference_overwrite",
-            source="chat",
-            before=existing_preference,
-            source_refs=candidate_refs,
-            turn_id=turn_id,
-        ) as _entry:
-            preference_layer.data.clear()
-            preference_layer.data.update(updated_preference)
-            preference_layer.save()
-            _entry.after = dict(updated_preference)
+        preference_layer.data.clear()
+        preference_layer.data.update(updated_preference)
+        preference_layer.save()
 
         if newly_added_dislikes:
             # Start the deterministic purge as soon as the durable preference
             # write succeeds. A full profile rebuild can take tens of seconds;
             # it must not delay removing an explicitly rejected topic from the
             # active pool. Semantic recall continues detached in parallel.
-            # Ledger write point D5 #2: dislike purge (records the intent at
-            # schedule time; the detached recall itself is best-effort).
-            self._ledger.record(
-                write_point="dislike_purge",
-                source="chat",
-                before={"disliked_topics": sorted(old_disliked)},
-                after={"disliked_topics": sorted(new_disliked)},
-                source_refs=list(newly_added_dislikes),
-                outcome="success",
-                turn_id=turn_id,
-            )
             self._schedule_dislike_purge(
                 newly_added=newly_added_dislikes,
                 all_dislikes=sorted(new_disliked),
@@ -1199,43 +898,24 @@ class SoulEngine:
             )
 
         profile_rebuilt = False
-        rebuild_gate_ok = (
-            self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_DIALOGUE,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=candidate_refs,
-                    context={"candidate_refs": candidate_refs},
-                )
-            ).blocks
-        )
-        if rebuild_gate_ok:
-            # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
+        if self._preference_changed_significantly(existing_preference, updated_preference):
             try:
-                with self._ledger.action(
-                    write_point="dialogue_soul_rebuild",
-                    source="chat",
-                    before=existing_profile,
-                    source_refs=candidate_refs,
-                    turn_id=turn_id,
-                ) as _entry:
-                    legacy_profile = await self._profile_builder.build(
-                        history=[],
-                        preference=updated_preference,
-                        awareness_notes=[
-                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                        ],
-                        active_insights=self._rebuild_active_insights(),
-                    )
-                    profile = OnionProfile.from_legacy(legacy_profile)
-                    profile.populate_from_flat_preference(updated_preference)
-                    soul_layer = self._memory.get_layer("soul")
-                    soul_layer.data.clear()
-                    soul_layer.data.update(profile.to_dict())
-                    soul_layer.save()
-                    _entry.after = dict(soul_layer.data)
+                legacy_profile = await self._profile_builder.build(
+                    history=[],
+                    preference=updated_preference,
+                    awareness_notes=[
+                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                    ],
+                    active_insights=[
+                        insight_hypothesis_to_dict(item) for item in self._load_insights()
+                    ],
+                )
+                profile = OnionProfile.from_legacy(legacy_profile)
+                profile.populate_from_flat_preference(updated_preference)
+                soul_layer = self._memory.get_layer("soul")
+                soul_layer.data.clear()
+                soul_layer.data.update(profile.to_dict())
+                soul_layer.save()
                 self._memory.sync_profile_files(profile)
                 profile_rebuilt = True
             except Exception:
@@ -1254,13 +934,6 @@ class SoulEngine:
                 item["applied"] = True
                 item["updated_at"] = datetime.now().isoformat()
         self._memory.save_insight_candidates(merged_candidates)
-
-        # Next dialogue-learning pass also triggers the debounced confirmed-
-        # hypotheses rebuild (spec invariant 4). Best-effort.
-        try:
-            await self.run_pending_rebuild_if_due()
-        except Exception:
-            logger.debug("pending rebuild trigger (dialogue) failed", exc_info=True)
 
         return {
             "event_logged": True,
@@ -1281,22 +954,7 @@ class SoulEngine:
                 "reason": "feedback_batch_in_progress",
             }
         async with self._feedback_batch_lock:
-            result = await self._process_feedback_batch_if_needed_locked()
-        # Consume any held updates left ``replaying`` by a resolved real-interest
-        # confusion (Wave B held-replay leftover). Best-effort — a replay failure
-        # never breaks feedback processing; the items stay ``replaying`` for a
-        # later run (and startup crash recovery bounds the worst case).
-        try:
-            await self.replay_held_updates()
-        except Exception:
-            logger.debug("held-replay consumer failed", exc_info=True)
-        # A periodic hook for the debounced confirmed-hypotheses rebuild (spec
-        # invariant 4). Best-effort — never breaks feedback processing.
-        try:
-            await self.run_pending_rebuild_if_due()
-        except Exception:
-            logger.debug("pending rebuild trigger (feedback batch) failed", exc_info=True)
-        return result
+            return await self._process_feedback_batch_if_needed_locked()
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
         """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
@@ -1344,65 +1002,29 @@ class SoulEngine:
             if str(item).strip()
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
-        # Topic-lifecycle (Phase 4): evidence overlay + dislike archive.
-        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
-        if newly_added_dislikes:
-            self._archive_disliked_topics(updated_preference, newly_added_dislikes)
-        feedback_refs = [
-            f"feedback_event:{self._to_int(event.get('id', 0))}" for event in feedback_events
-        ] or ["feedback_batch"]
-        # Ledger write point D5 #4a: feedback-batch preference overwrite.
-        with self._ledger.action(
-            write_point="feedback_preference_overwrite",
-            source="feedback",
-            before=existing_preference,
-            source_refs=feedback_refs,
-        ) as _entry:
-            preference_layer.data.clear()
-            preference_layer.data.update(updated_preference)
-            preference_layer.save()
-            _entry.after = dict(updated_preference)
+        preference_layer.data.clear()
+        preference_layer.data.update(updated_preference)
+        preference_layer.save()
 
         profile_rebuilt = False
-        # P2 (spec r3/F4): a feedback batch with a significant preference shift
-        # now passes access point ③ — previously this rebuild bypassed every
-        # gate. off/shadow proceed; enforce downgrade/reject abandons the rebuild.
-        feedback_rebuild_ok = (
-            self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=feedback_refs,
-                    context={"feedback_count": feedback_count, "feedback_refs": feedback_refs},
-                )
-            ).blocks
-        )
-        if feedback_rebuild_ok:
-            # Ledger write point D5 #4b: feedback-batch full soul rebuild.
+        if self._preference_changed_significantly(existing_preference, updated_preference):
             try:
-                with self._ledger.action(
-                    write_point="feedback_soul_rebuild",
-                    source="feedback",
-                    before=existing_profile,
-                    source_refs=feedback_refs,
-                ) as _entry:
-                    legacy_profile = await self._profile_builder.build(
-                        history=[],
-                        preference=updated_preference,
-                        awareness_notes=[
-                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                        ],
-                        active_insights=self._rebuild_active_insights(),
-                    )
-                    profile = OnionProfile.from_legacy(legacy_profile)
-                    profile.populate_from_flat_preference(updated_preference)
-                    soul_layer = self._memory.get_layer("soul")
-                    soul_layer.data.clear()
-                    soul_layer.data.update(profile.to_dict())
-                    soul_layer.save()
-                    _entry.after = dict(soul_layer.data)
+                legacy_profile = await self._profile_builder.build(
+                    history=[],
+                    preference=updated_preference,
+                    awareness_notes=[
+                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                    ],
+                    active_insights=[
+                        insight_hypothesis_to_dict(item) for item in self._load_insights()
+                    ],
+                )
+                profile = OnionProfile.from_legacy(legacy_profile)
+                profile.populate_from_flat_preference(updated_preference)
+                soul_layer = self._memory.get_layer("soul")
+                soul_layer.data.clear()
+                soul_layer.data.update(profile.to_dict())
+                soul_layer.save()
                 self._memory.sync_profile_files(profile)
                 profile_rebuilt = True
             except Exception:
@@ -1684,212 +1306,6 @@ class SoulEngine:
         layer.data.update({"hypotheses": [insight_hypothesis_to_dict(item) for item in insights]})
         layer.save()
 
-    def _rebuild_active_insights(self) -> list[dict[str, object]]:
-        """Insight dicts eligible to shape a soul rebuild (spec invariant 3 / F1).
-
-        Only validated hypotheses with confidence >= 0.75 are visible to a
-        rebuild; rejected/unvalidated ones are filtered out, so a reject's next
-        rebuild squeezes the old conclusion out instead of leaving it forever.
-        """
-        return [
-            insight_hypothesis_to_dict(item)
-            for item in self._load_insights()
-            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
-        ]
-
-    # -- Pending confirmed-hypotheses rebuild state machine (spec r3/F3) -------
-
-    def _rebuild_state_path(self) -> Path | None:
-        data_dir = getattr(self._memory, "_data_dir", None)
-        if data_dir is None:
-            return None
-        return Path(data_dir) / "memory" / "rebuild_pending_state.json"
-
-    def _load_rebuild_state(self) -> dict[str, Any]:
-        path = self._rebuild_state_path()
-        if path is None or not path.exists():
-            return {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def _save_rebuild_state(self, state: dict[str, Any]) -> None:
-        path = self._rebuild_state_path()
-        if path is None:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_name(f"{path.name}.tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-            tmp_path.replace(path)
-        except OSError:
-            logger.debug("Failed to save rebuild pending state", exc_info=True)
-
-    async def _mark_rebuild_pending(self, trigger_refs: list[str]) -> None:
-        """Set/refresh the pending marker (confirm & reject single point, inv 4).
-
-        A new migration always re-stamps ``set_at`` and resets ``retry_count`` —
-        "new evidence reopens" — merging its refs with any still-pending ones.
-        """
-        async with self._rebuild_pending_lock:
-            state = self._load_rebuild_state()
-            existing = state.get("pending")
-            refs = (
-                list(existing.get("trigger_refs", []))
-                if isinstance(existing, dict) and isinstance(existing.get("trigger_refs"), list)
-                else []
-            )
-            for ref in trigger_refs:
-                if ref not in refs:
-                    refs.append(ref)
-            state["pending"] = {
-                "set_at": datetime.now().isoformat(),
-                "trigger_refs": refs,
-                "retry_count": 0,
-            }
-            self._save_rebuild_state(state)
-
-    async def run_pending_rebuild_if_due(self, *, now: datetime | None = None) -> dict[str, Any]:
-        """Run the debounced gated confirmed-hypotheses rebuild when due (inv 4).
-
-        Triggered by the 12h cognition loop and by the next dialogue-learning /
-        feedback-batch pass. Debounced by ``_DEEP_REBUILD_DEBOUNCE_HOURS``.
-        Clear-marker semantics (spec invariant 4):
-
-        - gate accept + build ok → clear the marker.
-        - gate downgrade/reject that is NOT an error (``is_error=False``) → this
-          batch is abandoned: clear the marker + record ``last_gate_refusal``. A
-          later confirm/reject re-opens it (no infinite retry).
-        - gate error OR build exception (``is_error=True``) → keep the marker,
-          bump ``retry_count``; after ``_REBUILD_MAX_RETRIES`` clear + WARNING.
-
-        A concurrent re-mark during the build is reconciled by comparing
-        ``set_at`` (compare-and-swap): if it changed, the fresh marker is left
-        intact rather than clobbered by this run's outcome.
-        """
-        current = now or datetime.now()
-        async with self._rebuild_pending_lock:
-            if self._rebuild_running:
-                return {"ran": False, "reason": "in_progress"}
-            state = self._load_rebuild_state()
-            pending = state.get("pending")
-            if not isinstance(pending, dict):
-                return {"ran": False, "reason": "not_pending"}
-            set_at = self._parse_iso(pending.get("set_at"))
-            if set_at is None or (current - set_at) < timedelta(hours=_DEEP_REBUILD_DEBOUNCE_HOURS):
-                return {"ran": False, "reason": "debounced"}
-            started_set_at = str(pending.get("set_at", ""))
-            trigger_refs = [str(r) for r in pending.get("trigger_refs", []) if isinstance(r, str)]
-            retry_count = int(pending.get("retry_count", 0) or 0)
-            self._rebuild_running = True
-
-        # The long LLM build runs WITHOUT the lock so a concurrent confirm/reject
-        # can re-mark pending (reconciled below via compare-and-swap on set_at).
-        try:
-            outcome = await self._execute_pending_rebuild(trigger_refs)
-        except Exception:
-            logger.exception("pending rebuild dispatch failed")
-            outcome = "error"
-
-        async with self._rebuild_pending_lock:
-            self._rebuild_running = False
-            state = self._load_rebuild_state()
-            pending = state.get("pending")
-            if not isinstance(pending, dict) or str(pending.get("set_at", "")) != started_set_at:
-                # A newer confirm/reject reopened the marker mid-build — leave it.
-                return {"ran": True, "outcome": outcome, "superseded": True}
-            if outcome == "accept":
-                state["pending"] = None
-            elif outcome == "refusal":
-                state["pending"] = None
-                state["last_gate_refusal"] = {
-                    "at": current.isoformat(),
-                    "trigger_refs": trigger_refs,
-                }
-            else:  # error
-                retry_count += 1
-                if retry_count >= _REBUILD_MAX_RETRIES:
-                    logger.warning(
-                        "pending rebuild exceeded retry budget (%d); clearing marker",
-                        _REBUILD_MAX_RETRIES,
-                    )
-                    state["pending"] = None
-                else:
-                    pending["retry_count"] = retry_count
-                    state["pending"] = pending
-            self._save_rebuild_state(state)
-            return {"ran": True, "outcome": outcome, "retry_count": retry_count}
-
-    async def _execute_pending_rebuild(self, trigger_refs: list[str]) -> str:
-        """Gate + run one confirmed-hypotheses rebuild. Returns the outcome tag.
-
-        ``accept`` (rebuilt), ``refusal`` (gate downgrade/reject, real verdict),
-        or ``error`` (gate is_error, or a build exception).
-        """
-        preference = dict(self._memory.get_layer("preference").data)
-        existing_profile = dict(self._memory.get_layer("soul").data)
-        validated = [
-            item
-            for item in self._load_insights()
-            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
-        ]
-        context: dict[str, object] = {
-            "confirmed_hypotheses": [item.hypothesis for item in validated][
-                :_REBUILD_CONTEXT_HYPOTHESIS_CAP
-            ],
-            "trigger_refs": trigger_refs,
-        }
-        source_refs = trigger_refs or ["rebuild_pending"]
-        decision = await self._gate_soul_rebuild(
-            trigger=_REBUILD_TRIGGER_CONFIRMED_HYPOTHESES,
-            existing_preference=preference,
-            updated_preference=preference,
-            source_refs=source_refs,
-            context=context,
-        )
-        if decision.blocks:
-            return "error" if decision.is_error else "refusal"
-        try:
-            with self._ledger.action(
-                write_point="hypotheses_soul_rebuild",
-                source="hypotheses",
-                before=existing_profile,
-                source_refs=source_refs,
-            ) as _entry:
-                legacy_profile = await self._profile_builder.build(
-                    history=[],
-                    preference=preference,
-                    awareness_notes=[
-                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                    ],
-                    active_insights=self._rebuild_active_insights(),
-                )
-                profile = OnionProfile.from_legacy(legacy_profile)
-                profile.populate_from_flat_preference(preference)
-                soul_layer = self._memory.get_layer("soul")
-                soul_layer.data.clear()
-                soul_layer.data.update(profile.to_dict())
-                soul_layer.save()
-                _entry.after = dict(soul_layer.data)
-            self._memory.sync_profile_files(profile)
-            return "accept"
-        except Exception:
-            logger.exception("Failed to rebuild soul profile from confirmed hypotheses")
-            return "error"
-
-    @staticmethod
-    def _parse_iso(value: Any) -> datetime | None:
-        if not isinstance(value, str) or not value.strip():
-            return None
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-
     def _merge_insight_candidates(
         self,
         existing_candidates: list[dict[str, object]],
@@ -1939,410 +1355,6 @@ class SoulEngine:
                 existing["evidence"] = evidence
             existing["updated_at"] = now
         return merged
-
-    def _build_dialogue_active_list(
-        self,
-    ) -> tuple[dict[str, object], dict[str, str]]:
-        """Assemble the settle-injection list (speculations / insights / confusions).
-
-        Returns ``(active_list, insight_hash_map)`` where ``insight_hash_map``
-        maps the injected insight hash key -> hypothesis text. Confusions are an
-        empty list in Wave A (the confusion object lands in Wave B).
-        """
-        speculations: list[dict[str, object]] = []
-        try:
-            active_specs = self._speculator.get_active_speculations()
-            # Cap at 10 (spec: activelist speculation ≤10) to bound the prompt.
-            for spec in active_specs[:10]:
-                domain = str(getattr(spec, "domain", "")).strip()
-                if domain:
-                    speculations.append({"domain": domain})
-        except Exception:
-            logger.debug("Failed to load active speculations for settles", exc_info=True)
-
-        insight_hypotheses = [
-            item.hypothesis for item in self._load_insights() if item.hypothesis.strip()
-        ]
-        insight_hash_map = build_hash8_map(insight_hypotheses)
-        # Reverse map (hypothesis -> key) preserves injection order for the prompt.
-        key_by_text = {text: key for key, text in insight_hash_map.items()}
-        insights = [
-            {"hash": key_by_text[text], "hypothesis": text}
-            for text in insight_hypotheses
-            if text in key_by_text
-        ]
-
-        confusions: list[dict[str, object]] = []
-        try:
-            for confusion in self._confusion_manager.list_active():
-                confusions.append(
-                    {
-                        "id": str(confusion.id),
-                        "topic": confusion.topic,
-                        "observation": confusion.observation,
-                    }
-                )
-        except Exception:
-            logger.debug("Failed to load active confusions for settles", exc_info=True)
-
-        active_list: dict[str, object] = {
-            "speculations": speculations,
-            "insights": insights,
-            "confusions": confusions,
-        }
-        return active_list, insight_hash_map
-
-    async def _process_dialogue_settles(
-        self,
-        *,
-        settles: list[dict[str, object]],
-        active_list: dict[str, object],
-        insight_hash_map: dict[str, str],
-        turn_id: str,
-    ) -> None:
-        """Settle active objects referenced by a chat turn (whitelist = injected).
-
-        ``ref`` must appear in the round's injection list (spec §invariant 5);
-        unknown refs are dropped with WARNING. Settling calls existing functions
-        (speculation confirm/reject, insight feedback) and records a ledger row
-        stamped with ``turn_id`` (idempotency observation key).
-        """
-        spec_domains = {
-            str(item.get("domain", "")).strip()
-            for item in _as_dict_list(active_list.get("speculations"))
-        }
-        confusion_ids = {
-            str(item.get("id", "")).strip() for item in _as_dict_list(active_list.get("confusions"))
-        }
-        for settle in settles:
-            kind = str(settle.get("kind", "")).strip()
-            ref = str(settle.get("ref", "")).strip()
-            verdict = str(settle.get("verdict", "")).strip()
-            if not ref:
-                continue
-            if kind == "speculation":
-                if ref not in spec_domains:
-                    logger.warning("dialogue settle ref not in injected list: %s", ref)
-                    continue
-                await self._settle_speculation(ref, verdict, turn_id)
-            elif kind == "insight":
-                hypothesis = insight_hash_map.get(ref)
-                if hypothesis is None:
-                    logger.warning("dialogue settle ref not in injected list: %s", ref)
-                    continue
-                await self._settle_insight(hypothesis, verdict, turn_id)
-            elif kind == "confusion":
-                if ref not in confusion_ids:
-                    logger.warning("dialogue settle ref not in injected list: %s", ref)
-                    continue
-                self._settle_confusion(ref, verdict, turn_id)
-            else:
-                logger.warning("dialogue settle dropped: unknown kind=%s", kind)
-
-    async def _settle_speculation(self, domain: str, verdict: str, turn_id: str) -> None:
-        before = {"domain": domain, "verdict": verdict}
-        applied = False
-        try:
-            if verdict == "confirm":
-                applied = bool(self._speculator.user_confirm_speculation(domain))
-            elif verdict == "reject":
-                applied = bool(self._speculator.user_reject_speculation(domain))
-        except Exception:
-            logger.exception("Failed to settle speculation %s", domain)
-        self._ledger.record(
-            write_point="settle_speculation",
-            source="chat",
-            before=before,
-            after={"domain": domain, "applied": applied},
-            source_refs=[domain],
-            outcome="success" if applied else "failed",
-            turn_id=turn_id,
-        )
-
-    async def _settle_insight(self, hypothesis: str, verdict: str, turn_id: str) -> None:
-        signal = "confirm" if verdict == "confirm" else "reject"
-        result: dict[str, Any] = {}
-        try:
-            result = await self.update_from_feedback({"hypothesis": hypothesis, "signal": signal})
-        except Exception:
-            logger.exception("Failed to settle insight via feedback")
-        matched = bool(result.get("matched", result.get("updated", False)))
-        self._ledger.record(
-            write_point="settle_insight",
-            source="chat",
-            before={"hypothesis": hypothesis[:80], "verdict": verdict},
-            after={"matched": matched},
-            source_refs=[hypothesis[:60]],
-            outcome="success" if matched else "failed",
-            turn_id=turn_id,
-        )
-
-    def _settle_confusion(self, ref: str, verdict: str, turn_id: str) -> None:
-        """Directly resolve a confusion referenced from a plain chat turn.
-
-        ``confirm`` → the confused behaviour reflects a real interest
-        (``real_interest``, held updates replay); ``reject`` → it was a proxy /
-        misread (``proxy_behavior``, held updates discarded). The confusion's
-        direct-settle exit (gate off ⇒ direct write + ledger, spec §Phase 2).
-        """
-        try:
-            confusion_id = int(ref)
-        except (TypeError, ValueError):
-            logger.warning("confusion settle dropped: non-int ref=%r", ref)
-            return
-        resolution = "real_interest" if verdict == "confirm" else "proxy_behavior"
-        terminal: str | None = None
-        try:
-            terminal = self._confusion_manager.resolve(
-                confusion_id, resolution=resolution, note="chat_settle"
-            )
-        except Exception:
-            logger.exception("Failed to settle confusion %s", confusion_id)
-        self._ledger.record(
-            write_point="settle_confusion",
-            source="chat",
-            before={"confusion_id": confusion_id, "verdict": verdict},
-            after={"resolution": resolution, "status": terminal},
-            source_refs=[ref],
-            outcome="success" if terminal else "failed",
-            turn_id=turn_id,
-        )
-
-    async def replay_held_updates(self) -> dict[str, object]:
-        """Rebase resolved-real-interest held updates into preference analysis.
-
-        Wave B held-replay consumer (leftover wiring). A confusion resolved as
-        ``real_interest`` leaves its held topic updates in the ``replaying``
-        state with a receipt. This consumer feeds those held topics as evidence
-        into the preference analyzer (rebase semantics — never a direct weight
-        write), persists the result through the normal chokepoint (freeze + the
-        interest fast line, which is not gated), then marks the replay
-        ``applied``. Idempotent: once applied the items are no longer
-        ``replaying``, so a second run is a no-op. A crash between the
-        preference write and ``mark_replay_applied`` is reconciled to
-        ``applied_unverified`` by :meth:`recover_replaying` at next startup.
-        """
-        pending = self._confusion_manager.pending_replays()
-        if not pending:
-            return {"replayed": 0, "confusions": 0}
-        events: list[dict[str, object]] = []
-        for confusion in pending:
-            for held in confusion.held_updates:
-                if held.state != "replaying":
-                    continue
-                events.append(
-                    {
-                        "event_type": "dialogue_insight",
-                        "title": held.topic,
-                        "metadata": {
-                            "kind": "interest",
-                            "confidence": held.value,
-                            "evidence": "疑惑被确认为真实兴趣，重放此前搁置的兴趣变更。",
-                            "source": "confusion_replay",
-                            "occurrences": 1,
-                        },
-                    }
-                )
-        if not events:
-            return {"replayed": 0, "confusions": 0}
-        preference_layer = self._memory.get_layer("preference")
-        existing_preference = dict(preference_layer.data)
-        updated_preference = await self._preference_analyzer.analyze_events(
-            events=events,
-            existing_preference=existing_preference,
-        )
-        # Freeze filter still applies (other topics may be frozen); the replayed
-        # topics themselves are resolved, so they are no longer frozen.
-        try:
-            frozen_topics = self._confusion_manager.frozen_topics()
-        except Exception:
-            frozen_topics = set()
-        if frozen_topics:
-            updated_preference, held_updates = apply_confusion_freeze(
-                before=existing_preference,
-                after=updated_preference,
-                frozen_topics=frozen_topics,
-            )
-            if held_updates:
-                try:
-                    self._confusion_manager.record_held_updates(held_updates)
-                except Exception:
-                    logger.debug("Failed to record held confusion updates", exc_info=True)
-        with self._ledger.action(
-            write_point="confusion_replay_preference",
-            source="confusion",
-            before=existing_preference,
-            source_refs=[c.topic for c in pending if c.topic],
-        ) as _entry:
-            preference_layer.data.clear()
-            preference_layer.data.update(updated_preference)
-            preference_layer.save()
-            _entry.after = dict(updated_preference)
-        for confusion in pending:
-            self._confusion_manager.mark_replay_applied(confusion.id)
-        return {"replayed": len(events), "confusions": len(pending)}
-
-    # -- Posture gate (Phase 3) ----------------------------------------------
-
-    def _ledger_digest_for_gate(self) -> list[dict[str, object]]:
-        """Compact 30-day ledger digest fed to the posture gate as context."""
-        query = getattr(self._ledger_database, "query_profile_ledger", None)
-        if not callable(query):
-            return []
-        try:
-            rows = query(days=30, limit=30)
-        except Exception:
-            return []
-        digest: list[dict[str, object]] = []
-        for row in rows:
-            digest.append(
-                {
-                    "write_point": str(row.get("write_point", "")),
-                    "source": str(row.get("source", "")),
-                    "outcome": str(row.get("outcome", "")),
-                    "gate_verdict": str(row.get("gate_verdict", "")),
-                }
-            )
-        return digest
-
-    async def _gate_dialogue_candidates(
-        self, candidates: list[dict[str, object]]
-    ) -> list[dict[str, object]]:
-        """Access point ①: gate goal/value/state candidates (Phase 3).
-
-        ``off`` returns the input untouched (byte-identical feed). Otherwise
-        interest/dislike pass through; deep kinds are judged. Under enforce a
-        rejected candidate is dropped and a downgraded one is demoted to an
-        insight hypothesis (confidence × 0.6). Shadow keeps every candidate (its
-        judgement is recorded asynchronously).
-        """
-        if not self._posture_gate.enabled:
-            return candidates
-        core_memory = self._memory.get_core_memory()
-        ledger_digest = self._ledger_digest_for_gate()
-        kept: list[dict[str, object]] = []
-        downgraded: list[InsightHypothesis] = []
-        for item in candidates:
-            kind = str(item.get("kind", "")).strip()
-            if kind not in _DEEP_CANDIDATE_KINDS:
-                kept.append(item)
-                continue
-            content = str(item.get("content", ""))
-            decision = await self._posture_gate.evaluate(
-                write_point="dialogue_deep_candidate",
-                change={
-                    "kind": kind,
-                    "content": content,
-                    "confidence": item.get("confidence", 0.0),
-                    "evidence": item.get("evidence", ""),
-                },
-                core_memory=core_memory,
-                ledger_digest=ledger_digest,
-                source_refs=[f"{kind}:{content[:60]}"],
-            )
-            if not decision.blocks:
-                kept.append(item)
-                continue
-            # enforce reject / downgrade: excluded from the deep write.
-            if decision.downgraded:
-                downgraded.append(self._candidate_to_insight(item))
-        if downgraded:
-            self._persist_downgraded_insights(downgraded)
-        return kept
-
-    def _candidate_to_insight(self, item: dict[str, object]) -> InsightHypothesis:
-        """Demote a downgraded deep candidate to a hypothesis (confidence × 0.6)."""
-        raw_conf = item.get("confidence", 0.0)
-        try:
-            confidence = float(raw_conf)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            confidence = 0.0
-        evidence_text = str(item.get("evidence", "")).strip()
-        return InsightHypothesis(
-            hypothesis=str(item.get("content", "")).strip(),
-            evidence=[evidence_text] if evidence_text else [],
-            confidence=round(max(0.0, min(1.0, confidence)) * 0.6, 4),
-        )
-
-    def _persist_downgraded_insights(self, insights: list[InsightHypothesis]) -> None:
-        existing = self._load_insights()
-        self._save_insights(existing + insights)
-        for insight in insights:
-            self._ledger.record(
-                write_point="posture_gate_downgrade_insight",
-                source="posture_gate",
-                after={"hypothesis": insight.hypothesis[:80], "confidence": insight.confidence},
-                source_refs=[insight.hypothesis[:60]],
-                gate_verdict="downgrade",
-            )
-
-    async def _gate_soul_rebuild(
-        self,
-        *,
-        trigger: str,
-        existing_preference: dict[str, object],
-        updated_preference: dict[str, object],
-        source_refs: list[str],
-        context: dict[str, object] | None = None,
-    ) -> GateDecision:
-        """Access point ③: gate a full soul rebuild (Phase 3, generalized r3/F4).
-
-        Shared by all three rebuild triggers (dialogue / feedback_batch /
-        confirmed_hypotheses). The judged snapshot carries the ``trigger``, its
-        ledger ``write_point``, an old-soul interest-diff summary, and the
-        trigger-specific ``context`` (dialogue candidates / feedback-batch
-        summary / confirmed-hypothesis list) so the gate sees the right
-        provenance. off never calls the gate (byte-identical) and returns an
-        ``accept`` decision; shadow/accept → proceed; enforce downgrade/reject →
-        abandon + ledger row.
-
-        Returns the :class:`GateDecision`. Callers proceed on ``not
-        decision.blocks``; the pending-rebuild state machine additionally reads
-        ``decision.is_error`` to keep vs clear its marker (F7).
-        """
-        write_point = _REBUILD_WRITE_POINT.get(trigger, "soul_rebuild")
-        if not self._posture_gate.enabled:
-            return GateDecision(verdict=ACCEPT, enforced=False)
-        core_memory = self._memory.get_core_memory()
-        decision = await self._posture_gate.evaluate(
-            write_point=write_point,
-            change={
-                "kind": "soul_rebuild",
-                "trigger": trigger,
-                "write_point": write_point,
-                "before_interests": existing_preference.get("interests", []),
-                "after_interests": updated_preference.get("interests", []),
-                "context": context or {},
-            },
-            core_memory=core_memory,
-            ledger_digest=self._ledger_digest_for_gate(),
-            source_refs=source_refs,
-        )
-        if decision.blocks:
-            self._ledger.record(
-                write_point=write_point,
-                source="posture_gate",
-                before={"rebuild": "requested", "trigger": trigger},
-                after={"rebuild": "abandoned", "verdict": decision.verdict},
-                source_refs=source_refs,
-                gate_verdict=decision.verdict,
-                outcome="failed",
-            )
-        return decision
-
-    @staticmethod
-    def _candidate_ledger_refs(candidates: list[dict[str, object]]) -> list[str]:
-        """Compact source refs for a dialogue-learning ledger row.
-
-        Non-empty so the ledger's ``source_refs`` provenance is auditable even
-        when candidate contents are terse.
-        """
-        refs = [
-            f"{str(item.get('kind', '')).strip()}:{str(item.get('content', '')).strip()[:60]}"
-            for item in candidates
-            if str(item.get("content", "")).strip()
-        ]
-        return refs or ["dialogue"]
 
     def _candidate_ready_for_learning(self, candidate: dict[str, object]) -> bool:
         if bool(candidate.get("applied", False)):

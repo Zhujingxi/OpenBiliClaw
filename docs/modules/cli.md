@@ -71,7 +71,6 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-bangumi-latest` | 只读验证 Bangumi 按日期浏览（可能含未播条目） | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
 | `chat` | 苏格拉底式对话 | ✅ |
-| `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
 | `delight` | 手动查看当前惊喜推荐候选 | ✅ |
 | `probe` | 手动查看并确认猜测兴趣方向 | ✅ |
 | `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | OpenClaw JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
@@ -474,19 +473,6 @@ $ openbiliclaw profile
 深层需求
   被理解、持续成长
 ```
-
-### `openbiliclaw ledger`
-
-查看画像更新台账（`profile_update_ledger`，v0.3.174+）。每个画像写点（对话学习 / 反馈批 / 12h 整理 / init 建像 / 管线各层 / 推测确认 / 觉察同步 / 对话结算）在动作结束后追加一行，含 `outcome`（success/failed）、before/after 摘要与 `source_refs`。台账为只追加审计底座，写失败只 WARNING、不阻断画像写入；从 v0.3.174+ 开始记录，旧的画像更新不回填。
-
-```bash
-$ openbiliclaw ledger                    # 默认：近 30 天按写点聚合（成功/失败计数）
-$ openbiliclaw ledger --line             # 逐行明细（时间 / 写点 / 来源 / 结果 / turn_id / source_refs）
-$ openbiliclaw ledger --days 7           # 只看近 7 天
-$ openbiliclaw ledger --write-point dialogue_preference_overwrite   # 只看某个写点
-```
-
-选项：`--days N`（窗口，默认 30）/ `--line`（逐行，默认按写点聚合）/ `--write-point <name>`（过滤单个写点）/ `--limit N`（逐行最多行数，默认 200）。写点清单见 `docs/modules/soul.md`。shadow 门控采数（Phase 3 上线后）可直接查 `gate_verdict LIKE 'shadow_%'`。
 
 ### `openbiliclaw profile-consolidate`
 

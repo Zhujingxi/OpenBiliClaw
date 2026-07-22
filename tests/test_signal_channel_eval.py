@@ -267,26 +267,25 @@ async def test_ch2_engagement_event_updates_interest(tmp_path: object) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Channel 3: FEEDBACK → INTEREST + SURFACE  (strong signal: immediate)
-# VALUES routing retired (deep-line consolidation, P1) — reverse assertions.
+# Channel 3: FEEDBACK → INTEREST + SURFACE + VALUES  (strong signal: immediate)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_ch3_feedback_routing(tmp_path: object) -> None:
-    """FEEDBACK routes to interest + surface only — VALUES write retired (P1)."""
+    """FEEDBACK should route to values (not role) — key distinguisher from BEHAVIOR_EVENT."""
     pipeline = _make_pipeline(tmp_path)
     result = await pipeline.ingest(signal_from_feedback("like", "测试视频", "好内容"))
 
     assert "interest" in result.layers_buffered
     assert "surface" in result.layers_buffered
-    assert "values" not in result.layers_buffered, "FEEDBACK must NOT route to VALUES (P1 retired)"
-    assert "role" not in result.layers_buffered
+    assert "values" in result.layers_buffered
+    assert "role" not in result.layers_buffered, "FEEDBACK routes to VALUES, not ROLE"
 
 
 @pytest.mark.asyncio
 async def test_ch3_feedback_single_signal_immediate_update(tmp_path: object) -> None:
-    """A single FEEDBACK signal bypasses min_signals for INTEREST but NOT VALUES.
+    """A single FEEDBACK signal must bypass the min_signals gate and update immediately.
 
     Threshold is set to min_signals=10, so only strong-signal bypass can trigger this.
     """
@@ -298,21 +297,26 @@ async def test_ch3_feedback_single_signal_immediate_update(tmp_path: object) -> 
         "Single FEEDBACK must immediately update INTEREST (strong-signal bypass). "
         f"Got: {updated_layers}"
     )
-    assert OnionLayer.VALUES not in updated_layers, (
-        f"FEEDBACK must NOT update VALUES — deep writes retired (P1). Got: {updated_layers}"
+    assert OnionLayer.VALUES in updated_layers, (
+        "Single FEEDBACK must immediately update VALUES (strong-signal bypass). "
+        f"Got: {updated_layers}"
     )
 
 
 @pytest.mark.asyncio
-async def test_ch3_feedback_does_not_touch_values(tmp_path: object) -> None:
-    """FEEDBACK no longer buffers or updates the Values layer (P1 retired)."""
+async def test_ch3_feedback_triggers_values_update(tmp_path: object) -> None:
+    """FEEDBACK should change the Values layer with content-appropriate values."""
     pipeline = _make_pipeline(tmp_path)
     result = await pipeline.ingest(signal_from_feedback("like", "深度内容", "正向反馈"))
 
-    assert "values" not in result.layers_buffered
     updated_layers = {r.layer for r in result.layers_updated}
-    assert OnionLayer.VALUES not in updated_layers, (
-        f"VALUES must never be triggered by FEEDBACK now. Got: {updated_layers}"
+    assert OnionLayer.VALUES in updated_layers, (
+        f"VALUES should be triggered by FEEDBACK. Got: {updated_layers}"
+    )
+    values_result = next(r for r in result.layers_updated if r.layer == OnionLayer.VALUES)
+    assert values_result.changed, "Values layer should actually change"
+    assert any("学习" in c or "价值" in c or "驱动" in c for c in values_result.changes), (
+        f"Changes should mention values/drivers. Got: {values_result.changes}"
     )
 
 
@@ -376,13 +380,15 @@ async def test_ch4_dialogue_turn_skips_role_values_core(tmp_path: object) -> Non
     [
         ("interest", OnionLayer.INTEREST),
         ("dislike", OnionLayer.INTEREST),
+        ("value", OnionLayer.VALUES),
         ("goal", OnionLayer.ROLE),
+        ("state", OnionLayer.CORE),
     ],
 )
 async def test_ch5_dialogue_insight_routing(
     tmp_path: object, kind: str, expected_layer: OnionLayer
 ) -> None:
-    """DIALOGUE_INSIGHT routing depends on the 'kind' field (fast-line kinds only)."""
+    """DIALOGUE_INSIGHT routing depends on the 'kind' field."""
     pipeline = _make_pipeline(tmp_path)
     signals = signals_from_dialogue(
         [{"kind": kind, "content": f"测试insight: {kind}", "confidence": 0.9}]
@@ -392,27 +398,6 @@ async def test_ch5_dialogue_insight_routing(
     assert expected_layer.value in result.layers_buffered, (
         f"kind={kind!r} should buffer {expected_layer.value}. Got: {result.layers_buffered}"
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["value", "state"])
-async def test_ch5_dialogue_insight_deep_kinds_are_inert(tmp_path: object, kind: str) -> None:
-    """value/state self-report kinds are inert in the pipeline (P1 retired).
-
-    A deep self-report reaches the profile only through the gated dialogue-deep
-    path (access point ①) in the SoulEngine — never a pipeline VALUES/CORE write.
-    """
-    pipeline = _make_pipeline(tmp_path)
-    signals = signals_from_dialogue(
-        [{"kind": kind, "content": f"测试insight: {kind}", "confidence": 0.9}]
-    )
-    result = await pipeline.ingest(signals[0])
-
-    assert "values" not in result.layers_buffered
-    assert "core" not in result.layers_buffered
-    updated = {r.layer for r in result.layers_updated}
-    assert OnionLayer.VALUES not in updated
-    assert OnionLayer.CORE not in updated
 
 
 @pytest.mark.asyncio
@@ -478,8 +463,8 @@ async def test_ch5_insight_goal_kind_updates_role(tmp_path: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ch5_insight_value_kind_does_not_update_values(tmp_path: object) -> None:
-    """value-kind insight is inert in the pipeline — VALUES write retired (P1)."""
+async def test_ch5_insight_value_kind_updates_values(tmp_path: object) -> None:
+    """value-kind insight must immediately update and change VALUES."""
     pipeline = _make_pipeline(tmp_path)
     result = await pipeline.ingest(
         signals_from_dialogue(
@@ -488,15 +473,14 @@ async def test_ch5_insight_value_kind_does_not_update_values(tmp_path: object) -
     )
 
     updated_changed = {r.layer for r in result.layers_updated if r.changed}
-    assert OnionLayer.VALUES not in updated_changed, (
-        f"value-kind insight must NOT change VALUES now. Changed: {updated_changed}"
+    assert OnionLayer.VALUES in updated_changed, (
+        f"value-kind insight must change VALUES. Changed: {updated_changed}"
     )
-    assert "values" not in result.layers_buffered
 
 
 @pytest.mark.asyncio
-async def test_ch5_insight_state_kind_does_not_trigger_core(tmp_path: object) -> None:
-    """state-kind insight is inert in the pipeline — CORE write retired (P1)."""
+async def test_ch5_insight_state_kind_triggers_core(tmp_path: object) -> None:
+    """state-kind insight must immediately trigger a Core update attempt."""
     pipeline = _make_pipeline(tmp_path)
     result = await pipeline.ingest(
         signals_from_dialogue(
@@ -505,10 +489,10 @@ async def test_ch5_insight_state_kind_does_not_trigger_core(tmp_path: object) ->
     )
 
     updated_layers = {r.layer for r in result.layers_updated}
-    assert OnionLayer.CORE not in updated_layers, (
-        f"state-kind insight must NOT trigger CORE now. Triggered: {updated_layers}"
+    assert OnionLayer.CORE in updated_layers, (
+        "state-kind insight must trigger Core update (even if conservative changed=False). "
+        f"Triggered: {updated_layers}"
     )
-    assert "core" not in result.layers_buffered
 
 
 # ---------------------------------------------------------------------------
@@ -645,17 +629,13 @@ async def test_ch7_recommendation_click_changes_interest_content(
 
 
 # ---------------------------------------------------------------------------
-# Key distinction: FEEDBACK vs BEHAVIOR_EVENT (ROLE split; neither hits VALUES)
+# Key distinction: FEEDBACK vs BEHAVIOR_EVENT (VALUES vs ROLE split)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_feedback_and_behavior_both_skip_values(tmp_path: object) -> None:
-    """After P1 retirement neither FEEDBACK nor BEHAVIOR_EVENT touches VALUES.
-
-    The FEEDBACK-vs-BEHAVIOR split now shows only in ROLE (behavior routes to
-    ROLE; feedback does not).
-    """
+async def test_feedback_targets_values_not_role_vs_behavior(tmp_path: object) -> None:
+    """FEEDBACK→VALUES but not ROLE; BEHAVIOR_EVENT→ROLE but not VALUES."""
     from pathlib import Path
 
     pipeline_fb = _make_pipeline(Path(str(tmp_path)) / "fb")
@@ -666,7 +646,7 @@ async def test_feedback_and_behavior_both_skip_values(tmp_path: object) -> None:
         signals_from_events([{"event_type": "view", "title": "测试"}])[0]
     )
 
-    assert "values" not in fb_result.layers_buffered
+    assert "values" in fb_result.layers_buffered
     assert "role" not in fb_result.layers_buffered
     assert "role" in bh_result.layers_buffered
     assert "values" not in bh_result.layers_buffered
@@ -708,8 +688,8 @@ async def test_channel_eval_report(tmp_path: object, capsys: object) -> None:
         {
             "name": "FEEDBACK (1 signal)",
             "signals": lambda: [signal_from_feedback("like", "深度AI内容", "强正向反馈")],
-            "expected_buffered": {"interest", "surface"},
-            "expected_changed": {"interest"},
+            "expected_buffered": {"interest", "surface", "values"},
+            "expected_changed": {"interest", "values"},
         },
         {
             "name": "DIALOGUE_TURN (1 signal)",
@@ -718,12 +698,12 @@ async def test_channel_eval_report(tmp_path: object, capsys: object) -> None:
             "expected_changed": {"interest"},
         },
         {
-            "name": "DIALOGUE_INSIGHT/goal (1)",
+            "name": "DIALOGUE_INSIGHT/value (1)",
             "signals": lambda: signals_from_dialogue(
-                [{"kind": "goal", "content": "用户希望转型为AI工程师", "confidence": 0.9}]
+                [{"kind": "value", "content": "用户重视持续学习", "confidence": 0.9}]
             ),
-            "expected_buffered": {"role"},
-            "expected_changed": {"role"},
+            "expected_buffered": {"values"},
+            "expected_changed": {"values"},
         },
         {
             "name": "ACCOUNT_SNAPSHOT",

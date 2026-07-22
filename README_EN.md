@@ -610,7 +610,6 @@ guided init: signals → preferences → full profile commit → discover → ev
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Soul cognition discipline: 3 write lines · ledger audit · confusions · deep posture gate (shadow) │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │

@@ -580,33 +580,30 @@ async def test_update_layer_exception_restores_signals(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_feedback_no_longer_triggers_portrait_regen(tmp_path: Path) -> None:
-    """FEEDBACK no longer routes to VALUES, so portrait regen is never attempted (P1).
-
-    A patched-to-raise ``regenerate_portrait`` must never be called — the pipeline
-    completes normally and only the fast-line INTEREST layer updates.
-    """
+async def test_regenerate_portrait_exception_does_not_break_pipeline(tmp_path: Path) -> None:
+    """A failure in portrait regeneration should be swallowed silently."""
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
 
+    # Patch regenerate_portrait to raise
     from openbiliclaw.soul import layer_updaters as lu_mod
 
     original = lu_mod.regenerate_portrait
-    called = False
 
     async def boom(**kwargs: Any) -> str:
-        nonlocal called
-        called = True
         raise RuntimeError("portrait broken")
 
     lu_mod.regenerate_portrait = boom  # type: ignore[assignment]
     try:
+        # Trigger a values update — this should attempt portrait regen and fail gracefully
         result = await pipeline.ingest(signal_from_feedback("like", "测试", ""))
     finally:
         lu_mod.regenerate_portrait = original  # type: ignore[assignment]
 
+    # The values update itself should still be reported
     layers = {r.layer for r in result.layers_updated}
-    assert OnionLayer.VALUES not in layers, "FEEDBACK must not update VALUES (P1 retired)"
-    assert called is False, "portrait regen must never fire from a FEEDBACK signal now"
+    assert OnionLayer.VALUES in layers, (
+        "Values update must still succeed even if portrait regen fails"
+    )
 
 
 # ===========================================================================
@@ -615,17 +612,19 @@ async def test_feedback_no_longer_triggers_portrait_regen(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_feedback_does_not_regenerate_portrait(tmp_path: Path) -> None:
-    """FEEDBACK no longer changes VALUES, so it must not regenerate the portrait (P1)."""
+async def test_portrait_regenerated_when_values_change(tmp_path: Path) -> None:
+    """A Values change must trigger portrait regeneration via ProfileBuilder."""
     pipeline, svc, _ = _make_low_threshold_pipeline(tmp_path)
 
+    # Snapshot how many portrait calls existed before
     portrait_calls_before = len(svc.portrait_calls)
 
+    # Feedback routes to values; values changes ⇒ portrait regen
     await pipeline.ingest(signal_from_feedback("like", "深度内容", "强反馈"))
 
     portrait_calls_after = len(svc.portrait_calls)
-    assert portrait_calls_after == portrait_calls_before, (
-        "FEEDBACK routes only to the fast line now — no portrait regen. "
+    assert portrait_calls_after > portrait_calls_before, (
+        f"Portrait regen should have been called. "
         f"Before={portrait_calls_before}, After={portrait_calls_after}"
     )
 
@@ -660,21 +659,16 @@ async def test_changelog_recorded_on_layer_change(tmp_path: Path) -> None:
     assert changelog_path.exists(), "Changelog file should be created"
     content = changelog_path.read_text(encoding="utf-8")
     assert "画像更新日志" in content
-    # FEEDBACK now routes to the fast line (INTEREST/SURFACE), not VALUES (P1).
-    assert "interest" in content.lower() or "兴趣" in content or "surface" in content.lower(), (
-        content
-    )
+    # Should mention values (FEEDBACK→VALUES)
+    assert "values" in content.lower() or "价值" in content, content
 
 
 @pytest.mark.asyncio
-async def test_state_insight_no_longer_updates_core(tmp_path: Path) -> None:
-    """A state-kind DIALOGUE_INSIGHT is inert in the pipeline — CORE write retired (P1).
-
-    The deep CORE layer changes only via a gated soul rebuild; the pipeline
-    neither buffers nor updates it from a state self-report.
-    """
+async def test_core_changed_true_branch_applies_traits_and_mbti(tmp_path: Path) -> None:
+    """When LLM returns changed=True for Core, traits/needs/MBTI must be applied."""
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
 
+    # Seed an existing profile so we can detect diffs
     seed_profile = OnionProfile()
     seed_profile.core.core_traits = ["旧特质"]
     seed_profile.core.deep_needs = ["旧需求"]
@@ -682,23 +676,28 @@ async def test_state_insight_no_longer_updates_core(tmp_path: Path) -> None:
     soul_layer.data.update(seed_profile.to_dict())
     soul_layer.save()
 
+    # Trigger Core via DIALOGUE_INSIGHT kind=state
     insight_signals = signals_from_dialogue(
         [{"kind": "state", "content": "用户正在深度思考人生方向", "confidence": 0.9}]
     )
     result = await pipeline.ingest(insight_signals[0])
 
     core_results = [r for r in result.layers_updated if r.layer == OnionLayer.CORE]
-    assert core_results == [], "CORE must never fire from a pipeline state insight now"
+    assert core_results, "Core update should fire"
+    core_result = core_results[0]
+    assert core_result.changed, "Core should report changed=True (mock returns changed=True)"
 
-    # The seeded core is untouched — no traits/MBTI applied.
+    # Reload profile and verify traits were applied
     reloaded = OnionProfile.from_dict(memory.get_layer("soul").data)
-    assert reloaded.core.core_traits == ["旧特质"]
-    assert reloaded.core.deep_needs == ["旧需求"]
+    assert "好奇心强" in reloaded.core.core_traits
+    assert "深度探索" in reloaded.core.core_traits
+    assert "对原理的深层理解" in reloaded.core.deep_needs
+    assert reloaded.core.mbti.type == "INTJ"
 
 
 @pytest.mark.asyncio
-async def test_state_insight_does_not_regenerate_portrait(tmp_path: Path) -> None:
-    """A state-kind insight is inert — no portrait regen (deep CORE write retired, P1)."""
+async def test_core_change_triggers_portrait_regen(tmp_path: Path) -> None:
+    """Core layer change must trigger portrait regeneration (Core is in trigger set)."""
     pipeline, svc, _ = _make_low_threshold_pipeline(tmp_path)
 
     portrait_calls_before = len(svc.portrait_calls)
@@ -708,9 +707,7 @@ async def test_state_insight_does_not_regenerate_portrait(tmp_path: Path) -> Non
     await pipeline.ingest(insight_signals[0])
 
     portrait_calls_after = len(svc.portrait_calls)
-    assert portrait_calls_after == portrait_calls_before, (
-        "state insight must not trigger portrait regen (pipeline deep write retired)"
-    )
+    assert portrait_calls_after > portrait_calls_before, "Core change must trigger portrait regen"
 
 
 # ===========================================================================
@@ -2948,24 +2945,22 @@ async def test_ingest_skips_layer_with_missing_buffer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_regenerate_portrait_returns_builder_output(tmp_path: Path) -> None:
-    """regenerate_portrait still builds a portrait when called directly.
-
-    The pipeline no longer dispatches deep layers (P1 retired) so this helper is
-    only reachable directly / for rebuild tooling; verify it still works.
-    """
-    from openbiliclaw.soul.layer_updaters import regenerate_portrait
-
+async def test_portrait_regen_success_writes_new_portrait(tmp_path: Path) -> None:
+    """When regenerate_portrait returns a non-empty string, it must be saved."""
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
-    profile = OnionProfile()
 
-    portrait = await regenerate_portrait(
-        profile=profile,
-        profile_builder=ProfileBuilder(registry=svc),
-        memory=memory,
+    # Trigger Core change → Core is in _PORTRAIT_TRIGGER_LAYERS
+    insight_signals = signals_from_dialogue(
+        [{"kind": "state", "content": "深度思考状态", "confidence": 0.9}]
     )
-    assert portrait, "regenerate_portrait should return the builder's portrait text"
-    assert "热爱技术探索" in portrait
+    await pipeline.ingest(insight_signals[0])
+
+    # Reload profile from disk and verify the portrait was written
+    reloaded = OnionProfile.from_dict(memory.get_layer("soul").data)
+    assert reloaded.personality_portrait, (
+        "Portrait should have been regenerated and saved to soul layer"
+    )
+    assert "热爱技术探索" in reloaded.personality_portrait
 
 
 @pytest.mark.asyncio
@@ -3084,186 +3079,3 @@ async def test_speculator_seed_ingestion_exception_is_swallowed(tmp_path: Path) 
     assert not any("猜测兴趣种子" in c for c in result.changes)
     # But other changes (like new interest) should still be there
     assert result.changed
-
-
-# ===========================================================================
-# P1 retirement — deep-buffer migration (deep-line consolidation)
-# ===========================================================================
-
-
-def _write_pipeline_state_with_deep_buffers(data_dir: Path) -> None:
-    """Persist a pipeline_state.json holding legacy VALUES/CORE buffer signals."""
-    memory_dir = data_dir / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    state = {
-        "version": 1,
-        "buffers": {
-            "values": {
-                "layer": "values",
-                "signals": [
-                    {
-                        "id": "sig1",
-                        "signal_type": "feedback",
-                        "timestamp": "2026-07-01T10:00:00",
-                        "source": "feedback",
-                        "payload": {"event_type": "like", "title": "深度学习纪录片", "id": 42},
-                        "confidence": 0.9,
-                    }
-                ],
-                "last_updated_at": "",
-                "update_count": 0,
-            },
-            "core": {
-                "layer": "core",
-                "signals": [
-                    {
-                        "id": "sig2",
-                        "signal_type": "dialogue_insight",
-                        "timestamp": "2026-07-02T11:00:00",
-                        "source": "dialogue",
-                        "payload": {"content": "用户在反思人生方向"},
-                        "confidence": 0.85,
-                    }
-                ],
-                "last_updated_at": "",
-                "update_count": 0,
-            },
-            "interest": {
-                "layer": "interest",
-                "signals": [],
-                "last_updated_at": "",
-                "update_count": 0,
-            },
-        },
-        "last_saved_at": "2026-07-02T11:00:00",
-        "total_signals_ingested": 2,
-    }
-    with open(memory_dir / "pipeline_state.json", "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-class _FakeLedger:
-    def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
-
-    def record(self, **kwargs: Any) -> None:
-        self.rows.append(dict(kwargs))
-
-
-@pytest.mark.asyncio
-async def test_migrate_pipeline_deep_buffers_converts_and_clears(tmp_path: Path) -> None:
-    """Legacy VALUES/CORE buffer signals become awareness notes; keys cleared; ledger row."""
-    from openbiliclaw.soul.pipeline import (
-        _PIPELINE_DEEP_MIGRATION_MARKER,
-        _PIPELINE_DEEP_MIGRATION_PREFIX,
-        migrate_pipeline_deep_buffers,
-    )
-
-    data_dir = Path(tmp_path)
-    _write_pipeline_state_with_deep_buffers(data_dir)
-    memory = MemoryManager(data_dir)
-    memory.initialize()
-    ledger = _FakeLedger()
-
-    added = migrate_pipeline_deep_buffers(data_dir, memory, ledger)
-    assert added == 2
-
-    notes = memory.get_layer("awareness").data.get("notes", [])
-    observations = [str(n.get("observation", "")) for n in notes]
-    assert all(o.startswith(_PIPELINE_DEEP_MIGRATION_PREFIX) for o in observations)
-    assert any("深度学习纪录片" in o for o in observations)
-    assert any("反思人生方向" in o for o in observations)
-    # Best-effort source_event_id backfill: the values signal carried id=42.
-    assert any(42 in n.get("source_event_ids", []) for n in notes)
-
-    # State: deep keys cleared, marker set.
-    with open(data_dir / "memory" / "pipeline_state.json", encoding="utf-8") as f:
-        state = json.load(f)
-    assert state[_PIPELINE_DEEP_MIGRATION_MARKER] is True
-    assert state["buffers"]["values"]["signals"] == []
-    assert state["buffers"]["core"]["signals"] == []
-
-    # Ledger row recorded the migration.
-    assert ledger.rows and ledger.rows[0]["write_point"] == "pipeline_deep_migration"
-
-
-@pytest.mark.asyncio
-async def test_migrate_pipeline_deep_buffers_is_idempotent(tmp_path: Path) -> None:
-    """Re-running the migration (marker set) adds nothing and touches no notes."""
-    from openbiliclaw.soul.pipeline import migrate_pipeline_deep_buffers
-
-    data_dir = Path(tmp_path)
-    _write_pipeline_state_with_deep_buffers(data_dir)
-    memory = MemoryManager(data_dir)
-    memory.initialize()
-
-    first = migrate_pipeline_deep_buffers(data_dir, memory, None)
-    assert first == 2
-    notes_after_first = len(memory.get_layer("awareness").data.get("notes", []))
-
-    # Marker short-circuits the re-run.
-    second = migrate_pipeline_deep_buffers(data_dir, memory, None)
-    assert second == 0
-    assert len(memory.get_layer("awareness").data.get("notes", [])) == notes_after_first
-
-
-@pytest.mark.asyncio
-async def test_migrate_dedup_on_crash_rerun_without_marker(tmp_path: Path) -> None:
-    """A crash before the marker write is safe: re-run dedups by content hash."""
-    from openbiliclaw.soul.pipeline import (
-        _PIPELINE_DEEP_MIGRATION_MARKER,
-        migrate_pipeline_deep_buffers,
-    )
-
-    data_dir = Path(tmp_path)
-    _write_pipeline_state_with_deep_buffers(data_dir)
-    memory = MemoryManager(data_dir)
-    memory.initialize()
-
-    migrate_pipeline_deep_buffers(data_dir, memory, None)
-    notes_after_first = len(memory.get_layer("awareness").data.get("notes", []))
-
-    # Simulate a crash BEFORE the marker/clear persisted: restore the raw signals
-    # and drop the marker, keeping the already-written awareness notes.
-    _write_pipeline_state_with_deep_buffers(data_dir)
-    state_path = data_dir / "memory" / "pipeline_state.json"
-    with open(state_path, encoding="utf-8") as f:
-        state = json.load(f)
-    assert _PIPELINE_DEEP_MIGRATION_MARKER not in state
-
-    added = migrate_pipeline_deep_buffers(data_dir, memory, None)
-    assert added == 0, "content-hash dedup must prevent duplicate notes on re-run"
-    assert len(memory.get_layer("awareness").data.get("notes", [])) == notes_after_first
-
-
-def test_buffered_layers_excludes_deep(tmp_path: Path) -> None:
-    """Reverse assertion: the pipeline no longer buffers VALUES/CORE at all."""
-    assert OnionLayer.VALUES not in _BUFFERED_LAYERS
-    assert OnionLayer.CORE not in _BUFFERED_LAYERS
-    # classify_signal never yields a deep layer for feedback or value/state insights.
-    assert OnionLayer.VALUES not in classify_signal(SignalType.FEEDBACK, {})
-    assert classify_signal(SignalType.DIALOGUE_INSIGHT, {"kind": "value"}) == frozenset()
-    assert classify_signal(SignalType.DIALOGUE_INSIGHT, {"kind": "state"}) == frozenset()
-
-
-@pytest.mark.asyncio
-async def test_update_layer_seals_values_and_core(tmp_path: Path) -> None:
-    """update_layer(VALUES|CORE) is a defensive no-op (invariant 1, F3)."""
-    from openbiliclaw.soul.layer_updaters import update_layer
-
-    memory = MemoryManager(Path(tmp_path))
-    memory.initialize()
-    profile = OnionProfile()
-    signals = [{"payload": {"event_type": "view", "title": "t", "content": "深度"}}]
-    for layer in (OnionLayer.VALUES, OnionLayer.CORE):
-        result = await update_layer(
-            layer=layer,
-            signals=signals,
-            profile=profile,
-            memory=memory,
-            preference_analyzer=None,  # type: ignore[arg-type]
-            profile_builder=None,  # type: ignore[arg-type]
-        )
-        assert result.changed is False
-    assert profile.values_layer.values == []
-    assert profile.core.core_traits == []

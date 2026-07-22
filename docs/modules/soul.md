@@ -58,17 +58,6 @@
 | 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新。`SocraticDialogue` 派发这条用户主动学习链时使用 task-local background-admission bypass：空库存或后台 LLM 暂停不会把 `soul.dialogue_insight` 永久 park，但所有 provider 调用仍经过 total gate。若本轮真正新增 `disliked_topics`，偏好落盘后会立即按新旧差集调度共享 `purge_pool_for_new_dislikes`：精确清池先执行，embedding + LLM 精判与完整画像重建并行；行为与手动画像编辑、反馈批处理和避雷探针一致，且不阻塞对话回复。对话 prompt 会如实区分本地长期画像/推荐过滤与平台自身推荐算法 |
-| 画像更新台账（`soul/ledger.py`，v0.3.174+） | ✅ | `ProfileLedger` 是画像写点的**只追加审计观察者**：动作结束后一次 `INSERT` 到 `profile_update_ledger`，行含 `outcome(success\|failed)`、before/after 摘要、`diff`（top-level changed keys，≤2000 字符）、`source_refs`、`turn_id`（对话/结算幂等观察键），以及为后续 Wave 预留的 `gate_verdict`（Phase 3 shadow_*）/`held_id`（Phase 2）。台账为 **best-effort**：写失败只记 WARNING，绝不阻断底层画像写入。`action()` 上下文管理器包裹写入动作，正常出块记 success、异常记 failed 并**重新抛出**（不改变原控制流）。枚举写点见下「[画像写点台账挂钩清单](#画像写点台账挂钩清单)」。CLI 查询：`openbiliclaw ledger [--line] [--days] [--write-point]` |
-| 觉察证据链（`AwarenessNote.note_id / source_event_ids`，v0.3.174+） | ✅ | `AwarenessNote` 新增生成式 `note_id`（uuid hex 前 12）、`source_event_ids`（本轮 cursor 消费的事件 id）与 `source_event_ids_approximate`（归属为**按轮**非按 note——LLM 不把观察映射到具体事件，故整批挂到每条 note 并标注近似）。`analyze()` 新增可选 `source_event_ids`，觉察 prompt 一字不动（回放不变性）；`cognition_cycle` 传入每批事件 id。向后兼容:旧 note 缺字段默认空。是 Wave B 疑惑 evidence_refs 的前置 |
-| 对话学习串行队列（`soul/dialogue_learn_queue.py`，v0.3.174+） | ✅ | `learn_from_dialogue` 不再每轮 `asyncio.create_task`（相邻轮会交错 read/merge/write 共享偏好/画像）；改由 `DialogueLearnQueue` 单 worker 串行消费。worker **自持生命周期**（不入 `cancel_all` 注册表）：热重载在 `cancel_all` **之前** pause-drain 旧队列,构建成功停旧启新、构建失败回滚 resume 旧队列;进程退出经 shutdown 钩子 drain。`SocraticDialogue` 注入 queue 时投递、否则回退旧 detached-task 路径（CLI/OpenClaw） |
-| 对话窗口 + 回灌（v0.3.174+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮(≤窗口字节不变,provider 缓存不破)。回灌**仅 popup + scope='chat' + completed** 的 `chat_turns`(重启后恢复对话线索);CLI 无 DB、probe/confusion scope 带前缀语境,均不回灌 |
-| 对话结算 settles（v0.3.174+） | ✅ | `build_dialogue_insight_prompt` 收敛为模块级静态 system + `sort_keys=True`(prompt-cache 合规,入 invariance 清单),新增 `active_list` 注入(推测兴趣按 `domain` ≤10 / 洞察按内容 hash8 / 疑惑按 id——Wave A 疑惑为空)。`extract()` 返回 `{candidates, settles}`;`learn_from_dialogue` **仅 scope='chat'** 处理 settles(单一所有权:probe/confusion 归 durable 侧效应),白名单=当轮注入清单(未见 ref 丢弃+WARNING),结算调既有 `user_confirm/reject_speculation`(domain)/`update_from_feedback`(insight)并进台账(带 turn_id,幂等)。hash8=SHA-256(NFC+strip+空白折叠)hex 前 8,清单内碰撞升 hex16、仍碰撞跳过 |
-| 疑惑对象「看不懂」（`soul/confusion.py` + `confusions` 表，v0.3.175+） | ✅ | 当系统无法干净解读某行为时产出**疑惑**（不写画像，只驱动澄清与冻结）。两产生源：①觉察——`analyze_with_confusions()` + 独立 builder `build_awareness_with_confusions_prompt`（静态 system，入 invariance 清单；`analyze()`/`build_awareness_prompt` 一字不动，`cognition_cycle` 切新 API 属有意变更），候选 ≤2/轮、白名单校验落库；②推测僵局——`SpeculatorTickResult.stalemate`=expire 时 `0<confirmation_count<threshold`（现存字段判定），pipeline 转疑惑。状态机 `open→clarifying→resolved\|dismissed`（+TTL `expired`）；`clarifying` 全局 ≤1 由 partial unique index 跨连接原子保证。TTL 扫描并入 12h `cognition_cycle` |
-| 疑惑澄清三路 + 三出口 + 冻结（v0.3.175+） | ✅ | **ask**：durable chat `scope="confusion"`，`schedule_ask` claim `clarifying` + 72h 冷却持久化于 `asked_at`（重启不复问），`defer` 复用探针忽略语义（回 open、保冷却）；**wait**：14 天 TTL；**probe** 复用现有探针域。三出口 `resolve()`：`real_interest`→held 更新重放、`proxy_behavior`→丢弃 held、`dismissed`。durable `scope="confusion"` 侧效应按情绪判断结算（单一所有权，不走 settles）。**冻结**：`apply_confusion_freeze` 在对话偏好写 chokepoint 拦截——冻结 topic 的新增/上调搁置进 `held_updates`（**已有权重不回滚**），无疑惑时零差异。held 状态机 `held→replaying→applied\|applied_unverified\|discarded`：`_begin_replay` 将 replaying 与回执（`replay_submitted_at+batch_id`）写同一 SQLite 事务；崩溃恢复 `recover_replaying` 见回执置 `applied_unverified`（**不重复提交，宁漏勿双计**），无回执重试至 `replay_attempts=2` 后丢弃 |
-| 态势门控（`soul/posture_gate.py`，v0.3.176+） | ✅ | 深层写入一致性门控（Phase 3）。`build_posture_gate_prompt` 静态 system（三判定 accept/downgrade/reject + 「冲突不是错误是新假设」）+ `sort_keys`（入 invariance 清单）。`PostureGate` 三模式：`off`=完全旁路、**门控 LLM 零调用**、逐字节等价；`shadow`(默认)=**commit boundary 捕获不可变快照**（before/after/source_refs/gate_id），异步旁路任务只消费快照（判定前对活状态再写入不污染判定，带断言）、判定落台账 `shadow_*`、LLM 异常落 `shadow_error`、**零延迟不阻塞原写入**；`enforce`=同步判定，异常/解析失败/非白名单 verdict 保守 downgrade（`GateDecision.is_error` 区分：真实 downgrade 判定 `is_error=False`，LLM/解析**异常**强制的 downgrade `is_error=True`，供重建调用方决定清标或保留重试）。**深层线归一后**（见「深层影响唯一模式」），有效接入点为两条：①对话 goal/value/state 深层候选（interest/dislike 快线不过；downgrade 置信=confidence×0.6 转 insight）；③soul 整份重建，泛化承载三触发源（dialogue / feedback_batch / confirmed_hypotheses），downgrade/reject→放弃本次 rebuild + 台账。**接入点②（管线 VALUES/CORE 层 updater 门控）已随 P1 退役**：`update_layer` 对 VALUES/CORE 直接封死 no-op + WARNING，不再有逐层门控。新 caller `soul.posture_gate` 注册 usage recorder。enforce 受 save-time 三条件校验（见 config.md，`posture_gate_force_enforce` 逃生门） |
-| 疑惑代理行为证据折价（v0.3.176+） | ✅ | 疑惑 `resolve()` 走 `proxy_behavior`（误读）出口时，对 `evidence_refs` 中可解析为事件 id 的关联事件调用 `Database.discount_events_by_confusion`（`sources/event_format.apply_confusion_discount`）：盖 `metadata.discounted_by_confusion=true` + `signal_strength` 折至 0.2（与 retraction 折价同底、幂等不回升）。非 id ref（话题/note）跳过；`real_interest` 出口不折价 |
-| topic 生命周期状态机（`soul/topic_lifecycle.py`，v0.3.177+） | ✅ | interest（flat 与 Onion domain 两层）叠加状态元数据 `state ∈ {trial\|active\|decaying\|archived}` + `evidence_count` + `last_evidence_at` + `parent_topic`；旧数据缺字段默认 `active`，且**默认 `active` 的 topic 序列化不写这些键**（回放门：`interest_tag_to_dict` 只在非默认时 emit）。跃迁（常量带首轮校准注释，见模块 docstring）：新 topic 首见→`trial`；证据 ≥5 **或** 持续 ≥7 天→`active`（`apply_evidence`，接在 `analyze_events`/`learn_from_dialogue`/反馈批的偏好写 chokepoint，每次分析计一次证据）；`last_evidence_at` 静默 ≥30 天→`decaying`（权重×0.5）；再 ≥30 天（共 60 天）→`archived`（不删）；`archived`/`decaying` 遇新证据→直接复燃 `active`；**衰减扫描 `scan_lifecycle` 并入 12h `ProfileConsolidator`**（`last_evidence_at` 缺失的旧 topic 永不被扫衰减，避免启用即团灭）；**dislike 改「归档+避雷」**（`archive_topics`：匹配 topic 置 `archived` 保留台账，不再从库删）；**细分提议**（子类占父域权重 ≥60%）只经 `topic_subdivision_proposal` 记台账不执行（shadow）。所有跃迁进 `profile_update_ledger`（`topic_lifecycle` 写点）。**最小消费**：见下「觉察提炼节奏」下方 `topic_lifecycle_serialization` 开关（默认 off） |
-| 觉察提炼节奏（`soul/cognition_cycle.py`，v0.3.177+） | ✅ | 除 12h 兜底节流外新增**提前触发**：awareness 水位线之后未提炼事件 ≥30 条 **或** 出现强信号事件（`comment/danmaku/reply` 带文本、`feedback`、或 `inferred_satisfaction∈{positive,negative}`）→ 本 tick 立即跑觉察（`_should_early_trigger`）。**单飞锁** `asyncio.Lock`：`run_if_due` 见锁被持有即跳过（`throttled`），due-check 与 watermark 消费全在锁内（重叠 tick / 提前触发抢跑 12h tick 都恰一执行）。state JSON 写入 **tmp+fsync+`os.replace`** 原子化（写崩不损坏 watermark）；awareness 批失败/取消时 `last_awareness_event_id` 不前进、`last_awareness_at` 不推进（下轮重做）。同批事件 awareness prompt 输出路径不变（回放不变性） |
 | 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
 | 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
@@ -86,8 +75,7 @@
 | 桌面 Web 探针即时反馈与撤销 | ✅ | 正向兴趣和避雷探针的 `confirm / reject / defer` 在消息抽屉与画像页复用同一稳定 action key，先即时隐藏或更新卡片，再保留 10 秒撤销窗口；撤销不调用 respond API，提交失败恢复原卡。`chat` 需要对话回复和情绪分类，继续直接调用后端，不进入可撤销屏障。 |
 | 短期探索 buffer | ✅ | `exploration_buffer.py` 把弱正向聊天、推荐喜欢、惊喜喜欢、普通点击和负反馈汇总到 `discovery_runtime_state["short_term_exploration_buffer"]`；7 天内显式弱证据累计到阈值后以 `buffer_promoted` 写回兴趣，负向反馈会进入 48h 冷却并抵消分数 |
 | 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
-| ROLE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）；ROLE 是最深的快线层，仍由 pipeline 增量更新 |
-| ~~VALUES/CORE 增量更新器~~（P1 已退役） | ⛔ | `_update_values` / `_update_core` 仍作为 delta-prompt 库函数保留（直接工具/潜在重建输入复用），但**已从 pipeline dispatch 摘除**：`update_layer` 对 VALUES/CORE 封死 no-op + WARNING。深层变更改由「假设确认 → 门控下 soul 重建」唯一模式驱动，见下文「深层影响唯一模式」 |
+| ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
 | v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
 | v0.3.147 画像上下文缓存前缀保护 | ✅ | PreferenceAnalyzer、ProfileBuilder、AwarenessAnalyzer、InsightAnalyzer、InterestSpeculator 和 AvoidanceSpeculator 的结构化 prompt 已经把 history / preference / soul_profile / profile_summary 放在 user message；调用 `LLMService` 时在支持路径上关闭额外 core memory 注入，避免把同一份动态画像再次拼进 system prompt |
 
@@ -295,40 +283,6 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 - `src/openbiliclaw/soul/dislike_writeback.py` — confirmed dislike 写回、profile 同步和候选池清理
 - `src/openbiliclaw/llm/prompts.py` — `build_avoidance_generation_prompt()`
 - `tests/test_avoidance_speculator.py` — avoidance lifecycle / novelty / probe selection 单元测试
-
-## 画像写点台账挂钩清单
-
-> 认知画像流水线 Phase 0。以下每个画像写点在动作结束后经 `ProfileLedger`（`soul/ledger.py`）追加一行台账（best-effort，写失败只 WARNING）。**新增画像写点必须补挂钩并更新本清单（code review 义务）。**
-
-| # | 写点 | write_point | 实现位置 |
-|---|------|-------------|----------|
-| 1a | 对话学习偏好覆写 | `dialogue_preference_overwrite` | `engine.learn_from_dialogue` |
-| 1b | 对话学习整份重建 | `dialogue_soul_rebuild` | `engine.learn_from_dialogue` |
-| 2 | dislike 清池 | `dislike_purge` | `engine.learn_from_dialogue`（调度时记录） |
-| 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（SURFACE/INTEREST/ROLE 快线层 changed 时，每层一行；VALUES/CORE 已封死不写） |
-| 4a | 反馈批偏好覆写 | `feedback_preference_overwrite` | `engine._process_feedback_batch_if_needed_locked` |
-| 4b | 反馈批整份重建（P2 已过门控③） | `feedback_soul_rebuild` | `engine._process_feedback_batch_if_needed_locked` |
-| 1c | 确认假设攒批整份重建 | `hypotheses_soul_rebuild` | `engine._execute_pending_rebuild`（rebuild_pending 状态机） |
-| — | P1 退役深层缓冲迁移（一次性） | `pipeline_deep_migration` | `pipeline.migrate_pipeline_deep_buffers`（构造时幂等运行） |
-| 5 | 推测 promote/confirm/reject | `speculation_promote` / `speculation_confirm` / `speculation_reject` | `speculator`（引擎构造时 `attach_ledger`） |
-| 6 | 12h 整理 应用 / 回滚 | `consolidation_apply` / `consolidation_revert` | `consolidator.run` / `consolidator.revert` |
-| 7 | init 全量建像（偏好 + soul） | `init_preference_build` / `init_soul_build` | `engine.analyze_events` / `engine.build_initial_profile` |
-| 8 | cognition sync（觉察/洞察 → soul） | `cognition_sync` | `cognition_cycle._sync_to_profile` |
-| — | 对话结算（Phase 1） | `settle_speculation` / `settle_insight` | `engine._process_dialogue_settles`（带 turn_id） |
-
-> `init_soul_build` 是实现中发现的清单外写点（原 clist #7 只点名偏好写入），已一并挂钩。CLI 观测：`openbiliclaw ledger --line` / 按写点聚合 `openbiliclaw ledger`；shadow 门控采数（Phase 3）：`SELECT gate_verdict, COUNT(*) FROM profile_update_ledger WHERE gate_verdict LIKE 'shadow_%' GROUP BY 1`。
-
-## 深层影响唯一模式（深层线归一，v0.3.178+）
-
-深层画像（VALUES/CORE 层与 soul 层）的**事件驱动影响收敛为唯一模式**：**「假设（验证 confirmed）→ 攒批去抖 → 门控下 soul 重建」**。规格见 `docs/plans/2026-07-22-deep-line-consolidation-spec.md`。三条历史直写路径的处置：
-
-- **P1 退役**：pipeline 不再消费 VALUES/CORE。`_BUFFERED_LAYERS` 摘除这两层；`FEEDBACK` 只路由 interest+surface；对话 `value/state` kind 在 pipeline 内失活（深层自述改走接入点①）。`update_layer(VALUES|CORE)` 封死为 no-op + WARNING（代码级封死，防止未来重新接线）。**一次性迁移**：`migrate_pipeline_deep_buffers` 在构造时幂等运行，把持久化 buffer 中残留的 VALUES/CORE 信号确定性转成 awareness note（内容前缀 `[migration:pipeline-deep]`，内容 hash 去重，marker + 台账行，清空旧键；崩溃重跑靠去重幂等）。
-- **P2 补门控**：反馈批显著变化的整份重建此前**绕过所有门控**，现已接入接入点③（`feedback_soul_rebuild` 写点）；enforce downgrade/reject 会放弃本次重建。
-- **P3 对话深层 candidates**（接入点①）：保留，行为不变。
-
-**重建输入过滤**：所有 soul 重建（dialogue / feedback_batch / confirmed_hypotheses）只纳入 `validated=True 且 confidence>=0.75` 的假设（`_rebuild_active_insights`）——rejected/未验证假设对重建不可见，因此一次 reject 的下一次重建会把旧结论**挤出**。
-
-**rebuild_pending 状态机**（`engine.py`，持久化于 `memory/rebuild_pending_state.json`）：`update_from_feedback` 是 confirm/reject 的单一入口，两者都置 `rebuild_pending {set_at, trigger_refs, retry_count}`（新迁移重新置标=「新证据重开」，重置 retry）。去抖 `_DEEP_REBUILD_DEBOUNCE_HOURS=6` 后由 12h 认知循环 / 下一次对话学习 / 反馈批触发门控重建（trigger=`confirmed_hypotheses`）。清标语义：门控 accept+重建成功→清标；真实 downgrade/reject（`is_error=False`）→清标 + 记 `last_gate_refusal`（本批放弃，新 confirm/reject 重开，无无限重试）；LLM/解析异常或重建异常（`is_error=True`）→保留 pending、`retry_count+1`，达 `_REBUILD_MAX_RETRIES=2` 后清标 + WARNING（有界）。构建期间释放锁允许并发 re-mark，用 `set_at` compare-and-swap 对账；重启后 `_rebuild_running` 复位、marker 持久化自动恢复。
 
 ## 画像更新逻辑详解
 

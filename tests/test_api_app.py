@@ -2018,15 +2018,11 @@ class TestBackendAPI:
                 session: str,
                 tools: object | None = None,
                 tool_dispatcher: object | None = None,
-                learn_queue: object | None = None,
-                database: object | None = None,
             ) -> None:
                 self.llm = llm
                 self.soul_engine = soul_engine
                 self.llm_service = llm_service
                 self.session = session
-                self.learn_queue = learn_queue
-                self.database = database
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
@@ -6542,13 +6538,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.messages: list[str] = []
 
-            async def respond(
-                self,
-                user_message: str,
-                *,
-                scope: str = "chat",
-                turn_id: str = "",
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 self.messages.append(user_message)
                 await asyncio.sleep(0.01)
                 return "这部番像是从另一个角度补上你的口味。"
@@ -7877,9 +7867,7 @@ class TestBackendAPI:
         from fastapi.testclient import TestClient
 
         class FakeDialogue:
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 assert user_message == "我最近总在看国际新闻"
                 return "你更在意的是它背后的逻辑，还是事件本身的冲突感？"
 
@@ -7902,9 +7890,7 @@ class TestBackendAPI:
         from openbiliclaw.llm.service import LLMResponseContentError
 
         class FakeDialogue:
-            async def respond(
-                self, _user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _user_message: str) -> str:
                 raise LLMResponseContentError("LLM returned an empty response")
 
         app = create_app(
@@ -7926,9 +7912,7 @@ class TestBackendAPI:
         from fastapi.testclient import TestClient
 
         class FakeDialogue:
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 return user_message
 
         app = create_app(
@@ -8096,9 +8080,7 @@ class TestBackendAPI:
         from fastapi.testclient import TestClient
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 return "懂，这就是你想看的那类。"
 
         class FakeMemoryManager:
@@ -8179,9 +8161,7 @@ class TestBackendAPI:
         from fastapi.testclient import TestClient
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 return "可以，先把它当作一个轻量方向。"
 
         class FakeMemoryManager:
@@ -8256,9 +8236,7 @@ class TestBackendAPI:
         from fastapi.testclient import TestClient
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 return "可以，先轻量试试。"
 
         class FakeMemoryManager:
@@ -8323,9 +8301,7 @@ class TestBackendAPI:
                 raise RuntimeError("classifier unavailable")
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 return "我先理解成你还在犹豫。"
 
         class FakeMemoryManager:
@@ -8802,9 +8778,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.messages: list[str] = []
 
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 self.messages.append(user_message)
                 await asyncio.sleep(0.05)
                 return "你更在意的是它背后的逻辑。"
@@ -8863,63 +8837,6 @@ class TestBackendAPI:
         assert restored["items"][0]["status"] == "completed"
         assert restored["items"][0]["reply"] == "你更在意的是它背后的逻辑。"
 
-    def test_confusion_scope_durable_turn_resolves_via_side_effect(self, tmp_path: Path) -> None:
-        """A durable scope="confusion" turn settles the confusion (single owner).
-
-        The reply's sentiment (keyword fallback, no LLM) decides the exit:
-        a positive answer confirms real interest and resolves the confusion.
-        The confusion is settled by the durable side-effect path only —
-        NOT by ``learn_from_dialogue`` settles (single ownership).
-        """
-        import time
-        from types import SimpleNamespace
-
-        from fastapi.testclient import TestClient
-
-        from openbiliclaw.soul.confusion import ConfusionManager
-        from openbiliclaw.storage.database import Database
-
-        class FakeDialogue:
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
-                return "明白了"
-
-        db = Database(tmp_path / "openbiliclaw.db")
-        db.initialize()
-        confusion_id = db.insert_confusion(topic="解压视频", observation="停留很短")
-        manager = ConfusionManager(db)
-        soul_engine = SimpleNamespace(_confusion_manager=manager)
-        app = create_app(
-            memory_manager=object(),
-            database=db,
-            soul_engine=soul_engine,
-            dialogue=FakeDialogue(),
-        )
-
-        with TestClient(app) as client:
-            client.post(
-                "/api/chat/turns",
-                json={
-                    "turn_id": "turn-confusion-1",
-                    "session": "popup",
-                    "scope": "confusion",
-                    "subject_id": str(confusion_id),
-                    "subject_title": "解压视频",
-                    "message": "我就喜欢",  # strong_positive keyword → real_interest
-                },
-            )
-            for _ in range(50):
-                time.sleep(0.02)
-                turn = client.get("/api/chat/turns/turn-confusion-1").json()
-                if turn["status"] == "completed":
-                    break
-            assert turn["status"] == "completed"
-
-        stored = manager.get(confusion_id)
-        assert stored.status == "resolved"
-        assert stored.resolution == "real_interest"
-
     @pytest.mark.parametrize(
         ("failure", "expected_fragment"),
         [
@@ -8948,9 +8865,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def respond(
-                self, _user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _user_message: str) -> str:
                 self.calls += 1
                 raise failure
 
@@ -8998,9 +8913,7 @@ class TestBackendAPI:
         from openbiliclaw.storage.database import Database
 
         class FakeDialogue:
-            async def respond(
-                self, _user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _user_message: str) -> str:
                 return "   "
 
         db = Database(tmp_path / "openbiliclaw.db")
@@ -9050,9 +8963,7 @@ class TestBackendAPI:
                 super().complete_chat_turn(turn_id, reply=reply)
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 order.append("dialogue")
                 return "这是真实回复"
 
@@ -9128,9 +9039,7 @@ class TestBackendAPI:
                 super().fail_chat_turn(turn_id, error=error, reply=reply)
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 return "已经完成的真实回复"
 
         db = FailingCompletionDatabase(tmp_path / "openbiliclaw.db")
@@ -9172,9 +9081,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.messages: list[str] = []
 
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 self.messages.append(user_message)
                 await asyncio.sleep(0.01)
                 return "这条像是从另一个角度补上你的问题。"
@@ -9234,9 +9141,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.messages: list[str] = []
 
-            async def respond(
-                self, user_message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, user_message: str) -> str:
                 self.messages.append(user_message)
                 await asyncio.sleep(0.01)
                 return "懂，这类你更像是在避开低信息密度。"
@@ -9912,7 +9817,7 @@ class TestBackendAPI:
                 self.updates = updates
 
         class FakeDialogue:
-            async def respond(self, message: str, *, scope: str = "chat", turn_id: str = "") -> str:
+            async def respond(self, message: str) -> str:
                 assert "惊喜推荐" in message
                 return "继续聊"
 
@@ -9974,9 +9879,7 @@ class TestBackendAPI:
         from openbiliclaw.llm.service import LLMResponseContentError
 
         class FakeDialogue:
-            async def respond(
-                self, _message: str, *, scope: str = "chat", turn_id: str = ""
-            ) -> str:
+            async def respond(self, _message: str) -> str:
                 raise LLMResponseContentError("LLM returned an empty response")
 
         class FakeMemory:
@@ -12419,7 +12322,7 @@ def test_probe_chat_sentiment_uses_plain_text_llm_call() -> None:
             return SimpleNamespace(content="positive")
 
     class FakeDialogue:
-        async def respond(self, _message: str, *, scope: str = "chat", turn_id: str = "") -> str:
+        async def respond(self, _message: str) -> str:
             return "懂，你更喜欢和 VOCALOID 相关的部分。"
 
     class FakeSpeculator:
@@ -16236,7 +16139,7 @@ def _make_defer_app(interest_defer=None, avoidance_defer=None, llm_reply="neutra
             return SimpleNamespace(content=llm_reply)
 
     class FakeDialogue:
-        async def respond(self, _message: str, *, scope: str = "chat", turn_id: str = "") -> str:
+        async def respond(self, _message: str) -> str:
             return "好的，我记住了。"
 
     class FakeInterestSpeculator:
