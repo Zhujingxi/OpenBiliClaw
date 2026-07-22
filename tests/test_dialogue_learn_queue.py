@@ -77,6 +77,34 @@ async def test_handler_receives_payload_kwargs() -> None:
             "session": "popup",
             "scope": "chat",
             "turn_id": "t-1",
+            "anchor_ref": "",
+            "anchor_generation": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_anchor_snapshot_is_captured_when_turn_is_submitted() -> None:
+    seen: list[dict[str, Any]] = []
+    snapshot: dict[str, object] = {
+        "anchor_ref": "first",
+        "anchor_generation": 3,
+    }
+
+    async def handler(**kwargs: Any) -> None:
+        seen.append(kwargs)
+
+    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(snapshot))
+    queue.start()
+    await queue.submit({"tag": "turn"})
+    snapshot.update(anchor_ref="replacement", anchor_generation=4)
+    await queue.shutdown()
+
+    assert seen == [
+        {
+            "tag": "turn",
+            "anchor_ref": "first",
+            "anchor_generation": 3,
         }
     ]
 
@@ -234,6 +262,8 @@ async def test_dialogue_respond_threads_scope_and_turn_id_via_queue() -> None:
             "session": "popup",
             "scope": "confusion",
             "turn_id": "conf-7",
+            "anchor_ref": "",
+            "anchor_generation": 0,
         }
     ]
 

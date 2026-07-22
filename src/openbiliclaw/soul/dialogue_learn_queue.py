@@ -37,7 +37,7 @@ class DialogueLearnQueue:
 
     ``handler`` is an async callable invoked with the payload's keyword
     arguments (``user_message`` / ``assistant_reply`` / ``session`` /
-    ``scope`` / ``turn_id``).
+    ``scope`` / ``turn_id`` / ``anchor_ref`` / ``anchor_generation``).
     """
 
     def __init__(
@@ -45,9 +45,11 @@ class DialogueLearnQueue:
         handler: Callable[..., Awaitable[Any]],
         *,
         name: str = "dialogue_learn_worker",
+        anchor_provider: Callable[[], Mapping[str, object]] | None = None,
     ) -> None:
         self._handler = handler
         self._name = name
+        self._anchor_provider = anchor_provider
         self._queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._accepting = True
@@ -157,7 +159,26 @@ class DialogueLearnQueue:
         # Lazily start the worker if ``start`` was called before a loop existed.
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run(), name=self._name)
-        await self._queue.put(payload)
+        queued_payload = dict(payload)
+        anchor_snapshot: Mapping[str, object] = {}
+        if self._anchor_provider is not None:
+            try:
+                anchor_snapshot = self._anchor_provider()
+            except Exception:
+                logger.warning("Failed to capture dialogue anchor snapshot", exc_info=True)
+        queued_payload["anchor_ref"] = str(anchor_snapshot.get("anchor_ref", "") or "")
+        try:
+            raw_generation = anchor_snapshot.get("anchor_generation", 0)
+            if not isinstance(raw_generation, (int, str)):
+                raise TypeError
+            queued_payload["anchor_generation"] = max(
+                0,
+                int(raw_generation),
+            )
+        except (TypeError, ValueError):
+            logger.warning("Invalid dialogue anchor generation in snapshot; using zero")
+            queued_payload["anchor_generation"] = 0
+        await self._queue.put(queued_payload)
         depth = self._queue.qsize()
         if depth >= _QUEUE_DEPTH_WARN:
             logger.warning(

@@ -1277,7 +1277,12 @@ class RuntimeContext:
         from openbiliclaw.sources.tools import SOURCE_TOOLS, SourceToolDispatcher
 
         source_tool_dispatcher = SourceToolDispatcher(self.database)
-        new_learn_queue = DialogueLearnQueue(_build_dialogue_learn_handler(new_soul_engine))
+        anchor_manager = getattr(new_soul_engine, "_dialogue_anchor_manager", None)
+        anchor_provider = getattr(anchor_manager, "snapshot", None)
+        new_learn_queue = DialogueLearnQueue(
+            _build_dialogue_learn_handler(new_soul_engine),
+            anchor_provider=anchor_provider if callable(anchor_provider) else None,
+        )
         new_dialogue = SocraticDialogue(
             llm=None,
             soul_engine=new_soul_engine,

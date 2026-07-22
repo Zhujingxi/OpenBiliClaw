@@ -31,6 +31,7 @@ from .cognition_cycle import (
 )
 from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
+from .dialogue_anchor import DialogueAnchorManager
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
@@ -331,6 +332,11 @@ class SoulEngine:
         # Confusion state machine over the same database — drives the topic
         # freeze reflex at the dialogue preference write chokepoint (Phase 2).
         self._confusion_manager = ConfusionManager(self._ledger_database, self._ledger)
+        self._dialogue_anchor_manager = DialogueAnchorManager(
+            data_dir,
+            database=self._ledger_database,
+            ledger=self._ledger,
+        )
         # Wire the same ledger into the speculator so promote/confirm/reject
         # write points (D5 #5) land in the same audit trail.
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
@@ -1018,6 +1024,8 @@ class SoulEngine:
         session: str,
         scope: str = "chat",
         turn_id: str = "",
+        anchor_ref: str = "",
+        anchor_generation: int = 0,
     ) -> dict[str, object]:
         """Persist a chat turn and update long-term understanding when warranted.
 
@@ -1027,6 +1035,7 @@ class SoulEngine:
         settled by the durable side-effect path (single ownership). ``turn_id``
         is stamped on the ledger rows as an idempotency observation key.
         """
+        del anchor_ref, anchor_generation  # Consumed by the Task 2 relation handler.
         await self._memory.propagate_event(
             {
                 "event_type": "dialogue",
