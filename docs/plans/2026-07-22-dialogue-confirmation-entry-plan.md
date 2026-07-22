@@ -2,14 +2,14 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-22-dialogue-confirmation-entry-spec.md`](./2026-07-22-dialogue-confirmation-entry-spec.md)
-> **Status:** r6 — codex 第五轮 F32-F36 已修订,待第六轮 review
+> **Status:** r7 — codex 第六轮 F37-F38 已修订,待第七轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6)→ Wave D(Task 7)。每 Wave 完成其文档子集方可交付。
 > **Tech:** Python:仓库 `.venv/bin/python` + worktree 根 + `PYTHONPATH=$PWD/src`(import 自查);测试前 `mv config.toml /tmp/dce_config_stash.toml`,结束**必须还原并 diff 确认原件**(5070 字节含 source_incremental_hours);`ruff format/check src/ tests/`;`mypy src/`(strict)。扩展:`cd extension && npm test && npm run typecheck && npm run build`。**桌面端 = `src/openbiliclaw/web/desktop/assets/js/`(session="webui"),移动端 = `src/openbiliclaw/web/js/`(本版仅只读化)**。
 
 **Invariants that MUST hold — re-read before each task:**
 
 - 唯一主动 UI 入口 + legacy 端点转发兼容(source=legacy_endpoint 台账)。
-- 结算:仲裁 INSERT OR IGNORE;冲突分流(applied=1→already_settled;=0→接管路径,不谎报终态);claim+fencing token(段写带 token WHERE,旧执行者被拒);每段自身幂等;投影只认 applied=1;discuss 先 CAS(记 discussing_at)同请求建锚、校正带 5min 宽限;投影批量 patch+读取兜底。
+- 结算:仲裁 INSERT OR IGNORE;冲突分流(applied=1→already_settled;=0→接管路径,不谎报终态);claim+fencing token;event 段=同事务原子占位+INSERT(token+seg 双条件,停顿恢复必失配);其它段幂等;投影只认 applied=1;discuss 先 CAS(记 discussing_at+attempt_token)同请求建锚(建锚校验 token)、校正带 5min 宽限且清 token 拒旧请求;投影批量 patch+读取兜底。
 - 一个大脑多个屏幕:单一 history 回灌全部 {chat,hypothesis,confusion} completed turn 不分 session;前端按 session 过滤显示;durable 逐请求传 session;附着=消息处理流程内先 INSERT 卡片,排序 (created_at, rowid);去重范围 **(ref, session)**(跨 session 各自产卡,投影由结算表统一)。
 - 锚:≤1;解除四条;confusion 非结算解锚回 open;generation 快照失配丢弃;anchor 含 origin_turn_id(结算时 patch 来源卡片终态)与 ambiguous_count(非 ambiguous 清零)。
 - confusion 结算唯一所有者=锚处理器;失败不吞:replay_queue 持久有序小队列(上限5),队头依序处理失败停原位,新轮入队尾不越序,四种锚释放清空+台账,12h 兜底。
@@ -81,7 +81,7 @@
 
 **Steps:**
 
-- [ ] Failing tests:卡片 turn 创建(completed+worker guard);action 四种(**冲突分流:applied=1→already_settled、=0→接管(r6/F32);claim+fencing:旧执行者段写被 token 拒(r6/F33);故障注入各段含「段成功标志未写崩溃→重做且段幂等不双写」;5min 超时接管**);同 ref 并发相反 action 恰一赢;投影只认 applied=1+批量 patch+读取兜底+跨 session 刷新;discuss 顺序/回滚/**5min 宽限校正(r6/F35)**;**跨 session open 各自产卡正向测试(r6/F36)**;legacy 转发等价。
+- [ ] Failing tests:卡片 turn 创建(completed+worker guard);action 四种(**冲突分流:applied=1→already_settled、=0→接管(r6/F32);claim+fencing;**event 段同事务占位+INSERT,停顿-接管-恢复交错不双写(r7/F37)**;故障注入各段;5min 超时接管**);同 ref 并发相反 action 恰一赢;投影只认 applied=1+批量 patch+读取兜底+跨 session 刷新;discuss 顺序/回滚/5min 宽限校正/**attempt_token fencing:校正后旧请求恢复建锚被拒(r7/F38)**;**跨 session open 各自产卡正向测试(r6/F36)**;legacy 转发等价。
 - [ ] Failing tests(进流,r4/F26):回灌含 hypothesis/confusion scope 轮次(probe 仍排除);**跨 session 单一 history 回灌**(popup+webui 的 completed turn 全部进同一 history,时间序);前端列表按 session 过滤仅影响显示(API 过滤参数测试)。
 - [ ] Confirm FAIL → 实现 → PASS;回归 + ruff + mypy。
 
