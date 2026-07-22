@@ -51,6 +51,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `recommend` | 查看推荐 | ✅ |
 | `feedback <id> <like\|dislike\|comment\|dismiss>` | 对推荐提交反馈 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
+| `questions` | 只读查看对话确认入口的待聊假设与疑惑 | ✅ |
 | `keyword-inspiration-dry-run` | 真实调用当前 LLM + inspiration 搜索 provider 链，预览关键词生成中间链路，不写关键词池；支持 `--persist-axes` | ✅ |
 | `keyword-inspiration-preview` | `keyword-inspiration-dry-run` 的等价别名；支持 `--persist-axes` | ✅ |
 | `keyword-inspiration-report` | 输出 inspiration / merged 关键词 cohort 对比和 replace 启用门禁判定 | ✅ |
@@ -487,6 +488,19 @@ $ openbiliclaw ledger --write-point dialogue_preference_overwrite   # 只看某�
 ```
 
 选项：`--days N`（窗口，默认 30）/ `--line`（逐行，默认按写点聚合）/ `--write-point <name>`（过滤单个写点）/ `--limit N`（逐行最多行数，默认 200）。写点清单见 `docs/modules/soul.md`。shadow 门控采数（Phase 3 上线后）可直接查 `gate_verdict LIKE 'shadow_%'`。
+
+### `openbiliclaw questions`
+
+只读展示对话确认入口当前最多 3 条高优先级待聊对象。命令从配置中的 `[api].port` 连接本机 `127.0.0.1`，只调用 `GET /api/chat/pending-confirmations`，因此假设/疑惑阈值、未结算过滤、排序、上限和 `count` 与 popup、桌面 Web 完全同口径，不在 CLI 复制筛选规则。
+
+```bash
+$ openbiliclaw questions
+待聊确认
+  猜测  你可能更看重一手证据  83%  event-7、event-9  hyp-ref
+  疑惑  为什么最近跳过熟悉主题  61%  —                  42
+```
+
+输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认仍只能在插件或桌面端的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
 
 ### `openbiliclaw profile-consolidate`
 

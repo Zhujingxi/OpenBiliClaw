@@ -19,7 +19,8 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
-durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
+durable dialogue → confirmation entry(pending list / cards)
+                 → chat_turn(payload + fixed turn time) → single learn queue
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
@@ -39,7 +40,7 @@ background refresh → maintenance DB worker / isolated connection
                    → ≤50 mutations per transaction → commit/yield/retry next batch
 ```
 
-1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话与唯一主动洞察确认入口（待聊列表/卡片；认知更新区只读）· 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
@@ -190,7 +191,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
 1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
-2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。
+2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
 3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker；confirm/reject 经 ref 仲裁、claim 与三段 fencing 完成结算，discuss 经持久化 attempt token 建锚，defer 只写对象冷却。
 4. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 可见历史；Dialogue prompt 则统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。
 

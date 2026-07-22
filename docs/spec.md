@@ -224,7 +224,8 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
-durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
+durable dialogue → confirmation entry(pending list / cards)
+                 → chat_turn(payload + fixed turn time) → single learn queue
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
@@ -256,10 +257,10 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐    │
-│  │ 统一行为采集   │  │ 推荐展示 UI   │  │ 对话/反馈/探针   │    │
+│  │ 统一行为采集   │  │ 推荐展示 UI   │  │ 对话/确认入口    │    │
 │  │ Adapter: B/XHS│  │ (LUI 界面)   │  │ (durable turn) │    │
 │  │ +DY/YT/X/ZH   │  │ +真实可换数   │  │                │    │
-│  │ +停留满意度   │  │ +文字卡渲染   │  │                │    │
+│  │ +停留满意度   │  │ +文字卡渲染   │  │ 待聊列表/卡片   │    │
 │  └──────────────┘  └──────────────┘  └─────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ bili/xhs/dy/yt/zhihu/reddit 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │

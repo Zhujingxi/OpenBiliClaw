@@ -595,7 +595,7 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-持久对话：固定时间/payload → 单学习队列 → 单锚(ref+generation) → 归属矩阵
+持久对话：固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → 单锚(ref+generation) → 归属矩阵
                            ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
                            ├→ 假设卡 ref 仲裁 → claim fencing → applied-only 跨 session 投影
                            └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
@@ -644,7 +644,7 @@ background ─ background admission (default 3) ──────┘
 Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
                                       │                      └新避雷：共享清池 → content_cache
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
-durable turn → 固定时间/payload → 单学习队列 → anchor(ref,generation) → relation matrix
+durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → anchor(ref,generation) → relation matrix
                                                    └confusion 失败：FIFO≤5 → 12h 恢复
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
