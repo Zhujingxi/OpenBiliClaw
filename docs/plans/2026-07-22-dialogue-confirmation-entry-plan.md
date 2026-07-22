@@ -2,17 +2,17 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-22-dialogue-confirmation-entry-spec.md`](./2026-07-22-dialogue-confirmation-entry-spec.md)
-> **Status:** r2 — codex 第一轮 12 findings 已修订,待第二轮 review
+> **Status:** r3 — codex 第二轮 F13-F21 已修订,待第三轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6)→ Wave D(Task 7)。每 Wave 完成其文档子集方可交付。
 > **Tech:** Python:仓库 `.venv/bin/python` + worktree 根 + `PYTHONPATH=$PWD/src`(import 自查);测试前 `mv config.toml /tmp/dce_config_stash.toml`,结束**必须还原并 diff 确认原件**(5070 字节含 source_incremental_hours);`ruff format/check src/ tests/`;`mypy src/`(strict)。扩展:`cd extension && npm test && npm run typecheck && npm run build`。**桌面端 = `src/openbiliclaw/web/desktop/assets/js/`(session="webui"),移动端 = `src/openbiliclaw/web/js/`(本版仅只读化)**。
 
 **Invariants that MUST hold — re-read before each task:**
 
 - 唯一主动 UI 入口 + legacy 端点转发兼容(source=legacy_endpoint 台账)。
-- chat_turns.payload 为卡片/结算态唯一事实源;state 单向 CAS(turn_id 幂等键,first-writer-wins,已结算返回 already_settled)。
-- 回灌/前端 scope 集合 = {chat, hypothesis, confusion};卡片 session 取产生端;系统抛出附着于用户下一条消息。
-- 锚:≤1;解除四条(结算/2 轮 unrelated/TTL 2h/replaced);confusion 非结算解锚回 open(释放 clarifying 槽);generation 代次随学习 payload 快照,失配丢弃+WARNING。
-- confusion 结算唯一所有者=锚处理器(durable side-effect 直接 resolve 移除,分类器输出并入)。
+- 对象为真源、卡片为投影:action=①对象态查验(终态→already_settled+顺手 patch 卡片)→②副作用先行(幂等)→③CAS payload.state;卡片 turn 创建即 status=completed + payload.type=card,worker 不触发 LLM;同 ref 多卡片由对象级仲裁统一。
+- 一个大脑多个屏幕:单一 history 回灌全部 {chat,hypothesis,confusion} completed turn 不分 session;前端按 session 过滤显示;durable 逐请求传 session;附着=用户消息处理流程内先 INSERT 卡片,排序 (created_at, rowid),同 ref pending 卡片去重。
+- 锚:≤1;解除四条;confusion 非结算解锚回 open;generation 快照失配丢弃;anchor 含 origin_turn_id(结算时 patch 来源卡片终态)与 ambiguous_count(非 ambiguous 清零)。
+- confusion 结算唯一所有者=锚处理器;confusions 行增 last_processed_turn_id 处理 receipt(与结算同事务),12h 扫描重放未处理回复(幂等),崩溃可恢复。
 - kind×relation 合法矩阵(见 spec);ambiguous 追问 ≤1,两次计 defer;Jaccard(NFC+中文 bigram/英文 token,停用词表)≥0.5 丢 candidates+WARNING。
 - 历史轮=绝对时间戳(创建时定死,前缀字节稳定);当前时间只进 user prompt 尾段;UTC→本地转换单点可注入。
 - 双轨冷却持久化(全局 12h + 同对象 72h);用户主动零冷却;角标=SW 决策表扩展,健康类优先。
@@ -29,7 +29,7 @@
 **Steps:**
 
 - [ ] **基线更新单独提交**(绝对戳为有意变更;固定轮时间断言输出字节确定,且**渲染函数不接受/不读取 now**——前缀稳定性以"函数签名无 now"结构性保证)。
-- [ ] Failing tests:payload 列迁移(fresh+旧库);CAS(pending→confirmed 成功;已 confirmed 再置 rejected 失败返回当前态;并发两连接恰一成功);ChatTurnOut 带 payload。
+- [ ] Failing tests:payload 列迁移(fresh+旧库);CAS(pending→confirmed 成功;已 confirmed 再置 rejected 失败返回当前态;并发两连接恰一成功);ChatTurnOut 带 payload;**turn 列表排序改 (created_at, rowid) 且旧数据兼容(r3/F18)**。
 - [ ] Failing tests:历史渲染绝对戳(回灌轮用 created_at 转本地;内存轮用记录时刻);「当前时间」只出现在 user prompt 尾段(前缀不含);时区转换注入测试。
 - [ ] Confirm FAIL → 实现 → PASS;`pytest tests/test_llm_prompts.py -q`(invariance)+ ruff + mypy。
 
@@ -37,11 +37,11 @@
 
 ### Task 1: 锚状态机(四条解除/代次/持久化)
 
-**Files:** 新增 `src/openbiliclaw/soul/dialogue_anchor.py`(anchor {kind, ref, generation, established_at, unrelated_streak};持久化于 soul 状态存储;TTL 2h 校准注释);`soul/dialogue_learn_queue.py`(payload 增 anchor_ref/anchor_generation 快照);台账行;新增 `tests/test_dialogue_anchor.py`。
+**Files:** 新增 `src/openbiliclaw/soul/dialogue_anchor.py`(anchor {kind, ref, generation, established_at, unrelated_streak, **origin_turn_id, ambiguous_count**};持久化;TTL 2h 校准注释);`soul/dialogue_learn_queue.py`(payload 增 anchor 快照);台账行;新增 `tests/test_dialogue_anchor.py`。
 
 **Steps:**
 
-- [ ] Failing tests:建立三入口(内部 API);同时 ≤1(新顶旧 → released:replaced,generation 递增);解除四条各一;**confusion 非结算解锚 → 行状态回 open(clarifying 槽释放,后续 claim 成功)**;重启恢复(TTL 按 established_at 续算);**代次失配**(排队 payload 带旧 generation → 处理时丢弃+WARNING+锚不动);台账断言。
+- [ ] Failing tests:建立三入口;≤1(replaced);解除四条各一;confusion 非结算解锚回 open(槽释放);重启恢复;代次失配丢弃;**锚结算 → 经 origin_turn_id patch 来源卡片终态(r3/F17)**;**ambiguous_count 累计与非 ambiguous 清零(r3/F21)**;台账断言。
 - [ ] Confirm FAIL → 实现 → PASS;`pytest tests/test_confusion_lifecycle.py tests/test_dialogue_learn_queue.py -q` 回归 + ruff + mypy。
 
 **Acceptance:** 生命周期+代次+槽释放 ≥10 用例;既有零回归。
@@ -61,11 +61,11 @@
 
 ### Task 3: confusion 结算所有权收归 + Wave A 文档 gate
 
-**Files:** `api/app.py`(durable confusion side-effect 的直接 resolve/defer **移除**,改为:分类器输出作为信号并入锚处理;抛出提问即建锚)、`soul/confusion.py`(锚处理器结算入口统一);既有 confusion 用例改写;文档:soul.md 锚与归属小节、changelog。
+**Files:** `api/app.py`(durable confusion 直接 resolve/defer 移除;分类器输出并入;抛出即建锚)、`soul/confusion.py`(锚处理器结算入口统一)、`storage/database.py`(confusions 增 `last_processed_turn_id` receipt 列,幂等迁移)、`soul/cognition_cycle.py`(12h 扫描:clarifying 且有晚于 receipt 的 completed 回复 → 重放归属,幂等,r3/F14);既有用例改写;文档 gate。
 
 **Steps:**
 
-- [ ] Failing test:confusion 抛出 → 锚建立;回复经学习队列锚处理器结算(answer→resolve;ambiguous→追问);**durable 路径不再直接 resolve**(断言旧路径零调用)。
+- [ ] Failing test:confusion 抛出 → 锚建立;回复经锚处理器结算(receipt 与结算同事务);durable 旧路径零调用断言;**崩溃重放(r3/F14):队列丢任务后 12h 扫描按 receipt 重放、已处理跳过**。
 - [ ] 改写既有单轮结算用例为锚定语义;`pytest tests/test_confusion_lifecycle.py tests/test_api_app.py -q` 全绿。
 - [ ] Wave A 文档 gate。
 
@@ -81,7 +81,7 @@
 
 **Steps:**
 
-- [ ] Failing tests:卡片 turn 创建(payload 完整、session=请求端);action 四种;CAS 幂等(重复 confirm→already_settled;confirm 后 reject 拒绝);legacy 端点转发等价(同结算函数、台账 source 区分)。
+- [ ] Failing tests:卡片 turn 创建(payload 完整、session=请求端、**status=completed 且 worker 不触发 LLM(r3/F13)**);action 四种(**对象级仲裁顺序:①对象态→②副作用→③CAS;故障注入:②后崩溃 → 重试被①吸收,r3/F15**);**同 ref 双卡片跨 turn 竞态:一张 confirm 后另一张 reject → already_settled(r3/F16)**;legacy 转发等价+source 区分。
 - [ ] Failing tests(进流):回灌含 hypothesis/confusion scope 轮次(probe 仍排除);popup 与 webui 各回灌各的。
 - [ ] Confirm FAIL → 实现 → PASS;回归 + ruff + mypy。
 
@@ -93,7 +93,7 @@
 
 **Steps:**
 
-- [ ] Failing tests:列表口径;open 连开 3 条零冷却;系统抛出 12h 持久化(重启仍生效);72h 叠加;**抛出附着语义**(无用户消息不凭空产 turn,下一条消息前置卡片)。
+- [ ] Failing tests:列表口径 + `?count_only=1` 轻响应;open 连开 3 条零冷却(**同 ref pending 卡片去重复用**);系统抛出 12h 持久化;72h 叠加;附着语义(处理流程内先 INSERT 卡片、(created_at,rowid) 保序、无用户消息不凭空产 turn、重启/重试不重复附着,r3/F18)。
 - [ ] Confirm FAIL → 实现 → PASS;回归 + ruff + mypy;Wave B 文档 gate。
 
 **Acceptance:** 双轨矩阵+附着 ≥7 用例。
@@ -106,7 +106,7 @@
 
 **Steps:**
 
-- [ ] Failing tests(node --test):payload→卡片 DOM;action→端点+乐观更新+竞态回滚;badge 决策表(健康优先/计数/离线抑制);无 payload turn 文字降级。
+- [ ] Failing tests(node --test):payload→卡片 DOM;action→端点+乐观更新+already_settled 回滚;badge 决策表(健康优先/计数/离线抑制/**复用 30s alarm 不新增定时器+count_only 请求+事件去抖,r3/F20**);无 payload turn 文字降级。
 - [ ] Confirm FAIL → popup 实现 → 桌面端同步(行为语义一致)→ 移动端按钮只读化 → PASS。
 - [ ] `npm test && npm run typecheck && npm run build`;Playwright;Wave C 文档 gate(extension.md、changelog)。
 
