@@ -18,11 +18,26 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_FIXED_TURN_TIMESTAMP = "2026-07-22T09:30:00+08:00"
+
+
 def _dialogue_with_history(exchanges: int) -> SocraticDialogue:
     dialogue = SocraticDialogue(llm=None, soul_engine=object(), session="popup")  # type: ignore[arg-type]
     for i in range(exchanges):
-        dialogue._history.append(DialogueTurn(role="user", content=f"用户消息{i}"))
-        dialogue._history.append(DialogueTurn(role="agent", content=f"助手回复{i}"))
+        dialogue._history.append(
+            DialogueTurn(
+                role="user",
+                content=f"用户消息{i}",
+                timestamp=_FIXED_TURN_TIMESTAMP,
+            )
+        )
+        dialogue._history.append(
+            DialogueTurn(
+                role="agent",
+                content=f"助手回复{i}",
+                timestamp=_FIXED_TURN_TIMESTAMP,
+            )
+        )
     # An in-flight user turn is appended by respond() before _history_to_messages.
     dialogue._history.append(DialogueTurn(role="user", content="当前用户消息"))
     return dialogue
@@ -33,17 +48,17 @@ def test_history_to_messages_within_window_is_unchanged() -> None:
     dialogue = _dialogue_with_history(20)
     messages = dialogue._history_to_messages()
     assert len(messages) == 40
-    assert messages[0] == {"role": "user", "content": "用户消息0"}
-    assert messages[1] == {"role": "assistant", "content": "助手回复0"}
-    assert messages[-1] == {"role": "assistant", "content": "助手回复19"}
+    assert messages[0] == {"role": "user", "content": "[07-22 09:30] 用户消息0"}
+    assert messages[1] == {"role": "assistant", "content": "[07-22 09:30] 助手回复0"}
+    assert messages[-1] == {"role": "assistant", "content": "[07-22 09:30] 助手回复19"}
 
 
 def test_history_to_messages_maps_agent_role_to_assistant() -> None:
     dialogue = _dialogue_with_history(1)
     messages = dialogue._history_to_messages()
     assert messages == [
-        {"role": "user", "content": "用户消息0"},
-        {"role": "assistant", "content": "助手回复0"},
+        {"role": "user", "content": "[07-22 09:30] 用户消息0"},
+        {"role": "assistant", "content": "[07-22 09:30] 助手回复0"},
     ]
 
 
@@ -53,8 +68,8 @@ def test_history_truncated_to_window_when_over_limit() -> None:
     messages = dialogue._history_to_messages()
     assert len(messages) == DIALOGUE_WINDOW_TURNS * 2
     # Oldest retained exchange is #5 (25 - 20).
-    assert messages[0] == {"role": "user", "content": "用户消息5"}
-    assert messages[-1] == {"role": "assistant", "content": "助手回复24"}
+    assert messages[0] == {"role": "user", "content": "[07-22 09:30] 用户消息5"}
+    assert messages[-1] == {"role": "assistant", "content": "[07-22 09:30] 助手回复24"}
 
 
 # ---------------------------------------------------------------------------
