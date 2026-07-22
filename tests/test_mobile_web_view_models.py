@@ -1190,7 +1190,7 @@ class TestMobileWebViewModels:
         interest_binder = (
             "function bindSpecInterestActions()"
             + profile_js.split("function bindSpecInterestActions()", 1)[1].split(
-                "\n}\n\nfunction bindInsightActions", 1
+                "\n}\n\n// ── Speculative Avoidances", 1
             )[0]
             + "\n}"
         )
