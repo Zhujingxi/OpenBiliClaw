@@ -249,17 +249,20 @@ def test_stale_generation_snapshot_is_dropped_with_warning(
     manager = _manager(tmp_path)
     old = manager.establish(
         kind="hypothesis",
-        ref="old",
+        ref="same-ref",
         origin_turn_id="",
         entry=ENTRY_PENDING_OPEN,
     )
+    assert manager.release(reason="replaced", expected_generation=old.generation) == old
     current = manager.establish(
         kind="hypothesis",
-        ref="new",
+        ref=old.ref,
         origin_turn_id="",
         entry=ENTRY_PENDING_OPEN,
     )
 
+    assert current.ref == old.ref
+    assert current.generation == old.generation + 1
     with caplog.at_level("WARNING"):
         assert manager.validate_snapshot(old.ref, old.generation) is None
 

@@ -391,7 +391,6 @@ def test_terminal_confusion_with_unpopped_head_is_recovered_by_fallback_scan(
             "anchor_generation": 1,
         },
     )
-    real_pop = db.pop_confusion_replay_head
 
     def crash_after_resolve(_confusion_id: int, *, expected_id: str) -> bool:
         del expected_id
@@ -405,13 +404,18 @@ def test_terminal_confusion_with_unpopped_head_is_recovered_by_fallback_scan(
     crashed = db.get_confusion(confusion_id)
     assert crashed["status"] == "resolved"
     assert [item["turn_id"] for item in crashed["replay_queue"]] == ["crash-turn"]
-    pending = manager.pending_dialogue_replays()
+
+    # Model an actual process crash/restart: discard the connection and recover
+    # through a fresh Database + manager, not the object that injected failure.
+    db.close()
+    restarted_db = Database(tmp_path / "confusion.db")
+    restarted_db.initialize()
+    restarted = ConfusionManager(restarted_db, ledger=ProfileLedger(restarted_db))
+    pending = restarted.pending_dialogue_replays()
     assert len(pending) == 1
     assert pending[0]["confusion_id"] == confusion_id
     assert pending[0]["has_replay_queue"] == 1
 
-    monkeypatch.setattr(db, "pop_confusion_replay_head", real_pop)
-    restarted = ConfusionManager(db, ledger=ProfileLedger(db))
     assert restarted.retry_anchor_settlements(confusion_id) == "resolved"
     assert restarted.get(confusion_id).replay_queue == []
 

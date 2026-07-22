@@ -261,43 +261,82 @@ def test_confirmation_turn_deduplicates_ref_session_atomically_but_not_cross_ses
     assert count == 2
 
 
-def test_card_settlement_claim_fences_old_executor_and_event_is_atomic(
+def test_card_settlement_claim_fences_paused_old_executor_after_takeover(
     tmp_path: Path,
 ) -> None:
     db = _db(tmp_path)
+    database_path = tmp_path / "init.db"
     now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
     assert db.try_create_card_settlement(
         ref="abc12345",
         verdict="confirmed",
         turn_id="card-popup",
     )
-    assert db.claim_card_settlement(
-        ref="abc12345",
-        claim_token="old-token",
-        now=now,
-    )
-
-    db.conn.execute(
-        "UPDATE card_settlements SET apply_claim_at = ? WHERE ref = ?",
-        ((now - timedelta(minutes=6)).isoformat(), "abc12345"),
-    )
-    db.conn.commit()
-    assert db.claim_card_settlement(
-        ref="abc12345",
-        claim_token="new-token",
-        now=now,
-    )
-
+    old_claimed = threading.Event()
+    resume_old = threading.Event()
     event = {
         "event_type": "feedback",
         "title": "用户偏爱深度内容",
         "metadata": {"settlement_ref": "abc12345", "signal": "confirm"},
     }
-    assert not db.record_card_settlement_event(
-        ref="abc12345",
-        claim_token="old-token",
-        event=event,
-    )
+
+    def paused_old_executor() -> tuple[bool, bool, bool, bool]:
+        old_db = Database(database_path)
+        old_db.initialize()
+        try:
+            assert old_db.claim_card_settlement(
+                ref="abc12345",
+                claim_token="old-token",
+                now=now,
+            )
+            old_claimed.set()
+            assert resume_old.wait(timeout=5)
+            return (
+                old_db.record_card_settlement_event(
+                    ref="abc12345",
+                    claim_token="old-token",
+                    event=event,
+                ),
+                old_db.mark_card_settlement_segment(
+                    ref="abc12345",
+                    claim_token="old-token",
+                    segment="object",
+                ),
+                old_db.mark_card_settlement_segment(
+                    ref="abc12345",
+                    claim_token="old-token",
+                    segment="marker",
+                ),
+                old_db.complete_card_settlement(
+                    ref="abc12345",
+                    claim_token="old-token",
+                ),
+            )
+        finally:
+            old_db.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        old_future = pool.submit(paused_old_executor)
+        assert old_claimed.wait(timeout=5)
+        assert not old_future.done()
+
+        db.conn.execute(
+            "UPDATE card_settlements SET apply_claim_at = ? WHERE ref = ?",
+            ((now - timedelta(minutes=6)).isoformat(), "abc12345"),
+        )
+        db.conn.commit()
+        assert db.claim_card_settlement(
+            ref="abc12345",
+            claim_token="new-token",
+            now=now,
+        )
+
+        # Resume the executor that still believes it owns the claim *before*
+        # the taker writes any segment. Every attempted write must be fenced by
+        # the replacement token, not merely by an already-applied receipt.
+        resume_old.set()
+        assert old_future.result(timeout=5) == (False, False, False, False)
+
     assert db.record_card_settlement_event(
         ref="abc12345",
         claim_token="new-token",
@@ -308,10 +347,25 @@ def test_card_settlement_claim_fences_old_executor_and_event_is_atomic(
         claim_token="new-token",
         event=event,
     )
+    assert db.mark_card_settlement_segment(
+        ref="abc12345",
+        claim_token="new-token",
+        segment="object",
+    )
+    assert db.mark_card_settlement_segment(
+        ref="abc12345",
+        claim_token="new-token",
+        segment="marker",
+    )
+    assert db.complete_card_settlement(
+        ref="abc12345",
+        claim_token="new-token",
+    )
 
     row = db.get_card_settlement("abc12345")
     assert row is not None
     assert row["seg_event"] == 1
+    assert row["applied"] == 1
     events = db.query_events(event_types=["feedback"])
     assert len(events) == 1
     assert json.loads(events[0]["metadata"])["settlement_ref"] == "abc12345"

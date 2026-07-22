@@ -2833,12 +2833,21 @@ async def test_stale_anchor_snapshot_is_ignored_before_extraction(
     memory.initialize()
     engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
     old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="旧假设")
+    assert (
+        engine._dialogue_anchor_manager.release(
+            reason="replaced",
+            expected_generation=old.generation,
+        )
+        == old
+    )
     current = engine._dialogue_anchor_manager.establish(
         kind="hypothesis",
-        ref="new-ref",
-        origin_turn_id="",
+        ref=old.ref,
+        origin_turn_id=old.origin_turn_id,
         entry=ENTRY_PENDING_OPEN,
     )
+    assert current.ref == old.ref
+    assert current.generation == old.generation + 1
 
     async def should_not_extract(**_kwargs: object) -> dict[str, object]:
         raise AssertionError("stale anchor must be discarded before LLM extraction")
@@ -2891,7 +2900,7 @@ async def test_anchor_generation_is_revalidated_after_llm_before_any_side_effect
             engine._dialogue_anchor_manager.establish(
                 kind="hypothesis",
                 ref=old.ref,
-                origin_turn_id="",
+                origin_turn_id=old.origin_turn_id,
                 entry=ENTRY_PENDING_OPEN,
             )
         )
@@ -3208,30 +3217,35 @@ async def test_pending_rebuild_refusal_clears_and_records(
 @pytest.mark.asyncio
 async def test_pending_rebuild_error_keeps_marker_then_bounded_clear(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
-
     memory = MemoryManager(tmp_path)
     memory.initialize()
     _seed_preference(memory)
-    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
-    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
-    # Enforce downgrade forced by an LLM/parse error → is_error=True.
-    engine._posture_gate = _DecisionGate(  # type: ignore[assignment]
-        GateDecision(verdict=DOWNGRADE, enforced=True, is_error=True)
+    registry = FakeRegistry("this is not valid JSON")
+    engine = SoulEngine(
+        llm=registry,
+        memory=memory,
+        posture_gate_mode="enforce",
     )
+    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
     await engine._mark_rebuild_pending(["ref:a"])
 
-    # First run: error → keep marker, retry_count=1.
-    r1 = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+    # The real PostureGate parser sees invalid provider output. Its conservative
+    # downgrade must carry is_error=True so the marker is retained for retry.
+    with caplog.at_level("WARNING"):
+        r1 = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
     assert r1["outcome"] == "error"
     state1 = engine._load_rebuild_state()
     assert isinstance(state1["pending"], dict)
     assert state1["pending"]["retry_count"] == 1
+    assert len(registry.calls) == 1
+    assert "posture gate returned non-dict JSON" in caplog.text
 
     # Second run: retry_count reaches the bound → cleared with WARNING.
     r2 = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
     assert r2["outcome"] == "error"
+    assert len(registry.calls) == 2
     assert engine._load_rebuild_state()["pending"] is None
 
 
