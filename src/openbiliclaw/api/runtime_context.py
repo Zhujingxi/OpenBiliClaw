@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
+_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS = 30.0
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:
@@ -541,8 +542,19 @@ class RuntimeContext:
         # touches it — on a construction failure below we ``resume`` it.
         old_learn_queue = self.dialogue_learn_queue
         if old_learn_queue is not None:
-            with suppress(Exception):
-                await old_learn_queue.pause_and_drain(timeout=30)
+            try:
+                await old_learn_queue.pause_and_drain(timeout=_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS)
+            except (Exception, asyncio.CancelledError):
+                # The old runtime is still installed.  Restore its ability to
+                # accept work and make the reload caller observe the failure;
+                # constructing a new queue here would create two live workers.
+                with suppress(Exception):
+                    old_learn_queue.resume()
+                logger.warning(
+                    "Hot-reload aborted: old dialogue learn queue did not drain",
+                    exc_info=True,
+                )
+                raise
 
         # Keep a running guided-init task alive across rebuild — config writes
         # are gated during init, but this is the belt-and-suspenders exemption
@@ -566,7 +578,7 @@ class RuntimeContext:
             # New queue is installed and started — stop the old one for good.
             if old_learn_queue is not None:
                 with suppress(Exception):
-                    await old_learn_queue.shutdown(timeout=30)
+                    await old_learn_queue.shutdown(timeout=_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS)
 
     def _rebuild_components(self, new_config: Config) -> None:
         """Synchronous component construction shared by hot-reload and startup.

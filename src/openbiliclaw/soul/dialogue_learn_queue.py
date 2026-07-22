@@ -144,6 +144,7 @@ class DialogueLearnQueue:
                 timeout,
                 self._queue.qsize(),
             )
+            raise
 
     # -- Submission -----------------------------------------------------------
 

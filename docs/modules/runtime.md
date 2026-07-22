@@ -523,6 +523,8 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 热重载取消边界：`BackgroundTaskRegistry.cancel_all()/cancel()` 与 `restart_background_tasks()` 都用 `asyncio.wait(..., timeout=1.5)`，而不是会继续等待 coroutine 真正结束的 `wait_for(gather(...))`。第三方 provider / loop 若吞掉 `CancelledError`，配置保存仍在 deadline 内返回；未退出任务继续留在 registry 和 `app.state` 中供后续关闭重试，并且不会启动同名 refresh / account-sync / auto-update loop，避免旧新 runtime 同时写库。正常协作取消的任务仍在新组件发布前完成清理。
 
+对话学习 worker 不在上述 registry 内，由 `RuntimeContext.rebuild_from_config()` 先 pause-drain。30 秒 drain 超时不再被吞掉：队列抛出 `TimeoutError`，runtime 恢复仍在位的旧队列接单并把异常交给配置事务回滚，且不会调用 `cancel_all`、构造或安装新 runtime；只有 drain 成功后才继续 swap，因此不存在新旧学习 worker 并发。进程 shutdown 的同类超时仍会在 `finally` 强制取消旧 worker。
+
 配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
 
 热重载成功后，所有可替换 LLM 入口都会拿到同一份 `module_overrides_from_config(config)`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并完成 atomic swap 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：

@@ -29,6 +29,9 @@ durable dialogue → confirmation entry(pending list / cards)
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → event + object + rebuild-marker → applied-only cross-session projection
 
+config hot-reload → pause/drain old learn worker → success: swap + stop old
+                                           └─────→ timeout: resume old + abort swap
+
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
   optional source_platform (PC Web tabs only, additive):

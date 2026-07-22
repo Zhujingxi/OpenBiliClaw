@@ -166,6 +166,35 @@ async def test_pause_and_drain_processes_backlog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pause_and_drain_timeout_is_reported_and_queue_can_resume() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    processed: list[str] = []
+
+    async def handler(*, tag: str, **_: Any) -> None:
+        entered.set()
+        await release.wait()
+        processed.append(tag)
+
+    queue = DialogueLearnQueue(handler)
+    queue.start()
+    await queue.submit({"tag": "blocked"})
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    try:
+        with pytest.raises(TimeoutError):
+            await queue.pause_and_drain(timeout=0.01)
+        assert await queue.submit({"tag": "while-paused"}) is False
+        queue.resume()
+        assert await queue.submit({"tag": "after-resume"}) is True
+    finally:
+        release.set()
+        await queue.shutdown(timeout=1)
+
+    assert processed == ["blocked", "after-resume"]
+
+
+@pytest.mark.asyncio
 async def test_worker_survives_registry_cancel_all() -> None:
     # The queue worker must NOT be in the runtime cancel_all registry.
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
@@ -287,6 +316,60 @@ async def test_reload_failure_resumes_old_queue() -> None:
 
     assert processed == ["before", "after"]
     assert old.worker_alive is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_reload_drain_timeout_keeps_old_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.api import runtime_context
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    processed: list[str] = []
+
+    async def handler(*, tag: str, **_: Any) -> None:
+        if tag == "blocked":
+            entered.set()
+            await release.wait()
+        processed.append(tag)
+
+    old = DialogueLearnQueue(handler)
+    old.start()
+    await old.submit({"tag": "blocked"})
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    ctx = RuntimeContext(dialogue_learn_queue=old)
+    rebuild_calls: list[object] = []
+    cancel_calls: list[object] = []
+
+    def fake_rebuild(new_config: object) -> None:
+        rebuild_calls.append(new_config)
+
+    async def fake_cancel_all(**kwargs: object) -> int:
+        cancel_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(runtime_context, "_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ctx, "_rebuild_components", fake_rebuild)
+    monkeypatch.setattr(ctx.task_registry, "cancel_all", fake_cancel_all)
+
+    try:
+        with pytest.raises(TimeoutError):
+            await ctx.rebuild_from_config(Config())
+        assert ctx.dialogue_learn_queue is old
+        assert old.worker_alive is True
+        assert rebuild_calls == []
+        assert cancel_calls == []
+        # The abort path resumes the still-installed generation rather than
+        # leaving it permanently paused after the failed reload.
+        assert await old.submit({"tag": "after-timeout"}) is True
+    finally:
+        release.set()
+        await old.shutdown(timeout=1)
+
+    assert processed == ["blocked", "after-timeout"]
 
 
 def test_start_without_loop_emits_no_unawaited_coroutine_warning() -> None:
