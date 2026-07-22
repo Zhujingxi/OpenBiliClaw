@@ -8,7 +8,11 @@
  * from the runtime-stream, not HTTP polling.
  */
 
-import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
+import {
+  computeActionBadge,
+  createPendingBadgeRefreshScheduler,
+  flushResponseReportsUninitialized,
+} from "./badge.js";
 import {
   BUFFER_MAX_SIZE,
   bufferReady,
@@ -240,6 +244,7 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
 
   const eventType = String(event.type ?? "");
+  schedulePendingConfirmationBadgeRefresh();
 
   // Guided init finished (started from any surface) → the uninitialized
   // toolbar badge must clear without waiting for the next WS reconnect.
@@ -369,6 +374,7 @@ async function isBackendAlive(): Promise<boolean> {
 
 let backendReachable: boolean | null = null;
 let backendUninitialized = false;
+let pendingConfirmationCount = 0;
 
 function renderActionBadge(): void {
   // Subtle "!" badge so a fresh-install user (or anyone whose daemon
@@ -378,7 +384,11 @@ function renderActionBadge(): void {
   // visually identical to a healthy backend, so fresh installs got zero
   // proactive signal to initialize.
   try {
-    const view = computeActionBadge(backendReachable, backendUninitialized);
+    const view = computeActionBadge(
+      backendReachable,
+      backendUninitialized,
+      pendingConfirmationCount,
+    );
     void chrome.action.setBadgeText({ text: view.text });
     if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
     void chrome.action.setTitle({ title: view.title });
@@ -391,8 +401,49 @@ function setBackendBadge(reachable: boolean): void {
   backendReachable = reachable;
   // A down backend's init state is unknown; drop the stale flag so the
   // gray unreachable badge (and its hint) wins.
-  if (!reachable) backendUninitialized = false;
+  if (!reachable) {
+    backendUninitialized = false;
+    pendingConfirmationCount = 0;
+  }
   renderActionBadge();
+}
+
+async function refreshPendingConfirmationBadge(): Promise<void> {
+  // Do not poll a backend that is offline, not yet probed, or not initialized;
+  // stale confirmation counts must never mask the health-class badge.
+  if (backendReachable !== true || backendUninitialized) {
+    pendingConfirmationCount = 0;
+    renderActionBadge();
+    return;
+  }
+  try {
+    const response = await authenticatedFetch(
+      await apiUrl("/chat/pending-confirmations?count_only=1"),
+      { method: "GET" },
+    );
+    if (!response.ok) {
+      pendingConfirmationCount = 0;
+      renderActionBadge();
+      return;
+    }
+    const payload = (await response.json()) as { count?: unknown };
+    const count = Number(payload.count);
+    pendingConfirmationCount = Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+    renderActionBadge();
+  } catch {
+    // A failed lightweight read is enough to suppress a stale numeric badge;
+    // the runtime-stream liveness loop owns the health/error classification.
+    pendingConfirmationCount = 0;
+    renderActionBadge();
+  }
+}
+
+const pendingConfirmationBadgeScheduler = createPendingBadgeRefreshScheduler(
+  refreshPendingConfirmationBadge,
+);
+
+function schedulePendingConfirmationBadgeRefresh(): void {
+  pendingConfirmationBadgeScheduler.schedule();
 }
 
 async function refreshInitBadge(): Promise<void> {
@@ -405,7 +456,9 @@ async function refreshInitBadge(): Promise<void> {
     if (!response.ok) return;
     const payload = (await response.json()) as Record<string, unknown>;
     backendUninitialized = payload.initialized === false;
+    if (backendUninitialized) pendingConfirmationCount = 0;
     renderActionBadge();
+    if (!backendUninitialized) await refreshPendingConfirmationBadge();
   } catch {
     // Keep the last rendered state.
   }
@@ -508,6 +561,7 @@ async function flushEvents(): Promise<void> {
     if (uninitialized) {
       if (!backendUninitialized) {
         backendUninitialized = true;
+        pendingConfirmationCount = 0;
         renderActionBadge();
       }
       await parkEvents(events);
@@ -763,9 +817,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       await bufferReady();
       if (getBufferLength() > 0) {
         await flushEvents();
-        return;
+      } else {
+        await checkPendingNotification();
       }
-      await checkPendingNotification();
+      await refreshPendingConfirmationBadge();
     })();
   }
 });

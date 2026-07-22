@@ -604,6 +604,27 @@ export async function fetchChatTurns({ session = "popup", scope = "", limit = 50
   return requestJson(`/chat/turns?${params.toString()}`, { method: "GET" });
 }
 
+export async function fetchPendingConfirmations({ countOnly = false } = {}) {
+  const suffix = countOnly ? "?count_only=1" : "";
+  return requestJson(`/chat/pending-confirmations${suffix}`, { method: "GET" });
+}
+
+export async function openPendingConfirmation(ref, { session = "popup" } = {}) {
+  return requestJson(`/chat/pending-confirmations/${encodeURIComponent(String(ref || ""))}/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session }),
+  });
+}
+
+export async function actOnChatCard(turnId, action) {
+  return requestJson(`/chat/cards/${encodeURIComponent(String(turnId || ""))}/action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+}
+
 export async function respondToInterestProbe(domain, responseType, message = "") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);

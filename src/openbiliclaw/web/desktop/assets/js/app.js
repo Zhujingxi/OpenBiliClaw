@@ -23,6 +23,7 @@
       events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
+      pendingConfirmations: "/chat/pending-confirmations",
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
@@ -39,6 +40,18 @@
       profileEdit: "/profile/edit",
       profileEditState: "/profile/edit-state"
     };
+
+    const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
+    if (!dialogueConfirmation) throw new Error("dialogue-confirmation shared helper did not load");
+    const {
+      executeCardAction,
+      isCardTurn,
+      isQuestionTurn,
+      pendingConfirmationOpenPath,
+      renderPendingListMarkup,
+      renderTurnMarkup,
+      selectDialogueTurns
+    } = dialogueConfirmation;
 
     const state = {
       query: "",
@@ -87,7 +100,8 @@
       messageChatSubjectTitle: "",
       chat: [
         { role: "agent", text: "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。" }
-      ]
+      ],
+      pendingConfirmations: { count: 0, items: [], expanded: false }
     };
 
     const $ = (selector) => document.querySelector(selector);
@@ -219,6 +233,10 @@
     // 库存变化事件可能成串到达（补货一轮会连发多条），去抖 + 单飞（合并 pending
     // 调用）避免把只读快照接口打成风暴。debounceAsync 已实现这两点。
     const schedulePlatformAvailabilityRefresh = debounceAsync(() => refreshPlatformAvailability(), 600);
+    const scheduleDialogueConfirmationRefresh = debounceAsync(
+      () => refreshDialogueConfirmationSurface(),
+      300
+    );
 
     let platformAvailabilityRetryAttempt = 0;
     let platformAvailabilityRetryTimer = null;
@@ -2202,6 +2220,7 @@
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
       showMainPage("chatPage");
       renderChat();
+      scheduleDialogueConfirmationRefresh();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
       window.setTimeout(() => input?.focus(), 100);
@@ -5684,10 +5703,129 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function chatHtml(messages) {
-      return messages.map((msg) => `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`).join("");
+      return messages.map((msg) => {
+        if (msg?.turn) return renderTurnMarkup(msg.turn, { surface: "desktop" });
+        return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`;
+      }).join("");
+    }
+
+    function renderDesktopPendingConfirmations() {
+      const pending = state.pendingConfirmations;
+      const count = Math.max(0, Number(pending.count) || 0);
+      updateSavedBadge("chatPendingCountBadge", count);
+      const toggle = $("#desktopPendingToggle");
+      const countLabel = $("#desktopPendingCount");
+      const list = $("#desktopPendingConfirmations");
+      if (countLabel) countLabel.textContent = count > 99 ? "99+" : String(count);
+      if (toggle) {
+        toggle.setAttribute("aria-expanded", String(Boolean(pending.expanded)));
+        toggle.classList.toggle("is-expanded", Boolean(pending.expanded));
+      }
+      if (list) {
+        list.hidden = !pending.expanded;
+        list.innerHTML = renderPendingListMarkup(pending.items);
+      }
+    }
+
+    function applyDialogueChatSnapshot(snapshot) {
+      const items = selectDialogueTurns(Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items));
+      if (!items.length) return;
+      state.chat = items.flatMap((turn) => {
+        if (isCardTurn(turn) || isQuestionTurn(turn)) return [{ turn }];
+        const failed = String(turn.status || "").toLowerCase() === "failed";
+        const agentText = failed
+          ? turn.error || "这句还没发出去，稍后再试。"
+          : turn.reply || turn.assistant_message || "等待后端回复中。";
+        return [
+          { role: "user", text: turn.message || turn.user_message || "" },
+          { role: "agent", text: agentText }
+        ].filter((item) => item.text);
+      });
+      renderChat();
+    }
+
+    async function refreshDialogueTurns() {
+      const snapshot = await requestJsonStrict(
+        `${ENDPOINTS.chatTurns}?session=webui&limit=100`,
+        { cache: "no-store" }
+      );
+      applyDialogueChatSnapshot(snapshot);
+    }
+
+    async function refreshDesktopPendingConfirmations() {
+      const payload = await requestJsonStrict(ENDPOINTS.pendingConfirmations, { cache: "no-store" });
+      state.pendingConfirmations = {
+        ...state.pendingConfirmations,
+        count: Math.max(0, Number(payload?.count) || 0),
+        items: asArray(payload?.items)
+      };
+      renderDesktopPendingConfirmations();
+    }
+
+    async function refreshDialogueConfirmationSurface() {
+      await Promise.allSettled([refreshDialogueTurns(), refreshDesktopPendingConfirmations()]);
+    }
+
+    function updateDesktopDialogueTurn(turn) {
+      const index = state.chat.findIndex((entry) => entry?.turn?.turn_id === turn?.turn_id);
+      const entry = { turn };
+      if (index >= 0) state.chat[index] = entry;
+      else state.chat.push(entry);
+      renderChat();
+    }
+
+    async function handleDesktopCardAction(button) {
+      const card = button.closest(".dialogue-card");
+      const turnId = card?.dataset.dialogueTurnId || "";
+      const action = button.dataset.cardAction || "";
+      const turn = state.chat.find((entry) => entry?.turn?.turn_id === turnId)?.turn;
+      if (!turn || !action || button.disabled) return;
+      button.disabled = true;
+      try {
+        const { response } = await executeCardAction(turn, action, {
+          request(path, body) {
+            return requestJsonStrict(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body)
+            });
+          },
+          onUpdate: updateDesktopDialogueTurn
+        });
+        if (response?.outcome === "already_settled") showToast("这条已在另一个窗口结算，已同步最终状态");
+        else if (action === "discuss") {
+          showToast("好，沿着这条猜测继续聊");
+          $("#chatInput")?.focus();
+        } else if (action === "defer") showToast("先放一放，之后再聊");
+        else showToast(action === "confirm" ? "已确认这条猜测" : "已记下这条猜测不准");
+        await refreshDialogueConfirmationSurface();
+      } catch {
+        showToast("这次没有结算成功，卡片已恢复，可以重试");
+      }
+    }
+
+    async function handleDesktopPendingOpen(button) {
+      const ref = button.dataset.confirmationRef || "";
+      if (!ref || button.disabled) return;
+      button.disabled = true;
+      try {
+        const turn = await requestJsonStrict(pendingConfirmationOpenPath(ref), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: "webui" })
+        });
+        if (turn?.turn_id) updateDesktopDialogueTurn(turn);
+        await refreshDialogueConfirmationSurface();
+        showToast(isQuestionTurn(turn) ? "这条疑惑已经放进对话里" : "这张确认卡已经放进对话里");
+        $("#chatInput")?.focus();
+      } catch {
+        button.disabled = false;
+        showToast("这条待聊内容暂时打不开，请稍后重试");
+      }
     }
 
     function renderChat() {
+      renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
       if (chatLog) {
         chatLog.innerHTML = chatHtml(state.chat);
@@ -5723,17 +5861,21 @@ ${cardFeedbackBarHtml()}`;
         showToast("聊天提交失败：后端不可用");
         return;
       }
+      await refreshDialogueTurns().catch(() => {});
+      void refreshDesktopPendingConfirmations().catch(() => {});
       const startedAt = Date.now();
       const poll = async () => {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turn.turn_id)}`);
         if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
-          renderChat();
+          if (latest?.status === "failed") await refreshDialogueTurns().catch(() => {});
+          else {
+            state.chat.push({ role: "agent", text: "聊天处理超时，稍后可以在历史里继续查看。" });
+            renderChat();
+          }
           return;
         }
         if (latest?.status === "completed" || latest?.reply) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
-          renderChat();
+          await refreshDialogueConfirmationSurface();
           return;
         }
         window.setTimeout(poll, 1200);
@@ -8525,6 +8667,23 @@ ${cardFeedbackBarHtml()}`;
     safeBind("#searchInput", "input", (event) => { state.query = event.target.value || ""; renderAll(); });
     safeBind("#searchForm", "submit", (event) => { event.preventDefault(); state.query = $("#searchInput")?.value || ""; renderAll(); });
     window.addEventListener("resize", scheduleActivityRailHeightSync);
+    safeBind("#desktopPendingToggle", "click", () => {
+      state.pendingConfirmations.expanded = !state.pendingConfirmations.expanded;
+      renderDesktopPendingConfirmations();
+      if (state.pendingConfirmations.expanded) void refreshDesktopPendingConfirmations();
+    });
+    $("#desktopPendingConfirmations")?.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-confirmation-ref]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDesktopPendingOpen(button);
+    });
+    $("#chatLog")?.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-card-action]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDesktopCardAction(button);
+    });
     safeBind("#chatForm", "submit", (event) => { event.preventDefault(); const input = $("#chatInput"); const text = input?.value?.trim() || ""; if (!text) return; input.value = ""; sendChat(text); });
     safeBind("#messageChatBackBtn", "click", returnToMessages);
     safeBind("#messageChatForm", "submit", (event) => {

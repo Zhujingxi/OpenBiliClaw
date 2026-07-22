@@ -382,6 +382,23 @@
       transform: translateY(-1px);
     }
 
+    .tab-count-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      margin-left: 3px;
+      padding: 0 4px;
+      border-radius: 999px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 9px;
+      line-height: 1;
+    }
+
+    .tab-count-badge[hidden] { display: none; }
+
     .tab-button:focus-visible,
     .mobile-button:focus-visible,
     .messages-button:focus-visible,
@@ -3323,6 +3340,95 @@
       color: var(--text-secondary);
     }
 
+    .chat-pending {
+      flex-shrink: 0;
+      margin-bottom: 8px;
+      border: 1px solid rgba(239, 221, 233, 0.96);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255, 248, 251, 0.98), rgba(249, 251, 255, 0.98));
+    }
+
+    .chat-pending-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 11px;
+      border: 0;
+      border-radius: inherit;
+      background: transparent;
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .chat-pending-toggle::after {
+      content: "⌄";
+      color: var(--text-secondary);
+      transition: transform 160ms ease;
+    }
+
+    .chat-pending-toggle.is-expanded::after { transform: rotate(180deg); }
+
+    .chat-pending-toggle:focus-visible,
+    .dialogue-card-action:focus-visible,
+    .dialogue-pending-item button:focus-visible,
+    .dialogue-evidence summary:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
+    .chat-pending-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      margin-left: 5px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 10px;
+    }
+
+    .chat-pending-list {
+      display: grid;
+      gap: 7px;
+      padding: 0 8px 8px;
+    }
+
+    .chat-pending-list[hidden] { display: none; }
+
+    .dialogue-pending-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 9px;
+      border: 1px solid rgba(231, 238, 248, 0.96);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .dialogue-pending-copy { min-width: 0; display: grid; gap: 2px; }
+    .dialogue-pending-copy strong { font-size: 11px; line-height: 1.45; }
+    .dialogue-pending-kind,
+    .dialogue-pending-confidence,
+    .dialogue-pending-empty { font-size: 10px; color: var(--text-secondary); }
+    .dialogue-pending-empty { padding: 8px; }
+    .dialogue-pending-item button {
+      border: 1px solid rgba(239, 189, 207, 0.8);
+      border-radius: 999px;
+      padding: 6px 9px;
+      background: rgba(255, 244, 248, 0.96);
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
     .chat-messages {
       display: flex;
       flex-direction: column;
@@ -3331,6 +3437,63 @@
       overflow-y: auto;
       padding-right: 4px;
     }
+
+    .dialogue-turn {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .dialogue-card {
+      width: 100%;
+      padding: 13px;
+      border: 1px solid rgba(239, 189, 207, 0.72);
+      border-radius: 18px;
+      background: linear-gradient(145deg, rgba(255, 247, 250, 0.99), rgba(245, 250, 255, 0.99));
+      box-shadow: 0 10px 24px rgba(94, 79, 112, 0.08);
+    }
+
+    .dialogue-card[data-card-state="confirmed"] { border-color: rgba(99, 190, 137, 0.55); }
+    .dialogue-card[data-card-state="rejected"] { border-color: rgba(239, 122, 134, 0.55); }
+    .dialogue-card[data-card-state="deferred"] { border-color: rgba(156, 163, 175, 0.55); }
+    .dialogue-card-kicker {
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+    .dialogue-card-title { margin-top: 5px; font-size: 13px; line-height: 1.5; }
+    .dialogue-card-state {
+      margin-top: 9px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .dialogue-evidence { margin-top: 9px; color: var(--text-secondary); font-size: 10px; }
+    .dialogue-evidence summary { width: fit-content; cursor: pointer; font-weight: 700; }
+    .dialogue-evidence ul { display: grid; gap: 4px; margin: 7px 0 0 16px; line-height: 1.5; }
+    .dialogue-card-actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 11px;
+    }
+    .dialogue-card-action {
+      min-width: 0;
+      padding: 7px 3px;
+      border: 1px solid rgba(226, 230, 239, 0.98);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.94);
+      color: var(--text-main);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-card-action.is-confirm { color: #278a55; }
+    .dialogue-card-action.is-reject { color: var(--danger); }
+    .dialogue-card-action.is-discuss { color: var(--brand-strong); }
+    .dialogue-card-action:disabled { opacity: 0.5; cursor: default; }
+    .dialogue-question-shell { display: grid; gap: 6px; }
 
     /* Collapse the conversation surface entirely when no messages
        have been added yet — otherwise the min-height + margin
@@ -4823,7 +4986,7 @@
         <button id="tabWatchLater" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewWatchLater">稍后</button>
         <button id="tabFavorites" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewFavorites">收藏</button>
         <button id="tabProfile" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewProfile">画像</button>
-        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">对话</button>
+        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">对话<span id="chatPendingTabCount" class="tab-count-badge" hidden>0</span></button>
       </div>
     </div>
 
@@ -5065,6 +5228,12 @@
 
       <section id="viewChat" class="view" role="tabpanel" aria-labelledby="tabChat" hidden>
         <div class="chat-shell">
+          <div class="chat-pending">
+            <button id="chatPendingToggle" class="chat-pending-toggle" type="button" aria-expanded="false" aria-controls="chatPendingList">
+              <span>待聊确认 <span id="chatPendingCount" class="chat-pending-count">0</span></span>
+            </button>
+            <div id="chatPendingList" class="chat-pending-list" hidden></div>
+          </div>
           <div id="chatMessages" class="chat-messages"></div>
           <form id="chatForm" class="chat-form">
             <label class="chat-input-shell">
@@ -6169,10 +6338,11 @@
     </footer>
   </div>
 
-  <!-- Shared with the desktop page and the setup wizard; copied into the
-       package by scripts/build.mjs because MV3's CSP forbids loading it from
-       the backend. A classic script, so it runs before the deferred module
-       below and popup.js can read it as a global. -->
+  <!-- Frontend helpers shared with backend-served pages; copied into the
+       package by scripts/build.mjs because MV3's CSP forbids loading them from
+       the backend. Classic scripts run before the module below so popup.js can
+       read their globals. -->
+  <script src="shared/dialogue-confirmation.js"></script>
   <script src="shared/source-status.js"></script>
   <script type="module" src="popup.js"></script>
 </body>

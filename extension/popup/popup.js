@@ -100,6 +100,7 @@ import {
 } from "./popup-embedding-banner.js";
 import {
   appendRecommendations,
+  actOnChatCard,
   checkBackendStatus,
   fetchActivityFeed,
   fetchUpdateStatus,
@@ -114,12 +115,14 @@ import {
   fetchInitStatus,
   fetchPendingDelight,
   fetchPendingDelightBatch,
+  fetchPendingConfirmations,
   fetchProfileSummary,
   fetchRecommendations,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
   markDelightSent,
+  openPendingConfirmation,
   probeConfigService,
   startEmbeddingRepair,
   startInit,
@@ -145,6 +148,19 @@ import {
   syncSavedItems,
   verifySource,
 } from "./popup-api.js";
+
+const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
+if (!dialogueConfirmation) {
+  throw new Error("dialogue-confirmation shared helper did not load");
+}
+const {
+  executeCardAction,
+  isCardTurn,
+  isQuestionTurn,
+  renderPendingListMarkup,
+  renderTurnMarkup,
+  selectDialogueTurns,
+} = dialogueConfirmation;
 
 const state = {
   activeTab: "recommend",
@@ -190,6 +206,11 @@ const state = {
   pendingAvoidanceProbe: null,
   handledProbeKeys: new Set(),
   messages: [],
+  pendingConfirmations: {
+    count: 0,
+    items: [],
+    expanded: false,
+  },
 };
 
 let backendUpdateStatusRefresh = null;
@@ -202,6 +223,7 @@ let manualRefreshInFlight = false;
 let activityFeedRefreshTimer = null;
 let activityFeedRefreshInFlight = false;
 let activityFeedRefreshPending = false;
+let dialogueConfirmationRefreshTimer = null;
 
 const elements = {
   content: document.querySelector(".content"),
@@ -283,6 +305,10 @@ const elements = {
   profileActiveInsights: document.getElementById("profileActiveInsights"),
   profileRecentAwareness: document.getElementById("profileRecentAwareness"),
   chatMessages: document.getElementById("chatMessages"),
+  chatPendingToggle: document.getElementById("chatPendingToggle"),
+  chatPendingCount: document.getElementById("chatPendingCount"),
+  chatPendingList: document.getElementById("chatPendingList"),
+  chatPendingTabCount: document.getElementById("chatPendingTabCount"),
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
   chatSendButton: document.getElementById("chatSendButton"),
@@ -617,6 +643,8 @@ function setActiveTab(tabName) {
   }
   if (tabName === "chat") {
     scrollChatMessagesToBottom();
+    void refreshPendingConfirmations();
+    void hydrateChatHistory();
   }
 }
 
@@ -2147,6 +2175,7 @@ function connectRuntimeStream() {
         elements.footer.dataset.tone = getHintBannerState(getRuntimeEventTone(event)).tone;
       }
       renderActivityCard();
+      scheduleDialogueConfirmationRefresh();
       // Hot-reload: re-fetch all data when backend config is reloaded
       if (event.type === "config_reloaded") {
         setHint("后端配置已热重载，正在刷新数据…", "success");
@@ -4820,6 +4849,84 @@ function renderEditPanel(container, editState) {
   }
 }
 
+const dialogueTurnsById = new Map();
+
+function renderPendingConfirmations() {
+  const { count, items, expanded } = state.pendingConfirmations;
+  const countText = count > 99 ? "99+" : String(Math.max(0, count));
+  if (elements.chatPendingCount instanceof HTMLElement) {
+    elements.chatPendingCount.textContent = countText;
+  }
+  if (elements.chatPendingTabCount instanceof HTMLElement) {
+    elements.chatPendingTabCount.textContent = countText;
+    elements.chatPendingTabCount.hidden = count <= 0;
+  }
+  if (elements.chatPendingToggle instanceof HTMLButtonElement) {
+    elements.chatPendingToggle.setAttribute("aria-expanded", String(expanded));
+    elements.chatPendingToggle.classList.toggle("is-expanded", expanded);
+  }
+  if (elements.chatPendingList instanceof HTMLElement) {
+    elements.chatPendingList.hidden = !expanded;
+    elements.chatPendingList.innerHTML = renderPendingListMarkup(items);
+  }
+}
+
+async function refreshPendingConfirmations() {
+  if (!state.online) {
+    state.pendingConfirmations = {
+      ...state.pendingConfirmations,
+      count: 0,
+      items: [],
+    };
+    renderPendingConfirmations();
+    return;
+  }
+  try {
+    const payload = await fetchPendingConfirmations();
+    state.pendingConfirmations = {
+      ...state.pendingConfirmations,
+      count: Math.max(0, Number(payload?.count) || 0),
+      items: Array.isArray(payload?.items) ? payload.items : [],
+    };
+    renderPendingConfirmations();
+  } catch {
+    // Keep the last successful list in the open popup; the toolbar badge
+    // independently suppresses stale counts when backend health changes.
+  }
+}
+
+function scheduleDialogueConfirmationRefresh() {
+  if (dialogueConfirmationRefreshTimer !== null) {
+    window.clearTimeout(dialogueConfirmationRefreshTimer);
+  }
+  dialogueConfirmationRefreshTimer = window.setTimeout(() => {
+    dialogueConfirmationRefreshTimer = null;
+    void refreshPendingConfirmations();
+    if (state.activeTab === "chat") void hydrateChatHistory();
+  }, 300);
+}
+
+function renderStructuredDialogueTurn(turn) {
+  if (!(elements.chatMessages instanceof HTMLElement) || !turn?.turn_id) return;
+  dialogueTurnsById.set(turn.turn_id, turn);
+  const selector = `[data-dialogue-turn-container="${CSS.escape(turn.turn_id)}"]`;
+  let container = elements.chatMessages.querySelector(selector);
+  if (!(container instanceof HTMLElement)) {
+    container = document.createElement("div");
+    container.className = "dialogue-turn";
+    container.dataset.dialogueTurnContainer = turn.turn_id;
+    elements.chatMessages.append(container);
+  }
+  container.innerHTML = renderTurnMarkup(turn, { surface: "popup" });
+  scrollChatMessagesToBottom();
+}
+
+function updateDialogueTurn(turn) {
+  if (!turn?.turn_id) return;
+  dialogueTurnsById.set(turn.turn_id, turn);
+  renderStructuredDialogueTurn(turn);
+}
+
 function scrollChatMessagesToBottom() {
   if (!(elements.chatMessages instanceof HTMLElement)) {
     return;
@@ -4950,6 +5057,10 @@ function findChatTurnElement(turnId, part) {
 
 function renderChatTurn(turn) {
   if (!turn?.turn_id || !(elements.chatMessages instanceof HTMLElement)) {
+    return;
+  }
+  if (isCardTurn(turn) || isQuestionTurn(turn)) {
+    renderStructuredDialogueTurn(turn);
     return;
   }
   const userPart = findChatTurnElement(turn.turn_id, "user");
@@ -5112,11 +5223,13 @@ async function hydrateChatHistory() {
     return;
   }
   try {
-    const payload = await fetchChatTurns({ session: CHAT_SESSION, scope: "chat", limit: 50 });
+    const payload = await fetchChatTurns({ session: CHAT_SESSION, limit: 100 });
+    const turns = selectDialogueTurns(payload.items || []);
     elements.chatMessages.replaceChildren();
-    for (const turn of payload.items || []) {
+    dialogueTurnsById.clear();
+    for (const turn of turns) {
       renderChatTurn(turn);
-      if (turn.status === "pending") {
+      if (turn.scope === "chat" && turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate: renderChatTurn,
           onDone: refreshAfterChatTurn,
@@ -6627,6 +6740,82 @@ function bindActivityToggle() {
     state.activityExpanded = !state.activityExpanded;
     renderActivityCard();
   });
+}
+
+async function handleDialogueCardAction(button) {
+  const card = button.closest(".dialogue-card");
+  const turnId = card?.dataset.dialogueTurnId || "";
+  const action = button.dataset.cardAction || "";
+  const turn = dialogueTurnsById.get(turnId);
+  if (!turn || !action || button.disabled) return;
+  button.disabled = true;
+  try {
+    const { response } = await executeCardAction(turn, action, {
+      request(_path, body) {
+        return actOnChatCard(turnId, body.action);
+      },
+      onUpdate: updateDialogueTurn,
+    });
+    if (response?.outcome === "already_settled") {
+      setHint("这条已在另一个窗口结算，已同步最终状态。", "success");
+    } else if (action === "discuss") {
+      setHint("好，沿着这条猜测继续聊。", "success");
+      elements.chatInput?.focus();
+    } else if (action === "defer") {
+      setHint("先放一放，之后再聊。", "success");
+    } else {
+      setHint(action === "confirm" ? "已确认这条猜测。" : "已记下这条猜测不准。", "success");
+    }
+    await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
+  } catch {
+    setHint("这次没有结算成功，卡片已恢复，可以重试。", "error");
+  }
+}
+
+async function handlePendingConfirmationOpen(button) {
+  const ref = button.dataset.confirmationRef || "";
+  if (!ref || button.disabled) return;
+  button.disabled = true;
+  try {
+    const turn = await openPendingConfirmation(ref, { session: CHAT_SESSION });
+    if (turn?.turn_id) renderChatTurn(turn);
+    await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
+    setHint(
+      isQuestionTurn(turn) ? "这条疑惑已经放进对话里。" : "这张确认卡已经放进对话里。",
+      "success",
+    );
+    elements.chatInput?.focus();
+  } catch {
+    button.disabled = false;
+    setHint("这条待聊内容暂时打不开，请稍后重试。", "error");
+  }
+}
+
+function bindDialogueConfirmations() {
+  if (elements.chatPendingToggle instanceof HTMLButtonElement) {
+    elements.chatPendingToggle.addEventListener("click", () => {
+      state.pendingConfirmations.expanded = !state.pendingConfirmations.expanded;
+      renderPendingConfirmations();
+      if (state.pendingConfirmations.expanded) void refreshPendingConfirmations();
+    });
+  }
+  if (elements.chatPendingList instanceof HTMLElement) {
+    elements.chatPendingList.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-confirmation-ref]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handlePendingConfirmationOpen(button);
+    });
+  }
+  if (elements.chatMessages instanceof HTMLElement) {
+    elements.chatMessages.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-card-action]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDialogueCardAction(button);
+    });
+  }
+  renderPendingConfirmations();
 }
 
 function bindChat() {
@@ -8434,6 +8623,7 @@ async function initializePopup() {
   bindRefreshButton();
   bindActivityToggle();
   bindChat();
+  bindDialogueConfirmations();
   bindOpenWeb();
   bindMobileQr();
   bindSettings();
@@ -8453,6 +8643,7 @@ async function initializePopup() {
   // call above never re-runs while a side panel stays open.
   installEmbeddingBannerAutoRefresh(maybeShowEmbeddingBanner);
   await hydrateChatHistory();
+  await refreshPendingConfirmations();
   // Always fetch profile-summary on startup so the messages inbox is
   // populated regardless of which tab the user lands on.  Without this
   // the inbox stays empty until the user manually opens the profile
