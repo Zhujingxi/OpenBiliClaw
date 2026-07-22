@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from dataclasses import asdict, dataclass, replace
@@ -10,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from openbiliclaw.memory.json_state import update_json_state
+from openbiliclaw.memory.json_state import read_json_state, update_json_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -406,15 +405,11 @@ class DialogueAnchorManager:
         if path is None:
             with self._volatile_lock:
                 return _normalize_state(self._volatile_state)
-        if not path.exists():
-            return _default_state()
-        try:
-            with open(path, encoding="utf-8") as file:
-                raw = json.load(file)
-        except (OSError, ValueError):
-            logger.warning("Failed to read dialogue anchor state; treating it as empty")
-            return _default_state()
-        return _normalize_state(raw)
+        return read_json_state(
+            path,
+            default_factory=_default_state,
+            normalize=_normalize_state,
+        )
 
     def _mutate_state(self, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         path = self._state_path

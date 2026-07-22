@@ -2839,7 +2839,11 @@ async def test_stale_anchor_snapshot_is_ignored_before_extraction(
         origin_turn_id="",
         entry=ENTRY_PENDING_OPEN,
     )
-    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _settles_extract([]))
+
+    async def should_not_extract(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("stale anchor must be discarded before LLM extraction")
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", should_not_extract)
 
     with caplog.at_level("WARNING"):
         result = await engine.learn_from_dialogue(
@@ -2851,8 +2855,91 @@ async def test_stale_anchor_snapshot_is_ignored_before_extraction(
         )
 
     assert engine._dialogue_anchor_manager.current() == current
-    assert "anchor_outcome" not in result
+    assert result["anchor_outcome"] == "stale"
+    rows = memory._database.query_profile_ledger(
+        days=1,
+        write_point="anchor_stale_generation_drop",
+    )
+    assert len(rows) == 1
+    assert rows[0]["source"] == "pre_llm"
     assert "stale dialogue anchor snapshot" in caplog.text
+
+
+async def test_anchor_generation_is_revalidated_after_llm_before_any_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户偏好原始研究"
+    old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis=hypothesis)
+    replacements: list[object] = []
+
+    async def replace_before_return(**_kwargs: object) -> dict[str, object]:
+        assert (
+            engine._dialogue_anchor_manager.release(
+                reason="replaced",
+                expected_generation=old.generation,
+            )
+            is not None
+        )
+        replacements.append(
+            engine._dialogue_anchor_manager.establish(
+                kind="hypothesis",
+                ref=old.ref,
+                origin_turn_id="",
+                entry=ENTRY_PENDING_OPEN,
+            )
+        )
+        return {
+            "candidates": [
+                {
+                    "kind": "interest",
+                    "content": "不应落库的迟到候选",
+                    "confidence": 0.99,
+                    "evidence": "stale generation",
+                }
+            ],
+            "settles": [],
+            "anchor": {"relation": "support", "interpretation": "", "derived": []},
+        }
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", replace_before_return)
+
+    with caplog.at_level("WARNING"):
+        result = await engine.learn_from_dialogue(
+            user_message="支持旧锚",
+            assistant_reply="迟到回复",
+            session="popup",
+            turn_id="stale-post-llm",
+            anchor_ref=old.ref,
+            anchor_generation=old.generation,
+        )
+
+    current = engine._dialogue_anchor_manager.current()
+    stored = engine._load_insights()[0]
+    assert replacements
+    assert current is not None
+    assert current.ref == old.ref
+    assert current.generation == old.generation + 1
+    assert result["anchor_outcome"] == "stale"
+    assert stored.validated is False
+    assert stored.confidence == 0.6
+    assert memory._database.get_card_settlement(old.ref) is None
+    assert memory.load_insight_candidates() == []
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "pending"
+    rows = memory._database.query_profile_ledger(
+        days=1,
+        write_point="anchor_stale_generation_drop",
+    )
+    assert len(rows) == 1
+    assert rows[0]["source"] == "post_llm"
+    assert rows[0]["turn_id"] == "stale-post-llm"
+    assert "stale dialogue anchor result discarded before side effects" in caplog.text
 
 
 # ===========================================================================

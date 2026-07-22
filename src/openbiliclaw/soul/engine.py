@@ -1564,8 +1564,14 @@ class SoulEngine:
                 anchor_ref,
                 anchor_generation,
             )
-            if active_anchor is not None:
-                anchor_context, anchor_texts = self._build_dialogue_anchor_context(active_anchor)
+            if active_anchor is None:
+                return self._stale_anchor_drop_result(
+                    anchor_ref=anchor_ref,
+                    anchor_generation=anchor_generation,
+                    turn_id=turn_id,
+                    phase="pre_llm",
+                )
+            anchor_context, anchor_texts = self._build_dialogue_anchor_context(active_anchor)
         anchor_decision: dict[str, object] | None = None
         try:
             if anchor_context is None:
@@ -1599,6 +1605,26 @@ class SoulEngine:
             logger.exception("Failed to extract dialogue insight candidates.")
             extracted = []
             settles = []
+
+        # The LLM call above yields control for an unbounded interval. An API
+        # action, TTL release, or newer dialogue entry may replace the anchor
+        # while it is in flight. Re-read and compare the ref+generation pair
+        # immediately after the response and before *any* object, replay-queue,
+        # candidate, or profile side effect. A stale answer is observation-only:
+        # discard every parsed output and leave the new generation untouched.
+        if active_anchor is not None:
+            revalidated_anchor = self._dialogue_anchor_manager.validate_snapshot(
+                anchor_ref,
+                anchor_generation,
+            )
+            if revalidated_anchor is None:
+                return self._stale_anchor_drop_result(
+                    anchor_ref=anchor_ref,
+                    anchor_generation=anchor_generation,
+                    turn_id=turn_id,
+                    phase="post_llm",
+                )
+            active_anchor = revalidated_anchor
 
         anchor_outcome = ""
         if active_anchor is not None:
@@ -2838,6 +2864,39 @@ class SoulEngine:
         if outcome:
             result["anchor_outcome"] = outcome
         return result
+
+    def _stale_anchor_drop_result(
+        self,
+        *,
+        anchor_ref: str,
+        anchor_generation: int,
+        turn_id: str,
+        phase: str,
+    ) -> dict[str, object]:
+        """Warn and audit one stale queued anchor result without side effects."""
+        logger.warning(
+            "stale dialogue anchor result discarded before side effects: "
+            "phase=%s ref=%r generation=%s turn_id=%s",
+            phase,
+            anchor_ref,
+            anchor_generation,
+            turn_id,
+        )
+        self._ledger.record(
+            write_point="anchor_stale_generation_drop",
+            source=phase,
+            before={"ref": anchor_ref, "generation": anchor_generation},
+            after={"discarded": True},
+            source_refs=[f"anchor:{anchor_ref}"],
+            turn_id=turn_id,
+        )
+        return {
+            "event_logged": True,
+            "candidate_count": 0,
+            "preference_updated": False,
+            "profile_rebuilt": False,
+            "anchor_outcome": "stale",
+        }
 
     def _merge_insight_candidates(
         self,
