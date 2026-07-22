@@ -2136,6 +2136,9 @@ async def test_settles_confirm_speculation_on_chat_scope(
     assert len(rows) == 1
     assert rows[0]["turn_id"] == "turn-42"
     assert rows[0]["outcome"] == "success"
+    receipt = memory._database.get_card_settlement("桌游")
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["applied"]) == ("confirmed", 1)
 
 
 @pytest.mark.asyncio
@@ -2211,6 +2214,120 @@ async def test_settles_confirm_is_idempotent(
     await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
     active = {s.domain for s in engine._speculator.get_active_speculations()}
     assert "桌游" not in active
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_confusion_settle_uses_ref_arbitrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="桌游", observation="连续浏览")
+    ref = str(confusion_id)
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "confusion", "ref": ref, "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="这确实是兴趣",
+        assistant_reply="收到",
+        session="popup",
+        scope="chat",
+        turn_id="confusion-chat-settle",
+    )
+
+    confusion = memory._database.get_confusion(confusion_id)
+    receipt = memory._database.get_card_settlement(ref)
+    assert confusion is not None
+    assert (confusion["status"], confusion["resolution"]) == ("resolved", "real_interest")
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["applied"]) == ("answer:real_interest", 1)
+    rows = _ledger_rows(memory, "settle_confusion")
+    assert len(rows) == 1
+    assert rows[0]["turn_id"] == "confusion-chat-settle"
+
+
+@pytest.mark.asyncio
+async def test_card_receipt_rejects_interleaved_plain_chat_confirm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视可证伪的证据"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    chat_entered_analyzer = asyncio.Event()
+    release_chat_settle = asyncio.Event()
+
+    async def interleaved_chat_extract(**_kwargs: object) -> dict[str, object]:
+        chat_entered_analyzer.set()
+        await release_chat_settle.wait()
+        return {
+            "candidates": [],
+            "settles": [{"kind": "insight", "ref": ref, "verdict": "confirm"}],
+        }
+
+    outcomes: dict[str, str] = {}
+    real_settle = engine.settle_hypothesis
+
+    async def capture_settlement(**kwargs: object) -> dict[str, object]:
+        result = await real_settle(**kwargs)  # type: ignore[arg-type]
+        outcomes[str(kwargs.get("source", ""))] = str(result.get("outcome", ""))
+        return result
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", interleaved_chat_extract)
+    monkeypatch.setattr(engine, "settle_hypothesis", capture_settlement)
+    chat_task = asyncio.create_task(
+        engine.learn_from_dialogue(
+            user_message="其实我支持这个判断",
+            assistant_reply="收到",
+            session="popup",
+            scope="chat",
+            turn_id="plain-chat-confirm",
+        )
+    )
+    await asyncio.wait_for(chat_entered_analyzer.wait(), timeout=5)
+    try:
+        card_result = await engine.settle_hypothesis(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="reject",
+            turn_id="card-reject",
+            source="card_action",
+        )
+        receipt_before_chat = memory._database.get_card_settlement(ref)
+        assert receipt_before_chat is not None
+        assert (receipt_before_chat["verdict"], receipt_before_chat["applied"]) == (
+            "rejected",
+            1,
+        )
+    finally:
+        release_chat_settle.set()
+    await asyncio.wait_for(chat_task, timeout=5)
+
+    stored = engine._load_insights()[0]
+    receipt = memory._database.get_card_settlement(ref)
+    assert card_result["outcome"] == "applied"
+    assert outcomes == {"card_action": "applied", "chat": "already_settled"}
+    assert stored.validated is False
+    assert stored.confidence == 0.35
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "rejected",
+        "card-reject",
+        1,
+    )
+    rows = _ledger_rows(memory, "settle_insight")
+    assert len(rows) == 1
+    assert rows[0]["turn_id"] == "card-reject"
 
 
 # ---------------------------------------------------------------------------

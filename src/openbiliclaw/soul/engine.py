@@ -1131,6 +1131,56 @@ class SoulEngine:
             anchor_generation=anchor_generation,
         )
 
+    async def settle_confusion(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        note: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Settle one unanchored confusion through the shared ref arbitrator."""
+        try:
+            confusion_id = int(ref)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Confusion settlement ref must be an integer: {ref!r}") from exc
+        interpretation = {
+            "confirm": "real_interest",
+            "confirmed": "real_interest",
+            "reject": "proxy_behavior",
+            "rejected": "proxy_behavior",
+        }.get(requested_verdict.strip().lower())
+        if interpretation is None:
+            raise ValueError(f"Unsupported confusion settlement: {requested_verdict!r}")
+        return await self.settle_confusion_answer(
+            ref=ref,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            turn_id=turn_id,
+            source=source,
+            anchor_generation=0,
+        )
+
+    async def settle_speculation(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Settle one speculation through the shared ref-level executor."""
+        return await self._settle_dialogue_object(
+            kind="speculation",
+            ref=ref,
+            title=ref,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+        )
+
     async def _settle_dialogue_object(
         self,
         *,
@@ -1210,6 +1260,21 @@ class SoulEngine:
                 "anchor_generation": max(0, int(anchor_generation)),
                 "source": source,
             }
+        elif normalized_kind == "speculation":
+            verdict = {
+                "confirm": "confirmed",
+                "confirmed": "confirmed",
+                "reject": "rejected",
+                "rejected": "rejected",
+            }.get(normalized_request)
+            if verdict is None:
+                raise ValueError(f"Unsupported speculation settlement: {requested_verdict!r}")
+            winning_payload = {
+                "kind": "speculation",
+                "title": title.strip(),
+                "action": verdict,
+                "source": source,
+            }
         else:
             raise ValueError(f"Unsupported dialogue settlement kind: {kind!r}")
 
@@ -1262,7 +1327,13 @@ class SoulEngine:
         stored_title = str(payload.get("title", title)).strip()
         stored_source = str(payload.get("source", source)).strip() or source
         stored_verdict = str(settlement.get("verdict", "")).strip().lower()
-        event_type = "feedback" if stored_kind == "hypothesis" else "confusion_settlement"
+        event_type = {
+            "hypothesis": "feedback",
+            "confusion": "confusion_settlement",
+            "speculation": "speculation_settlement",
+        }.get(stored_kind)
+        if event_type is None:
+            raise RuntimeError(f"Stored dialogue settlement kind is invalid: {stored_kind!r}")
         event_metadata: dict[str, object] = {
             "settlement_ref": normalized_ref,
             "settlement_kind": stored_kind,
@@ -1272,13 +1343,15 @@ class SoulEngine:
         }
         if stored_kind == "hypothesis":
             event_metadata.update(self._settlement_feedback(stored_title, stored_verdict))
-        else:
+        elif stored_kind == "confusion":
             event_metadata.update(
                 {
                     "confusion_id": payload.get("confusion_id", 0),
                     "interpretation": payload.get("interpretation", ""),
                 }
             )
+        else:
+            event_metadata["domain"] = stored_title
         event = {
             "event_type": event_type,
             "title": stored_title,
@@ -1352,9 +1425,11 @@ class SoulEngine:
                         verdict=stored_verdict,
                         turn_id=str(settlement.get("turn_id", normalized_turn_id)),
                         matched=bool(result.get("matched", False)),
-                        write_point=(
-                            "settle_insight" if stored_kind == "hypothesis" else "settle_confusion"
-                        ),
+                        write_point={
+                            "hypothesis": "settle_insight",
+                            "confusion": "settle_confusion",
+                            "speculation": "settle_speculation",
+                        }[stored_kind],
                     )
                 ):
                     return self._dialogue_settlement_response(
@@ -1403,6 +1478,18 @@ class SoulEngine:
                     turn_id=str(settlement.get("turn_id", "")),
                 )
             return result
+        if kind == "speculation":
+            if verdict == "confirmed":
+                applied = bool(self._speculator.user_confirm_speculation(title))
+                status = "confirmed"
+            else:
+                applied = bool(self._speculator.user_reject_speculation(title))
+                status = "rejected"
+            return {
+                "matched": applied,
+                "domain": title,
+                "status": status if applied else "",
+            }
         if kind != "confusion":
             raise RuntimeError(f"Stored dialogue settlement kind is invalid: {kind!r}")
         try:
@@ -1410,14 +1497,21 @@ class SoulEngine:
             generation = max(0, int(payload.get("anchor_generation", 0)))
         except (TypeError, ValueError) as exc:
             raise RuntimeError("Stored confusion settlement payload is invalid") from exc
-        terminal = self._confusion_manager.process_anchor_settlement(
-            confusion_id,
-            action="resolve",
-            interpretation=str(payload.get("interpretation", "")),
-            note=str(payload.get("note", "")),
-            turn_id=str(settlement.get("turn_id", "")),
-            anchor_generation=generation,
-        )
+        if generation > 0:
+            terminal = self._confusion_manager.process_anchor_settlement(
+                confusion_id,
+                action="resolve",
+                interpretation=str(payload.get("interpretation", "")),
+                note=str(payload.get("note", "")),
+                turn_id=str(settlement.get("turn_id", "")),
+                anchor_generation=generation,
+            )
+        else:
+            terminal = self._confusion_manager.resolve(
+                confusion_id,
+                resolution=str(payload.get("interpretation", "")),
+                note=str(payload.get("note", "")),
+            )
         if terminal is None:
             return None
         return {
@@ -1440,6 +1534,23 @@ class SoulEngine:
                     str(settlement.get("verdict", "")),
                 )
             )
+        if kind == "speculation":
+            domain = str(payload.get("title", "")).strip()
+            state = self._speculator._load_state()
+            active = next(
+                (item for item in state.active if item.domain.casefold() == domain.casefold()),
+                None,
+            )
+            cooldown = next(
+                (item for item in state.cooldown if item.domain.casefold() == domain.casefold()),
+                None,
+            )
+            status = active.status if active is not None else ("rejected" if cooldown else "")
+            return {
+                "matched": bool(status),
+                "domain": domain,
+                "status": status,
+            }
         try:
             confusion_id = int(payload.get("confusion_id", 0))
         except (TypeError, ValueError):
@@ -3157,89 +3268,46 @@ class SoulEngine:
                 if ref not in spec_domains:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                await self._settle_speculation(ref, verdict, turn_id)
+                try:
+                    await self.settle_speculation(
+                        ref=ref,
+                        requested_verdict=verdict,
+                        turn_id=turn_id,
+                        source="chat",
+                    )
+                except Exception:
+                    logger.exception("Failed to settle speculation %s", ref)
             elif kind == "insight":
                 hypothesis = insight_hash_map.get(ref)
                 if hypothesis is None:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                await self._settle_insight(hypothesis, verdict, turn_id)
+                try:
+                    await self.settle_hypothesis(
+                        ref=ref,
+                        hypothesis=hypothesis,
+                        requested_verdict=verdict,
+                        turn_id=turn_id,
+                        source="chat",
+                    )
+                except Exception:
+                    logger.exception("Failed to settle insight %s", ref)
             elif kind == "confusion":
                 if ref not in confusion_ids:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                self._settle_confusion(ref, verdict, turn_id)
+                try:
+                    await self.settle_confusion(
+                        ref=ref,
+                        requested_verdict=verdict,
+                        note="chat_settle",
+                        turn_id=turn_id,
+                        source="chat",
+                    )
+                except Exception:
+                    logger.exception("Failed to settle confusion %s", ref)
             else:
                 logger.warning("dialogue settle dropped: unknown kind=%s", kind)
-
-    async def _settle_speculation(self, domain: str, verdict: str, turn_id: str) -> None:
-        before = {"domain": domain, "verdict": verdict}
-        applied = False
-        try:
-            if verdict == "confirm":
-                applied = bool(self._speculator.user_confirm_speculation(domain))
-            elif verdict == "reject":
-                applied = bool(self._speculator.user_reject_speculation(domain))
-        except Exception:
-            logger.exception("Failed to settle speculation %s", domain)
-        self._ledger.record(
-            write_point="settle_speculation",
-            source="chat",
-            before=before,
-            after={"domain": domain, "applied": applied},
-            source_refs=[domain],
-            outcome="success" if applied else "failed",
-            turn_id=turn_id,
-        )
-
-    async def _settle_insight(self, hypothesis: str, verdict: str, turn_id: str) -> None:
-        signal = "confirm" if verdict == "confirm" else "reject"
-        result: dict[str, Any] = {}
-        try:
-            result = await self.update_from_feedback({"hypothesis": hypothesis, "signal": signal})
-        except Exception:
-            logger.exception("Failed to settle insight via feedback")
-        matched = bool(result.get("matched", result.get("updated", False)))
-        self._ledger.record(
-            write_point="settle_insight",
-            source="chat",
-            before={"hypothesis": hypothesis[:80], "verdict": verdict},
-            after={"matched": matched},
-            source_refs=[hypothesis[:60]],
-            outcome="success" if matched else "failed",
-            turn_id=turn_id,
-        )
-
-    def _settle_confusion(self, ref: str, verdict: str, turn_id: str) -> None:
-        """Directly resolve a confusion referenced from a plain chat turn.
-
-        ``confirm`` → the confused behaviour reflects a real interest
-        (``real_interest``, held updates replay); ``reject`` → it was a proxy /
-        misread (``proxy_behavior``, held updates discarded). The confusion's
-        direct-settle exit (gate off ⇒ direct write + ledger, spec §Phase 2).
-        """
-        try:
-            confusion_id = int(ref)
-        except (TypeError, ValueError):
-            logger.warning("confusion settle dropped: non-int ref=%r", ref)
-            return
-        resolution = "real_interest" if verdict == "confirm" else "proxy_behavior"
-        terminal: str | None = None
-        try:
-            terminal = self._confusion_manager.resolve(
-                confusion_id, resolution=resolution, note="chat_settle"
-            )
-        except Exception:
-            logger.exception("Failed to settle confusion %s", confusion_id)
-        self._ledger.record(
-            write_point="settle_confusion",
-            source="chat",
-            before={"confusion_id": confusion_id, "verdict": verdict},
-            after={"resolution": resolution, "status": terminal},
-            source_refs=[ref],
-            outcome="success" if terminal else "failed",
-            turn_id=turn_id,
-        )
 
     async def replay_held_updates(self) -> dict[str, object]:
         """Rebase resolved-real-interest held updates into preference analysis.
