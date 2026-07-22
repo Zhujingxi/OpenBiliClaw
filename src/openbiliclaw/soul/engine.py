@@ -2336,20 +2336,28 @@ class SoulEngine:
     async def _mark_rebuild_pending(self, trigger_refs: list[str]) -> None:
         """Set/refresh the pending marker (confirm & reject single point, inv 4).
 
-        A new migration always re-stamps ``set_at`` and resets ``retry_count`` —
-        "new evidence reopens" — merging its refs with any still-pending ones.
+        Replaying an existing trigger is a no-op so it cannot extend debounce or
+        erase a bounded-retry attempt.  A genuinely new trigger re-stamps
+        ``set_at`` and resets ``retry_count`` — "new evidence reopens" — while
+        merging its ref with any still-pending ones.
         """
         async with self._rebuild_pending_lock:
             state = self._load_rebuild_state()
             existing = state.get("pending")
             refs = (
-                list(existing.get("trigger_refs", []))
+                [ref for ref in existing.get("trigger_refs", []) if isinstance(ref, str) and ref]
                 if isinstance(existing, dict) and isinstance(existing.get("trigger_refs"), list)
                 else []
             )
+            has_new_trigger = False
             for ref in trigger_refs:
-                if ref not in refs:
+                if ref and ref not in refs:
                     refs.append(ref)
+                    has_new_trigger = True
+            if isinstance(existing, dict) and not has_new_trigger:
+                return
+            if not refs:
+                return
             state["pending"] = {
                 "set_at": datetime.now().isoformat(),
                 "trigger_refs": refs,

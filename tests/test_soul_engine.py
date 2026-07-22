@@ -3135,6 +3135,27 @@ async def test_pending_rebuild_debounced_within_window(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_rebuild_trigger_preserves_pending_clock_and_retry(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    await engine._mark_rebuild_pending(["ref:a"])
+    state = engine._load_rebuild_state()
+    state["pending"]["set_at"] = "2026-01-01T00:00:00"
+    state["pending"]["retry_count"] = 1
+    engine._save_rebuild_state(state)
+    marker_path = tmp_path / "memory" / "rebuild_pending_state.json"
+    before = marker_path.read_bytes()
+
+    await engine._mark_rebuild_pending(["ref:a"])
+
+    pending = engine._load_rebuild_state()["pending"]
+    assert pending["set_at"] == "2026-01-01T00:00:00"
+    assert pending["retry_count"] == 1
+    assert marker_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_pending_rebuild_accept_runs_and_clears(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3252,6 +3273,7 @@ async def test_new_migration_reopens_pending_and_resets_retry(tmp_path: Path) ->
     # Simulate a prior failed attempt leaving retry_count high.
     state = engine._load_rebuild_state()
     state["pending"]["retry_count"] = 1
+    state["pending"]["set_at"] = "2026-01-01T00:00:00"
     engine._save_rebuild_state(state)
 
     # A new confirm/reject migration re-stamps set_at and resets retry_count.
@@ -3259,4 +3281,5 @@ async def test_new_migration_reopens_pending_and_resets_retry(tmp_path: Path) ->
     await engine.update_from_feedback({"hypothesis": "新证据", "signal": "confirm"})
     reopened = engine._load_rebuild_state()["pending"]
     assert reopened["retry_count"] == 0
+    assert reopened["set_at"] != "2026-01-01T00:00:00"
     assert "ref:a" in reopened["trigger_refs"]
