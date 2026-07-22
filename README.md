@@ -594,6 +594,9 @@ background ─ background admission (default 3) ──────┘
 
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
+
+持久对话：固定时间/payload → 单学习队列 → 单锚(ref+generation) → 归属矩阵
+                                              └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
 ```
@@ -613,7 +616,7 @@ background ─ background admission (default 3) ──────┘
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
-│ Soul 认知纪律：三线更新 · 台账审计 · 疑惑「看不懂」 · 深层态势门控(shadow) │
+│ Soul 认知纪律：单对话锚 · 归属矩阵 · 疑惑 FIFO 重放 · 台账 · 深层门控(shadow) │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
@@ -639,6 +642,8 @@ background ─ background admission (default 3) ──────┘
 Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
                                       │                      └新避雷：共享清池 → content_cache
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
+durable turn → 固定时间/payload → 单学习队列 → anchor(ref,generation) → relation matrix
+                                                   └confusion 失败：FIFO≤5 → 12h 恢复
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 

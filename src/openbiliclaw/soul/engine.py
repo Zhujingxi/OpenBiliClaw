@@ -33,7 +33,7 @@ from .cognition_cycle import (
 )
 from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
-from .dialogue_anchor import DialogueAnchor, DialogueAnchorManager
+from .dialogue_anchor import ENTRY_CONFUSION_PROMPT, DialogueAnchor, DialogueAnchorManager
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
@@ -323,6 +323,7 @@ class SoulEngine:
             # 12h-loop fallback trigger for the debounced confirmed-hypotheses
             # rebuild (spec invariant 4). Bound method; only invoked at run time.
             pending_rebuild_hook=self.run_pending_rebuild_if_due,
+            confusion_replay_hook=self.replay_confusion_dialogue_attributions,
         )
         self._profile_consolidator: ProfileConsolidator | None = None
         if profile_consolidation_enabled:
@@ -1070,10 +1071,11 @@ class SoulEngine:
         """Persist a chat turn and update long-term understanding when warranted.
 
         ``scope`` / ``turn_id`` (Phase 1) are threaded from the durable chat
-        path. ``scope`` defaults to ``"chat"``; only ``"chat"`` turns run the
-        ``settles`` inventory settling (Task 3) — probe / confusion scopes are
-        settled by the durable side-effect path (single ownership). ``turn_id``
-        is stamped on the ledger rows as an idempotency observation key.
+        path. ``scope`` defaults to ``"chat"``; only unanchored ``"chat"``
+        turns run inventory ``settles``. Probe settlement stays in its durable
+        side effect; confusion settlement belongs exclusively to the serialized
+        dialogue-anchor processor. ``turn_id`` is stamped on ledger rows as an
+        idempotency observation key.
         """
         await self._memory.propagate_event(
             {
@@ -1150,10 +1152,9 @@ class SoulEngine:
                     turn_id=turn_id,
                 )
 
-        # Process settles (single ownership, spec §invariant 6): only plain
-        # scope="chat" turns settle here — probe / confusion durable turns are
-        # settled by the durable side-effect path, so skip to avoid double
-        # settling.
+        # Process inventory settles (single ownership, spec §invariant 6): an
+        # anchored turn belongs to the dialogue-anchor processor. Probe turns
+        # retain their durable side effect, so both paths are excluded here.
         if scope == "chat" and settles and active_anchor is None:
             await self._process_dialogue_settles(
                 settles=settles,
@@ -1989,6 +1990,101 @@ class SoulEngine:
         except ValueError:
             return None
 
+    async def replay_confusion_dialogue_attributions(self) -> int:
+        """Recover completed clarifying replies through the same anchor owner.
+
+        The 12-hour cognition cycle calls this fallback. Persisted classifier
+        output is drained first without another model call; a crash gap with a
+        completed turn but no queue item is reclassified once and durably
+        receipted on the chat turn.
+        """
+        self._dialogue_anchor_manager.expire()
+        pending = self._confusion_manager.pending_dialogue_replays()
+        if not pending:
+            return 0
+        processed = 0
+        for row in pending:
+            try:
+                confusion_id = int(row.get("confusion_id", 0))
+            except (TypeError, ValueError):
+                continue
+            confusion = self._confusion_manager.get(confusion_id)
+            if confusion is None or confusion.status != "clarifying":
+                continue
+            anchor = self._dialogue_anchor_manager.current()
+            if anchor is None:
+                anchor = self._dialogue_anchor_manager.establish(
+                    kind="confusion",
+                    ref=str(confusion_id),
+                    origin_turn_id=confusion.ask_turn_id or str(row.get("ask_turn_id", "")),
+                    entry=ENTRY_CONFUSION_PROMPT,
+                )
+            if anchor.kind != "confusion" or anchor.ref != str(confusion_id):
+                logger.warning(
+                    "confusion replay fenced by a different active anchor: "
+                    "confusion_id=%s anchor=%s:%s",
+                    confusion_id,
+                    anchor.kind,
+                    anchor.ref,
+                )
+                continue
+            if confusion.replay_queue:
+                terminal = self._confusion_manager.retry_anchor_settlements(
+                    confusion_id,
+                    expected_generation=anchor.generation,
+                )
+                if terminal is None:
+                    continue
+                self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    expected_generation=anchor.generation,
+                )
+                processed += 1
+                continue
+
+            anchor_context, anchor_texts = self._build_dialogue_anchor_context(anchor)
+            label = str(row.get("subject_title") or row.get("subject_id") or "这个方向")
+            user_message = f"[关于我有点困惑的「{label}」的澄清] {str(row.get('message', ''))}"
+            try:
+                extract_result = await self._dialogue_insight_analyzer.extract(
+                    user_message=user_message,
+                    assistant_reply=str(row.get("reply", "")),
+                    core_memory=self._memory.get_core_memory(),
+                    active_list=self._build_dialogue_active_list()[0],
+                    anchor=anchor_context,
+                )
+            except DialogueInsightAnalysisError:
+                logger.warning(
+                    "confusion dialogue attribution replay failed analysis: turn_id=%s",
+                    row.get("turn_id"),
+                    exc_info=True,
+                )
+                continue
+            raw_decision = extract_result.get("anchor")
+            if not isinstance(raw_decision, dict):
+                logger.warning(
+                    "confusion dialogue attribution replay missing decision: turn_id=%s",
+                    row.get("turn_id"),
+                )
+                continue
+            if (
+                self._dialogue_anchor_manager.validate_snapshot(
+                    anchor.ref,
+                    anchor.generation,
+                )
+                is None
+            ):
+                continue
+            outcome = await self._process_dialogue_anchor_decision(
+                anchor=anchor,
+                anchor_texts=anchor_texts,
+                decision=raw_decision,
+                turn_id=str(row.get("turn_id", "")),
+            )
+            if outcome not in {"kept_invalid", "kept_failed", "queued_failed", "stale"}:
+                processed += 1
+        return processed
+
     def _build_dialogue_anchor_context(
         self,
         anchor: DialogueAnchor,
@@ -2086,6 +2182,14 @@ class SoulEngine:
                 relation,
                 expected_generation=anchor.generation,
             )
+            if anchor.kind == "confusion":
+                confusion_id = self._confusion_anchor_id(anchor)
+                if confusion_id:
+                    self._confusion_manager.record_anchor_relation_processed(
+                        confusion_id,
+                        relation=relation,
+                        turn_id=turn_id,
+                    )
             return "unrelated" if updated is not None else "released_unrelated"
 
         if relation == "ambiguous":
@@ -2103,6 +2207,14 @@ class SoulEngine:
                     source_refs=[f"{anchor.kind}:{anchor.ref}"],
                     turn_id=turn_id,
                 )
+                if anchor.kind == "confusion":
+                    confusion_id = self._confusion_anchor_id(anchor)
+                    if confusion_id:
+                        self._confusion_manager.record_anchor_relation_processed(
+                            confusion_id,
+                            relation=relation,
+                            turn_id=turn_id,
+                        )
                 return "follow_up"
             if anchor.kind == "hypothesis":
                 released = self._dialogue_anchor_manager.release(
@@ -2112,8 +2224,19 @@ class SoulEngine:
                 )
             else:
                 confusion_id = self._confusion_anchor_id(anchor)
-                if confusion_id:
-                    self._confusion_manager.defer(confusion_id)
+                terminal = (
+                    self._confusion_manager.process_anchor_settlement(
+                        confusion_id,
+                        action="defer",
+                        note="second ambiguous dialogue turn",
+                        turn_id=turn_id,
+                        anchor_generation=anchor.generation,
+                    )
+                    if confusion_id
+                    else None
+                )
+                if terminal is None:
+                    return "queued_failed"
                 released = self._dialogue_anchor_manager.release(
                     reason="settled",
                     expected_generation=anchor.generation,
@@ -2175,13 +2298,16 @@ class SoulEngine:
         confusion_id = self._confusion_anchor_id(anchor)
         if not confusion_id:
             return "kept_invalid"
-        terminal = self._confusion_manager.resolve(
+        terminal = self._confusion_manager.process_anchor_settlement(
             confusion_id,
-            resolution=interpretation,
+            action="resolve",
+            interpretation=interpretation,
             note="dialogue_anchor",
+            turn_id=turn_id,
+            anchor_generation=anchor.generation,
         )
         if terminal is None:
-            return "kept_failed"
+            return "queued_failed"
         released = self._dialogue_anchor_manager.release(
             reason="settled",
             expected_generation=anchor.generation,

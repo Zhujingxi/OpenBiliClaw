@@ -185,6 +185,7 @@ class DialogueAnchorManager:
             raise ValueError(f"Unsupported dialogue anchor entry: {entry!r}")
         established_at = _normalized_now(now or self._now_provider()).isoformat()
         released: DialogueAnchor | None = None
+        released_replays: list[dict[str, Any]] = []
         established: DialogueAnchor | None = None
         created_new = False
 
@@ -201,7 +202,9 @@ class DialogueAnchorManager:
                 established = existing
                 return
             if existing is not None:
-                self._prepare_release(existing, reason="replaced", card_state="")
+                released_replays.extend(
+                    self._prepare_release(existing, reason="replaced", card_state="")
+                )
                 released = existing
             generation = int(state.get("generation", 0)) + 1
             established = DialogueAnchor(
@@ -218,6 +221,7 @@ class DialogueAnchorManager:
         self._mutate_state(mutate)
         if released is not None:
             self._record_release(released, "replaced")
+            self._record_replay_drops(released, released_replays, reason="replaced")
         if established is None:  # pragma: no cover - guarded by mutation above
             raise RuntimeError("Failed to establish dialogue anchor")
         if created_new:
@@ -239,6 +243,7 @@ class DialogueAnchorManager:
         if normalized_card_state and normalized_card_state not in _TERMINAL_CARD_STATES:
             raise ValueError(f"Unsupported terminal card state: {card_state!r}")
         released: DialogueAnchor | None = None
+        released_replays: list[dict[str, Any]] = []
 
         def mutate(state: dict[str, Any]) -> None:
             nonlocal released
@@ -252,10 +257,12 @@ class DialogueAnchorManager:
                     anchor.generation,
                 )
                 return
-            self._prepare_release(
-                anchor,
-                reason=normalized_reason,
-                card_state=normalized_card_state,
+            released_replays.extend(
+                self._prepare_release(
+                    anchor,
+                    reason=normalized_reason,
+                    card_state=normalized_card_state,
+                )
             )
             released = anchor
             state["anchor"] = None
@@ -263,6 +270,11 @@ class DialogueAnchorManager:
         self._mutate_state(mutate)
         if released is not None:
             self._record_release(released, normalized_reason)
+            self._record_replay_drops(
+                released,
+                released_replays,
+                reason=normalized_reason,
+            )
         return released
 
     def note_relation(
@@ -274,6 +286,7 @@ class DialogueAnchorManager:
         """Persist unrelated/ambiguous counters and release after two unrelated turns."""
         normalized_relation = relation.strip().lower()
         released: DialogueAnchor | None = None
+        released_replays: list[dict[str, Any]] = []
 
         def mutate(state: dict[str, Any]) -> None:
             nonlocal released
@@ -294,7 +307,9 @@ class DialogueAnchorManager:
                     ambiguous_count=0,
                 )
                 if updated.unrelated_streak >= _UNRELATED_RELEASE_TURNS:
-                    self._prepare_release(updated, reason="unrelated", card_state="")
+                    released_replays.extend(
+                        self._prepare_release(updated, reason="unrelated", card_state="")
+                    )
                     released = updated
                     state["anchor"] = None
                 else:
@@ -313,6 +328,7 @@ class DialogueAnchorManager:
         self._mutate_state(mutate)
         if released is not None:
             self._record_release(released, "unrelated")
+            self._record_replay_drops(released, released_replays, reason="unrelated")
             return None
         return self.current()
 
@@ -393,12 +409,28 @@ class DialogueAnchorManager:
         *,
         reason: str,
         card_state: str,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         if reason == "settled" and anchor.kind == "hypothesis" and not card_state:
             raise ValueError("Hypothesis anchor settlement requires a terminal card state")
         database = self._database
         if database is None:
-            return
+            return []
+        dropped_replays: list[dict[str, Any]] = []
+        if anchor.kind == "confusion":
+            clear_replay_queue = getattr(database, "clear_confusion_replay_queue", None)
+            if callable(clear_replay_queue):
+                try:
+                    confusion_id = int(anchor.ref.rsplit(":", maxsplit=1)[-1])
+                except ValueError:
+                    logger.warning(
+                        "Cannot clear replay queue for malformed anchor ref=%r", anchor.ref
+                    )
+                else:
+                    raw_dropped = clear_replay_queue(confusion_id)
+                    if isinstance(raw_dropped, list):
+                        dropped_replays = [
+                            dict(item) for item in raw_dropped if isinstance(item, dict)
+                        ]
         update_payload = getattr(database, "update_chat_turn_payload_state", None)
         if anchor.origin_turn_id and callable(update_payload):
             if reason == "settled" and anchor.kind == "hypothesis":
@@ -414,19 +446,20 @@ class DialogueAnchorManager:
                     new_state="pending",
                 )
         if anchor.kind != "confusion" or reason == "settled":
-            return
+            return dropped_replays
         get_confusion = getattr(database, "get_confusion", None)
         update_confusion = getattr(database, "update_confusion", None)
         if not callable(get_confusion) or not callable(update_confusion):
-            return
+            return dropped_replays
         try:
             confusion_id = int(anchor.ref.rsplit(":", maxsplit=1)[-1])
         except ValueError:
             logger.warning("Cannot reopen confusion for malformed anchor ref=%r", anchor.ref)
-            return
+            return dropped_replays
         row = get_confusion(confusion_id)
         if isinstance(row, dict) and str(row.get("status", "")) == "clarifying":
             update_confusion(confusion_id, status="open")
+        return dropped_replays
 
     def _record_established(self, anchor: DialogueAnchor, entry: str) -> None:
         if self._ledger is None:
@@ -450,3 +483,22 @@ class DialogueAnchorManager:
             source_refs=[f"{anchor.kind}:{anchor.ref}"],
             turn_id=anchor.origin_turn_id,
         )
+
+    def _record_replay_drops(
+        self,
+        anchor: DialogueAnchor,
+        dropped: list[dict[str, Any]],
+        *,
+        reason: str,
+    ) -> None:
+        if self._ledger is None:
+            return
+        for item in dropped:
+            self._ledger.record(
+                write_point="confusion_replay_dropped",
+                source="dialogue_anchor",
+                before=item,
+                after={"reason": reason, "generation": anchor.generation},
+                source_refs=[f"{anchor.kind}:{anchor.ref}"],
+                turn_id=str(item.get("turn_id", "")),
+            )

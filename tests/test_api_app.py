@@ -8863,38 +8863,66 @@ class TestBackendAPI:
         assert restored["items"][0]["status"] == "completed"
         assert restored["items"][0]["reply"] == "你更在意的是它背后的逻辑。"
 
-    def test_confusion_scope_durable_turn_resolves_via_side_effect(self, tmp_path: Path) -> None:
-        """A durable scope="confusion" turn settles the confusion (single owner).
-
-        The reply's sentiment (keyword fallback, no LLM) decides the exit:
-        a positive answer confirms real interest and resolves the confusion.
-        The confusion is settled by the durable side-effect path only —
-        NOT by ``learn_from_dialogue`` settles (single ownership).
-        """
+    def test_confusion_scope_establishes_anchor_without_legacy_direct_settlement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The durable path establishes the anchor but never owns settlement."""
         import time
         from types import SimpleNamespace
 
         from fastapi.testclient import TestClient
 
         from openbiliclaw.soul.confusion import ConfusionManager
+        from openbiliclaw.soul.dialogue_anchor import DialogueAnchorManager
+        from openbiliclaw.soul.ledger import ProfileLedger
         from openbiliclaw.storage.database import Database
 
+        class TrackingConfusionManager(ConfusionManager):
+            def __init__(self, database: Database) -> None:
+                super().__init__(database)
+                self.direct_resolve_calls = 0
+                self.direct_defer_calls = 0
+
+            def resolve(self, *args: object, **kwargs: object) -> str | None:
+                self.direct_resolve_calls += 1
+                return super().resolve(*args, **kwargs)  # type: ignore[arg-type]
+
+            def defer(self, *args: object, **kwargs: object) -> None:
+                self.direct_defer_calls += 1
+                super().defer(*args, **kwargs)  # type: ignore[arg-type]
+
         class FakeDialogue:
+            def __init__(self, anchor_manager: DialogueAnchorManager) -> None:
+                self._anchor_manager = anchor_manager
+                self.anchor_seen_before_reply = False
+
             async def respond(
                 self, user_message: str, *, scope: str = "chat", turn_id: str = ""
             ) -> str:
+                del user_message, scope, turn_id
+                self.anchor_seen_before_reply = self._anchor_manager.current() is not None
                 return "明白了"
 
         db = Database(tmp_path / "openbiliclaw.db")
         db.initialize()
         confusion_id = db.insert_confusion(topic="解压视频", observation="停留很短")
-        manager = ConfusionManager(db)
-        soul_engine = SimpleNamespace(_confusion_manager=manager)
+        manager = TrackingConfusionManager(db)
+        anchor_manager = DialogueAnchorManager(
+            tmp_path,
+            database=db,
+            ledger=ProfileLedger(db),
+        )
+        dialogue = FakeDialogue(anchor_manager)
+        soul_engine = SimpleNamespace(
+            _confusion_manager=manager,
+            _dialogue_anchor_manager=anchor_manager,
+        )
         app = create_app(
             memory_manager=object(),
             database=db,
             soul_engine=soul_engine,
-            dialogue=FakeDialogue(),
+            dialogue=dialogue,
         )
 
         with TestClient(app) as client:
@@ -8906,7 +8934,7 @@ class TestBackendAPI:
                     "scope": "confusion",
                     "subject_id": str(confusion_id),
                     "subject_title": "解压视频",
-                    "message": "我就喜欢",  # strong_positive keyword → real_interest
+                    "message": "我就喜欢",
                 },
             )
             for _ in range(50):
@@ -8917,8 +8945,16 @@ class TestBackendAPI:
             assert turn["status"] == "completed"
 
         stored = manager.get(confusion_id)
-        assert stored.status == "resolved"
-        assert stored.resolution == "real_interest"
+        assert stored is not None
+        assert stored.status == "clarifying"
+        assert stored.resolution == ""
+        assert manager.direct_resolve_calls == 0
+        assert manager.direct_defer_calls == 0
+        assert dialogue.anchor_seen_before_reply is True
+        active_anchor = anchor_manager.current()
+        assert active_anchor is not None
+        assert active_anchor.kind == "confusion"
+        assert active_anchor.ref == str(confusion_id)
 
     @pytest.mark.parametrize(
         ("failure", "expected_fragment"),

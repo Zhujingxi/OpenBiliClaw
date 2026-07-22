@@ -145,8 +145,9 @@ class SocraticDialogue:
         Args:
             user_message: The user's message.
             scope: Chat scope threaded to ``learn_from_dialogue`` — only
-                ``"chat"`` runs settles; probe / confusion scopes are settled
-                by the durable side-effect path (single ownership).
+                unanchored ``"chat"`` runs inventory settles. Probe settlement
+                stays in its durable side effect; confusion settlement belongs
+                exclusively to the serialized dialogue-anchor processor.
             turn_id: Durable chat-turn id (idempotency observation key).
 
         Returns:

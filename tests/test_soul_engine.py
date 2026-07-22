@@ -2402,6 +2402,151 @@ async def test_confusion_anchor_answer_resolves_matching_interpretation(
     assert result["anchor_outcome"] == "answered"
 
 
+async def test_completed_confusion_reply_scan_replays_attribution_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="桌游", observation="连续浏览")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question-receipt",
+        asked_at="2026-07-21T01:00:00+00:00",
+    )
+    engine._dialogue_anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id="question-receipt",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+    memory._database.create_chat_turn(
+        turn_id="completed-reply",
+        session="popup",
+        scope="confusion",
+        subject_id=str(confusion_id),
+        subject_title="桌游",
+        message="这确实是我的兴趣",
+    )
+    memory._database.complete_chat_turn("completed-reply", reply="明白了")
+    extract_calls = 0
+    fake_extract = _anchor_extract("answer", interpretation="real_interest")
+
+    async def counted_extract(**kwargs: object) -> dict[str, object]:
+        nonlocal extract_calls
+        extract_calls += 1
+        return await fake_extract(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", counted_extract)
+
+    assert await engine.replay_confusion_dialogue_attributions() == 1
+    assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
+    assert memory._database.get_confusion(confusion_id)["replay_queue"] == []
+    assert engine._dialogue_anchor_manager.current() is None
+    assert await engine.replay_confusion_dialogue_attributions() == 0
+    assert extract_calls == 1
+
+
+async def test_confusion_anchor_receipts_ambiguous_turn_before_durable_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="长视频", observation="看不懂")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-21T01:00:00+00:00",
+    )
+    anchor = engine._dialogue_anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id="question",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+    memory._database.create_chat_turn(
+        turn_id="pending-ambiguous",
+        session="popup",
+        scope="confusion",
+        subject_id=str(confusion_id),
+        message="也许吧",
+    )
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("ambiguous"),
+    )
+
+    result = await engine.learn_from_dialogue(
+        user_message="也许吧",
+        assistant_reply="可以再想想",
+        session="popup",
+        turn_id="pending-ambiguous",
+        anchor_ref=anchor.ref,
+        anchor_generation=anchor.generation,
+    )
+
+    assert result["anchor_outcome"] == "follow_up"
+    pending = memory._database.get_chat_turn("pending-ambiguous")
+    assert pending["status"] == "pending"
+    assert pending["payload"]["confusion_anchor_processed"] == 1
+    memory._database.complete_chat_turn("pending-ambiguous", reply="可以再想想")
+    assert engine._confusion_manager.pending_dialogue_replays() == []
+
+
+async def test_second_ambiguous_confusion_turn_defers_through_anchor_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="长视频", observation="看不懂")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-21T01:00:00+00:00",
+    )
+    anchor = engine._dialogue_anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id="question",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("ambiguous"),
+    )
+    kwargs = {
+        "user_message": "说不准",
+        "assistant_reply": "可以再想想",
+        "session": "popup",
+        "anchor_ref": anchor.ref,
+        "anchor_generation": anchor.generation,
+    }
+
+    first = await engine.learn_from_dialogue(turn_id="ambiguous-1", **kwargs)  # type: ignore[arg-type]
+    second = await engine.learn_from_dialogue(turn_id="ambiguous-2", **kwargs)  # type: ignore[arg-type]
+
+    stored = memory._database.get_confusion(confusion_id)
+    assert first["anchor_outcome"] == "follow_up"
+    assert second["anchor_outcome"] == "deferred"
+    assert stored["status"] == "open"
+    assert stored["defer_count"] == 1
+    assert stored["replay_queue"] == []
+    assert engine._dialogue_anchor_manager.current() is None
+
+
 async def test_second_ambiguous_hypothesis_turn_defers_after_one_follow_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

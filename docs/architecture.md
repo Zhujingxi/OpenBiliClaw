@@ -19,6 +19,11 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
+durable dialogue → chat_turn(payload + fixed turn time) → single learn queue
+                 → anchor snapshot(ref + generation) → existing insight extraction
+                 → kind×relation matrix → hypothesis feedback / confusion FIFO settlement
+                   confusion failure → replay_queue(max 5, head-fenced) → 12h recovery
+
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
   optional source_platform (PC Web tabs only, additive):
@@ -72,7 +77,7 @@ background refresh → maintenance DB worker / isolated connection
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建
 - 五层灵魂模型（事件→偏好→觉察→洞察→灵魂）
-- 认知画像流水线（`soul/ledger.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线（对话学习 / 增量管线 / 整份重建）之上叠加统一审计与一致性纪律。**台账** `profile_update_ledger` 是所有画像写点的只追加 best-effort 观察者（含 shadow 门控 `gate_verdict`）。**疑惑** `confusions`「看不懂」对象由觉察 / 推测僵局产生，驱动澄清（ask/wait/probe）、topic 冻结（新增/上调搁置进 held_updates，已有权重不回滚）与 held 重放（resolved 真实兴趣型 rebase 进下次偏好分析），代理行为出口对证据事件折价。**态势门控** `PostureGate` 拦深层写入。**深层线归一后**（v0.3.178+，见 `docs/modules/soul.md`「深层影响唯一模式」）有效接入点两条：深层对话候选 goal/value/state、soul 整份重建（泛化承载 dialogue / feedback_batch / confirmed_hypotheses 三触发源）；interest 快线与 ROLE 不过门控。**接入点②（管线 VALUES/CORE 层）已随 P1 退役**——pipeline 不再消费 VALUES/CORE，`update_layer` 对这两层封死 no-op，深层变更改由「假设确认 → 门控下 soul 重建」唯一模式驱动（`GateDecision.is_error` 区分真实 downgrade 与瞬时错误，供 rebuild_pending 状态机清标/重试）。三模式：`off` 完全旁路、`shadow`(默认) 异步旁路零延迟采数、`enforce` 同步拦截（downgrade 转假设），enforce 受 ≥14 天 shadow 观察的 save-time 校验。
+- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线之上叠加统一审计与一致性纪律。**单锚**持久化 ref/generation 快照，合法归属矩阵复用既有对话提取调用；两轮 unrelated、2h TTL、replaced 或结算释放。**疑惑结算**只归串行锚处理器，API durable completion 不再直接 resolve/defer；classifier 输出先入 `confusions.replay_queue`（FIFO 5、队头 fencing、四类解锚清空台账），12h cycle 补扫 completed crash gap。**台账**仍是 best-effort 观察者；疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
 - 分类词表（`taxonomy.py`）：偏好层一级分类收敛到固定 `CATEGORY_VOCAB`，`PreferenceAnalyzer` 在写入前用精确命中 / embedding 最近邻 /「其他」兜底解析，避免自由文本分类污染长期画像。
 - 分类迁移与画像整理：`CategoryMigrator` 通过 `profile-consolidate --migrate-categories` 把存量自由分类迁到固定词表；`ProfileConsolidator` 的 12h 整理流程按 `(name, category)` 处理同名异义主题，支持 LLM 用 `{name, category}` 精确引用成员。
 - 用户画像覆盖层（`overrides.py`）：用户手动编辑存独立 `profile_overrides.json`，在读收口 `get_profile()` 与镜像收口 `sync_profile_files()` 叠加到 AI 画像之上（有效画像 = AI ⊕ 覆盖），画像重建不覆盖用户编辑；删 / 拉黑经有效 dislikes 影响 discovery / recommendation / delight 硬过滤（Phase 1 后端；编辑 UI 见 Phase 2/3）
@@ -180,11 +185,11 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
-1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe`）和可选的内容上下文。
-2. 后端先把 turn 写入 SQLite `chat_turns(status='pending')`，随后用后台任务调用 Dialogue 引擎生成回复。
+1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。
+2. 后端先把 turn（含兼容 JSON `payload`）写入 SQLite `chat_turns(status='pending')`，随后用后台任务调用 Dialogue 引擎；confusion 在回复进入学习前 claim `clarifying` 并建单锚。
 3. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 历史。
 
-这条数据流让 Chrome 在切 tab、reload 或内存压力下丢弃不可见 side panel 后，仍能恢复 pending thinking 占位、完成回复或失败状态。完成后的 delight/probe/avoidance_probe scope 会继续发布对应 cognition/runtime 事件，主聊天仍按原有受控学习链路进入画像更新。
+历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 
 ### Init 多源画像导入
 
@@ -249,7 +254,7 @@ X 是第六个内容源，分两条独立通路：
 - `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未命中 `seen_items` 的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `maintain_pool_inventory()` 是 runtime 唯一 destructive maintenance 边界：`canonical available -> recover eligible suppressed -> protected IDs -> stale/explore/topic/source plans -> cross-table raw plan -> invariant validation -> commit`；恢复复用 canonical readiness，仅额外要求 `recommended_at IS NULL`，并按来源缺口、相关度、评分时间和稳定 ID 排序。每批最多修改 50 行，维护查询、持久化已看身份与动态 delight 阈值都接受同一显式 isolated connection；专属 worker 与 serve worker 分队列，绝不把共享 `Database.conn` 直接扔进 `to_thread()` 并发事务。
 - `load_pool_serve_snapshot_async()` / `persist_pool_serve_async()` 是交互读写边界：前者在一个一致只读事务中聚合推荐所需状态，后者在短 `BEGIN IMMEDIATE` 中原子写 recommendation + shown；交互锁等待按 8×250ms 有界，维护锁等待固定 75ms。
-- `chat_turns` 持久化 side panel durable chat turn，字段包含 `turn_id/session/scope/subject/message/status/reply/error/created_at/updated_at`；`scope` 支持 `chat`、`delight`、`probe` 和 `avoidance_probe`
+- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。`card_settlements` 提供 ref 级 `INSERT OR IGNORE` 仲裁基础；`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 
 ## 运行时数据库约束

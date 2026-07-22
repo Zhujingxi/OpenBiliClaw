@@ -61,14 +61,15 @@
 | 画像更新台账（`soul/ledger.py`，v0.3.174+） | ✅ | `ProfileLedger` 是画像写点的**只追加审计观察者**：动作结束后一次 `INSERT` 到 `profile_update_ledger`，行含 `outcome(success\|failed)`、before/after 摘要、`diff`（top-level changed keys，≤2000 字符）、`source_refs`、`turn_id`（对话/结算幂等观察键），以及为后续 Wave 预留的 `gate_verdict`（Phase 3 shadow_*）/`held_id`（Phase 2）。台账为 **best-effort**：写失败只记 WARNING，绝不阻断底层画像写入。`action()` 上下文管理器包裹写入动作，正常出块记 success、异常记 failed 并**重新抛出**（不改变原控制流）。枚举写点见下「[画像写点台账挂钩清单](#画像写点台账挂钩清单)」。CLI 查询：`openbiliclaw ledger [--line] [--days] [--write-point]` |
 | 觉察证据链（`AwarenessNote.note_id / source_event_ids`，v0.3.174+） | ✅ | `AwarenessNote` 新增生成式 `note_id`（uuid hex 前 12）、`source_event_ids`（本轮 cursor 消费的事件 id）与 `source_event_ids_approximate`（归属为**按轮**非按 note——LLM 不把观察映射到具体事件，故整批挂到每条 note 并标注近似）。`analyze()` 新增可选 `source_event_ids`，觉察 prompt 一字不动（回放不变性）；`cognition_cycle` 传入每批事件 id。向后兼容:旧 note 缺字段默认空。是 Wave B 疑惑 evidence_refs 的前置 |
 | 对话学习串行队列（`soul/dialogue_learn_queue.py`，v0.3.174+） | ✅ | `learn_from_dialogue` 不再每轮 `asyncio.create_task`（相邻轮会交错 read/merge/write 共享偏好/画像）；改由 `DialogueLearnQueue` 单 worker 串行消费。worker **自持生命周期**（不入 `cancel_all` 注册表）：热重载在 `cancel_all` **之前** pause-drain 旧队列,构建成功停旧启新、构建失败回滚 resume 旧队列;进程退出经 shutdown 钩子 drain。`SocraticDialogue` 注入 queue 时投递、否则回退旧 detached-task 路径（CLI/OpenClaw） |
-| 对话窗口 + 回灌（v0.3.174+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮(≤窗口字节不变,provider 缓存不破)。回灌**仅 popup + scope='chat' + completed** 的 `chat_turns`(重启后恢复对话线索);CLI 无 DB、probe/confusion scope 带前缀语境,均不回灌 |
-| 对话结算 settles（v0.3.174+） | ✅ | `build_dialogue_insight_prompt` 收敛为模块级静态 system + `sort_keys=True`(prompt-cache 合规,入 invariance 清单),新增 `active_list` 注入(推测兴趣按 `domain` ≤10 / 洞察按内容 hash8 / 疑惑按 id——Wave A 疑惑为空)。`extract()` 返回 `{candidates, settles}`;`learn_from_dialogue` **仅 scope='chat'** 处理 settles(单一所有权:probe/confusion 归 durable 侧效应),白名单=当轮注入清单(未见 ref 丢弃+WARNING),结算调既有 `user_confirm/reject_speculation`(domain)/`update_from_feedback`(insight)并进台账(带 turn_id,幂等)。hash8=SHA-256(NFC+strip+空白折叠)hex 前 8,清单内碰撞升 hex16、仍碰撞跳过 |
+| 对话确认锚（Wave A，v0.3.182+） | ✅ | `DialogueAnchorManager` 在 `memory/dialogue_anchor_state.json` 持久化至多一个 `{kind,ref,generation,established_at,unrelated_streak,origin_turn_id,ambiguous_count}`；建锚入口为 confusion prompt / card discuss / pending open，替换时 generation 单调递增。学习入队时捕获 `{anchor_ref,anchor_generation}`，处理前失配即 WARNING 丢弃。四种释放为结算、连续两轮 unrelated、2h TTL、replaced；confusion 的非结算释放回 `open`。锚 prompt 复用既有 extraction 调用，合法矩阵为 hypothesis: support/contradict/revise/ambiguous/unrelated，confusion: answer/ambiguous/unrelated；越界按 unrelated。ambiguous 只追问一次，第二次 defer。候选与锚文本按 NFC + 中文 bigram / 英文小写 token + 停用词做 Jaccard，≥0.5 丢弃并 WARNING |
+| 对话窗口 + 时间事实（v0.3.182+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮。每个历史 turn 用创建时定死的本地绝对前缀 `[MM-DD HH:mm]`，SQLite 无时区 `created_at` 按 UTC 经单点函数转本地；当前时间只追加在当轮 user prompt 尾部，不改写历史前缀。回灌仍仅 popup + scope='chat' + completed 的 `chat_turns`；CLI 无 DB，probe/confusion scope 不回灌 |
+| 对话结算 settles（v0.3.182+） | ✅ | `build_dialogue_insight_prompt` 保持模块级静态 system + `sort_keys=True`，无锚输入/输出逐字节不变；有锚只在 user message 加 anchor 契约。`learn_from_dialogue` 仅在**无活锚的 scope='chat'** 处理检索式 settles；锚定轮跳过 settles，由锚处理器按矩阵唯一结算，避免双计。普通 settles 仍按当轮 `active_list` 白名单调用既有 speculation/insight 入口并记录 `turn_id`。hash8=SHA-256(NFC+strip+空白折叠)hex 前 8，碰撞升 hex16 |
 | 疑惑对象「看不懂」（`soul/confusion.py` + `confusions` 表，v0.3.175+） | ✅ | 当系统无法干净解读某行为时产出**疑惑**（不写画像，只驱动澄清与冻结）。两产生源：①觉察——`analyze_with_confusions()` + 独立 builder `build_awareness_with_confusions_prompt`（静态 system，入 invariance 清单；`analyze()`/`build_awareness_prompt` 一字不动，`cognition_cycle` 切新 API 属有意变更），候选 ≤2/轮、白名单校验落库；②推测僵局——`SpeculatorTickResult.stalemate`=expire 时 `0<confirmation_count<threshold`（现存字段判定），pipeline 转疑惑。状态机 `open→clarifying→resolved\|dismissed`（+TTL `expired`）；`clarifying` 全局 ≤1 由 partial unique index 跨连接原子保证。TTL 扫描并入 12h `cognition_cycle` |
-| 疑惑澄清三路 + 三出口 + 冻结（v0.3.175+） | ✅ | **ask**：durable chat `scope="confusion"`，`schedule_ask` claim `clarifying` + 72h 冷却持久化于 `asked_at`（重启不复问），`defer` 复用探针忽略语义（回 open、保冷却）；**wait**：14 天 TTL；**probe** 复用现有探针域。三出口 `resolve()`：`real_interest`→held 更新重放、`proxy_behavior`→丢弃 held、`dismissed`。durable `scope="confusion"` 侧效应按情绪判断结算（单一所有权，不走 settles）。**冻结**：`apply_confusion_freeze` 在对话偏好写 chokepoint 拦截——冻结 topic 的新增/上调搁置进 `held_updates`（**已有权重不回滚**），无疑惑时零差异。held 状态机 `held→replaying→applied\|applied_unverified\|discarded`：`_begin_replay` 将 replaying 与回执（`replay_submitted_at+batch_id`）写同一 SQLite 事务；崩溃恢复 `recover_replaying` 见回执置 `applied_unverified`（**不重复提交，宁漏勿双计**），无回执重试至 `replay_attempts=2` 后丢弃 |
+| 疑惑澄清三路 + 唯一结算所有者 + 冻结（v0.3.182+） | ✅ | **ask**：durable chat `scope="confusion"` 先 claim `clarifying` 并立即建锚，72h 冷却持久化于 `asked_at`；API 完成侧效应不再调用 `resolve/defer`，唯一所有者是串行学习队列中的锚处理器。分类结果先写 `confusions.replay_queue`（FIFO、上限 5、超限逐出最旧并记 dropped 台账），队头失败保留，新轮只能入尾；成功后从队头续跑。四种锚释放都会清队列并记 dropped；12h `CognitionCycle` 扫描晚于 ask receipt 且 completed、尚无 payload receipt 的回复，复用同一归属处理器且幂等。三出口仍为 `real_interest` / `proxy_behavior` / `dismissed`；两次 ambiguous 走 defer。topic 冻结与 held-update 重放状态机保持不变 |
 | 态势门控（`soul/posture_gate.py`，v0.3.176+） | ✅ | 深层写入一致性门控（Phase 3）。`build_posture_gate_prompt` 静态 system（三判定 accept/downgrade/reject + 「冲突不是错误是新假设」）+ `sort_keys`（入 invariance 清单）。`PostureGate` 三模式：`off`=完全旁路、**门控 LLM 零调用**、逐字节等价；`shadow`(默认)=**commit boundary 捕获不可变快照**（before/after/source_refs/gate_id），异步旁路任务只消费快照（判定前对活状态再写入不污染判定，带断言）、判定落台账 `shadow_*`、LLM 异常落 `shadow_error`、**零延迟不阻塞原写入**；`enforce`=同步判定，异常/解析失败/非白名单 verdict 保守 downgrade（`GateDecision.is_error` 区分：真实 downgrade 判定 `is_error=False`，LLM/解析**异常**强制的 downgrade `is_error=True`，供重建调用方决定清标或保留重试）。**深层线归一后**（见「深层影响唯一模式」），有效接入点为两条：①对话 goal/value/state 深层候选（interest/dislike 快线不过；downgrade 置信=confidence×0.6 转 insight）；③soul 整份重建，泛化承载三触发源（dialogue / feedback_batch / confirmed_hypotheses），downgrade/reject→放弃本次 rebuild + 台账。**接入点②（管线 VALUES/CORE 层 updater 门控）已随 P1 退役**：`update_layer` 对 VALUES/CORE 直接封死 no-op + WARNING，不再有逐层门控。新 caller `soul.posture_gate` 注册 usage recorder。enforce 受 save-time 三条件校验（见 config.md，`posture_gate_force_enforce` 逃生门） |
 | 疑惑代理行为证据折价（v0.3.176+） | ✅ | 疑惑 `resolve()` 走 `proxy_behavior`（误读）出口时，对 `evidence_refs` 中可解析为事件 id 的关联事件调用 `Database.discount_events_by_confusion`（`sources/event_format.apply_confusion_discount`）：盖 `metadata.discounted_by_confusion=true` + `signal_strength` 折至 0.2（与 retraction 折价同底、幂等不回升）。非 id ref（话题/note）跳过；`real_interest` 出口不折价 |
 | topic 生命周期状态机（`soul/topic_lifecycle.py`，v0.3.177+） | ✅ | interest（flat 与 Onion domain 两层）叠加状态元数据 `state ∈ {trial\|active\|decaying\|archived}` + `evidence_count` + `last_evidence_at` + `parent_topic`；旧数据缺字段默认 `active`，且**默认 `active` 的 topic 序列化不写这些键**（回放门：`interest_tag_to_dict` 只在非默认时 emit）。跃迁（常量带首轮校准注释，见模块 docstring）：新 topic 首见→`trial`；证据 ≥5 **或** 持续 ≥7 天→`active`（`apply_evidence`，接在 `analyze_events`/`learn_from_dialogue`/反馈批的偏好写 chokepoint，每次分析计一次证据）；`last_evidence_at` 静默 ≥30 天→`decaying`（权重×0.5）；再 ≥30 天（共 60 天）→`archived`（不删）；`archived`/`decaying` 遇新证据→直接复燃 `active`；**衰减扫描 `scan_lifecycle` 并入 12h `ProfileConsolidator`**（`last_evidence_at` 缺失的旧 topic 永不被扫衰减，避免启用即团灭）；**dislike 改「归档+避雷」**（`archive_topics`：匹配 topic 置 `archived` 保留台账，不再从库删）；**细分提议**（子类占父域权重 ≥60%）只经 `topic_subdivision_proposal` 记台账不执行（shadow）。所有跃迁进 `profile_update_ledger`（`topic_lifecycle` 写点）。**最小消费**：见下「觉察提炼节奏」下方 `topic_lifecycle_serialization` 开关（默认 off） |
-| 觉察提炼节奏（`soul/cognition_cycle.py`，v0.3.177+） | ✅ | 除 12h 兜底节流外新增**提前触发**：awareness 水位线之后未提炼事件 ≥30 条 **或** 出现强信号事件（`comment/danmaku/reply` 带文本、`feedback`、或 `inferred_satisfaction∈{positive,negative}`）→ 本 tick 立即跑觉察（`_should_early_trigger`）。**单飞锁** `asyncio.Lock`：`run_if_due` 见锁被持有即跳过（`throttled`），due-check 与 watermark 消费全在锁内（重叠 tick / 提前触发抢跑 12h tick 都恰一执行）。state JSON 写入 **tmp+fsync+`os.replace`** 原子化（写崩不损坏 watermark）；awareness 批失败/取消时 `last_awareness_event_id` 不前进、`last_awareness_at` 不推进（下轮重做）。同批事件 awareness prompt 输出路径不变（回放不变性） |
+| 觉察提炼节奏（`soul/cognition_cycle.py`，v0.3.182+） | ✅ | 除 12h 兜底节流外支持未提炼事件 ≥30 或强信号提前触发；`asyncio.Lock` 保证 due-check + watermark 单飞，state JSON 以 tmp+fsync+`os.replace` 原子写，失败/取消不推进水位。每次真正 due 的周期还调用 `confusion_replay_hook`：先重试已持久化 classifier 输出，再扫描 completed clarification crash gap；失败 best-effort 留待下轮，不阻断 awareness/insight 与 pending rebuild hook |
 | 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
 | 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
@@ -855,6 +856,34 @@ dialogue.clear_history()
 ```
 
 `respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM 异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
+
+### DialogueAnchorManager / ConfusionManager
+
+```python
+from openbiliclaw.soul.dialogue_anchor import (
+    ENTRY_CONFUSION_PROMPT,
+    DialogueAnchorManager,
+)
+
+anchor = anchor_manager.establish(
+    kind="confusion",
+    ref=str(confusion_id),
+    origin_turn_id=question_turn_id,
+    entry=ENTRY_CONFUSION_PROMPT,
+)
+snapshot = anchor_manager.snapshot()
+
+terminal = confusion_manager.process_anchor_settlement(
+    confusion_id,
+    action="resolve",
+    interpretation="real_interest",
+    note="dialogue_anchor",
+    turn_id=reply_turn_id,
+    anchor_generation=anchor.generation,
+)
+```
+
+`snapshot()` 只暴露排队所需的 ref/generation fencing 字段。`process_anchor_settlement()` 会先持久入队再从 FIFO 队头执行；返回 `None` 表示副作用失败且已留队，并非吞掉或结算成功。`retry_anchor_settlements()` 供同一锚处理器与 12h 恢复路径续跑；API durable completion 路径不得直接调用 `resolve()` / `defer()`。
 
 ### PreferenceAnalyzer
 

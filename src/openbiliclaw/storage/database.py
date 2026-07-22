@@ -1075,6 +1075,7 @@ CREATE TABLE IF NOT EXISTS confusions (
     defer_count               INTEGER NOT NULL DEFAULT 0,
     expires_at                TIMESTAMP,
     held_updates              TEXT NOT NULL DEFAULT '[]',
+    replay_queue              TEXT NOT NULL DEFAULT '[]',
     resolved_at               TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
@@ -2520,6 +2521,7 @@ class Database:
             "defer_count",
             "expires_at",
             "held_updates",
+            "replay_queue",
             "resolved_at",
         }
         assignments: list[str] = []
@@ -2528,7 +2530,7 @@ class Database:
             if key not in allowed:
                 raise ValueError(f"Unknown confusion column: {key}")
             assignments.append(f"{key} = ?")
-            if key == "held_updates" and not isinstance(value, str):
+            if key in {"held_updates", "replay_queue"} and not isinstance(value, str):
                 params.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
             else:
                 params.append(value)
@@ -2543,7 +2545,7 @@ class Database:
 
     @staticmethod
     def _decode_confusion_row(record: dict[str, Any]) -> dict[str, Any]:
-        for json_key in ("evidence_refs", "held_updates"):
+        for json_key in ("evidence_refs", "held_updates", "replay_queue"):
             raw = record.get(json_key)
             if isinstance(raw, str) and raw.strip():
                 try:
@@ -2553,6 +2555,189 @@ class Database:
             elif not isinstance(raw, list):
                 record[json_key] = []
         return record
+
+    def enqueue_confusion_replay(
+        self,
+        confusion_id: int,
+        item: Mapping[str, object],
+        *,
+        max_items: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Atomically append one replay item and return any oldest-first evictions."""
+        limit = max(1, int(max_items))
+        queued_item = dict(item)
+        identity = str(queued_item.get("turn_id") or queued_item.get("replay_id") or "")
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return []
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if identity and any(
+                str(existing.get("turn_id") or existing.get("replay_id") or "") == identity
+                for existing in queue
+            ):
+                conn.commit()
+                return []
+            queue.append(queued_item)
+            dropped = queue[:-limit]
+            queue = queue[-limit:]
+            conn.execute(
+                """UPDATE confusions
+                   SET replay_queue = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (
+                    json.dumps(queue, ensure_ascii=False, sort_keys=True),
+                    int(confusion_id),
+                ),
+            )
+            conn.commit()
+            return dropped
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def pop_confusion_replay_head(self, confusion_id: int, *, expected_id: str) -> bool:
+        """Pop exactly the expected FIFO head; mismatch is a fencing failure."""
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if not queue:
+                conn.commit()
+                return False
+            head = queue[0]
+            head_id = str(head.get("turn_id") or head.get("replay_id") or "")
+            if not expected_id or head_id != expected_id:
+                conn.commit()
+                return False
+            conn.execute(
+                """UPDATE confusions
+                   SET replay_queue = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (
+                    json.dumps(queue[1:], ensure_ascii=False, sort_keys=True),
+                    int(confusion_id),
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def clear_confusion_replay_queue(self, confusion_id: int) -> list[dict[str, Any]]:
+        """Atomically clear and return every queued attribution for release auditing."""
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return []
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if queue:
+                conn.execute(
+                    """UPDATE confusions
+                       SET replay_queue = '[]', updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (int(confusion_id),),
+                )
+            conn.commit()
+            return queue
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_pending_confusion_dialogue_replays(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return completed clarifying replies newer than their ask receipt."""
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT c.id AS confusion_id,
+                   c.ask_turn_id AS ask_turn_id,
+                   t.turn_id, t.session, t.subject_id, t.subject_title,
+                   t.message, t.reply, t.created_at, t.updated_at
+            FROM confusions AS c
+            JOIN chat_turns AS t
+              ON t.scope = 'confusion'
+             AND t.subject_id = CAST(c.id AS TEXT)
+            WHERE c.status = 'clarifying'
+              AND t.status = 'completed'
+              AND julianday(t.updated_at) > julianday(COALESCE(c.asked_at, c.created_at))
+              AND CASE
+                    WHEN json_valid(t.payload)
+                    THEN COALESCE(
+                        json_extract(t.payload, '$.confusion_anchor_processed'),
+                        0
+                    )
+                    ELSE 0
+                  END != 1
+            ORDER BY t.updated_at ASC, t.rowid ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_confusion_dialogue_replay_processed(self, turn_id: str) -> bool:
+        """Receipt attribution in the turn payload, including while it is pending."""
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,
+                    '$.confusion_anchor_processed',
+                    1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND scope = 'confusion'
+            """,
+            (turn_id,),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    @staticmethod
+    def _decode_confusion_replay_queue(raw: object) -> list[dict[str, Any]]:
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return []
+        else:
+            decoded = raw
+        if not isinstance(decoded, list):
+            return []
+        return [dict(item) for item in decoded if isinstance(item, dict)]
 
     # ------------------------------------------------------------------
     # LLM usage ledger
@@ -8365,6 +8550,7 @@ class Database:
                 defer_count               INTEGER NOT NULL DEFAULT 0,
                 expires_at                TIMESTAMP,
                 held_updates              TEXT NOT NULL DEFAULT '[]',
+                replay_queue              TEXT NOT NULL DEFAULT '[]',
                 resolved_at               TIMESTAMP
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
@@ -8372,6 +8558,14 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_confusions_status
                 ON confusions(status, updated_at);
         """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(confusions)").fetchall()
+        }
+        if "replay_queue" not in columns:
+            self.conn.execute(
+                "ALTER TABLE confusions ADD COLUMN replay_queue TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def _ensure_watch_later_table(self) -> None:
         """Create the watch_later bookmarks table for existing databases."""

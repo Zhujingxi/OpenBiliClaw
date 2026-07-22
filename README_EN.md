@@ -590,6 +590,9 @@ background ─ background admission (default 3) ──────┘
 
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
+
+durable dialogue: fixed time/payload → single learn queue → one anchor(ref+generation) → relation matrix
+                                                        └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
 ```
@@ -610,7 +613,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Soul cognition discipline: 3 write lines · ledger audit · confusions · deep posture gate (shadow) │
+│ Soul cognition: one dialogue anchor · relation matrix · confusion FIFO · ledger · deep posture gate (shadow) │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
@@ -636,6 +639,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
                                       │                      └new dislike: shared purge → content_cache
                                       └failure/timeout: rollback provisional history → safe error / failed turn
+durable turn → fixed time/payload → single learn queue → anchor(ref,generation) → relation matrix
+                                                  └confusion failure: FIFO≤5 → 12h recovery
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

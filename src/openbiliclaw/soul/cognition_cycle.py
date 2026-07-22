@@ -144,6 +144,7 @@ class CognitionCycle:
         insight_analyzer: InsightAnalyzer,
         min_interval_seconds: int = DEFAULT_MIN_INTERVAL_SECONDS,
         pending_rebuild_hook: Callable[[], Awaitable[Any]] | None = None,
+        confusion_replay_hook: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
         self._memory = memory
         self._awareness_analyzer = awareness_analyzer
@@ -152,6 +153,9 @@ class CognitionCycle:
         # 12h-loop fallback trigger for the SoulEngine's debounced confirmed-
         # hypotheses rebuild (spec invariant 4). Optional; best-effort.
         self._pending_rebuild_hook = pending_rebuild_hook
+        # 12h crash-recovery fallback for completed confusion replies whose
+        # attribution did not reach the serial dialogue-learning owner.
+        self._confusion_replay_hook = confusion_replay_hook
         # Single-flight guard (Phase 5): the due-check + watermark consumption
         # must run under one lock so overlapping ticks (or an early trigger
         # racing the 12h tick) never double-process the same events.
@@ -267,7 +271,16 @@ class CognitionCycle:
         except Exception:
             logger.debug("Confusion TTL sweep failed", exc_info=True)
 
-        # 5. 12h-loop fallback: trigger the debounced confirmed-hypotheses
+        # 5. Replay any completed clarifying reply that missed its durable
+        # anchor-attribution receipt. The hook drains persisted classifier
+        # output first and is idempotent across later cycles.
+        if self._confusion_replay_hook is not None:
+            try:
+                await self._confusion_replay_hook()
+            except Exception:
+                logger.debug("Confusion attribution replay failed", exc_info=True)
+
+        # 6. 12h-loop fallback: trigger the debounced confirmed-hypotheses
         # rebuild (spec invariant 4). Best-effort — never breaks the cycle.
         if self._pending_rebuild_hook is not None:
             try:

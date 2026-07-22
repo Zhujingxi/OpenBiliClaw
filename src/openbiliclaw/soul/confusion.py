@@ -50,6 +50,10 @@ WAIT_TTL_DAYS = 14
 # Held-update replay attempt ceiling — a replay that keeps failing is discarded
 # rather than retried forever (prefer under- to double-counting, r5/R4-1).
 MAX_REPLAY_ATTEMPTS = 2
+# Durable dialogue-attribution backlog. Five turns cover the bounded focused
+# thread without allowing a permanently failing settlement to grow the row
+# forever (r7 Wave A contract; oldest overflow is explicitly audited).
+MAX_DIALOGUE_REPLAY_QUEUE = 5
 
 _VALID_STATUSES = frozenset({"open", "clarifying", "resolved", "dismissed", "expired"})
 # Resolution outcome whitelist (drives held-update replay vs discard).
@@ -133,6 +137,7 @@ class Confusion:
     defer_count: int = 0
     expires_at: str = ""
     held_updates: list[HeldUpdate] = field(default_factory=list)
+    replay_queue: list[dict[str, Any]] = field(default_factory=list)
     resolved_at: str = ""
 
     @classmethod
@@ -159,6 +164,9 @@ class Confusion:
             defer_count=int(_to_int(row.get("defer_count", 0))),
             expires_at=str(row.get("expires_at") or ""),
             held_updates=held,
+            replay_queue=[
+                dict(item) for item in row.get("replay_queue", []) if isinstance(item, dict)
+            ],
             resolved_at=str(row.get("resolved_at") or ""),
         )
 
@@ -355,7 +363,7 @@ class ConfusionManager:
         if self._db is None:
             return
         confusion = self.get(confusion_id)
-        if confusion is None:
+        if confusion is None or confusion.status in {"resolved", "dismissed", "expired"}:
             return
         self._db.update_confusion(
             confusion_id,
@@ -434,6 +442,180 @@ class ConfusionManager:
             after={"resolution": resolution, "status": terminal},
         )
         return terminal
+
+    # -- Dialogue-anchor settlement ownership + durable FIFO replay ---------
+
+    def process_anchor_settlement(
+        self,
+        confusion_id: int,
+        *,
+        action: str,
+        interpretation: str = "",
+        note: str = "",
+        turn_id: str = "",
+        anchor_generation: int = 0,
+    ) -> str | None:
+        """Persist classifier output, then drain settlements strictly FIFO.
+
+        Every item is durably enqueued before the side effect. A failure leaves
+        the head in place; later turns append behind it and can never overtake.
+        ``None`` therefore means "retained for replay", not "ignored".
+        """
+        if self._db is None:
+            return None
+        normalized_action = action.strip().lower()
+        normalized_interpretation = interpretation.strip().lower()
+        if normalized_action not in {"resolve", "defer"}:
+            logger.warning("confusion anchor settlement dropped: bad action=%r", action)
+            return None
+        if normalized_action == "resolve" and normalized_interpretation not in _VALID_RESOLUTIONS:
+            logger.warning(
+                "confusion anchor settlement dropped: bad interpretation=%r",
+                interpretation,
+            )
+            return None
+        replay_id = turn_id.strip() or f"replay-{uuid.uuid4().hex}"
+        item: dict[str, object] = {
+            "replay_id": replay_id,
+            "turn_id": turn_id.strip(),
+            "action": normalized_action,
+            "interpretation": normalized_interpretation,
+            "note": note,
+            "anchor_generation": max(0, int(anchor_generation)),
+        }
+        enqueue = getattr(self._db, "enqueue_confusion_replay", None)
+        if not callable(enqueue):
+            logger.warning("confusion replay queue unavailable; settlement retained in memory only")
+            return None
+        dropped = enqueue(
+            confusion_id,
+            item,
+            max_items=MAX_DIALOGUE_REPLAY_QUEUE,
+        )
+        for dropped_item in dropped:
+            dropped_turn_id = str(dropped_item.get("turn_id", ""))
+            self._record(
+                "confusion_replay_dropped",
+                before=dropped_item,
+                after={"reason": "overflow", "limit": MAX_DIALOGUE_REPLAY_QUEUE},
+                turn_id=dropped_turn_id,
+            )
+        return self.retry_anchor_settlements(
+            confusion_id,
+            expected_generation=max(0, int(anchor_generation)),
+        )
+
+    def retry_anchor_settlements(
+        self,
+        confusion_id: int,
+        *,
+        expected_generation: int | None = None,
+    ) -> str | None:
+        """Drain an existing durable settlement queue from its head."""
+        if self._db is None:
+            return None
+        pop_head = getattr(self._db, "pop_confusion_replay_head", None)
+        if not callable(pop_head):
+            return None
+        last_status: str | None = None
+        while True:
+            confusion = self.get(confusion_id)
+            if confusion is None or not confusion.replay_queue:
+                return last_status
+            head = confusion.replay_queue[0]
+            replay_id = str(head.get("replay_id") or head.get("turn_id") or "")
+            turn_id = str(head.get("turn_id", ""))
+            action = str(head.get("action", "")).strip().lower()
+            interpretation = str(head.get("interpretation", "")).strip().lower()
+            note = str(head.get("note", ""))
+            terminal: str | None
+            try:
+                generation = max(0, int(head.get("anchor_generation", 0)))
+            except (TypeError, ValueError):
+                generation = -1
+            malformed = (
+                not replay_id
+                or action not in {"resolve", "defer"}
+                or (action == "resolve" and interpretation not in _VALID_RESOLUTIONS)
+            )
+            stale = expected_generation is not None and generation != expected_generation
+            if malformed or stale:
+                reason = "malformed" if malformed else "stale_generation"
+                if not pop_head(confusion_id, expected_id=replay_id):
+                    logger.warning(
+                        "confusion replay drop fenced: id=%s reason=%s",
+                        replay_id,
+                        reason,
+                    )
+                    return last_status
+                self._record(
+                    "confusion_replay_dropped",
+                    before=head,
+                    after={"reason": reason},
+                    turn_id=turn_id,
+                )
+                continue
+            try:
+                if action == "defer":
+                    self.defer(confusion_id)
+                    terminal = "deferred"
+                else:
+                    terminal = self.resolve(
+                        confusion_id,
+                        resolution=interpretation,
+                        note=note,
+                    )
+                    if terminal is None:
+                        raise RuntimeError("confusion resolution returned no terminal state")
+            except Exception:
+                logger.warning(
+                    "confusion anchor settlement failed; FIFO head retained: turn_id=%s",
+                    turn_id,
+                    exc_info=True,
+                )
+                return None
+            if not pop_head(confusion_id, expected_id=replay_id):
+                # A concurrent release may have cleared the queue after the
+                # idempotent side effect. Empty means the release owns cleanup;
+                # a non-empty mismatch is a real fencing loss and must stop.
+                refreshed = self.get(confusion_id)
+                if refreshed is not None and refreshed.replay_queue:
+                    logger.warning(
+                        "confusion replay pop fenced after settlement: turn_id=%s",
+                        turn_id,
+                    )
+                    return None
+            self._record_anchor_processed(
+                turn_id=turn_id,
+                after={
+                    "action": action,
+                    "interpretation": interpretation,
+                    "status": terminal,
+                },
+            )
+            last_status = terminal
+
+    def record_anchor_relation_processed(
+        self,
+        confusion_id: int,
+        *,
+        relation: str,
+        turn_id: str,
+    ) -> None:
+        """Write the idempotency receipt for non-settlement anchor relations."""
+        self._record_anchor_processed(
+            turn_id=turn_id,
+            after={"confusion_id": confusion_id, "relation": relation},
+        )
+
+    def pending_dialogue_replays(self) -> list[dict[str, Any]]:
+        """Completed clarifying replies without a successful processing receipt."""
+        if self._db is None:
+            return []
+        list_pending = getattr(self._db, "list_pending_confusion_dialogue_replays", None)
+        if not callable(list_pending):
+            return []
+        return [dict(item) for item in list_pending() if isinstance(item, dict)]
 
     # -- Topic freeze + held-update replay -----------------------------------
 
@@ -567,6 +749,20 @@ class ConfusionManager:
 
     # -- Internal helpers -----------------------------------------------------
 
+    def _record_anchor_processed(self, *, turn_id: str, after: object) -> None:
+        if turn_id and self._db is not None:
+            mark_processed = getattr(self._db, "mark_confusion_dialogue_replay_processed", None)
+            if callable(mark_processed) and not mark_processed(turn_id):
+                logger.debug(
+                    "confusion attribution receipt turn was not found/eligible: %s",
+                    turn_id,
+                )
+        self._record(
+            "confusion_anchor_processed",
+            after=after,
+            turn_id=turn_id,
+        )
+
     def _discount_proxy_evidence(self, confusion: Confusion) -> None:
         """Discount events behind a proxy-resolved confusion (best-effort)."""
         if self._db is None or not confusion.evidence_refs:
@@ -600,6 +796,7 @@ class ConfusionManager:
         before: object = None,
         after: object = None,
         held_id: str = "",
+        turn_id: str = "",
     ) -> None:
         if self._ledger is None:
             return
@@ -611,6 +808,7 @@ class ConfusionManager:
                 after=after,
                 source_refs=[topic] if topic else [],
                 held_id=held_id,
+                turn_id=turn_id,
             )
         except Exception:  # pragma: no cover - ledger is best-effort
             logger.debug("confusion ledger record failed", exc_info=True)

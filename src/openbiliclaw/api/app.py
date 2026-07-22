@@ -7041,6 +7041,41 @@ def create_app(
             return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
 
+    def _ensure_confusion_dialogue_anchor(turn: ChatTurnOut) -> None:
+        """Claim and anchor a thrown confusion before its reply enters learning."""
+        if turn.scope != "confusion":
+            return
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if confusion_manager is None or anchor_manager is None:
+            return
+        try:
+            confusion_id = int(turn.subject_id)
+        except (TypeError, ValueError):
+            logger.warning("Cannot establish confusion anchor for subject_id=%r", turn.subject_id)
+            return
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status in {"resolved", "dismissed", "expired"}:
+            return
+        if confusion.status == "open":
+            claimed = confusion_manager.schedule_ask(
+                confusion_id,
+                ask_turn_id=turn.turn_id,
+            )
+            if not claimed:
+                raise RuntimeError("Confusion clarifying slot is not available")
+            confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status != "clarifying":
+            raise RuntimeError("Confusion could not enter clarifying state")
+        from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+        anchor_manager.establish(
+            kind="confusion",
+            ref=str(confusion_id),
+            origin_turn_id=confusion.ask_turn_id or turn.turn_id,
+            entry=ENTRY_CONFUSION_PROMPT,
+        )
+
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
         if ctx.dialogue is None:
             raise RuntimeError("Dialogue service is not configured.")
@@ -7224,39 +7259,11 @@ def create_app(
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
         elif turn.scope == "confusion":
-            # Confusion ask resolution (single ownership — durable side effect,
-            # NOT learn_from_dialogue settles). The user's reply disambiguates a
-            # behaviour we could not read: positive → real interest (held
-            # updates replay); negative → proxy / misread (held discarded);
-            # neutral → defer (keep the 72h cooldown).
+            # Settlement ownership belongs exclusively to the serial dialogue
+            # anchor handler. This durable completion observer only records the
+            # visible conversation context; it must never resolve/defer here.
             label = turn.subject_title or turn.subject_id or "这个方向"
-            manager = getattr(ctx.soul_engine, "_confusion_manager", None)
-            try:
-                confusion_id = int(turn.subject_id)
-            except (TypeError, ValueError):
-                confusion_id = 0
-            sentiment, _classifier = await _classify_probe_sentiment(turn.message, reply, label)
-            if manager is not None and confusion_id:
-                if sentiment in {"strong_positive", "weak_positive"}:
-                    with suppress(Exception):
-                        manager.resolve(confusion_id, resolution="real_interest", note=turn.message)
-                    summary = f"你确认了对「{label}」确实有兴趣，之前搁置的信号会重新纳入。"
-                elif sentiment == "negative":
-                    with suppress(Exception):
-                        manager.resolve(
-                            confusion_id, resolution="proxy_behavior", note=turn.message
-                        )
-                    summary = f"明白了，「{label}」只是顺手，不算真的兴趣。"
-                elif sentiment == "neutral_deferred":
-                    with suppress(Exception):
-                        manager.defer(confusion_id)
-                    summary = f"关于「{label}」先放一放，过阵子再问。"
-                else:
-                    with suppress(Exception):
-                        manager.resolve(confusion_id, resolution="dismissed", note=turn.message)
-                    summary = f"关于「{label}」你说：{turn.message}"
-            else:
-                summary = f"关于「{label}」你说：{turn.message}"
+            summary = f"关于「{label}」你说：{turn.message}"
             _record_probe_cognition(
                 summary,
                 turn.subject_id or label,
@@ -7278,6 +7285,7 @@ def create_app(
             if turn.status != "pending":
                 return
             try:
+                _ensure_confusion_dialogue_anchor(turn)
                 reply = await _generate_durable_chat_reply(turn)
             except Exception as exc:
                 logger.exception("Failed to generate durable chat turn %s", turn_id)
