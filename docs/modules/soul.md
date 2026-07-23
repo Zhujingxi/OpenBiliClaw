@@ -953,7 +953,9 @@ await queue.shutdown()
 
 `submit()` 是同步 admission API：单调 sequence、深拷贝 payload、exhaustive
 anchor transition、owner reservation、冻结 snapshot 与 `put_nowait` 之间没有
-`await`。`submit_and_wait()` 只在调用 task 等 completion；worker 内重入会立即抛
+`await`。owner resolve 只更新自己的 per-ref entry；较早 ref 的 builder 迟到完成
+不能把无 target 的全局 latest snapshot 从更晚受理的 reservation 拉回旧 ref。
+`submit_and_wait()` 只在调用 task 等 completion；worker 内重入会立即抛
 `DialogueSettlementReentryError`。`anchor.establish`、`card.discuss` 与
 `confusion.attribution.replay(needs_anchor=true)` 是当前完整 builder 集合；新增
 builder kind 必须先扩 policy 与穷尽测试。进程退出会丢弃 registry，未执行 job 不做

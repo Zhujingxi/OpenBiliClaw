@@ -510,7 +510,6 @@ class AnchorAdmissionRegistry:
         head = self._heads.get(key)
         if isinstance(head, AnchorReserved) and head.reservation_id == reservation_id:
             self._heads[key] = effective
-            self._latest_head_key = key
         self._gc_if_unreferenced(entry)
         return effective
 

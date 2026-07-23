@@ -1316,6 +1316,45 @@ async def test_three_anchor_admission_timelines_repeat_100_times_without_mismatc
             await queue.shutdown(timeout=1)
 
 
+def test_cross_ref_older_builder_resolution_preserves_latest_reserved_head() -> None:
+    """F1: resolving B1(A) cannot move the global latest head behind B2(B)."""
+    from openbiliclaw.soul.dialogue_learn_queue import AnchorAdmissionRegistry
+
+    registry = AnchorAdmissionRegistry()
+    b1 = registry.reserve(
+        kind="hypothesis",
+        ref="A",
+        owner_job_id="B1",
+        owner_sequence=1,
+        producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+        origin="durable_confusion_ensure",
+    )
+    b2 = registry.reserve(
+        kind="hypothesis",
+        ref="B",
+        owner_job_id="B2",
+        owner_sequence=2,
+        producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+        origin="durable_confusion_ensure",
+    )
+
+    registry.resolve_owned(
+        ref="A",
+        reservation_id=b1.reservation_id,
+        owner_job_id=b1.owner_job_id,
+        owner_sequence=b1.owner_sequence,
+        terminal=AnchorMutationTerminal.persisted(
+            kind="hypothesis",
+            ref="A",
+            generation=1,
+        ),
+    )
+
+    latest = registry.snapshot()
+    assert latest == b2
+    registry.release(latest)
+
+
 def test_owner_cas_failed_gc_and_double_builder_state_machines_repeat_100_times() -> None:
     """Q18/Q19: owner checks, failed GC, and later-head protection are stable."""
     from openbiliclaw.soul.dialogue_learn_queue import (
