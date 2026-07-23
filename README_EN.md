@@ -591,10 +591,10 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-durable reply: fixed time/payload → queued mode → typed settlement queue (currently learn) → one learning worker
+durable reply: fixed time/payload → queued mode → typed settlement queue (current production entry: learn) → one worker
 confirmation entry (pending list/cards) → one anchor(ref+generation) → relation matrix (other typed kinds await cutover)
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
-                          ├→ card / legacy / anchor / unanchored settles share ref arbitration → claim guard → applied-only cross-session projection
+                          ├→ frozen anchor admission → worker-only apply → lightweight ref winner receipt → applied-only projection
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
@@ -616,7 +616,7 @@ confirmation entry (pending list/cards) → one anchor(ref+generation) → relat
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Soul cognition: dual pending cooldown · one anchor · card claim/fencing · confusion FIFO · ledger · deep gate │
+│ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
@@ -643,8 +643,8 @@ Web/API durable → SocraticDialogue(queued) → user+agent history → typed qu
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
 learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
 failure/timeout → rollback provisional history → safe error / failed turn
-durable turn → fixed time/payload → confirmation entry (pending list/cards) → anchor(ref,generation) → relation matrix
-                                                  └→ card/legacy/anchor/unanchored settles share ref arbitration; other queue kinds await cutover
+durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
+                                                  └→ nested learn settles apply in-worker; other entries await Wave 3 cutover
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

@@ -595,10 +595,10 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-持久对话回复：固定时间/payload → queued mode → typed 结算队列（当前 learn）→ 单 worker 学习
+持久对话回复：固定时间/payload → queued mode → typed 结算队列（当前生产入口为 learn）→ 单 worker
 确认入口（待聊列表/卡片）→ 单锚(ref+generation) → 归属矩阵（其余 typed kind 待 cutover）
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
-                       ├→ 卡片 / legacy / 锚 / 无锚 settles 共用 ref 仲裁 → claim guard → applied-only 跨 session 投影
+                       ├→ frozen anchor admission → worker-only apply → 轻量 ref winner receipt → applied-only 跨 session 投影
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
@@ -619,7 +619,7 @@ background ─ background admission (default 3) ──────┘
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
-│ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · 卡片 claim/fencing · 疑惑 FIFO 重放 · 台账 · 深层门控(shadow) │
+│ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
@@ -646,8 +646,8 @@ Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed que
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
 学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
 失败/超时 → 回滚临时历史 → 安全错因 / failed turn
-durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → anchor(ref,generation) → relation matrix
-                                                   └→ 卡片/legacy/锚/无锚 settles 共用 ref 仲裁；其余 queue kind 待 cutover
+durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
+                                                   └→ learn 内 nested settle 直接 worker-only apply；其余入口待 Wave 3 cutover
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 

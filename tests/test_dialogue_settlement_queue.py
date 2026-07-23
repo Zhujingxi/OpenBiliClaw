@@ -1,8 +1,7 @@
 """Dialogue settlement queue invariants frozen in Wave 0 and implemented by Wave 1.
 
 Registry, owner, commit-point, permit, and typed queue cases are GREEN in Wave
-1.  The settlement fence and endpoint cutover cases retain their later-Wave
-strict XFAIL markers.
+1. Wave 2 removes the settlement fence; endpoint cutover remains in Wave 3.
 
 Spec: docs/plans/2026-07-23-dialogue-settlement-queue-spec.md
 Plan: docs/plans/2026-07-23-dialogue-settlement-queue-plan.md Task 0.1.
@@ -11,7 +10,6 @@ Plan: docs/plans/2026-07-23-dialogue-settlement-queue-plan.md Task 0.1.
 from __future__ import annotations
 
 import asyncio
-import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +30,6 @@ from openbiliclaw.soul.dialogue_learn_queue import (
     anchor_snapshot_as_mapping,
     anchor_transition_as_mapping,
 )
-from openbiliclaw.storage.database import Database
 
 _DispatchHook = Callable[[dict[str, object], dict[str, object]], Awaitable[None]]
 
@@ -246,73 +243,34 @@ async def _no_dispatch(
     return
 
 
-@pytest.mark.xfail(strict=True, reason="[Q5] Wave 2 removes the blocking settlement fence")
-async def test_file_fence_does_not_block_event_loop_while_owner_awaits(
-    tmp_path: Path,
-) -> None:
-    """Q5: a competing settlement owner must not stop the event-loop heartbeat."""
-    database = Database(tmp_path / "settlement.db")
-    owner_entered = threading.Event()
-    release_owner = threading.Event()
-    contender_entered_sync_lock = threading.Event()
-    heartbeat_progressed = threading.Event()
-    owner_errors: list[BaseException] = []
-    heartbeat_before_release: list[bool] = []
+async def test_worker_await_does_not_block_event_loop_heartbeat() -> None:
+    """Q5: an awaiting worker yields without any synchronous settlement fence."""
+    worker_entered = asyncio.Event()
+    release_worker = asyncio.Event()
+    heartbeat_ticks = 0
 
-    def hold_fence() -> None:
-        try:
-            with database._card_settlement_fence():
-                owner_entered.set()
-                if not release_owner.wait(timeout=2):
-                    raise TimeoutError("owner fence release timed out")
-        except BaseException as exc:  # pragma: no cover - surfaced below
-            owner_errors.append(exc)
-            owner_entered.set()
-
-    owner = threading.Thread(target=hold_fence, name="wave0-settlement-owner")
-    owner.start()
-    assert await asyncio.to_thread(owner_entered.wait, 1)
-    assert owner_errors == []
-
-    contender_ready = asyncio.Event()
-    contender_go = asyncio.Event()
+    async def handler(_job: DialogueJob) -> DialogueJobResult:
+        worker_entered.set()
+        await release_worker.wait()
+        return DialogueJobResult(outcome="completed")
 
     async def heartbeat() -> None:
-        await contender_ready.wait()
-        contender_go.set()
-        await asyncio.sleep(0)
-        heartbeat_progressed.set()
+        nonlocal heartbeat_ticks
+        for _ in range(20):
+            await asyncio.sleep(0)
+            heartbeat_ticks += 1
 
-    async def contend_for_fence() -> None:
-        contender_ready.set()
-        await contender_go.wait()
-        contender_entered_sync_lock.set()
-        with database._card_settlement_fence():
-            pass
-
-    def watchdog() -> None:
-        if not contender_entered_sync_lock.wait(timeout=1):
-            heartbeat_before_release.append(False)
-        else:
-            heartbeat_before_release.append(heartbeat_progressed.wait(timeout=0.2))
-        release_owner.set()
-
-    watcher = threading.Thread(target=watchdog, name="wave0-settlement-watchdog")
-    watcher.start()
+    queue = DialogueSettlementQueue(handler)
+    job = queue.submit(DialogueJobKind.LEARN, {"job_id": "llm-wait"}, completion=True)
+    assert job is not None and job.completion is not None
     try:
-        await asyncio.wait_for(
-            asyncio.gather(heartbeat(), contend_for_fence()),
-            timeout=2,
-        )
+        await asyncio.wait_for(worker_entered.wait(), timeout=1)
+        await asyncio.wait_for(heartbeat(), timeout=1)
+        assert heartbeat_ticks == 20
     finally:
-        release_owner.set()
-        await asyncio.to_thread(owner.join, 1)
-        await asyncio.to_thread(watcher.join, 1)
-
-    assert owner_errors == []
-    assert not owner.is_alive()
-    assert not watcher.is_alive()
-    assert heartbeat_before_release == [True]
+        release_worker.set()
+        await queue.shutdown(timeout=1)
+    assert job.completion.result().outcome == "completed"
 
 
 async def test_queued_anchor_reservation_is_visible_to_later_settlement_admission() -> None:

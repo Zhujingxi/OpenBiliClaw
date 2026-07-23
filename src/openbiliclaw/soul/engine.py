@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -39,6 +39,18 @@ from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
 )
+from .dialogue_learn_queue import (
+    ANCHOR_NOT_APPLICABLE,
+    AnchorAbsent,
+    AnchorAdmissionSnapshot,
+    AnchorFailed,
+    AnchorNotApplicable,
+    AnchorPersisted,
+    AnchorReserved,
+    DialogueJobKind,
+    DialogueSettlementQueue,
+)
+from .dialogue_settlement_guard import require_dialogue_settlement_worker
 from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
@@ -380,6 +392,10 @@ class SoulEngine:
             database=self._ledger_database,
             ledger=self._ledger,
         )
+        # The API runtime binds its one queue after constructing both sides of
+        # the dispatcher cycle. Public submit façades fail closed until then;
+        # worker-only apply methods never infer a fallback executor.
+        self._dialogue_settlement_queue: DialogueSettlementQueue | None = None
         # Wire the same ledger into the speculator so promote/confirm/reject
         # write points (D5 #5) land in the same audit trail.
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
@@ -1068,7 +1084,14 @@ class SoulEngine:
             break
         return result
 
-    async def settle_hypothesis(
+    def bind_dialogue_settlement_queue(self, queue: DialogueSettlementQueue) -> None:
+        """Bind the runtime-owned single queue used by public submit façades."""
+        current = self._dialogue_settlement_queue
+        if current is not None and current is not queue:
+            raise RuntimeError("SoulEngine already has a dialogue settlement queue")
+        self._dialogue_settlement_queue = queue
+
+    async def submit_hypothesis_settlement(
         self,
         *,
         ref: str,
@@ -1077,36 +1100,28 @@ class SoulEngine:
         turn_id: str,
         source: str,
         derived: list[dict[str, object]] | None = None,
-        anchor_generation: int = 0,
     ) -> dict[str, Any]:
-        """Settle one hypothesis through the shared ref-level fenced executor.
-
-        Durable card actions, the deprecated feedback endpoint, and dialogue
-        anchor relations all enter here. The arbitration row persists the
-        winning action payload so a later claimant resumes the *winner's*
-        revise semantics rather than the contender's request.
-        """
+        """Submit one hypothesis settlement with its admission anchor frozen."""
         normalized_ref = ref.strip()
-        if anchor_generation <= 0:
-            active_anchor = self._dialogue_anchor_manager.current()
-            if (
-                active_anchor is not None
-                and active_anchor.kind == "hypothesis"
-                and active_anchor.ref == normalized_ref
-            ):
-                anchor_generation = active_anchor.generation
-        return await self._settle_dialogue_object(
-            kind="hypothesis",
-            ref=normalized_ref,
-            title=hypothesis,
-            requested_verdict=requested_verdict,
-            turn_id=turn_id,
-            source=source,
-            derived=derived,
-            anchor_generation=anchor_generation,
+        queue = self._require_dialogue_settlement_queue()
+        completion = await queue.submit_and_wait(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "ref": normalized_ref,
+                "hypothesis": hypothesis,
+                "requested_verdict": requested_verdict,
+                "turn_id": turn_id,
+                "source": source,
+                "derived": list(derived or []),
+                "target_kind": "hypothesis",
+                "target_ref": normalized_ref,
+            },
         )
+        if completion.settlement is not None:
+            return dict(completion.settlement)
+        return {"outcome": completion.outcome}
 
-    async def settle_confusion_answer(
+    async def submit_confusion_answer_settlement(
         self,
         *,
         ref: str,
@@ -1115,23 +1130,28 @@ class SoulEngine:
         note: str,
         turn_id: str,
         source: str,
-        anchor_generation: int,
     ) -> dict[str, Any]:
-        """Settle an anchored confusion answer through the same ref executor."""
-        return await self._settle_dialogue_object(
-            kind="confusion",
-            ref=ref,
-            title=f"confusion:{confusion_id}",
-            requested_verdict="answer",
-            turn_id=turn_id,
-            source=source,
-            confusion_id=confusion_id,
-            interpretation=interpretation,
-            note=note,
-            anchor_generation=anchor_generation,
+        """Submit one confusion answer with its admission anchor frozen."""
+        normalized_ref = ref.strip()
+        queue = self._require_dialogue_settlement_queue()
+        completion = await queue.submit_and_wait(
+            DialogueJobKind.SETTLE_CONFUSION,
+            {
+                "ref": normalized_ref,
+                "confusion_id": confusion_id,
+                "interpretation": interpretation,
+                "note": note,
+                "turn_id": turn_id,
+                "source": source,
+                "target_kind": "confusion",
+                "target_ref": normalized_ref,
+            },
         )
+        if completion.settlement is not None:
+            return dict(completion.settlement)
+        return {"outcome": completion.outcome}
 
-    async def settle_confusion(
+    async def submit_confusion_settlement(
         self,
         *,
         ref: str,
@@ -1140,7 +1160,7 @@ class SoulEngine:
         turn_id: str,
         source: str,
     ) -> dict[str, Any]:
-        """Settle one unanchored confusion through the shared ref arbitrator."""
+        """Submit one confirm/reject confusion action to the single queue."""
         try:
             confusion_id = int(ref)
         except (TypeError, ValueError) as exc:
@@ -1153,17 +1173,103 @@ class SoulEngine:
         }.get(requested_verdict.strip().lower())
         if interpretation is None:
             raise ValueError(f"Unsupported confusion settlement: {requested_verdict!r}")
-        return await self.settle_confusion_answer(
+        return await self.submit_confusion_answer_settlement(
             ref=ref,
             confusion_id=confusion_id,
             interpretation=interpretation,
             note=note,
             turn_id=turn_id,
             source=source,
-            anchor_generation=0,
         )
 
-    async def settle_speculation(
+    def _require_dialogue_settlement_queue(self) -> DialogueSettlementQueue:
+        queue = self._dialogue_settlement_queue
+        if queue is None:
+            raise RuntimeError("Dialogue settlement queue is not bound")
+        return queue
+
+    async def _apply_hypothesis_settlement(
+        self,
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+        derived: list[dict[str, object]] | None = None,
+    ) -> dict[str, Any]:
+        """Apply one admitted hypothesis settlement in the actual worker."""
+        return await self._apply_dialogue_settlement(
+            kind="hypothesis",
+            ref=ref,
+            title=hypothesis,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+            derived=derived,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_confusion_answer_settlement(
+        self,
+        *,
+        ref: str,
+        confusion_id: int,
+        interpretation: str,
+        note: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+    ) -> dict[str, Any]:
+        """Apply one admitted confusion answer in the actual worker."""
+        return await self._apply_dialogue_settlement(
+            kind="confusion",
+            ref=ref,
+            title=f"confusion:{confusion_id}",
+            requested_verdict="answer",
+            turn_id=turn_id,
+            source=source,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_confusion_settlement(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        note: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+    ) -> dict[str, Any]:
+        """Apply one admitted unanchored confusion action in the worker."""
+        try:
+            confusion_id = int(ref)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Confusion settlement ref must be an integer: {ref!r}") from exc
+        interpretation = {
+            "confirm": "real_interest",
+            "confirmed": "real_interest",
+            "reject": "proxy_behavior",
+            "rejected": "proxy_behavior",
+        }.get(requested_verdict.strip().lower())
+        if interpretation is None:
+            raise ValueError(f"Unsupported confusion settlement: {requested_verdict!r}")
+        return await self._apply_confusion_answer_settlement(
+            ref=ref,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            turn_id=turn_id,
+            source=source,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_speculation_settlement(
         self,
         *,
         ref: str,
@@ -1171,17 +1277,18 @@ class SoulEngine:
         turn_id: str,
         source: str,
     ) -> dict[str, Any]:
-        """Settle one speculation through the shared ref-level executor."""
-        return await self._settle_dialogue_object(
+        """Apply one ordinary-chat speculation settlement in the worker."""
+        return await self._apply_dialogue_settlement(
             kind="speculation",
             ref=ref,
             title=ref,
             requested_verdict=requested_verdict,
             turn_id=turn_id,
             source=source,
+            anchor_snapshot=ANCHOR_NOT_APPLICABLE,
         )
 
-    async def _settle_dialogue_object(
+    async def _apply_dialogue_settlement(
         self,
         *,
         kind: str,
@@ -1194,18 +1301,15 @@ class SoulEngine:
         confusion_id: int = 0,
         interpretation: str = "",
         note: str = "",
-        anchor_generation: int = 0,
+        anchor_snapshot: AnchorAdmissionSnapshot,
     ) -> dict[str, Any]:
-        """Run arbitration, three fenced segments, publication, and projection."""
+        """Apply one frozen winner through idempotent effects in the worker."""
+        require_dialogue_settlement_worker()
         database = self._ledger_database
         required_methods = (
             "try_create_card_settlement",
             "get_card_settlement",
-            "claim_card_settlement",
-            "card_settlement_claim_guard",
-            "record_card_settlement_event",
-            "mark_card_settlement_segment",
-            "finish_card_settlement_marker",
+            "record_card_settlement_event_once",
             "complete_card_settlement",
             "project_applied_card_settlement",
         )
@@ -1220,6 +1324,24 @@ class SoulEngine:
         normalized_turn_id = turn_id.strip()
         if not normalized_ref:
             raise ValueError("Dialogue settlement ref is required")
+        settlement = database.get_card_settlement(normalized_ref)
+        anchor_generation = 0
+        if settlement is None:
+            incoming_anchor_error = self._validate_dialogue_settlement_anchor(
+                kind=normalized_kind,
+                ref=normalized_ref,
+                snapshot=anchor_snapshot,
+            )
+            if incoming_anchor_error:
+                return self._dialogue_settlement_anchor_error(
+                    outcome=incoming_anchor_error,
+                    ref=normalized_ref,
+                )
+            anchor_generation = self._dialogue_settlement_anchor_generation(
+                kind=normalized_kind,
+                ref=normalized_ref,
+                snapshot=anchor_snapshot,
+            )
         if normalized_kind == "hypothesis":
             verdict = {
                 "confirm": "confirmed",
@@ -1238,7 +1360,7 @@ class SoulEngine:
                 "title": title.strip(),
                 "action": verdict,
                 "derived": list(derived or []),
-                "anchor_generation": max(0, int(anchor_generation)),
+                "anchor_generation": anchor_generation,
                 "source": source,
             }
         elif normalized_kind == "confusion":
@@ -1257,7 +1379,7 @@ class SoulEngine:
                 "confusion_id": confusion_id,
                 "interpretation": normalized_interpretation,
                 "note": note,
-                "anchor_generation": max(0, int(anchor_generation)),
+                "anchor_generation": anchor_generation,
                 "source": source,
             }
         elif normalized_kind == "speculation":
@@ -1278,55 +1400,51 @@ class SoulEngine:
         else:
             raise ValueError(f"Unsupported dialogue settlement kind: {kind!r}")
 
-        inserted = bool(
+        if settlement is None:
             database.try_create_card_settlement(
                 ref=normalized_ref,
                 verdict=verdict,
                 turn_id=normalized_turn_id,
                 payload=winning_payload,
             )
-        )
-        settlement = database.get_card_settlement(normalized_ref)
+            settlement = database.get_card_settlement(normalized_ref)
         if not isinstance(settlement, dict):
             raise RuntimeError("Dialogue settlement arbitration row disappeared")
-        if int(settlement.get("applied", 0)) == 1:
-            self._publish_dialogue_settlement(normalized_ref, settlement)
-            return self._dialogue_settlement_response(
-                outcome="already_settled",
-                settlement=settlement,
-            )
-
-        claim_token = uuid4().hex
-        claimed = bool(
-            await asyncio.to_thread(
-                database.claim_card_settlement,
-                ref=normalized_ref,
-                claim_token=claim_token,
-                now=datetime.now(UTC),
-            )
-        )
-        if not claimed:
-            settlement = database.get_card_settlement(normalized_ref)
-            if isinstance(settlement, dict) and int(settlement.get("applied", 0)) == 1:
-                self._publish_dialogue_settlement(normalized_ref, settlement)
-                return self._dialogue_settlement_response(
-                    outcome="already_settled",
-                    settlement=settlement,
-                )
-            return self._dialogue_settlement_response(
-                outcome="processing",
-                settlement=settlement if isinstance(settlement, dict) else {},
-            )
-
-        settlement = database.get_card_settlement(normalized_ref)
-        if not isinstance(settlement, dict):
-            raise RuntimeError("Claimed dialogue settlement row disappeared")
         stored_payload = settlement.get("payload")
         payload = dict(stored_payload) if isinstance(stored_payload, dict) else {}
         stored_kind = str(payload.get("kind", normalized_kind)).strip().lower()
         stored_title = str(payload.get("title", title)).strip()
         stored_source = str(payload.get("source", source)).strip() or source
         stored_verdict = str(settlement.get("verdict", "")).strip().lower()
+        stored_anchor_snapshot = self._stored_dialogue_settlement_anchor_snapshot(
+            kind=stored_kind,
+            ref=normalized_ref,
+            payload=payload,
+        )
+        stored_anchor_error = self._validate_dialogue_settlement_anchor(
+            kind=stored_kind,
+            ref=normalized_ref,
+            snapshot=stored_anchor_snapshot,
+        )
+        if stored_anchor_error:
+            return self._dialogue_settlement_anchor_error(
+                outcome=stored_anchor_error,
+                ref=normalized_ref,
+            )
+        if int(settlement.get("applied", 0)) == 1:
+            self._publish_dialogue_settlement(normalized_ref, settlement)
+            stored_result = settlement.get("result")
+            applied_result = (
+                dict(stored_result)
+                if isinstance(stored_result, dict) and stored_result
+                else self._read_dialogue_settlement_result(settlement, payload)
+            )
+            return self._dialogue_settlement_response(
+                outcome="already_settled",
+                settlement=settlement,
+                result=applied_result,
+            )
+
         event_type = {
             "hypothesis": "feedback",
             "confusion": "confusion_settlement",
@@ -1357,88 +1475,37 @@ class SoulEngine:
             "title": stored_title,
             "metadata": event_metadata,
         }
-        if int(settlement.get("seg_event", 0)) == 0 and not bool(
-            database.record_card_settlement_event(
-                ref=normalized_ref,
-                claim_token=claim_token,
-                event=event,
-            )
-        ):
+        database.record_card_settlement_event_once(
+            ref=normalized_ref,
+            event=event,
+        )
+        result = await self._apply_dialogue_settlement_object(
+            settlement=settlement,
+            payload=payload,
+        )
+        if result is None:
             return self._dialogue_settlement_response(
                 outcome="processing",
                 settlement=settlement,
             )
+        if stored_kind == "hypothesis":
+            feedback = self._settlement_feedback(stored_title, stored_verdict)
+            await self.mark_feedback_rebuild(feedback, result)
+        self._ledger.record(
+            write_point={
+                "hypothesis": "settle_insight",
+                "confusion": "settle_confusion",
+                "speculation": "settle_speculation",
+            }[stored_kind],
+            source=stored_source,
+            before={"title": stored_title, "verdict": stored_verdict},
+            after={"matched": bool(result.get("matched", False))},
+            source_refs=[normalized_ref],
+            outcome="success" if bool(result.get("matched", False)) else "failed",
+            turn_id=str(settlement.get("turn_id", normalized_turn_id)),
+        )
 
-        if int(settlement.get("seg_object", 0)) == 0:
-            with database.card_settlement_claim_guard(
-                ref=normalized_ref,
-                claim_token=claim_token,
-            ) as owns_claim:
-                if not owns_claim:
-                    return self._dialogue_settlement_response(
-                        outcome="processing",
-                        settlement=database.get_card_settlement(normalized_ref) or settlement,
-                    )
-                result = await self._apply_dialogue_settlement_object(
-                    settlement=settlement,
-                    payload=payload,
-                )
-                if result is None:
-                    return self._dialogue_settlement_response(
-                        outcome="processing",
-                        settlement=settlement,
-                    )
-                if not bool(
-                    database.mark_card_settlement_segment(
-                        ref=normalized_ref,
-                        claim_token=claim_token,
-                        segment="object",
-                    )
-                ):
-                    return self._dialogue_settlement_response(
-                        outcome="processing",
-                        settlement=database.get_card_settlement(normalized_ref) or settlement,
-                    )
-        else:
-            result = self._read_dialogue_settlement_result(settlement, payload)
-
-        if int(settlement.get("seg_marker", 0)) == 0:
-            with database.card_settlement_claim_guard(
-                ref=normalized_ref,
-                claim_token=claim_token,
-            ) as owns_claim:
-                if not owns_claim:
-                    return self._dialogue_settlement_response(
-                        outcome="processing",
-                        settlement=database.get_card_settlement(normalized_ref) or settlement,
-                        result=result,
-                    )
-                if stored_kind == "hypothesis":
-                    feedback = self._settlement_feedback(stored_title, stored_verdict)
-                    await self.mark_feedback_rebuild(feedback, result)
-                if not bool(
-                    database.finish_card_settlement_marker(
-                        ref=normalized_ref,
-                        claim_token=claim_token,
-                        source=stored_source,
-                        hypothesis=stored_title,
-                        verdict=stored_verdict,
-                        turn_id=str(settlement.get("turn_id", normalized_turn_id)),
-                        matched=bool(result.get("matched", False)),
-                        write_point={
-                            "hypothesis": "settle_insight",
-                            "confusion": "settle_confusion",
-                            "speculation": "settle_speculation",
-                        }[stored_kind],
-                    )
-                ):
-                    return self._dialogue_settlement_response(
-                        outcome="processing",
-                        settlement=database.get_card_settlement(normalized_ref) or settlement,
-                        result=result,
-                    )
-
-        if not bool(database.complete_card_settlement(ref=normalized_ref, claim_token=claim_token)):
+        if not bool(database.complete_card_settlement(ref=normalized_ref, result=result)):
             latest = database.get_card_settlement(normalized_ref)
             if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
                 self._publish_dialogue_settlement(normalized_ref, latest)
@@ -1454,10 +1521,85 @@ class SoulEngine:
         latest = database.get_card_settlement(normalized_ref) or settlement
         self._publish_dialogue_settlement(normalized_ref, latest)
         return self._dialogue_settlement_response(
-            outcome="applied" if inserted or claimed else "already_settled",
+            outcome="applied",
             settlement=latest,
             result=result,
         )
+
+    def _validate_dialogue_settlement_anchor(
+        self,
+        *,
+        kind: str,
+        ref: str,
+        snapshot: AnchorAdmissionSnapshot,
+    ) -> str:
+        """Validate the frozen state without ever upgrading it from current."""
+        if isinstance(snapshot, AnchorFailed):
+            return "anchor_dependency_failed"
+        if isinstance(snapshot, AnchorReserved):
+            raise RuntimeError("Unresolved anchor reservation reached settlement apply")
+        if isinstance(snapshot, AnchorNotApplicable):
+            return "" if kind == "speculation" else "stale_anchor"
+        if isinstance(snapshot, AnchorPersisted):
+            if snapshot.kind != kind or snapshot.ref != ref:
+                return "stale_anchor"
+            active = self._dialogue_anchor_manager.validate_snapshot(
+                snapshot.ref,
+                snapshot.generation,
+            )
+            if active is None or active.kind != snapshot.kind:
+                return "stale_anchor"
+            return ""
+        if snapshot.target_kind != kind or snapshot.target_ref != ref:
+            return "stale_anchor"
+        return "stale_anchor" if self._dialogue_anchor_manager.current() is not None else ""
+
+    @staticmethod
+    def _dialogue_settlement_anchor_generation(
+        *,
+        kind: str,
+        ref: str,
+        snapshot: AnchorAdmissionSnapshot,
+    ) -> int:
+        if isinstance(snapshot, AnchorPersisted):
+            if snapshot.kind != kind or snapshot.ref != ref:
+                raise ValueError("Persisted settlement anchor target mismatch")
+            return snapshot.generation
+        if isinstance(snapshot, AnchorAbsent):
+            if snapshot.target_kind != kind or snapshot.target_ref != ref:
+                raise ValueError("Absent settlement anchor target mismatch")
+            return 0
+        if isinstance(snapshot, AnchorNotApplicable) and kind == "speculation":
+            return 0
+        if isinstance(snapshot, AnchorFailed):
+            return 0
+        raise ValueError("Settlement apply requires a resolved admission anchor")
+
+    @staticmethod
+    def _stored_dialogue_settlement_anchor_snapshot(
+        *,
+        kind: str,
+        ref: str,
+        payload: dict[str, Any],
+    ) -> AnchorAdmissionSnapshot:
+        if kind == "speculation":
+            return ANCHOR_NOT_APPLICABLE
+        try:
+            generation = max(0, int(payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Stored settlement anchor generation is invalid") from exc
+        if generation > 0:
+            return AnchorPersisted(kind=kind, ref=ref, generation=generation)
+        return AnchorAbsent(target_kind=kind, target_ref=ref, tombstone_epoch=1)
+
+    @staticmethod
+    def _dialogue_settlement_anchor_error(*, outcome: str, ref: str) -> dict[str, Any]:
+        return {
+            "outcome": outcome,
+            "state": "stale",
+            "settlement_ref": ref,
+            "settlement_verdict": "",
+        }
 
     async def _apply_dialogue_settlement_object(
         self,
@@ -1819,6 +1961,8 @@ class SoulEngine:
                 active_list=active_list,
                 insight_hash_map=insight_hash_map,
                 turn_id=turn_id,
+                admission_anchor_ref=anchor_ref,
+                admission_anchor_generation=anchor_generation,
             )
 
         merged_candidates = self._merge_insight_candidates(
@@ -2714,14 +2858,27 @@ class SoulEngine:
                         )
                     except (TypeError, ValueError):
                         generation = 0
-                    result = await self.settle_confusion_answer(
+                    snapshot: AnchorAdmissionSnapshot
+                    if generation > 0:
+                        snapshot = AnchorPersisted(
+                            kind="confusion",
+                            ref=str(confusion_id),
+                            generation=generation,
+                        )
+                    else:
+                        snapshot = AnchorAbsent(
+                            target_kind="confusion",
+                            target_ref=str(confusion_id),
+                            tombstone_epoch=1,
+                        )
+                    result = await self._apply_confusion_answer_settlement(
                         ref=str(confusion_id),
                         confusion_id=confusion_id,
                         interpretation=str(settlement_payload.get("interpretation", "")),
                         note=str(settlement_payload.get("note", "")),
                         turn_id=str(settlement.get("turn_id", row.get("turn_id", ""))),
                         source=str(settlement_payload.get("source", "recovery")),
-                        anchor_generation=generation,
+                        anchor_snapshot=snapshot,
                     )
                     if result.get("outcome") == "processing":
                         continue
@@ -2983,13 +3140,17 @@ class SoulEngine:
                 logger.warning("dialogue hypothesis anchor has no resolvable object text")
                 return "kept_invalid"
             if relation in {"support", "contradict"}:
-                result = await self.settle_hypothesis(
+                result = await self._apply_hypothesis_settlement(
                     ref=anchor.ref,
                     hypothesis=hypothesis,
                     requested_verdict=relation,
                     turn_id=turn_id,
                     source="dialogue_anchor",
-                    anchor_generation=anchor.generation,
+                    anchor_snapshot=AnchorPersisted(
+                        kind=anchor.kind,
+                        ref=anchor.ref,
+                        generation=anchor.generation,
+                    ),
                 )
                 if result.get("outcome") == "processing":
                     return "queued_failed"
@@ -2997,14 +3158,18 @@ class SoulEngine:
             if relation == "revise":
                 raw_derived = decision.get("derived")
                 derived = _as_dict_list(raw_derived)
-                result = await self.settle_hypothesis(
+                result = await self._apply_hypothesis_settlement(
                     ref=anchor.ref,
                     hypothesis=hypothesis,
                     requested_verdict="revise",
                     turn_id=turn_id,
                     source="dialogue_anchor",
                     derived=derived,
-                    anchor_generation=anchor.generation,
+                    anchor_snapshot=AnchorPersisted(
+                        kind=anchor.kind,
+                        ref=anchor.ref,
+                        generation=anchor.generation,
+                    ),
                 )
                 if result.get("outcome") == "processing":
                     return "queued_failed"
@@ -3025,14 +3190,18 @@ class SoulEngine:
         confusion_id = self._confusion_anchor_id(anchor)
         if not confusion_id:
             return "kept_invalid"
-        result = await self.settle_confusion_answer(
+        result = await self._apply_confusion_answer_settlement(
             ref=anchor.ref,
             confusion_id=confusion_id,
             interpretation=interpretation,
             note="dialogue_anchor",
             turn_id=turn_id,
             source="dialogue_anchor",
-            anchor_generation=anchor.generation,
+            anchor_snapshot=AnchorPersisted(
+                kind=anchor.kind,
+                ref=anchor.ref,
+                generation=anchor.generation,
+            ),
         )
         if result.get("outcome") == "processing":
             return "queued_failed"
@@ -3245,6 +3414,8 @@ class SoulEngine:
         active_list: dict[str, object],
         insight_hash_map: dict[str, str],
         turn_id: str,
+        admission_anchor_ref: str,
+        admission_anchor_generation: int,
     ) -> None:
         """Settle active objects referenced by a chat turn (whitelist = injected).
 
@@ -3253,6 +3424,10 @@ class SoulEngine:
         (speculation confirm/reject, insight feedback) and records a ledger row
         stamped with ``turn_id`` (idempotency observation key).
         """
+        if admission_anchor_ref or admission_anchor_generation:
+            raise RuntimeError(
+                "Ordinary dialogue settles require the admission-time absent anchor state"
+            )
         spec_domains = {
             str(item.get("domain", "")).strip()
             for item in _as_dict_list(active_list.get("speculations"))
@@ -3271,7 +3446,7 @@ class SoulEngine:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
                 try:
-                    await self.settle_speculation(
+                    await self._apply_speculation_settlement(
                         ref=ref,
                         requested_verdict=verdict,
                         turn_id=turn_id,
@@ -3285,12 +3460,17 @@ class SoulEngine:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
                 try:
-                    await self.settle_hypothesis(
+                    await self._apply_hypothesis_settlement(
                         ref=ref,
                         hypothesis=hypothesis,
                         requested_verdict=verdict,
                         turn_id=turn_id,
                         source="chat",
+                        anchor_snapshot=AnchorAbsent(
+                            target_kind="hypothesis",
+                            target_ref=ref,
+                            tombstone_epoch=1,
+                        ),
                     )
                 except Exception:
                     logger.exception("Failed to settle insight %s", ref)
@@ -3299,12 +3479,17 @@ class SoulEngine:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
                 try:
-                    await self.settle_confusion(
+                    await self._apply_confusion_settlement(
                         ref=ref,
                         requested_verdict=verdict,
                         note="chat_settle",
                         turn_id=turn_id,
                         source="chat",
+                        anchor_snapshot=AnchorAbsent(
+                            target_kind="confusion",
+                            target_ref=ref,
+                            tombstone_epoch=1,
+                        ),
                     )
                 except Exception:
                     logger.exception("Failed to settle confusion %s", ref)

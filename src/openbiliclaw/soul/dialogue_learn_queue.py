@@ -291,6 +291,7 @@ class DialogueJobResult:
     """Typed completion returned to request/response submitters."""
 
     outcome: str
+    settlement: Mapping[str, object] | None = None
     classification: str | None = None
     classifier: str | None = None
     resulting_action: str | None = None

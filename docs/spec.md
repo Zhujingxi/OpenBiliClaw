@@ -226,14 +226,15 @@ guided init: signals → preferences → full profile commit
 
 durable dialogue → confirmation entry(pending list / cards)
                  → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
-                 → typed settlement queue[current production kind: learn] → one worker
+                 → typed settlement queue[current production entry: learn] → one worker
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
-                 → hypothesis card action ┴→ shared ref arbitration → claim/fencing
+                 → hypothesis card action ┴→ frozen snapshot → worker-only apply
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
-                   → event + object + rebuild-marker → applied-only cross-session projection
+                   → lightweight ref winner receipt → event + object + rebuild-marker
+                   → applied-only cross-session projection
 
 degraded registry → provider-free ping(degraded) → static /web | /setup | /m
                   ├─ GET/PUT config → restart runtime
@@ -356,7 +357,7 @@ runtime 与次级 hydration 是独立分支。
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Cognitive profile pipeline: 单对话锚(ref+generation) + 归属矩阵 + 台账 │ │
 │  │       + 待聊≤3/主动零冷却/系统12h+对象72h/attached_to 去重             │ │
-│  │       + 卡片/legacy/锚/无锚 settles 共用 ref 仲裁/claim guard/applied 投影 │ │
+│  │       + frozen admission / worker-only apply / 轻量 ref winner / applied 投影 │ │
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │

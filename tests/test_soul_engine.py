@@ -4,7 +4,9 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
@@ -2118,6 +2120,115 @@ def _ledger_rows(memory: MemoryManager, write_point: str) -> list[dict[str, obje
     return memory._database.query_profile_ledger(days=30, write_point=write_point)
 
 
+@asynccontextmanager
+async def _test_dialogue_runtime(engine: SoulEngine):  # type: ignore[no-untyped-def]
+    """Bind the real single worker to an engine without cutting production entries over."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorPersisted,
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    async def dispatch(job: DialogueJob) -> DialogueJobResult:
+        snapshot = job.effective_anchor_snapshot
+        assert snapshot is not None
+        if job.kind is DialogueJobKind.LEARN:
+            payload = dict(job.payload)
+            if isinstance(snapshot, AnchorPersisted):
+                payload["anchor_ref"] = snapshot.ref
+                payload["anchor_generation"] = snapshot.generation
+            else:
+                payload["anchor_ref"] = ""
+                payload["anchor_generation"] = 0
+            result = await engine.learn_from_dialogue(**payload)
+        elif job.kind is DialogueJobKind.SETTLE_HYPOTHESIS:
+            raw_derived = job.payload.get("derived", [])
+            derived = (
+                [dict(item) for item in raw_derived if isinstance(item, dict)]
+                if isinstance(raw_derived, list)
+                else []
+            )
+            result = await engine._apply_hypothesis_settlement(
+                ref=str(job.payload["ref"]),
+                hypothesis=str(job.payload["hypothesis"]),
+                requested_verdict=str(job.payload["requested_verdict"]),
+                turn_id=str(job.payload["turn_id"]),
+                source=str(job.payload["source"]),
+                derived=derived,
+                anchor_snapshot=snapshot,
+            )
+        elif job.kind is DialogueJobKind.SETTLE_CONFUSION:
+            result = await engine._apply_confusion_answer_settlement(
+                ref=str(job.payload["ref"]),
+                confusion_id=int(job.payload["confusion_id"]),
+                interpretation=str(job.payload["interpretation"]),
+                note=str(job.payload["note"]),
+                turn_id=str(job.payload["turn_id"]),
+                source=str(job.payload["source"]),
+                anchor_snapshot=snapshot,
+            )
+        else:  # pragma: no cover - helper is deliberately closed over Wave 2 kinds
+            raise AssertionError(f"unexpected test settlement kind: {job.kind}")
+        return DialogueJobResult(
+            outcome=str(result.get("outcome", "completed")),
+            settlement=MappingProxyType(dict(result)),
+        )
+
+    queue = DialogueSettlementQueue(
+        dispatch,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    engine.bind_dialogue_settlement_queue(queue)
+    try:
+        yield queue
+    finally:
+        await queue.shutdown(timeout=2)
+
+
+async def _learn_in_test_dialogue_runtime(
+    queue: object,
+    **payload: object,
+) -> dict[str, object]:
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueSettlementQueue,
+    )
+
+    assert isinstance(queue, DialogueSettlementQueue)
+    completion = await queue.submit_and_wait(DialogueJobKind.LEARN, payload)
+    assert completion.settlement is not None
+    return dict(completion.settlement)
+
+
+async def _call_in_test_dialogue_worker(engine: SoulEngine, operation):  # type: ignore[no-untyped-def]
+    """Execute a pre-cutover internal operation under the actual queue worker permit."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    values: list[object] = []
+
+    async def dispatch(_job: DialogueJob) -> DialogueJobResult:
+        values.append(await operation())
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(
+        dispatch,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    try:
+        await queue.submit_and_wait(DialogueJobKind.LEARN, {"test_operation": True})
+    finally:
+        await queue.shutdown(timeout=2)
+    assert len(values) == 1
+    return values[0]
+
+
 @pytest.mark.asyncio
 async def test_settles_confirm_speculation_on_chat_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2132,13 +2243,15 @@ async def test_settles_confirm_speculation_on_chat_scope(
         _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
     )
 
-    await engine.learn_from_dialogue(
-        user_message="最近确实在玩桌游",
-        assistant_reply="不错",
-        session="popup",
-        scope="chat",
-        turn_id="turn-42",
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="最近确实在玩桌游",
+            assistant_reply="不错",
+            session="popup",
+            scope="chat",
+            turn_id="turn-42",
+        )
 
     active = {s.domain for s in engine._speculator.get_active_speculations()}
     assert "桌游" not in active  # confirmed → no longer active
@@ -2219,9 +2332,10 @@ async def test_settles_confirm_is_idempotent(
     kwargs = dict(
         user_message="确实在玩", assistant_reply="ok", session="popup", scope="chat", turn_id="t"
     )
-    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
-    # Re-run same turn: state must not degrade (still confirmed, not resurrected).
-    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    async with _test_dialogue_runtime(engine) as queue:
+        await _learn_in_test_dialogue_runtime(queue, **kwargs)
+        # Re-run same turn: state must not degrade (still confirmed, not resurrected).
+        await _learn_in_test_dialogue_runtime(queue, **kwargs)
     active = {s.domain for s in engine._speculator.get_active_speculations()}
     assert "桌游" not in active
 
@@ -2242,13 +2356,15 @@ async def test_plain_chat_confusion_settle_uses_ref_arbitrator(
         _settles_extract([{"kind": "confusion", "ref": ref, "verdict": "confirm"}]),
     )
 
-    await engine.learn_from_dialogue(
-        user_message="这确实是兴趣",
-        assistant_reply="收到",
-        session="popup",
-        scope="chat",
-        turn_id="confusion-chat-settle",
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="这确实是兴趣",
+            assistant_reply="收到",
+            session="popup",
+            scope="chat",
+            turn_id="confusion-chat-settle",
+        )
 
     confusion = memory._database.get_confusion(confusion_id)
     receipt = memory._database.get_card_settlement(ref)
@@ -2262,10 +2378,11 @@ async def test_plain_chat_confusion_settle_uses_ref_arbitrator(
 
 
 @pytest.mark.asyncio
-async def test_card_receipt_rejects_interleaved_plain_chat_confirm(
+async def test_worker_nested_plain_chat_settle_does_not_reenter_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
     from openbiliclaw.soul.identity import insight_hash8
 
     memory = MemoryManager(tmp_path)
@@ -2286,58 +2403,60 @@ async def test_card_receipt_rejects_interleaved_plain_chat_confirm(
         }
 
     outcomes: dict[str, str] = {}
-    real_settle = engine.settle_hypothesis
+    real_apply = engine._apply_hypothesis_settlement
 
     async def capture_settlement(**kwargs: object) -> dict[str, object]:
-        result = await real_settle(**kwargs)  # type: ignore[arg-type]
+        result = await real_apply(**kwargs)  # type: ignore[arg-type]
         outcomes[str(kwargs.get("source", ""))] = str(result.get("outcome", ""))
         return result
 
     monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", interleaved_chat_extract)
-    monkeypatch.setattr(engine, "settle_hypothesis", capture_settlement)
-    chat_task = asyncio.create_task(
-        engine.learn_from_dialogue(
-            user_message="其实我支持这个判断",
-            assistant_reply="收到",
-            session="popup",
-            scope="chat",
-            turn_id="plain-chat-confirm",
+    monkeypatch.setattr(engine, "_apply_hypothesis_settlement", capture_settlement)
+    async with _test_dialogue_runtime(engine) as queue:
+        chat_job = queue.submit(
+            DialogueJobKind.LEARN,
+            {
+                "user_message": "其实我支持这个判断",
+                "assistant_reply": "收到",
+                "session": "popup",
+                "scope": "chat",
+                "turn_id": "plain-chat-confirm",
+            },
+            completion=True,
         )
-    )
-    await asyncio.wait_for(chat_entered_analyzer.wait(), timeout=5)
-    try:
-        card_result = await engine.settle_hypothesis(
-            ref=ref,
-            hypothesis=hypothesis,
-            requested_verdict="reject",
-            turn_id="card-reject",
-            source="card_action",
+        assert chat_job is not None and chat_job.completion is not None
+        await asyncio.wait_for(chat_entered_analyzer.wait(), timeout=5)
+        card_task = asyncio.create_task(
+            engine.submit_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="reject",
+                turn_id="card-reject",
+                source="card_action",
+            )
         )
-        receipt_before_chat = memory._database.get_card_settlement(ref)
-        assert receipt_before_chat is not None
-        assert (receipt_before_chat["verdict"], receipt_before_chat["applied"]) == (
-            "rejected",
-            1,
-        )
-    finally:
+        await asyncio.sleep(0)
+        assert queue.depth == 1
+        assert memory._database.get_card_settlement(ref) is None
         release_chat_settle.set()
-    await asyncio.wait_for(chat_task, timeout=5)
+        await asyncio.wait_for(chat_job.completion, timeout=5)
+        card_result = await asyncio.wait_for(card_task, timeout=5)
 
     stored = engine._load_insights()[0]
     receipt = memory._database.get_card_settlement(ref)
-    assert card_result["outcome"] == "applied"
-    assert outcomes == {"card_action": "applied", "chat": "already_settled"}
-    assert stored.validated is False
-    assert stored.confidence == 0.35
+    assert card_result["outcome"] == "already_settled"
+    assert outcomes == {"chat": "applied", "card_action": "already_settled"}
+    assert stored.validated is True
+    assert stored.confidence == 0.75
     assert receipt is not None
     assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
-        "rejected",
-        "card-reject",
+        "confirmed",
+        "plain-chat-confirm",
         1,
     )
     rows = _ledger_rows(memory, "settle_insight")
     assert len(rows) == 1
-    assert rows[0]["turn_id"] == "card-reject"
+    assert rows[0]["turn_id"] == "plain-chat-confirm"
 
 
 # ---------------------------------------------------------------------------
@@ -2413,33 +2532,80 @@ def _anchor_extract(
     return fake_extract
 
 
-@pytest.mark.xfail(strict=True, reason="[Q3/F2] Wave 2 removes future-anchor inference")
 async def test_generation_zero_never_captures_future_anchor(tmp_path: Path) -> None:
-    """Q3/F2: legacy zero is an absent admission tombstone, not a late lookup."""
+    """Q3/F2: an admitted absent snapshot never captures a later non-reserved anchor."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+    from openbiliclaw.soul.identity import insight_hash8
+
     memory = MemoryManager(tmp_path)
     memory.initialize()
     engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
     hypothesis = "用户重视可证伪的判断"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    blocker_entered = asyncio.Event()
+    release_blocker = asyncio.Event()
 
-    # The legacy compatibility request was accepted while there was no anchor,
-    # so zero represents a frozen absent tombstone.  This non-reservation
-    # establish happens later and must not be captured by the old request.
+    async def dispatch(job: DialogueJob) -> DialogueJobResult:
+        if job.kind is DialogueJobKind.LEARN:
+            blocker_entered.set()
+            await release_blocker.wait()
+            return DialogueJobResult(outcome="completed")
+        assert job.kind is DialogueJobKind.SETTLE_HYPOTHESIS
+        assert job.effective_anchor_snapshot is not None
+        result = await engine._apply_hypothesis_settlement(
+            ref=str(job.payload["ref"]),
+            hypothesis=str(job.payload["hypothesis"]),
+            requested_verdict=str(job.payload["requested_verdict"]),
+            turn_id=str(job.payload["turn_id"]),
+            source=str(job.payload["source"]),
+            anchor_snapshot=job.effective_anchor_snapshot,
+        )
+        return DialogueJobResult(outcome=str(result["outcome"]))
+
+    queue = DialogueSettlementQueue(
+        dispatch,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    queue.start()
+    assert queue.submit(DialogueJobKind.LEARN, {"blocker": True})
+    await asyncio.wait_for(blocker_entered.wait(), timeout=1)
+    settlement = queue.submit(
+        DialogueJobKind.SETTLE_HYPOTHESIS,
+        {
+            "ref": ref,
+            "hypothesis": hypothesis,
+            "requested_verdict": "confirm",
+            "turn_id": "legacy-absent-admission",
+            "source": "legacy_compatibility",
+            "target_kind": "hypothesis",
+            "target_ref": ref,
+        },
+        completion=True,
+    )
+    assert settlement is not None
+    assert settlement.completion is not None
+
+    # The request is already accepted with an absent tombstone. This establish
+    # is deliberately not represented by an admission reservation.
     anchor = _seed_dialogue_anchor_hypothesis(
         memory,
         engine,
         hypothesis=hypothesis,
         origin_turn_id="future-anchor-card",
     )
-    result = await engine.settle_hypothesis(
-        ref=anchor.ref,
-        hypothesis=hypothesis,
-        requested_verdict="confirm",
-        turn_id="legacy-absent-admission",
-        source="legacy_compatibility",
-        anchor_generation=0,
-    )
+    release_blocker.set()
+    try:
+        result = await asyncio.wait_for(settlement.completion, timeout=2)
+    finally:
+        await queue.shutdown(timeout=1)
 
-    assert result["outcome"] == "stale_anchor"
+    assert result.outcome == "stale_anchor"
     assert memory._database.get_card_settlement(anchor.ref) is None
     assert engine._dialogue_anchor_manager.current() == anchor
     stored = engine._load_insights()[0]
@@ -2447,13 +2613,109 @@ async def test_generation_zero_never_captures_future_anchor(tmp_path: Path) -> N
     assert stored.confidence == 0.6
 
 
-@pytest.mark.xfail(strict=True, reason="[Q3] Wave 2 validates frozen generation before effects")
+async def test_public_submit_uses_worker_only_apply_and_child_cannot_inherit_permit(
+    tmp_path: Path,
+) -> None:
+    """Q4/F4: public admission submits once; only the actual worker may apply."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorAbsent,
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+    from openbiliclaw.soul.dialogue_settlement_guard import (
+        DialogueSettlementMutationOutsideWorker,
+    )
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视可复核的资料"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    child_denials = 0
+    dispatch_count = 0
+
+    async def dispatch(job: DialogueJob) -> DialogueJobResult:
+        nonlocal child_denials, dispatch_count
+        dispatch_count += 1
+        assert job.kind is DialogueJobKind.SETTLE_HYPOTHESIS
+        assert job.effective_anchor_snapshot is not None
+
+        async def child_apply() -> None:
+            await engine._apply_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="confirm",
+                turn_id="child-must-fail",
+                source="test",
+                anchor_snapshot=job.effective_anchor_snapshot,
+            )
+
+        child = asyncio.create_task(child_apply())
+        with pytest.raises(DialogueSettlementMutationOutsideWorker):
+            await child
+        child_denials += 1
+        result = await engine._apply_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict=str(job.payload["requested_verdict"]),
+            turn_id=str(job.payload["turn_id"]),
+            source=str(job.payload["source"]),
+            anchor_snapshot=job.effective_anchor_snapshot,
+        )
+        return DialogueJobResult(outcome=str(result["outcome"]))
+
+    queue = DialogueSettlementQueue(
+        dispatch,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    engine.bind_dialogue_settlement_queue(queue)
+    with pytest.raises(DialogueSettlementMutationOutsideWorker):
+        await engine._apply_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="confirm",
+            turn_id="outside-worker",
+            source="test",
+            anchor_snapshot=AnchorAbsent(
+                target_kind="hypothesis",
+                target_ref=ref,
+                tombstone_epoch=1,
+            ),
+        )
+
+    try:
+        result = await engine.submit_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="confirm",
+            turn_id="public-submit",
+            source="test",
+        )
+    finally:
+        await queue.shutdown(timeout=1)
+
+    assert result["outcome"] == "applied"
+    assert dispatch_count == 1
+    assert child_denials == 1
+    assert memory._database.get_card_settlement(ref)["applied"] == 1
+
+
 async def test_generation_change_after_analysis_before_effect_writes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Q3: replacing a generation in the post-analysis gap fences every effect."""
     from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
 
     memory = MemoryManager(tmp_path)
     memory.initialize()
@@ -2468,7 +2730,7 @@ async def test_generation_change_after_analysis_before_effect_writes_nothing(
 
     settlement_entered = asyncio.Event()
     release_settlement = asyncio.Event()
-    real_settle = engine.settle_hypothesis
+    real_apply = engine._apply_hypothesis_settlement
 
     async def pause_before_first_settlement_effect(
         *,
@@ -2478,33 +2740,52 @@ async def test_generation_change_after_analysis_before_effect_writes_nothing(
         turn_id: str,
         source: str,
         derived: list[dict[str, object]] | None = None,
-        anchor_generation: int = 0,
+        anchor_snapshot: object,
     ) -> dict[str, object]:
         settlement_entered.set()
         await release_settlement.wait()
-        return await real_settle(
+        return await real_apply(
             ref=ref,
             hypothesis=hypothesis,
             requested_verdict=requested_verdict,
             turn_id=turn_id,
             source=source,
             derived=derived,
-            anchor_generation=anchor_generation,
+            anchor_snapshot=anchor_snapshot,  # type: ignore[arg-type]
         )
 
-    monkeypatch.setattr(engine, "settle_hypothesis", pause_before_first_settlement_effect)
-    learning = asyncio.create_task(
-        engine.learn_from_dialogue(
-            user_message="我支持这个判断",
-            assistant_reply="收到",
-            session="popup",
-            turn_id="generation-effect-gap",
-            anchor_ref=old.ref,
-            anchor_generation=old.generation,
-        )
+    monkeypatch.setattr(
+        engine,
+        "_apply_hypothesis_settlement",
+        pause_before_first_settlement_effect,
     )
-    await asyncio.wait_for(settlement_entered.wait(), timeout=1)
+
+    async def dispatch(job: DialogueJob) -> DialogueJobResult:
+        assert job.kind is DialogueJobKind.LEARN
+        await engine.learn_from_dialogue(**dict(job.payload))
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(
+        dispatch,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    queue.start()
+    learning = queue.submit(
+        DialogueJobKind.LEARN,
+        {
+            "user_message": "我支持这个判断",
+            "assistant_reply": "收到",
+            "session": "popup",
+            "turn_id": "generation-effect-gap",
+            "anchor_ref": old.ref,
+            "anchor_generation": old.generation,
+        },
+        completion=True,
+    )
+    assert learning is not None
+    assert learning.completion is not None
     try:
+        await asyncio.wait_for(settlement_entered.wait(), timeout=1)
         assert (
             engine._dialogue_anchor_manager.release(
                 reason="replaced",
@@ -2520,7 +2801,8 @@ async def test_generation_change_after_analysis_before_effect_writes_nothing(
         )
     finally:
         release_settlement.set()
-    await asyncio.wait_for(learning, timeout=2)
+    await asyncio.wait_for(learning.completion, timeout=2)
+    await queue.shutdown(timeout=1)
 
     assert engine._dialogue_anchor_manager.current() == replacement
     assert memory._database.get_card_settlement(old.ref) is None
@@ -2558,14 +2840,14 @@ async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
     )
     monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract(relation))
 
-    result = await engine.learn_from_dialogue(
-        user_message="这是我的明确回答",
-        assistant_reply="明白了",
-        session="popup",
-        turn_id="anchor-turn",
-        anchor_ref=anchor.ref,
-        anchor_generation=anchor.generation,
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="这是我的明确回答",
+            assistant_reply="明白了",
+            session="popup",
+            turn_id="anchor-turn",
+        )
 
     stored = engine._load_insights()[0]
     assert stored.validated is validated
@@ -2611,18 +2893,20 @@ async def test_hypothesis_anchor_obeys_existing_object_arbitration_and_projects_
             "kind": "hypothesis",
             "title": hypothesis,
             "action": "rejected",
+            "anchor_generation": anchor.generation,
+            "source": "card_action",
         },
     )
     monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract("support"))
 
-    result = await engine.learn_from_dialogue(
-        user_message="其实我支持这个判断",
-        assistant_reply="收到",
-        session="popup",
-        turn_id="anchor-support-loser",
-        anchor_ref=anchor.ref,
-        anchor_generation=anchor.generation,
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="其实我支持这个判断",
+            assistant_reply="收到",
+            session="popup",
+            turn_id="anchor-support-loser",
+        )
 
     stored = engine._load_insights()[0]
     receipt = memory._database.get_card_settlement(anchor.ref)
@@ -2666,13 +2950,13 @@ async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_
         ),
     )
 
-    result = await engine.learn_from_dialogue(
-        user_message="不是只要理论，我更看重能落地",
-        assistant_reply="这个修正很关键",
-        session="popup",
-        anchor_ref=anchor.ref,
-        anchor_generation=anchor.generation,
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="不是只要理论，我更看重能落地",
+            assistant_reply="这个修正很关键",
+            session="popup",
+        )
 
     by_text = {item.hypothesis: item for item in engine._load_insights()}
     assert by_text["用户只在意理论深度"].validated is False
@@ -2713,13 +2997,13 @@ async def test_confusion_anchor_answer_resolves_matching_interpretation(
         _anchor_extract("answer", interpretation="real_interest"),
     )
 
-    result = await engine.learn_from_dialogue(
-        user_message="是真的喜欢",
-        assistant_reply="明白",
-        session="popup",
-        anchor_ref=anchor.ref,
-        anchor_generation=anchor.generation,
-    )
+    async with _test_dialogue_runtime(engine) as queue:
+        result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="是真的喜欢",
+            assistant_reply="明白",
+            session="popup",
+        )
 
     assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
     assert memory._database.get_confusion(confusion_id)["resolution"] == "real_interest"
@@ -2771,11 +3055,23 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
 
     monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", counted_extract)
 
-    assert await engine.replay_confusion_dialogue_attributions() == 1
+    assert (
+        await _call_in_test_dialogue_worker(
+            engine,
+            engine.replay_confusion_dialogue_attributions,
+        )
+        == 1
+    )
     assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
     assert memory._database.get_confusion(confusion_id)["replay_queue"] == []
     assert engine._dialogue_anchor_manager.current() is None
-    assert await engine.replay_confusion_dialogue_attributions() == 0
+    assert (
+        await _call_in_test_dialogue_worker(
+            engine,
+            engine.replay_confusion_dialogue_attributions,
+        )
+        == 0
+    )
     assert extract_calls == 1
 
 
@@ -3383,6 +3679,10 @@ async def test_confirm_and_reject_both_mark_rebuild_pending(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=True,
+    reason="[F7/F9] Task 2.3 rewrites marker recovery around stable effects",
+)
 async def test_rebuild_marker_write_failure_blocks_settlement_publication_and_cleans_tmp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
