@@ -11,6 +11,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,6 +116,17 @@ RAW_SINK_INVENTORY = (
         ),
     ),
     _RawSink(
+        "confusion_orphan_claim_release",
+        "Database.release_orphan_confusion_claim",
+        ("reconcile_orphan",),
+        (
+            (
+                "create_app._handle_confusion_open_sync",
+                'getattr(ctx.database, "release_orphan_confusion_claim", None)',
+            ),
+        ),
+    ),
+    _RawSink(
         "pending_open_anchor",
         "DialogueAnchorManager.establish",
         ("establish",),
@@ -137,6 +149,10 @@ def _production_symbol_source(symbol: str) -> str:
         from openbiliclaw.soul.confusion import ConfusionManager
 
         return inspect.getsource(getattr(ConfusionManager, function_name))
+    if owner_name == "Database":
+        from openbiliclaw.storage.database import Database
+
+        return inspect.getsource(getattr(Database, function_name))
     assert owner_name == "create_app"
     source = inspect.getsource(create_app)
     tree = ast.parse(source)
@@ -164,12 +180,14 @@ def test_pending_open_raw_sink_inventory_is_complete() -> None:
     assert [sink.source_symbol for sink in RAW_SINK_INVENTORY] == [
         "ConfusionManager.schedule_ask",
         "Database.update_confusion",
+        "Database.release_orphan_confusion_claim",
         "DialogueAnchorManager.establish",
     ]
     assert {operation for sink in RAW_SINK_INVENTORY for operation in sink.operations} == {
         "schedule",
         "retarget",
         "create_failure_rollback",
+        "reconcile_orphan",
         "establish",
     }
     for sink in RAW_SINK_INVENTORY:
@@ -238,26 +256,190 @@ def test_cognition_replay_producer_only_submits_dedicated_typed_kind() -> None:
     assert "_dialogue_anchor_manager.establish(" not in source
 
 
-@pytest.mark.parametrize("category", PROTECTED_MUTATORS, ids=lambda item: item.name)
-async def test_protected_mutator_cannot_mutate_outside_worker(
-    category: _ProtectedMutatorCategory,
-) -> None:
-    """Q1/F4: calling a protected mutator outside the worker changes nothing."""
-    from openbiliclaw.soul.dialogue_settlement_guard import (
-        DialogueSettlementGuard,
-        DialogueSettlementMutationOutsideWorker,
+def _closure_callable(function: object, name: str) -> object:
+    assert callable(function)
+    value = inspect.getclosurevars(function).nonlocals[name]
+    assert callable(value)
+    return value
+
+
+def _dialogue_job(kind: object, payload: dict[str, object]) -> object:
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        ANCHOR_NOT_APPLICABLE,
+        AnchorTransition,
+        DialogueJob,
     )
 
-    guard = DialogueSettlementGuard()
-    mutations: list[str] = []
+    return DialogueJob(
+        job_id=f"guard-{getattr(kind, 'value', kind)}",
+        kind=kind,
+        payload=payload,
+        anchor_snapshot=ANCHOR_NOT_APPLICABLE,
+        anchor_transition=AnchorTransition(action="none"),
+        owned_anchor_reservation_id=None,
+        accepted_at=0.0,
+        sequence=1,
+        completion=None,
+        effective_anchor_snapshot=ANCHOR_NOT_APPLICABLE,
+    )
 
-    def protected_mutator() -> None:
-        guard.require_dialogue_settlement_worker()
-        mutations.append(category.name)
 
-    with pytest.raises(DialogueSettlementMutationOutsideWorker):
-        protected_mutator()
-    assert mutations == []
+@pytest.mark.parametrize("category", PROTECTED_MUTATORS, ids=lambda item: item.name)
+async def test_real_protected_mutator_cannot_mutate_outside_worker(
+    category: _ProtectedMutatorCategory,
+    tmp_path: Path,
+) -> None:
+    """F5: every category calls its own production mutator outside the worker."""
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        ANCHOR_NOT_APPLICABLE,
+        DialogueJobKind,
+    )
+    from openbiliclaw.soul.dialogue_settlement_guard import (
+        DialogueSettlementMutationOutsideWorker,
+    )
+    from openbiliclaw.soul.engine import SoulEngine
+
+    class Registry:
+        async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+            return LLMResponse(content="[]", provider="fake")
+
+    memory = MemoryManager(tmp_path / "data")
+    memory.initialize()
+    engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+    app = create_app(
+        memory_manager=memory,
+        database=memory._database,
+        soul_engine=engine,
+    )
+    ctx = app.state.runtime_context
+    handlers = ctx.dialogue_settlement_handlers
+    database = memory._database
+    mutation_ref = f"guard-{category.name}"
+    confusion_id = database.insert_confusion(
+        source="awareness",
+        topic=mutation_ref,
+        observation="guard",
+        interpretation_confidence=0.8,
+    )
+    card_turn_id = f"guard-card-{category.name}"
+    card_state = "discussing" if category.name == "card_projection_reconcile" else "pending"
+    database.create_chat_turn(
+        turn_id=card_turn_id,
+        session="popup",
+        scope="hypothesis",
+        subject_id=mutation_ref,
+        subject_title=mutation_ref,
+        message="阿b 的猜测",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": mutation_ref,
+            "title": mutation_ref,
+            "state": card_state,
+        },
+    )
+    database.complete_chat_turn(card_turn_id, reply="")
+    defer_card = _closure_callable(
+        handlers[DialogueJobKind.CARD_DEFER],
+        "_defer_hypothesis_card",
+    )
+    reconcile_card = _closure_callable(
+        handlers[DialogueJobKind.CARD_RECONCILE],
+        "_reconcile_chat_card_row",
+    )
+    defer_cooldown = _closure_callable(
+        defer_card,
+        "_defer_dialogue_confirmation",
+    )
+    before_changes = database.conn.total_changes
+    before_anchor = engine._dialogue_anchor_manager.snapshot()
+    before_confusion = database.get_confusion(confusion_id)
+    before_card = database.get_chat_turn(card_turn_id)
+    cooldown_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+    before_cooldown = cooldown_path.read_bytes() if cooldown_path.exists() else None
+
+    try:
+        with pytest.raises(DialogueSettlementMutationOutsideWorker):
+            if category.name in {
+                "hypothesis_dialogue_apply",
+                "confusion_dialogue_apply",
+                "speculation_dialogue_apply",
+            }:
+                kind = category.name.removesuffix("_dialogue_apply")
+                await engine._apply_dialogue_settlement(
+                    kind=kind,
+                    ref=mutation_ref,
+                    title=mutation_ref,
+                    requested_verdict="confirm",
+                    turn_id=f"turn-{category.name}",
+                    source="guard-test",
+                    confusion_id=confusion_id,
+                    interpretation="real_interest",
+                    anchor_snapshot=ANCHOR_NOT_APPLICABLE,
+                )
+            elif category.name == "anchor_mutations":
+                engine._dialogue_anchor_manager.establish(
+                    kind="hypothesis",
+                    ref=mutation_ref,
+                    origin_turn_id=card_turn_id,
+                    entry="pending_open",
+                )
+            elif category.name == "confusion_lifecycle":
+                engine._confusion_manager.schedule_ask(
+                    confusion_id,
+                    ask_turn_id=f"turn-{category.name}",
+                )
+            elif category.name == "card_payload_transition":
+                defer_card(
+                    SimpleNamespace(
+                        turn_id=card_turn_id,
+                        payload={"state": "pending", "ref": mutation_ref},
+                    )
+                )
+            elif category.name == "card_projection_reconcile":
+                assert before_card is not None
+                reconcile_card(before_card)
+            elif category.name == "dialogue_confirmation_cooldown":
+                defer_cooldown(mutation_ref)
+            elif category.name == "probe_durable_reply_side_effect":
+                await handlers[DialogueJobKind.PROBE_REPLY_APPLY](
+                    _dialogue_job(
+                        DialogueJobKind.PROBE_REPLY_APPLY,
+                        {
+                            "turn_id": card_turn_id,
+                            "domain": mutation_ref,
+                            "message": "guard",
+                            "reply": "guard",
+                        },
+                    )
+                )
+            elif category.name == "confusion_durable_reply_side_effect":
+                await handlers[DialogueJobKind.CONFUSION_REPLY_APPLY](
+                    _dialogue_job(
+                        DialogueJobKind.CONFUSION_REPLY_APPLY,
+                        {
+                            "turn_id": card_turn_id,
+                            "subject_id": str(confusion_id),
+                            "subject_title": mutation_ref,
+                            "message": "guard",
+                            "reply": "guard",
+                        },
+                    )
+                )
+            else:
+                raise AssertionError(f"Unhandled protected category: {category.name}")
+
+        assert database.conn.total_changes == before_changes
+        assert engine._dialogue_anchor_manager.snapshot() == before_anchor
+        assert database.get_confusion(confusion_id) == before_confusion
+        assert database.get_chat_turn(card_turn_id) == before_card
+        after_cooldown = cooldown_path.read_bytes() if cooldown_path.exists() else None
+        assert after_cooldown == before_cooldown
+        assert database.get_card_settlement(mutation_ref) is None
+    finally:
+        database.close()
 
 
 async def test_worker_child_task_cannot_inherit_mutation_permit() -> None:

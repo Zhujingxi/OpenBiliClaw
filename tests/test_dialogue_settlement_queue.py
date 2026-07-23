@@ -968,51 +968,343 @@ async def test_typed_queue_serializes_100_concurrent_mixed_submissions() -> None
     assert accepted_sequences == list(range(accepted_sequences[0], accepted_sequences[0] + 100))
 
 
-async def test_declared_entries_100_interleavings_publish_one_winner_without_contradiction() -> (
-    None
-):
-    """Task 3.4: declared writers share one order and publish one immutable winner."""
-    release_producers = asyncio.Event()
-    winner = ""
-    published: list[str] = []
-    active = 0
-    max_active = 0
+async def test_declared_entry_kinds_use_real_runtime_handlers_and_guard_f1_f2(
+    tmp_path: Path,
+) -> None:
+    """F5: every declared kind crosses its production handler, including F1/F2."""
+    from contextlib import suppress
 
-    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
-        nonlocal active, max_active, winner
-        active += 1
-        max_active = max(max_active, active)
-        requested = str(job.payload["verdict"])
-        if not winner:
-            winner = requested
-        await asyncio.sleep(0)
-        published.append(winner)
-        active -= 1
-        return DialogueJobResult(outcome="completed")
+    from openbiliclaw.api.app import create_app
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.soul.engine import SoulEngine
+    from openbiliclaw.soul.identity import insight_hash8
 
-    queue = DialogueSettlementQueue(dispatcher)
+    class Registry:
+        async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+            return LLMResponse(content="[]", provider="fake")
+
+    memory = MemoryManager(tmp_path / "data")
+    memory.initialize()
+    engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+    app = create_app(
+        memory_manager=memory,
+        database=memory._database,
+        soul_engine=engine,
+    )
+    ctx = app.state.runtime_context
+    queue = ctx.dialogue_settlement_queue
+    real_dispatcher = queue._dispatcher
+    observed_real_kinds: set[DialogueJobKind] = set()
+    b2_entered = asyncio.Event()
+    release_b2 = asyncio.Event()
+
+    async def observed_dispatcher(
+        job: DialogueJob,
+    ) -> DialogueJobResult | DialogueDispatchResult | AnchorMutationTerminal | None:
+        if job.payload.get("f1_builder") == "B2":
+            b2_entered.set()
+            await release_b2.wait()
+        if job.payload.get("f2_parent") is True:
+            child = asyncio.create_task(
+                queue.submit_and_wait(
+                    DialogueJobKind.CARD_RECONCILE,
+                    {
+                        "ref": "f2-child-missing",
+                        "turn_id": "",
+                        "target_kind": "hypothesis",
+                        "target_ref": "f2-child-missing",
+                    },
+                )
+            )
+            child_result = await child
+            assert child_result.outcome == "not_found"
+        result = await real_dispatcher(job)
+        observed_real_kinds.add(job.kind)
+        return result
+
+    queue._dispatcher = observed_dispatcher
     queue.start()
 
-    async def submit(index: int) -> DialogueJobResult:
-        await release_producers.wait()
-        return await queue.submit_and_wait(
-            DialogueJobKind.SETTLE_HYPOTHESIS,
+    def create_completed_turn(
+        turn_id: str,
+        *,
+        scope: str,
+        subject_id: str,
+        subject_title: str,
+        message: str,
+        reply: str,
+        payload: dict[str, object],
+    ) -> None:
+        memory._database.create_chat_turn(
+            turn_id=turn_id,
+            session="popup",
+            scope=scope,
+            subject_id=subject_id,
+            subject_title=subject_title,
+            message=message,
+            payload=payload,
+        )
+        memory._database.complete_chat_turn(turn_id, reply=reply)
+
+    hypothesis = "F5 真实 handler 假设"
+    hypothesis_ref = insight_hash8(hypothesis)
+    insight = memory.get_layer("insight")
+    insight.data["hypotheses"] = [
+        {
+            "hypothesis": hypothesis,
+            "evidence": ["F5"],
+            "confidence": 0.72,
+            "validated": False,
+            "created_at": "2026-07-23",
+        }
+    ]
+    insight.save()
+    confusion_settle_id = memory._database.insert_confusion(
+        source="awareness",
+        topic="F5 结算疑惑",
+        observation="需要真实 confusion settlement",
+        interpretation_confidence=0.8,
+    )
+    confusion_open_id = memory._database.insert_confusion(
+        source="awareness",
+        topic="F5 open 疑惑",
+        observation="需要真实 confusion.open.sync",
+        interpretation_confidence=0.79,
+    )
+    create_completed_turn(
+        "f5-card-defer",
+        scope="hypothesis",
+        subject_id="f5-card-defer-ref",
+        subject_title="F5 defer",
+        message="阿b 的猜测",
+        reply="",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "f5-card-defer-ref",
+            "title": "F5 defer",
+            "state": "pending",
+        },
+    )
+    create_completed_turn(
+        "f5-card-discuss",
+        scope="hypothesis",
+        subject_id="f5-card-discuss-ref",
+        subject_title="F5 discuss",
+        message="阿b 的猜测",
+        reply="",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "f5-card-discuss-ref",
+            "title": "F5 discuss",
+            "state": "pending",
+        },
+    )
+    create_completed_turn(
+        "f5-card-reconcile",
+        scope="hypothesis",
+        subject_id="f5-card-reconcile-ref",
+        subject_title="F5 reconcile",
+        message="阿b 的猜测",
+        reply="",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "f5-card-reconcile-ref",
+            "title": "F5 reconcile",
+            "state": "discussing",
+        },
+    )
+    create_completed_turn(
+        "f5-probe",
+        scope="probe",
+        subject_id="f5-probe-domain",
+        subject_title="F5 probe",
+        message="再看看",
+        reply="好的",
+        payload={},
+    )
+    create_completed_turn(
+        "f5-confusion-reply",
+        scope="confusion",
+        subject_id=str(confusion_settle_id),
+        subject_title="F5 confusion",
+        message="实际情况",
+        reply="明白了",
+        payload={},
+    )
+
+    try:
+        b1 = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
             {
+                "f1_builder": "B1",
                 "target_kind": "hypothesis",
-                "target_ref": "shared-object",
-                "verdict": "confirmed" if index % 2 == 0 else "rejected",
+                "target_ref": "f1-A",
+                "origin_turn_id": "f1-turn-A",
+                "entry": "pending_open",
+                "producer_source": "durable_confusion_ensure",
             },
+            completion=True,
+        )
+        b2 = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "f1_builder": "B2",
+                "target_kind": "hypothesis",
+                "target_ref": "f1-B",
+                "origin_turn_id": "f1-turn-B",
+                "entry": "pending_open",
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
+        )
+        assert b1 is not None and b1.completion is not None
+        assert b2 is not None and b2.completion is not None
+        await asyncio.wait_for(b2_entered.wait(), timeout=1)
+        latest = queue.registry.snapshot()
+        assert isinstance(latest, AnchorReserved)
+        assert latest.reservation_id == b2.owned_anchor_reservation_id
+        queue.registry.release(latest)
+        release_b2.set()
+        await asyncio.gather(
+            asyncio.shield(b1.completion),
+            asyncio.shield(b2.completion),
         )
 
-    tasks = [asyncio.create_task(submit(index)) for index in range(100)]
-    release_producers.set()
-    results = await asyncio.gather(*tasks)
-    await queue.shutdown()
+        f2_result = await asyncio.wait_for(
+            queue.submit_and_wait(
+                DialogueJobKind.CARD_RECONCILE,
+                {
+                    "f2_parent": True,
+                    "ref": "f2-parent-missing",
+                    "turn_id": "",
+                    "target_kind": "hypothesis",
+                    "target_ref": "f2-parent-missing",
+                },
+            ),
+            timeout=0.5,
+        )
+        assert f2_result.outcome == "not_found"
 
-    assert max_active == 1
-    assert {result.outcome for result in results} == {"completed"}
-    assert len(published) == 100
-    assert set(published) == {winner}
+        jobs = (
+            (
+                DialogueJobKind.LEARN,
+                {
+                    "user_message": "F5 learn",
+                    "assistant_reply": "F5 reply",
+                    "session": "popup",
+                    "scope": "chat",
+                    "turn_id": "f5-learn",
+                },
+            ),
+            (
+                DialogueJobKind.SETTLE_HYPOTHESIS,
+                {
+                    "ref": hypothesis_ref,
+                    "hypothesis": hypothesis,
+                    "requested_verdict": "confirm",
+                    "turn_id": "f5-settle-hypothesis",
+                    "source": "card_action",
+                    "derived": [],
+                    "target_kind": "hypothesis",
+                    "target_ref": hypothesis_ref,
+                },
+            ),
+            (
+                DialogueJobKind.SETTLE_CONFUSION,
+                {
+                    "ref": str(confusion_settle_id),
+                    "requested_verdict": "confirm",
+                    "note": "F5",
+                    "turn_id": "f5-settle-confusion",
+                    "source": "card_action",
+                    "target_kind": "confusion",
+                    "target_ref": str(confusion_settle_id),
+                },
+            ),
+            (
+                DialogueJobKind.CARD_DEFER,
+                {
+                    "turn_id": "f5-card-defer",
+                    "target_kind": "hypothesis",
+                    "target_ref": "f5-card-defer-ref",
+                },
+            ),
+            (
+                DialogueJobKind.CARD_DISCUSS,
+                {
+                    "turn_id": "f5-card-discuss",
+                    "target_kind": "hypothesis",
+                    "target_ref": "f5-card-discuss-ref",
+                    "producer_source": "card_action",
+                },
+            ),
+            (
+                DialogueJobKind.CARD_RECONCILE,
+                {
+                    "turn_id": "f5-card-reconcile",
+                    "ref": "f5-card-reconcile-ref",
+                    "target_kind": "hypothesis",
+                    "target_ref": "f5-card-reconcile-ref",
+                },
+            ),
+            (
+                DialogueJobKind.PROBE_REPLY_APPLY,
+                {
+                    "turn_id": "f5-probe",
+                    "domain": "f5-probe-domain",
+                    "message": "再看看",
+                    "reply": "好的",
+                },
+            ),
+            (
+                DialogueJobKind.CONFUSION_REPLY_APPLY,
+                {
+                    "turn_id": "f5-confusion-reply",
+                    "subject_id": str(confusion_settle_id),
+                    "subject_title": "F5 confusion",
+                    "message": "实际情况",
+                    "reply": "明白了",
+                },
+            ),
+            (
+                DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
+                {
+                    "confusion_id": 999999,
+                    "turn_id": "f5-replay-missing",
+                    "replay_id": "f5-replay-missing",
+                    "has_replay_queue": False,
+                    "needs_anchor": False,
+                    "target_kind": "confusion",
+                    "target_ref": "999999",
+                },
+            ),
+            (
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "schedule",
+                    "confusion_id": confusion_open_id,
+                    "ask_turn_id": "f5-open-turn",
+                    "asked_at": "2026-07-23T00:00:00+00:00",
+                    "ignore_cooldown": True,
+                },
+            ),
+        )
+        for kind, payload in jobs:
+            await asyncio.wait_for(queue.submit_and_wait(kind, payload), timeout=2)
+
+        assert observed_real_kinds == set(DialogueJobKind)
+        assert {
+            DialogueJobKind(kind) for entry in ENTRY_INVENTORY for kind in entry.job_kinds
+        } == observed_real_kinds - {DialogueJobKind.SETTLE_CONFUSION}
+    finally:
+        release_b2.set()
+        with suppress(TimeoutError):
+            await queue.shutdown(timeout=0.5)
+        memory._database.close()
 
 
 async def test_known_limit_out_of_scope_writer_is_not_coordinated() -> None:
