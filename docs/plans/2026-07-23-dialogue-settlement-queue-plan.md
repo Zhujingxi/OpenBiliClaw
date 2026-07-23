@@ -2,8 +2,8 @@
 
 > **Spec:** [`2026-07-23-dialogue-settlement-queue-spec.md`](./2026-07-23-dialogue-settlement-queue-spec.md)
 > **Baseline:** `feat/cognitive-profile-pipeline` @ `e16797ec`
-> **Review:** adversarial review round 2 — F1–F9 retained; REVISE findings
-> R2-1–R2-3 incorporated
+> **Review:** adversarial review round 3 — F1–F9 retained；R2-2/R2-3 已闭环；
+> REVISE findings R3-1/R3-2 incorporated **[R3-1][R3-2]**
 > **Execution:** Wave 0 → 1 → 2 → 3；每个 Task 必须先 RED、再最小实现、最后 GREEN
 > **Boundary:** 只实现 spec §2.1–2.2；禁止顺手收口
 > force_tick/exploration/pipeline/OpenClaw/CLI。唯一例外是 F5 要求在既有 CLI/OpenClaw
@@ -11,6 +11,9 @@
 > R2-1～R2-3 只收紧既有单进程、单 `asyncio` 队列的 admission registry 与 worker
 > permit 生命周期，不增加 writer、queue、进程协调层、Wave 或 Task。
 > **[R2-1][R2-2][R2-3]**
+> R3-1/R3-2 继续严守同一边界：同 ref builder 各自拥有 reservation entry，且在
+> 建锚 mutation 返回后、下一次 await/effect 前转正；不引入 coalescer、第二 worker、
+> 其他 writer、新 Wave 或新 Task。**[R3-1][R3-2]**
 
 ## 1. 开工铁律
 
@@ -191,14 +194,28 @@ extension/tests/dialogue-confirmation-wiring.test.ts
    - fresh retry 分配不同 reservation id 并可成功。
    测试同时覆盖失败后的 actual state 为 persisted 与 absent，不用 sleep。
    **[R2-2]**
-6. 写 `test_generation_change_after_analysis_before_effect_writes_nothing`：
+6. 写两组同源 reservation RED：
+   - `test_same_ref_double_builder_second_noop_resolves_own_head_for_later_settlement`：
+     barrier 卡 worker，按序 submit 同 ref `B1`、`B2`、`settle S1`；断言 B1/B2 的
+     reservation id 与 `(job_id, sequence)` owner 都不同，B2 是 head，S1 引用 B2。
+     放行后 B1 persisted 只 resolve B1，B2 返回 `already_terminal/no_op` 仍只 resolve
+     B2 为同一 persisted generation；随后 `settle S2` 冻结 B2 转正后的 persisted
+     head，S1/S2 都完成且无悬空 entry。对 `anchor.establish`、`card.discuss`、重复
+     replay builder 表驱动，不允许隐式 coalesce；**[R3-1]**
+   - `test_anchor_reservation_promotes_before_followup_await_throw_or_replay_short_circuit`：
+     fake 持久化 mutator 返回后，让复合 handler 卡在下一次 await/effect；此时并发
+     submit 必须已看到 terminal head。再分别触发后续 throw、already-terminal
+     short-circuit 与 duplicate replay no-op，断言 entry 不回退/二次 resolve；参数化
+     `persisted/absent/already_terminal/no_op/superseded/failed`，每个 owner entry
+     恰好一次离开 `reserved`。不用 sleep。**[R3-1][R3-2]**
+7. 写 `test_generation_change_after_analysis_before_effect_writes_nothing`：
    barrier 卡在 post-LLM revalidation 后、首 effect 前，replace 同 ref anchor；
    旧代 event/object/derived/projection 均须为 0。当前实现应暴露窗口。
-7. 写 `test_declared_dialogue_entries_submit_without_direct_mutation`，先覆盖 card action、
+8. 写 `test_declared_dialogue_entries_submit_without_direct_mutation`，先覆盖 card action、
    legacy、pending-open anchor、普通 chat settle、probe/confusion durable side effect。
    对 queue.submit 和现有 direct mutator 同时放 spy；当前代码应至少出现 card/legacy/
    probe reply 旁路。
-8. 每个 RED 都注明对应 spec Q/finding 编号；不永久保留 xfail。Task 分支若必须先提交测试，
+9. 每个 RED 都注明对应 spec Q/finding 编号；不永久保留 xfail。Task 分支若必须先提交测试，
    只允许 `xfail(strict=True)`，在对应 GREEN commit 中立即移除。
 
 **Acceptance**
@@ -208,14 +225,14 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
   tests/test_dialogue_settlement_queue.py \
   tests/test_soul_engine.py \
   tests/test_api_app.py \
-  -k 'file_fence or future_anchor or anchor_reservation or card_discuss_reservation or anchor_building_kind or failed_reservation or no_anchor_tombstone or generation_change or declared_dialogue_entries' \
+  -k 'file_fence or future_anchor or anchor_reservation or card_discuss_reservation or anchor_building_kind or failed_reservation or same_ref_double_builder or promotes_before_followup or no_anchor_tombstone or generation_change or declared_dialogue_entries' \
   -q -rxX
 ```
 
-RED 门：原四类问题、F2 的两个 admission 交错、R2-1 discuss/建锚全集与 R2-2
-failed-head 交错都被精确复现；每个测试单独运行 `<5s`；无无关失败。F2/R2
-registry 测试在 Wave 1 转 GREEN，不等到 endpoint cutover。
-**[R2-1][R2-2]**
+RED 门：原四类问题、F2 的两个 admission 交错、R2-1 discuss/建锚全集、R2-2
+failed-head、R3-1 同 ref owner/no-op 与 R3-2 commit-point 交错都被精确复现；每个
+测试单独运行 `<5s`；无无关失败。F2/R2/R3 registry 测试在 Wave 1 转 GREEN，
+不等到 endpoint cutover。**[R2-1][R2-2][R3-1][R3-2]**
 
 ### Task 0.2 — 固定 entry/mutator inventory 与 worker guard 契约
 
@@ -300,9 +317,10 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 ```
 
 保留的 strict XFAIL 只能是 Task 0.1 列明的原始 repro、F2/R2-1/R2-2 admission
-repro、R2-3 reload cleanup repro 与 `ENTRY_INVENTORY` 中尚未 cutover 的
-production-wiring case；各组数量都必须与清单精确相等，不得出现 unclassified
-XFAIL/XPASS。**[R2-1][R2-2][R2-3]**
+repro、R3-1 same-ref owner/no-op、R3-2 commit-point repro、R2-3 reload cleanup repro
+与 `ENTRY_INVENTORY` 中尚未 cutover 的 production-wiring case；各组数量都必须与
+清单精确相等，不得出现 unclassified XFAIL/XPASS。
+**[R2-1][R2-2][R2-3][R3-1][R3-2]**
 
 ## 4. Wave 1 — 泛化为唯一内存队列
 
@@ -329,6 +347,10 @@ XFAIL/XPASS。**[R2-1][R2-2][R2-3]**
    - establish-reservation → later settle、card.discuss-reservation → later settle
      与 absent-tombstone → later establish 三个 barrier 交错按 Task 0.1 转 GREEN；
      表驱动建锚全集无漏项；**[F2][R2-1]**
+   - 同 ref 双 builder 各有 owner-bound entry，第二个 `already_terminal/no_op` 也精确
+     resolve 自己，夹在第二个执行前后的 settle 确定引用第二条 reserved/resolved
+     head；六类 terminal 与 mutation-return commit-point barrier 按 Task 0.1 转 GREEN；
+     **[R3-1][R3-2]**
    - builder 失败后 head 前移、new submit 不引用 failed、旧依赖排空后 GC、fresh
      retry 新 id 成功；旧依赖返回 `anchor_dependency_failed`、effect=0；
      **[R2-2]**
@@ -348,9 +370,15 @@ XFAIL/XPASS。**[R2-1][R2-2][R2-3]**
    不执行 exploration。envelope 另带由 `kind + immutable payload` 得出的 typed
    `anchor_transition`；dispatcher 不得在 admission policy 之外自行决定建锚。
    **[F8][R2-1]**
-4. 在 queue 内实现唯一 `AnchorAdmissionRegistry`：**[F2][R2-1][R2-2]**
+4. 在 queue 内实现唯一 `AnchorAdmissionRegistry`：
+   **[F2][R2-1][R2-2][R3-1][R3-2]**
    - logical-state union 明确为 `persisted`、`reserved`、`failed`、`absent`、
      `not_applicable`；`failed` 不是旁挂 boolean；**[R2-2]**
+   - 每次 builder admission 都创建不同 `reservation_id`，owner 固定为 envelope 的
+     `(job_id, sequence)`；同 ref 不 coalesce，后发 entry 成为 head。实现
+     `resolve_owned(ref, reservation_id, owner_job_id, owner_sequence, terminal)`（名称可
+     等价）的单次 CAS，非 owner、二次 resolve、跨 entry resolve 全部 fail closed；
+     **[R3-1]**
    - 建立 exhaustive `ANCHOR_TRANSITION_POLICY`（名称可等价）：直接
      `anchor.establish`（producer source 明确覆盖探针抛出、疑惑抛出、durable
      confusion ensure）、inline `card.discuss` 与
@@ -358,25 +386,31 @@ XFAIL/XPASS。**[R2-1][R2-2][R2-3]**
      reservation，再入队；`confusion.open.sync` 禁止 inline 建锚，成功后必须提交
      前述 `anchor.establish`。任何 `may_establish` dispatcher 分支无 reservation
      时 fail closed；**[R2-1]**
-   - 本 Task 用 fake establish handler 证明 completion 把 reservation resolve 成实际
-     generation；生产 handler 在 Task 3.1/3.2 接线；
-   - 失败 completion 在同一无-await transition 中把 entry resolve 成
+   - 定义 typed `AnchorMutationTerminal`，完整覆盖
+     `persisted/absent/already_terminal/no_op/superseded/failed`；no-op/terminal 必须
+     带 authoritative `persisted/absent` post-state。本 Task 用 fake establish handler
+     证明 mutator 返回后立即同步 `resolve_owned`，而不是等整个 handler completion；
+     生产 handler 在 Task 2.2/3.1/3.2 接线；**[R3-1][R3-2]**
+   - typed failed terminal 在同一无-await transition 中把 entry resolve 成
      `failed(reservation_id, cause)`，并在 head 仍指它时把 head 前移到 mutation 后
      实际 `persisted/absent`；新 submit 从该实际 head 冻结，禁止再引用 failed；
      **[R2-2]**
-   - worker anchor mutation completion 按 sequence 回报 actual state；若 logical head
-     已有更晚 reservation，旧 completion 只 resolve 自己，不能覆盖 head；
+   - 每个 terminal 先 resolve owner entry；仅当 head 仍指该 id 时才把 head 折叠为
+     effective actual state。若 logical head 已有更晚 reservation，较早 result 只
+     resolve 自己，不能覆盖 head；`superseded` 依赖只解包 authoritative actual state
+     并走既有 exact validation，失配沿用 `stale_anchor`；**[R3-1]**
    - no-anchor 保存 target kind/ref + tombstone epoch，不与 not-applicable 共用
      `("", 0)`；
-   - reservation refcount 只包含已经冻结该 id 的 queued/running job；failed 后不增
-     新引用，旧依赖归零即 GC；retry 必须分配 fresh id；shutdown 全丢。
-     **[R2-2]**
+   - reservation refcount 只包含已经冻结该 id 的 queued/running job；terminal entry
+     在旧引用归零后 GC，`failed/superseded` 后不增新引用；retry 必须分配 fresh id；
+     shutdown 全丢。**[R2-2][R3-1]**
 5. `submit()` 在一个**不含 await**的 admission critical section 内：
    - 分配单调 sequence；
    - 复制 payload；
-   - 先按 exhaustive policy 为所有建锚 transition reserve，再从 registry 读取
-     logical anchor（包括尚未执行的 reservation），而不是只读 anchor provider；
-     **[R2-1]**
+   - 先按 exhaustive policy 为每个建锚 transition 创建 owner-bound reservation，
+     再从 registry 读取 logical anchor（包括尚未执行的 latest reservation），而不是
+     只读 anchor provider；同 ref 也不能复用前一 builder 的 entry；
+     **[R2-1][R3-1]**
    - 冻结 typed snapshot；
    - `put_nowait` 到 unbounded queue；
    - 可选创建 completion Future。
@@ -387,6 +421,11 @@ XFAIL/XPASS。**[R2-1][R2-2][R2-3]**
    用精确 tuple revoke。**[F4][R2-3]**
 7. 保留 `_QUEUE_DEPTH_WARN=10`，新增 structured log：
    `kind/sequence/depth/queue_wait_ms/run_ms/outcome`。不新增 durable metrics store。
+8. dispatcher 的 builder wrapper 固定为
+   `terminal = await anchor_mutator(...)` 后立即同步 `resolve_owned(terminal)`；两句之间
+   以及 resolver 与其后的第一处 await/effect 之间不得插入业务 effect、release、
+   completion 或 observer。mutator failure 分支也先同步 resolve failed/head，再传播；
+   resolver 后的 handler throw 只失败 Future，不得二次 resolve。**[R3-2]**
 
 **Acceptance**
 
@@ -395,12 +434,14 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
   tests/test_dialogue_settlement_queue.py -q
 ```
 
-数值门：至少 22 个 queue 用例；100 mixed jobs 的 `max_active=1`、sequence 无缺口；
+数值门：至少 24 个 queue 用例；100 mixed jobs 的 `max_active=1`、sequence 无缺口；
 F2 anchor/absent 与 R2-1 discuss 三个交错各循环 100 次且 snapshot 错配=0；
 建锚 policy `unclassified=[]`；failed reservation 100 次均 new-ref=0、旧依赖
-effect=0、归零 GC=1、retry fresh-id=1；较早 completion 覆盖较晚 reservation=0；
+effect=0、归零 GC=1、retry fresh-id=1；同 ref 双 builder 100 次 owner/id 冲突=0、
+第二个 no-op 悬空=0、later-settle wrong-head=0；六类 terminal owner-resolve 恰好一次，
+commit-point barrier 看到 reserved=0；较早 resolution 覆盖较晚 reservation=0；
 child-task guard 绕过=0；old finally 清除 new permit=0；异常后至少 2 个后续 job
-成功；reentry 测试 `<0.1s`。**[R2-1][R2-2][R2-3]**
+成功；reentry 测试 `<0.1s`。**[R2-1][R2-2][R2-3][R3-1][R3-2]**
 
 ### Task 1.2 — runtime 只装一个 dispatcher，拆分 API 与 legacy-direct 兼容模式 **[F5]**
 
@@ -522,9 +563,10 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 ```
 
 所有 Wave 0 queue/lifecycle XFAIL（含 R2-1 全建锚预约、R2-2 failed head/GC、
-R2-3 reload permit handoff）在本 Wave 移除；尚未 cutover 的 endpoint repro 可以
-继续 strict XFAIL。CLI/OpenClaw compatibility tests 必须 GREEN，且不要求二者
-接入 queue。**[F5][R2-1][R2-2][R2-3]**
+R3-1 same-ref owner/no-op、R3-2 commit-point、R2-3 reload permit handoff）在本
+Wave 移除；尚未 cutover 的 endpoint repro 可以继续 strict XFAIL。CLI/OpenClaw
+compatibility tests 必须 GREEN，且不要求二者接入 queue。
+**[F5][R2-1][R2-2][R2-3][R3-1][R3-2]**
 
 ## 5. Wave 2 — 删除旧锁栈，保留轻量 receipt/effect 幂等
 
@@ -622,6 +664,9 @@ AST 测试必须证明 `database.py` 中旧列名只出现在具名 private migr
    - 已入队 `anchor.establish` 与 `card.discuss` reservation 都被后续 settle
      admission 捕获并 resolve；探针/疑惑抛出/补建锚的表驱动 producer 同样无漏项；
      **[F2][R2-1]**
+   - 同 ref 两个 builder 各自持有/resolve 不同 entry；第二个 no-op 后其前后 settle
+     都稳定使用第二条 head；mutator 返回后卡在复合 handler 的下一 await，再 submit
+     时 head 已转正，后续 throw/replay short-circuit 不回退；**[R3-1][R3-2]**
    - builder 失败时旧依赖不回退为 absent/current；失败后的新 submit 冻结实际
      persisted/absent，旧依赖排空后 failed entry GC，fresh retry 成功；
      **[R2-2]**
@@ -629,11 +674,16 @@ AST 测试必须证明 `database.py` 中旧列名只出现在具名 private migr
 2. 删除 `settle_hypothesis:1089-1097` 的 current anchor 推断，参数缺失默认 0，
    不允许 `None` 表示“稍后推断”。内部兼容参数的 0 只能在 producer 被迁移前作为
    typed `absent(target_kind, target_ref, tombstone_epoch)` 输入，最终 handler 只接收
-   `AnchorAdmissionSnapshot`；worker resolve `reserved`、校验 `persisted/absent`，
+   `AnchorAdmissionSnapshot`；worker 解析 owner 已 resolve 的 `reserved`、校验
+   `persisted/absent`，
    不读取 current 来改变 snapshot。非预约未来锚返回 `stale_anchor`；failed
    reservation 返回 `anchor_dependency_failed`，两者全部业务 effect=0。**[F2]**
    failed resolve 只面向失败前已受理依赖；新 submit 不得拿到 failed snapshot，
    registry head 前移/GC 契约沿用 Task 1.1。**[R2-2]**
+   `superseded` dependency 解包 authoritative state 后走既有 exact validation，失配
+   返回 `stale_anchor` 且 effect=0；
+   `already_terminal/no_op` 必须解包 mutator 返回的 authoritative state，不能执行期
+   再读 current。**[R3-1]**
 3. 把 `_settle_dialogue_object` 改为 worker-only `_apply_dialogue_settlement`：
    - 先读 existing receipt；存在时 contender 总是采用 stored winner payload；
    - 在任何新 receipt/effect 前校验 authoritative frozen generation；
@@ -650,10 +700,18 @@ AST 测试必须证明 `database.py` 中旧列名只出现在具名 private migr
    `ContextVar` nonce 匹配但 current task 不是已登记 worker 也必须失败。**[F4]**
 6. card discuss 不再使用 attempt token/5min fencing：
    admission 先为 `card.discuss` 登记 reservation，worker 内再执行
-   pending→discussing、establish；异常补偿同时 resolve failed 并推进 head；orphan
-   reconcile 立即回 pending。**[R2-1][R2-2]**
+   pending→discussing、establish。`establish` 持久化 mutation 返回后必须立即同步
+   resolve 该 job 自己的 entry，随后才能 await/release/完成 card effect；重复 discuss
+   的 `already_terminal/no_op` 也 resolve 自己为 authoritative persisted/absent。
+   mutator 自身失败的异常补偿先 resolve failed 并推进 head；转正后的后续异常不得
+   二次 resolve failed；orphan reconcile 立即回 pending。
+   **[R2-1][R2-2][R3-1][R3-2]**
 7. confusion 的 dialogue `schedule_ask/process_anchor_settlement/retry` 通过 guarded
    façade 调用；通用 TTL 等 out-of-scope 路径不被错误迁入队列。
+8. 所有建锚 façade 返回统一 typed terminal；wrapper 严格执行
+   `terminal = await persist_anchor_mutation(...)` → 无 await/effect 的
+   `resolve_owned(terminal)`。用于日志、card transition、replay receipt、Future
+   completion 的代码都排在 resolver 之后。**[R3-2]**
 
 **Acceptance**
 
@@ -669,8 +727,10 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 数值门：F2 establish/tombstone 与 R2-1 card.discuss 三个交错各循环 100 次，
 snapshot 错配与错误 mutation=0；建锚 policy 漏项=0；failed reservation
 old-effect=0、new-reference=0、GC/retry 各成功 100 次；worker nested settle queue
-depth 增量=0；permit 外 10 个 mutation与 inherited-context child mutation全抛。
-**[F2][F4][R2-1][R2-2]**
+depth 增量=0；同 ref 双 builder 第二个 no-op 后 dangling=0、wrong-head=0；六类
+terminal owner-resolve-once=100%，commit-point 后 reserved 可见次数=0、later throw
+demotion=0；permit 外 10 个 mutation与 inherited-context child mutation全抛。
+**[F2][F4][R2-1][R2-2][R3-1][R3-2]**
 
 ### Task 2.3 — 七个 crash gap、applied boundary 与幂等重试
 
@@ -754,8 +814,9 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest tests/test_database.py \
 
 Wave 0 的 deadlock/future-anchor repro 必须在此转 GREEN；F2 establish/tombstone、
 R2-1 discuss/全建锚 policy 与 R2-2 failed head/GC/retry 交错已在 Wave 1 GREEN
-并继续回归，F7 的 applied-gap GET reconcile 在本 Wave GREEN。
-**[R2-1][R2-2]**
+并继续回归；R3-1 双 builder owner/no-op 与 R3-2 mutation-return commit-point 在本
+Wave 的真实 anchor façade 上 GREEN；F7 的 applied-gap GET reconcile 在本 Wave
+GREEN。**[R2-1][R2-2][R3-1][R3-2]**
 
 ## 6. Wave 3 — 全入口 cutover、按需 202、护栏与交付
 
@@ -777,6 +838,9 @@ R2-1 discuss/全建锚 policy 与 R2-2 failed head/GC/retry 交错已在 Wave 1 
    - `card.discuss` submit 的 reservation 在 queue put 前可见；用 barrier 固定
      discuss 入队、settle 随后入队、worker 尚未执行的顺序，后者必须冻结
      reserved 而非 absent/旧锚；**[R2-1]**
+   - 同 ref 两次 discuss/establish 都分配独立 owner entry；第二个执行时即使 card/锚
+     已 terminal 而 no-op，也先 resolve 自己，再让其后 settle 读取第二条 resolved
+     head；第一条 resolution 不得覆盖第二条 head；**[R3-1]**
    - pending-open confusion 的 schedule、retarget、turn-create failure rollback 都提交
      `confusion.open.sync`，raw `schedule_ask`/`Database.update_confusion` spy 只在
      worker task 内触发。具名
@@ -795,10 +859,13 @@ R2-1 discuss/全建锚 policy 与 R2-2 failed head/GC/retry 交错已在 Wave 1 
    envelope。worker 按 queue sequence 创建/读取 winner receipt，并完成对象、
    event、card payload 与 anchor 处理。
 4. defer/discuss 依赖 `turn_id + action + card state` 幂等；`card.discuss` admission
-   自己创建 reservation，不能等 handler 运行才补记。两个重复 queued job 串行后
-   第二个返回 already terminal，不延长 cooldown、不重建锚；失败补偿按 R2-2
-   resolve failed/head 前移，不让后续 submit 粘住失败 entry。
-   **[R2-1][R2-2]**
+   为每个 job 创建 owner-bound reservation，不能等 handler 运行才补记，也不能与
+   同 ref 前一 job coalesce。两个重复 queued job 串行后，第二个返回 already
+   terminal/no-op，不延长 cooldown、不重建锚，但必须用 authoritative anchor state
+   resolve 自己的 entry；后续 settle 引用第二条 head。建锚 mutator 返回后先同步
+   转正，才能继续 cooldown/card effect 或 return；其后异常不回退。mutator 自身失败
+   的补偿按 R2-2 先 resolve failed/head 前移，不让后续 submit 粘住失败 entry。
+   **[R2-1][R2-2][R3-1][R3-2]**
 5. 实现 `confusion.open.sync` 的唯一 dispatcher handler：**[F3]**
    - `operation=schedule` 调 guarded `ConfusionManager.schedule_ask`；
    - turn 创建异常后 endpoint 只可 submit+await `operation=rollback`；
@@ -828,8 +895,10 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 数值门：入口 spy 覆盖 card 4 + open + reconcile + legacy 共 7 类；
 pending-open schedule/retarget/rollback 三分支各至少 1 例；§2.2 流程 worker 外
 raw confusion/anchor sink=0；card.discuss→settle barrier 100 次 reserved=100、
-absent/旧锚=0；探针/疑惑抛出建锚 policy 漏项=0；空队列 100 次 action 全为 200；
-每次本地完成 `<1s`。**[F3][R2-1]**
+absent/旧锚=0；同 ref 双 discuss 第二个 no-op owner-resolve=100、dangling/wrong-head=0；
+mutation-return 后下一 effect 前 reserved 可见=0；探针/疑惑抛出建锚 policy 漏项=0；
+空队列 100 次 action 全为 200；每次本地完成 `<1s`。
+**[F3][R2-1][R3-1][R3-2]**
 
 ### Task 3.2 — chat/anchor cutover、typed replay 与 probe→exploration handoff
 
@@ -864,6 +933,10 @@ absent/旧锚=0；探针/疑惑抛出建锚 policy 漏项=0；空队列 100 次 
      `test_confusion_attribution_replay_dispatches_dedicated_kind`；**[F1]**
    - replay payload 表明缺锚、其 handler 将补建锚时，reservation 必须在 replay
      envelope 入队前成为 logical head；不能进 worker 后才补预约；**[R2-1]**
+   - 同 replay identity 连续提交两个 needs-anchor job 时，各自拥有 reservation；首个
+     建锚后，第二个命中已有 terminal result/no-op 仍 resolve 自己，后续 settle 引用
+     第二条 head；首个 mutator 返回后的下一 await barrier 上 submit 已见 persisted；
+     **[R3-1][R3-2]**
    - 同 `(confusion_id, turn_id, replay_id)` submit 10 次，gap analyzer 与对象语义
      各 1 次，返回同一 terminal result。具名
      `test_confusion_attribution_replay_is_idempotent`；**[F1]**
@@ -896,9 +969,14 @@ absent/旧锚=0；探针/疑惑抛出建锚 policy 漏项=0；空队列 100 次 
    - payload/admission policy 必须在缺锚且 handler 会补建时声明
      `anchor_transition=establish(confusion, ref)` 并先创建 reservation；
      **[R2-1]**
-   - 先读现有 replay head/turn payload/settlement receipt；已有 result 时直接返回；
+   - 先读现有 replay head/turn payload/settlement receipt；已有 result 时，若 envelope
+     持有 reservation，必须从 authoritative anchor state 同步 resolve 本 job 的
+     `already_terminal/no_op` entry，之后才可直接返回；**[R3-1][R3-2]**
    - classification gap 才调用 analyzer，一次写入既有 durable replay/turn receipt
      后再 apply；
+   - handler 的 anchor mutator 返回 typed terminal 后立即 `resolve_owned`，再做 replay
+     receipt/settle/release/下一次 await；转正后的后续 throw 不改 reservation；
+     **[R3-2]**
    - handler 可调用内部 settle/anchor apply，但不得 public submit 自己。
 8. cognition replay hook 只做 read-only candidate enumeration，逐个投递
    `confusion.attribution.replay`；worker 内仍按现有 FIFO confusion replay 语义
@@ -922,7 +1000,9 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 exploration=1 且 exploration worker-permit=false；out-of-scope direct probe
 button/avoidance/exploration writer 的行为与 baseline 一致，没有被接入 queue；
 replay 缺锚补建 admission 100 次 reservation-before-put=100、late-reserve=0。
-**[F1][F8][R2-1]**
+同 replay 双 builder 100 次 distinct-owner=100、第二个 no-op resolved=100、
+later-settle wrong-head=0；commit-point barrier reserved-visible=0、throw demotion=0。
+**[F1][F8][R2-1][R3-1][R3-2]**
 
 ### Task 3.3 — 按需 202 与 card turn 轮询
 
@@ -1103,9 +1183,11 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest \
 数值门：旧 takeover/fencing runtime/test 词命中 0；declared entry coverage=100%；
 §2.2 worker 外 protected/raw-sink mutation=0；inherited-context child 绕过=0；
 typed replay branch 有覆盖；建锚 admission policy 漏项=0；failed entry 新引用=0、
-旧引用归零后残留=0；reload old-finally 清 new permit=0；CLI/OpenClaw
-legacy-direct callsite=2 且 queue submit=0。
-**[F1][F3][F4][F5][F9][R2-1][R2-2][R2-3]**
+旧引用归零后残留=0；同 ref builder owner 冲突/越权 resolve/dangling entry=0，
+already-terminal/no-op/superseded 均终结自己的 entry；建锚 mutation 返回后下一
+await/effect 前 reserved-visible=0，later throw demotion=0；reload old-finally 清 new
+permit=0；CLI/OpenClaw legacy-direct callsite=2 且 queue submit=0。
+**[F1][F3][F4][F5][F9][R2-1][R2-2][R2-3][R3-1][R3-2]**
 
 ### Wave 3 / Final Gate
 
@@ -1138,7 +1220,9 @@ git status --short
 - CLI/OpenClaw 只有两处 `legacy_direct` compatibility pin、对应测试/文档，queue
   adapter/submit/guard 改动为 0；**[F5]**
 - 所有建锚 kind/路径 admission-before-put，failed reservation 可排空/GC/retry，
-  reload permit 始终单槽且迟到 old finally 不影响 new。**[R2-1][R2-2][R2-3]**
+  同 ref builder 各自 owner-only resolve 且 mutation-return 即转正，reload permit
+  始终单槽且迟到 old finally 不影响 new。
+  **[R2-1][R2-2][R2-3][R3-1][R3-2]**
 
 ## 7. Rollout 与回滚
 
@@ -1185,7 +1269,17 @@ git status --short
 | R2-2 BLOCKER | Task 0.1 failure→new submit→old drain→GC/retry barrier **[R2-2]** | Task 1.1 union/head/refcount；Task 2.2 old dependency effect=0、新引用=0、GC/fresh retry 各 100 次 | failed 留作 logical head；新 submit 继续引用；复用 failed id 或加 durable retry scheduler |
 | R2-3 MAJOR | Task 0.2 `new registered→old finally→new mutation` deterministic guard test **[R2-3]** | Task 1.1 exact revoke/compare-clear primitive；Task 1.2 10 次成功/失败 reload 均 `max_authorized_workers=1` | 到 finally 才撤旧权；无条件 clear；引入 coordinator/第二 worker |
 
+## 10. Review round 3 finding → RED/GREEN 追踪
+
+R2-2/R2-3 保持已闭环；下表只收紧同一 registry 的 entry ownership 与
+mutation-return 线性化点。**[R3-1][R3-2]**
+
+| Finding | RED 所在 | GREEN/最终 gate | 不允许的“修法” |
+| --- | --- | --- | --- |
+| R3-1 BLOCKER | Task 0.1 `same-ref B1→B2→settle` + 第二个 no-op + 六 terminal owner test；Task 3.1/3.2 duplicate discuss/replay spies **[R3-1]** | Task 1.1 owner-bound entry/CAS；Task 2.2 authoritative terminal apply；B1/B2 各 resolve 一次、later settle 固定 B2 head、dangling/越权 resolve=0 | 同 ref 共享未声明 reservation；no-op 直接 return；较早 resolution 覆盖后发 head；新增 coalescer/第二 writer |
+| R3-2 MAJOR | Task 0.1 mutator-return→next-await barrier + later throw/replay short-circuit **[R3-2]** | Task 1.1 synchronous resolver wrapper；Task 2.2/3.1/3.2 真实 handler 上 reserved-visible=0、later-throw demotion=0 | 等整个 handler 成功才转正；在 resolve 前 await/release/effect；用 completion callback 补转正 |
+
 Wave 数仍为 **4**，Task 数仍为 **12**（2 + 3 + 3 + 4）；本轮只把
-R2-1～R2-3 落进既有 Task，不新增 queue、进程协调层或
-force_tick/exploration/pipeline/OpenClaw/CLI writer。
-**[R2-1][R2-2][R2-3]**
+R3-1/R3-2 落进既有 Task，不新增 queue、coalescer、进程协调层或
+force_tick/exploration/pipeline/OpenClaw/CLI writer；R2-2/R2-3 状态机不改。
+**[R3-1][R3-2]**
