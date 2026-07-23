@@ -13,17 +13,157 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from openbiliclaw.soul.dialogue_learn_queue import DialogueLearnQueue
 from openbiliclaw.storage.database import Database
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 _DispatchHook = Callable[[dict[str, object], dict[str, object]], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _DialogueEntry:
+    spec_label: str
+    source_symbol: str
+    job_kinds: tuple[str, ...]
+    protected_mutations: tuple[str, ...]
+    waits_for_completion: bool
+
+
+ENTRY_INVENTORY = (
+    _DialogueEntry(
+        "卡片 `confirm/reject`",
+        "api.app.create_app.act_on_chat_card",
+        ("settle.hypothesis",),
+        ("hypothesis.apply", "card.project", "anchor.release"),
+        True,
+    ),
+    _DialogueEntry(
+        "卡片 `defer`",
+        "api.app.create_app.act_on_chat_card",
+        ("card.defer",),
+        ("card.transition", "confirmation.cooldown", "anchor.release"),
+        True,
+    ),
+    _DialogueEntry(
+        "卡片 `discuss`",
+        "api.app.create_app.act_on_chat_card",
+        ("card.discuss",),
+        ("card.transition", "anchor.establish"),
+        True,
+    ),
+    _DialogueEntry(
+        "pending open / confusion question claim、retarget、rollback",
+        "api.app.create_app._create_confirmation_turn",
+        ("confusion.open.sync", "anchor.establish"),
+        ("confusion.schedule", "confusion.retarget", "confusion.rollback"),
+        True,
+    ),
+    _DialogueEntry(
+        "durable confusion turn 建锚",
+        "api.app.create_app._ensure_confusion_dialogue_anchor",
+        ("anchor.establish",),
+        ("anchor.establish",),
+        True,
+    ),
+    _DialogueEntry(
+        "锚 relation/解除/归属结算",
+        "soul.engine.SoulEngine._process_dialogue_anchor_decision",
+        ("learn",),
+        ("anchor.relation", "dialogue_object.apply", "anchor.release"),
+        True,
+    ),
+    _DialogueEntry(
+        "普通 chat `settles`",
+        "soul.engine.SoulEngine._process_dialogue_settles",
+        ("learn",),
+        ("dialogue_object.apply",),
+        False,
+    ),
+    _DialogueEntry(
+        "durable `scope=probe` 回复侧效应",
+        "api.app.create_app._apply_durable_chat_success_side_effects",
+        ("probe.reply.apply",),
+        ("probe.reply.side_effect",),
+        True,
+    ),
+    _DialogueEntry(
+        "durable `scope=confusion` 回复侧效应",
+        "api.app.create_app._apply_durable_chat_success_side_effects",
+        ("confusion.reply.apply",),
+        ("confusion.reply.side_effect",),
+        True,
+    ),
+    _DialogueEntry(
+        "confusion attribution 补放",
+        "soul.engine.SoulEngine.replay_confusion_dialogue_attributions",
+        ("confusion.attribution.replay",),
+        ("confusion.apply", "anchor.establish"),
+        False,
+    ),
+    _DialogueEntry(
+        "legacy insight feedback",
+        "api.app.create_app.insight_feedback",
+        ("settle.hypothesis",),
+        ("hypothesis.apply", "card.project", "anchor.release"),
+        True,
+    ),
+    _DialogueEntry(
+        "card projection / orphan discussion repair",
+        "api.app.create_app._reconcile_chat_card_row",
+        ("card.reconcile",),
+        ("card.project", "card.reconcile"),
+        False,
+    ),
+)
+
+OUT_OF_SCOPE_WRITERS = (
+    "force_tick",
+    "avoidance",
+    "exploration",
+    "profile_pipeline",
+    "openclaw",
+    "cli",
+)
+
+
+def test_dialogue_entry_inventory_matches_spec_section_2_2() -> None:
+    """Q1/F3: every finalized §2.2 table row is classified exactly once."""
+    spec = (
+        Path(__file__).parents[1] / "docs/plans/2026-07-23-dialogue-settlement-queue-spec.md"
+    ).read_text(encoding="utf-8")
+    section = spec.split("### 2.2 必须入队的入口", 1)[1].split("### 2.3 Out of scope", 1)[0]
+    spec_labels = []
+    for line in section.splitlines():
+        if not line.startswith("| "):
+            continue
+        label = line.split("|", 2)[1].strip()
+        if label not in {"入口", "---"}:
+            spec_labels.append(label)
+
+    inventory_labels = [entry.spec_label for entry in ENTRY_INVENTORY]
+    unclassified = sorted(set(spec_labels) - set(inventory_labels))
+    duplicate_labels = sorted(
+        label for label in set(inventory_labels) if inventory_labels.count(label) != 1
+    )
+    assert inventory_labels == spec_labels
+    assert unclassified == []
+    assert duplicate_labels == []
+    assert all(entry.job_kinds for entry in ENTRY_INVENTORY)
+    assert all(entry.protected_mutations for entry in ENTRY_INVENTORY)
+
+
+def test_dialogue_entry_inventory_excludes_out_of_scope_writers() -> None:
+    """Q1 boundary: Wave 0 cannot pull the explicitly excluded writers inward."""
+    classified = {
+        token
+        for entry in ENTRY_INVENTORY
+        for token in (*entry.job_kinds, *entry.protected_mutations)
+    }
+    assert classified.isdisjoint(OUT_OF_SCOPE_WRITERS)
 
 
 async def _capture_legacy_admissions(

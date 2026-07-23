@@ -6,6 +6,8 @@
 
 ## v0.3.182：账号同步、换批去重与桌面升级交接（2026-07-21）
 
+- **对话结算单队列 Wave 0 护栏与 RED 契约**：冻结 spec §2.2 的 12 项入口、10 类 protected mutator 与 pending-open 三类 raw sink，确定性复现文件 fence、future-anchor、建锚 reservation/failed-head/同 ref owner/commit-point 及当前入口旁路；新增实际 worker Task + lifecycle nonce 双校验 guard primitive，child task 不能继承写权限，旧 worker 迟到 cleanup 不能撤销新 permit。此 Wave 不接线现有 runtime façade，也不改 force_tick、exploration、pipeline、OpenClaw 或 CLI writer。
+
 - **移动端惊喜卡恢复整卡点击打开（issue #126）**：用户反馈手机上「惊喜推荐一定要点『看看』才能跳转，下面的内容却是整卡点一下就进去」，问这是防误触还是别的设计原因。查下来两者都不是——这是实现不一致而非有意为之：移动 Web 的普通卡片在 `renderCard()` 里绑了整卡 click（动作行 `stopPropagation` 排除按钮），而惊喜卡的 `.delight-tray` 上只有左右滑动切卡的 pointer handler，位移不足 50px 时松手什么也不做，于是卡体在视觉上像可点、实际是死区。现在死区内松手（位移 <10px，`DELIGHT_DRAG_DEAD_ZONE`，与桌面端 `_DELIGHT_DRAG_DEAD_ZONE` 同值）等同点击「看看」：走同一个 `handleDelightAction(d, "view")`，因此已读标记、`POST /api/delight/respond` 与打开链接的语义和按钮完全一致，不是另一条旁路。10px–50px 之间仍然刻意不触发任何动作，手指轻微拖动不会误开内容；≥50px 继续是切卡。反馈按钮、聊天输入框等交互元素本就在 `pointerdown` 阶段 `stopPropagation`，天然不会被整卡点击吸收；已反馈完成（`show_actions=false`）、聊天 composer 展开中、或拿不到内容 URL 时不接管点击，避免抢走「点空白处收起输入框」的预期。**四端范围**：桌面 Web 的普通推荐卡本来就只有动作按钮、没有整卡点击，惊喜卡另有封面点击区 + 「去看看」按钮，自身已经自洽，本次不动以免改变桌面既有手感；插件 popup / side panel 没有惊喜卡（delight 只走 background 通知），CLI 无此交互。新增三个 Playwright 真机级 E2E：点击卡体打开内容并只上报一次 `view`、拖动 30px 不打开也不上报、点「喜欢」不会连带打开内容。
 
 - **认知画像流水线(四 Wave)+ 深层线归一合入**(2026-07-22,分支 `feat/cognitive-profile-pipeline`,codex 共十轮对抗 review、59 findings 闭环;规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md` 与 `docs/plans/2026-07-22-deep-line-consolidation-spec.md`;真实环境 E2E 7/7。三线更新、觉察/疑惑/假设生命周期、态势门控(默认 shadow)、统一台账 `openbiliclaw ledger`、topic 生命周期状态机、深层影响收敛为「假设确认→门控下 soul 重建」。细分条目如下)。
