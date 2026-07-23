@@ -635,7 +635,7 @@ test "$(rg -n \
   src/openbiliclaw tests | wc -l | tr -d ' ')" = "0"
 test "$(rg -n \
   'apply_claim_token|apply_claim_at|seg_event|seg_object|seg_marker' \
-  src/openbiliclaw --glob '!storage/database.py' | wc -l | tr -d ' ')" = "0"
+  src/openbiliclaw --glob '!**/storage/database.py' | wc -l | tr -d ' ')" = "0"
 PYTHONPATH=$PWD/src .venv/bin/python -m pytest tests/test_database.py \
   -k 'legacy_card_settlement_columns_are_migration_only' -q
 ```
@@ -807,7 +807,7 @@ test "$(rg -n \
   src/openbiliclaw tests | wc -l | tr -d ' ')" = "0"
 test "$(rg -n \
   'apply_claim_token|apply_claim_at|seg_event|seg_object|seg_marker' \
-  src/openbiliclaw --glob '!storage/database.py' | wc -l | tr -d ' ')" = "0"
+  src/openbiliclaw --glob '!**/storage/database.py' | wc -l | tr -d ' ')" = "0"
 PYTHONPATH=$PWD/src .venv/bin/python -m pytest tests/test_database.py \
   -k 'legacy_card_settlement_columns_are_migration_only' -q
 ```
@@ -1162,7 +1162,7 @@ test "$(rg -n \
   src/openbiliclaw tests | wc -l | tr -d ' ')" = "0"
 test "$(rg -n \
   'apply_claim_token|apply_claim_at|seg_event|seg_object|seg_marker' \
-  src/openbiliclaw --glob '!storage/database.py' | wc -l | tr -d ' ')" = "0"
+  src/openbiliclaw --glob '!**/storage/database.py' | wc -l | tr -d ' ')" = "0"
 PYTHONPATH=$PWD/src .venv/bin/python -m pytest tests/test_database.py \
   -k 'legacy_card_settlement_columns_are_migration_only' -q
 

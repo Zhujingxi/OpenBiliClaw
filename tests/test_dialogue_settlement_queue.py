@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from openbiliclaw.soul.dialogue_learn_queue import (
+    ANCHOR_ESTABLISH_PRODUCER_SOURCES,
     AnchorAbsent,
+    AnchorAdmissionError,
     AnchorMutationDisposition,
     AnchorMutationTerminal,
     AnchorPersisted,
@@ -437,6 +439,32 @@ async def test_every_anchor_building_kind_reserves_before_enqueue(
     snapshot = builder.get("anchor_snapshot")
     assert isinstance(snapshot, Mapping)
     assert snapshot.get("state") == "reserved"
+
+
+@pytest.mark.parametrize(
+    "producer_source",
+    ["card_action", "cognition_cycle", "undeclared_nonempty_source"],
+)
+async def test_anchor_establish_rejects_undeclared_producer_source(
+    producer_source: str,
+) -> None:
+    """F6: anchor.establish admission is closed to undeclared producers."""
+    assert producer_source not in ANCHOR_ESTABLISH_PRODUCER_SOURCES
+
+    async def dispatcher(_job: DialogueJob) -> DialogueJobResult:
+        raise AssertionError("Rejected admission must never dispatch")
+
+    queue = DialogueSettlementQueue(dispatcher)
+
+    with pytest.raises(AnchorAdmissionError, match="producer_source must be one of"):
+        queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+                "producer_source": producer_source,
+            },
+        )
 
 
 @pytest.mark.parametrize(

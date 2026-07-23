@@ -749,6 +749,9 @@ def _classify_anchor_transition(
             origin = "cognition_cycle"
         else:
             raise AnchorAdmissionError("anchor.establish requires an explicit producer_source")
+    if kind is DialogueJobKind.ANCHOR_ESTABLISH and origin not in ANCHOR_ESTABLISH_PRODUCER_SOURCES:
+        allowed = ", ".join(sorted(ANCHOR_ESTABLISH_PRODUCER_SOURCES))
+        raise AnchorAdmissionError(f"anchor.establish producer_source must be one of: {allowed}")
     return AnchorTransition(
         action="establish",
         target_kind=target_kind,

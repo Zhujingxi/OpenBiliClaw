@@ -959,7 +959,9 @@ anchor transition、owner reservation、冻结 snapshot 与 `put_nowait` 之间�
 execution scope 内的 child task 重入时，会显式授权该 task 直接执行 nested handler，
 不把 job 排到父 worker 身后。普通 child 只继承 ContextVar 仍无写权限，父 handler
 退出后遗留的 detached child 也不再具有 inline reentry 身份。`anchor.establish`、
-`card.discuss` 与
+只接受 `pending_probe_throw`、`pending_confusion_throw`、
+`durable_confusion_ensure` 三个已声明 producer source，其他非空 source 也在
+admission fail closed；`card.discuss` 与
 `confusion.attribution.replay(needs_anchor=true)` 是当前完整 builder 集合；新增
 builder kind 必须先扩 policy 与穷尽测试。进程退出会丢弃 registry，未执行 job 不做
 durable 恢复。
