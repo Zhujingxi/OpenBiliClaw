@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
@@ -20,6 +21,100 @@ if TYPE_CHECKING:
 from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
+
+
+def _dialogue_entry_source(symbol: str) -> str:
+    """Return one current entry function without matching unrelated branches."""
+    if symbol.startswith("SoulEngine."):
+        from openbiliclaw.soul.engine import SoulEngine
+
+        return inspect.getsource(getattr(SoulEngine, symbol.removeprefix("SoulEngine.")))
+    source = inspect.getsource(create_app)
+    tree = ast.parse(source)
+    matches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == symbol
+    ]
+    assert len(matches) == 1, f"expected one create_app nested function named {symbol}"
+    node = matches[0]
+    assert node.end_lineno is not None
+    lines = source.splitlines()
+    return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+
+
+@pytest.mark.parametrize(
+    ("entry", "job_kind", "direct_mutation_tokens"),
+    [
+        pytest.param(
+            "_settle_hypothesis",
+            "settle.hypothesis",
+            ("result = await settle(",),
+            id="card-confirm-reject",
+        ),
+        pytest.param(
+            "_defer_hypothesis_card",
+            "card.defer",
+            ("anchor_manager.release(", "update_payload(", "_defer_dialogue_confirmation("),
+            id="card-defer",
+        ),
+        pytest.param(
+            "_discuss_hypothesis_card",
+            "card.discuss",
+            ("begin(", "anchor_manager.establish(", "rollback("),
+            id="card-discuss",
+        ),
+        pytest.param(
+            "insight_feedback",
+            "settle.hypothesis",
+            ("result = await _settle_hypothesis(",),
+            id="legacy-feedback",
+        ),
+        pytest.param(
+            "_prepare_confusion_confirmation",
+            "confusion.open.sync",
+            ("confusion_manager.schedule_ask(", "updater("),
+            id="pending-open-sync",
+        ),
+        pytest.param(
+            "_create_confirmation_turn",
+            "anchor.establish",
+            ("anchor_manager.establish(",),
+            id="pending-open-anchor",
+        ),
+        pytest.param(
+            "SoulEngine._process_dialogue_settles",
+            "learn",
+            ("await self.settle_speculation(", "await self.settle_hypothesis("),
+            id="ordinary-chat-settle",
+        ),
+        pytest.param(
+            "_apply_durable_chat_success_side_effects",
+            "probe.reply.apply",
+            ("_record_probe_feedback_history(", "_record_probe_cognition("),
+            id="durable-probe-reply",
+        ),
+        pytest.param(
+            "_apply_durable_chat_success_side_effects",
+            "confusion.reply.apply",
+            ("_record_probe_cognition(", "_publish_probe_event("),
+            id="durable-confusion-reply",
+        ),
+    ],
+)
+@pytest.mark.xfail(strict=True, reason="[Q1/F3] Wave 3 cuts declared entries over to the queue")
+def test_declared_dialogue_entries_submit_without_direct_mutation(
+    entry: str,
+    job_kind: str,
+    direct_mutation_tokens: tuple[str, ...],
+) -> None:
+    """Q1/F3: every declared entry submits and performs no protected mutation."""
+    source = _dialogue_entry_source(entry)
+    observed = {
+        "submitted": "dialogue_settlement_queue" in source and job_kind in source,
+        "direct_mutation": any(token in source for token in direct_mutation_tokens),
+    }
+    assert observed == {"submitted": True, "direct_mutation": False}
 
 
 def test_source_platform_helpers_delegate_to_canonical_registry() -> None:

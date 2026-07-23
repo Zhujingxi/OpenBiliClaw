@@ -2403,6 +2403,125 @@ def _anchor_extract(
     return fake_extract
 
 
+@pytest.mark.xfail(strict=True, reason="[Q3/F2] Wave 2 removes future-anchor inference")
+async def test_generation_zero_never_captures_future_anchor(tmp_path: Path) -> None:
+    """Q3/F2: legacy zero is an absent admission tombstone, not a late lookup."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视可证伪的判断"
+
+    # The legacy compatibility request was accepted while there was no anchor,
+    # so zero represents a frozen absent tombstone.  This non-reservation
+    # establish happens later and must not be captured by the old request.
+    anchor = _seed_dialogue_anchor_hypothesis(
+        memory,
+        engine,
+        hypothesis=hypothesis,
+        origin_turn_id="future-anchor-card",
+    )
+    result = await engine.settle_hypothesis(
+        ref=anchor.ref,
+        hypothesis=hypothesis,
+        requested_verdict="confirm",
+        turn_id="legacy-absent-admission",
+        source="legacy_compatibility",
+        anchor_generation=0,
+    )
+
+    assert result["outcome"] == "stale_anchor"
+    assert memory._database.get_card_settlement(anchor.ref) is None
+    assert engine._dialogue_anchor_manager.current() == anchor
+    stored = engine._load_insights()[0]
+    assert stored.validated is False
+    assert stored.confidence == 0.6
+
+
+@pytest.mark.xfail(strict=True, reason="[Q3] Wave 2 validates frozen generation before effects")
+async def test_generation_change_after_analysis_before_effect_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q3: replacing a generation in the post-analysis gap fences every effect."""
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户重视原始证据"
+    old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis=hypothesis)
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("support"),
+    )
+
+    settlement_entered = asyncio.Event()
+    release_settlement = asyncio.Event()
+    real_settle = engine.settle_hypothesis
+
+    async def pause_before_first_settlement_effect(
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        derived: list[dict[str, object]] | None = None,
+        anchor_generation: int = 0,
+    ) -> dict[str, object]:
+        settlement_entered.set()
+        await release_settlement.wait()
+        return await real_settle(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+            derived=derived,
+            anchor_generation=anchor_generation,
+        )
+
+    monkeypatch.setattr(engine, "settle_hypothesis", pause_before_first_settlement_effect)
+    learning = asyncio.create_task(
+        engine.learn_from_dialogue(
+            user_message="我支持这个判断",
+            assistant_reply="收到",
+            session="popup",
+            turn_id="generation-effect-gap",
+            anchor_ref=old.ref,
+            anchor_generation=old.generation,
+        )
+    )
+    await asyncio.wait_for(settlement_entered.wait(), timeout=1)
+    try:
+        assert (
+            engine._dialogue_anchor_manager.release(
+                reason="replaced",
+                expected_generation=old.generation,
+            )
+            == old
+        )
+        replacement = engine._dialogue_anchor_manager.establish(
+            kind="hypothesis",
+            ref=old.ref,
+            origin_turn_id=old.origin_turn_id,
+            entry=ENTRY_PENDING_OPEN,
+        )
+    finally:
+        release_settlement.set()
+    await asyncio.wait_for(learning, timeout=2)
+
+    assert engine._dialogue_anchor_manager.current() == replacement
+    assert memory._database.get_card_settlement(old.ref) is None
+    assert memory._database.query_events(event_types=["feedback"]) == []
+    stored = engine._load_insights()[0]
+    assert stored.validated is False
+    assert stored.confidence == 0.6
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "pending"
+    assert _ledger_rows(memory, "settle_insight") == []
+
+
 @pytest.mark.parametrize(
     ("relation", "validated", "confidence", "card_state", "outcome"),
     [
