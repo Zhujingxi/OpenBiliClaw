@@ -571,8 +571,12 @@ export async function startChatTurn({
   });
 }
 
-export async function fetchChatTurn(turnId) {
-  return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, { method: "GET" });
+export async function fetchChatTurn(turnId, { signal, timeoutMs = 10_000 } = {}) {
+  return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, {
+    method: "GET",
+    signal,
+    timeoutMs,
+  });
 }
 
 export async function fetchChatTurns({ session = "popup", scope = "", limit = 50 } = {}) {
@@ -598,11 +602,13 @@ export async function openPendingConfirmation(ref, { session = "popup" } = {}) {
   });
 }
 
-export async function actOnChatCard(turnId, action) {
+export async function actOnChatCard(turnId, action, { signal } = {}) {
   return requestJson(`/chat/cards/${encodeURIComponent(String(turnId || ""))}/action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action }),
+    signal,
+    timeoutMs: 60_000,
   });
 }
 

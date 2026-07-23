@@ -51,6 +51,7 @@
       renderTurnMarkup,
       selectDialogueTurns
     } = dialogueConfirmation;
+    const dialogueCardActionAbortController = new AbortController();
 
     const state = {
       query: "",
@@ -2315,6 +2316,7 @@
       void startDesktopBackendSession();
     });
     window.addEventListener("pagehide", () => {
+      dialogueCardActionAbortController.abort();
       pauseDesktopBackendSession();
       for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
     }, { once: true });
@@ -5719,6 +5721,23 @@ ${cardFeedbackBarHtml()}`;
       applyDialogueChatSnapshot(snapshot);
     }
 
+    async function fetchDesktopDialogueTurn(turnId, { signal, timeoutMs = 10000 } = {}) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      const forwardAbort = () => controller.abort(signal?.reason);
+      if (signal?.aborted) forwardAbort();
+      else signal?.addEventListener("abort", forwardAbort, { once: true });
+      try {
+        return await requestJsonStrict(
+          `${ENDPOINTS.chatTurns}/${encodeURIComponent(turnId)}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+      } finally {
+        window.clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", forwardAbort);
+      }
+    }
+
     async function refreshDesktopPendingConfirmations() {
       const payload = await requestJsonStrict(ENDPOINTS.pendingConfirmations, { cache: "no-store" });
       state.pendingConfirmations = {
@@ -5757,8 +5776,14 @@ ${cardFeedbackBarHtml()}`;
               body: JSON.stringify(body)
             });
           },
+          fetchTurn: fetchDesktopDialogueTurn,
+          signal: dialogueCardActionAbortController.signal,
           onUpdate: updateDesktopDialogueTurn
         });
+        if (response?.outcome === "retryable_error") {
+          showToast("后端结果暂未同步；可刷新确认，或直接重试这次操作");
+          return;
+        }
         if (response?.outcome === "already_settled") showToast("这条已在另一个窗口结算，已同步最终状态");
         else if (action === "discuss") {
           showToast("好，沿着这条猜测继续聊");

@@ -160,6 +160,7 @@ const {
   renderTurnMarkup,
   selectDialogueTurns,
 } = dialogueConfirmation;
+const dialogueCardActionAbortController = new AbortController();
 
 const state = {
   activeTab: "recommend",
@@ -733,6 +734,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 window.addEventListener("pagehide", () => {
+  dialogueCardActionAbortController.abort();
   for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
 }, { once: true });
 
@@ -6709,10 +6711,20 @@ async function handleDialogueCardAction(button) {
   try {
     const { response } = await executeCardAction(turn, action, {
       request(_path, body) {
-        return actOnChatCard(turnId, body.action);
+        return actOnChatCard(turnId, body.action, {
+          signal: dialogueCardActionAbortController.signal,
+        });
       },
+      fetchTurn(id, options) {
+        return fetchChatTurn(id, options);
+      },
+      signal: dialogueCardActionAbortController.signal,
       onUpdate: updateDialogueTurn,
     });
+    if (response?.outcome === "retryable_error") {
+      setHint("后端结果暂未同步；可刷新确认，或直接重试这次操作。", "error");
+      return;
+    }
     if (response?.outcome === "already_settled") {
       setHint("这条已在另一个窗口结算，已同步最终状态。", "success");
     } else if (action === "discuss") {

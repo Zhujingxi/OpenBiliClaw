@@ -14,6 +14,7 @@
     discussing: "正在聊这条",
     deferred: "已稍后再聊",
     processing: "正在处理，以后端结算为准",
+    retryable_error: "处理结果暂未同步，可刷新或重试",
   };
   const CARD_STATES = new Set([
     "pending",
@@ -22,8 +23,20 @@
     "discussing",
     "deferred",
     "processing",
+    "retryable_error",
   ]);
   const TERMINAL_CARD_STATES = new Set(["confirmed", "rejected", "deferred"]);
+  const POLL_TERMINAL_CARD_STATES = new Set([
+    "confirmed",
+    "rejected",
+    "deferred",
+    "discussing",
+  ]);
+  const CARD_ACTION_POLL_BACKOFF_MS = Object.freeze([1_000, 2_000, 5_000]);
+  // Calibrated for several local 1/2/5s publication reads. This bounds a
+  // non-durable restart spinner; it deliberately does not wait for a 300s
+  // provider timeout or introduce a durable job table.
+  const CARD_ACTION_POLL_DEADLINE_MS = 30_000;
   const DIALOGUE_SCOPES = new Set(["chat", "hypothesis", "confusion"]);
 
   function isRecord(value) {
@@ -99,6 +112,130 @@
     return CARD_STATES.has(state) ? state : fallbackState;
   }
 
+  function abortError() {
+    if (typeof DOMException === "function") {
+      return new DOMException("Card action polling aborted", "AbortError");
+    }
+    const error = new Error("Card action polling aborted");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function isAbort(error, signal) {
+    return Boolean(signal?.aborted) || error?.name === "AbortError";
+  }
+
+  function waitForPoll(milliseconds, signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason || abortError());
+    return new Promise((resolve, reject) => {
+      let timeoutId = null;
+      const onAbort = () => {
+        if (timeoutId !== null) clearTimeout(timeoutId);
+        reject(signal.reason || abortError());
+      };
+      timeoutId = setTimeout(() => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, milliseconds);
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+        Promise.resolve().then(() => {
+          if (signal.aborted) onAbort();
+        });
+      }
+    });
+  }
+
+  function retryableCardResult(turn, action, reason, onUpdate) {
+    const retryable = withCardState(turn, "retryable_error");
+    retryable.payload.retry_action = text(action).toLowerCase();
+    const response = {
+      ok: false,
+      outcome: "retryable_error",
+      state: "retryable_error",
+      reason,
+    };
+    onUpdate(retryable, response);
+    return { turn: retryable, response };
+  }
+
+  async function pollProcessingCard(original, action, initialResponse, options) {
+    if (typeof options.fetchTurn !== "function") {
+      return retryableCardResult(
+        original,
+        action,
+        "poll_unavailable",
+        options.onUpdate,
+      );
+    }
+    const now = typeof options.now === "function" ? options.now : Date.now;
+    const sleep = typeof options.sleep === "function" ? options.sleep : waitForPoll;
+    const startedAt = now();
+    let backoffIndex = 0;
+    let latest = cloneTurn(original);
+
+    while (true) {
+      if (options.signal?.aborted) {
+        return retryableCardResult(latest, action, "aborted", options.onUpdate);
+      }
+      const remaining = CARD_ACTION_POLL_DEADLINE_MS - Math.max(0, now() - startedAt);
+      if (remaining <= 0) {
+        return retryableCardResult(latest, action, "deadline", options.onUpdate);
+      }
+      const configuredDelay = CARD_ACTION_POLL_BACKOFF_MS[
+        Math.min(backoffIndex, CARD_ACTION_POLL_BACKOFF_MS.length - 1)
+      ];
+      const delay = Math.min(configuredDelay, remaining);
+      try {
+        await sleep(delay, options.signal);
+      } catch (error) {
+        if (isAbort(error, options.signal)) {
+          return retryableCardResult(latest, action, "aborted", options.onUpdate);
+        }
+        return retryableCardResult(latest, action, "poll_failed", options.onUpdate);
+      }
+      if (options.signal?.aborted) {
+        return retryableCardResult(latest, action, "aborted", options.onUpdate);
+      }
+      if (now() - startedAt >= CARD_ACTION_POLL_DEADLINE_MS) {
+        return retryableCardResult(latest, action, "deadline", options.onUpdate);
+      }
+      try {
+        const fetchTimeoutMs = Math.max(
+          1,
+          CARD_ACTION_POLL_DEADLINE_MS - Math.max(0, now() - startedAt),
+        );
+        latest = cloneTurn(
+          await options.fetchTurn(text(original.turn_id), {
+            signal: options.signal,
+            timeoutMs: fetchTimeoutMs,
+          }),
+        );
+      } catch (error) {
+        if (isAbort(error, options.signal)) {
+          return retryableCardResult(latest, action, "aborted", options.onUpdate);
+        }
+        backoffIndex += 1;
+        continue;
+      }
+      const durableState = normalizedCardState(latest);
+      if (POLL_TERMINAL_CARD_STATES.has(durableState)) {
+        const response = {
+          ...initialResponse,
+          ok: true,
+          outcome: "settled",
+          state: durableState,
+          verdict: durableState,
+        };
+        options.onUpdate(latest, response);
+        return { turn: latest, response };
+      }
+      const processing = withCardState(latest, "processing");
+      options.onUpdate(processing, initialResponse);
+      backoffIndex += 1;
+    }
+  }
+
   async function executeCardAction(turn, action, options = {}) {
     if (typeof options.request !== "function" || typeof options.onUpdate !== "function") {
       throw new TypeError("card action requires request and onUpdate callbacks");
@@ -110,6 +247,14 @@
       const response = await options.request(cardActionPath(original.turn_id), {
         action: text(action).toLowerCase(),
       });
+      if (
+        text(response?.outcome).toLowerCase() === "processing"
+        || responseCardState(response, "") === "processing"
+      ) {
+        const processing = withCardState(original, "processing");
+        options.onUpdate(processing, response);
+        return await pollProcessingCard(original, action, response, options);
+      }
       // `already_settled` is authoritative, including the opposite verdict.
       // Replacing the optimistic state here is the cross-screen rollback path.
       const settled = withCardState(
@@ -119,6 +264,9 @@
       options.onUpdate(settled, response);
       return { turn: settled, response };
     } catch (error) {
+      if (isAbort(error, options.signal)) {
+        return retryableCardResult(original, action, "aborted", options.onUpdate);
+      }
       options.onUpdate(original, { outcome: "error", error });
       throw error;
     }

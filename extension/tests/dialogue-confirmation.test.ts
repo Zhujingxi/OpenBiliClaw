@@ -13,6 +13,13 @@ const dialogue = (globalThis as typeof globalThis & {
       options: {
         request: (path: string, body: Record<string, string>) => Promise<Record<string, unknown>>;
         onUpdate: (turn: Record<string, unknown>) => void;
+        fetchTurn?: (
+          turnId: string,
+          options?: { signal?: AbortSignal; timeoutMs?: number },
+        ) => Promise<Record<string, unknown>>;
+        sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+        now?: () => number;
+        signal?: AbortSignal;
       },
     ) => Promise<{ turn: Record<string, unknown>; response: Record<string, unknown> }>;
     pendingConfirmationOpenPath: (ref: string) => string;
@@ -110,11 +117,16 @@ test("confusion question enters the flow as a pure assistant turn", () => {
 test("card action posts to the encoded endpoint, updates optimistically, then rolls back to already-settled verdict", async () => {
   const updates: string[] = [];
   const requests: Array<{ path: string; body: Record<string, string> }> = [];
+  let fetchCalls = 0;
 
   const result = await dialogue!.executeCardAction(cardTurn(), "confirm", {
     async request(path, body) {
       requests.push({ path, body });
       return { ok: true, outcome: "already_settled", state: "rejected", verdict: "rejected" };
+    },
+    async fetchTurn() {
+      fetchCalls += 1;
+      return cardTurn("confirmed");
     },
     onUpdate(turn) {
       updates.push(String((turn.payload as Record<string, unknown>)?.state ?? ""));
@@ -125,7 +137,125 @@ test("card action posts to the encoded endpoint, updates optimistically, then ro
     { path: "/chat/cards/turn%2Fcard%201/action", body: { action: "confirm" } },
   ]);
   assert.deepEqual(updates, ["confirmed", "rejected"]);
+  assert.equal(fetchCalls, 0, "a synchronous 200 result must not start publication polling");
   assert.equal((result.turn.payload as Record<string, unknown>).state, "rejected");
+});
+
+test("processing response polls the durable turn with 1/2/5 backoff and keeps remote pending local-processing", async () => {
+  const updates: string[] = [];
+  const delays: number[] = [];
+  const durablePending = cardTurn("pending");
+  let fakeNow = 0;
+  let fetchCalls = 0;
+
+  const result = await dialogue!.executeCardAction(cardTurn(), "confirm", {
+    async request() {
+      return { ok: false, outcome: "processing", state: "processing" };
+    },
+    async fetchTurn() {
+      fetchCalls += 1;
+      return fetchCalls === 1 ? durablePending : cardTurn("confirmed");
+    },
+    async sleep(milliseconds) {
+      delays.push(milliseconds);
+      fakeNow += milliseconds;
+    },
+    now: () => fakeNow,
+    onUpdate(turn) {
+      updates.push(String((turn.payload as Record<string, unknown>)?.state ?? ""));
+    },
+  });
+
+  assert.deepEqual(delays, [1_000, 2_000]);
+  assert.deepEqual(updates, ["confirmed", "processing", "processing", "confirmed"]);
+  assert.equal((durablePending.payload as Record<string, unknown>).state, "pending");
+  assert.equal((result.turn.payload as Record<string, unknown>).state, "confirmed");
+});
+
+test("processing poll stops on every authoritative card terminal state", async () => {
+  for (const terminal of ["confirmed", "rejected", "deferred", "discussing"]) {
+    let fakeNow = 0;
+    let fetchCalls = 0;
+    const result = await dialogue!.executeCardAction(cardTurn(), "confirm", {
+      async request() {
+        return { ok: false, outcome: "processing", state: "processing" };
+      },
+      async fetchTurn() {
+        fetchCalls += 1;
+        return cardTurn(terminal);
+      },
+      async sleep(milliseconds) {
+        fakeNow += milliseconds;
+      },
+      now: () => fakeNow,
+      onUpdate() {},
+    });
+
+    assert.equal(fetchCalls, 1, `${terminal} should stop after its first durable read`);
+    assert.equal((result.turn.payload as Record<string, unknown>).state, terminal);
+  }
+});
+
+test("processing poll reaches the calibrated 30s deadline as local retryable_error without mutating durable pending", async () => {
+  const delays: number[] = [];
+  const durablePending = cardTurn("pending");
+  let fakeNow = 0;
+  let fetchCalls = 0;
+
+  const result = await dialogue!.executeCardAction(cardTurn(), "confirm", {
+    async request() {
+      return { ok: false, outcome: "processing", state: "processing" };
+    },
+    async fetchTurn() {
+      fetchCalls += 1;
+      return durablePending;
+    },
+    async sleep(milliseconds) {
+      delays.push(milliseconds);
+      fakeNow += milliseconds;
+    },
+    now: () => fakeNow,
+    onUpdate() {},
+  });
+
+  assert.equal(fakeNow, 30_000);
+  assert.equal(delays.reduce((sum, delay) => sum + delay, 0), 30_000);
+  assert.ok(fetchCalls > 1);
+  assert.equal((durablePending.payload as Record<string, unknown>).state, "pending");
+  assert.equal((result.turn.payload as Record<string, unknown>).state, "retryable_error");
+  assert.equal(result.response.outcome, "retryable_error");
+  const markup = dialogue!.renderTurnMarkup(result.turn, { surface: "popup" });
+  assert.match(markup, /data-card-state="retryable_error"/);
+  assert.match(markup, /data-card-action="confirm"(?! disabled)/);
+});
+
+test("page abort stops processing polling and leaves a refresh-or-retry state", async () => {
+  const controller = new AbortController();
+  const updates: string[] = [];
+  let fetchCalls = 0;
+
+  const result = await dialogue!.executeCardAction(cardTurn(), "reject", {
+    async request() {
+      return { ok: false, outcome: "processing", state: "processing" };
+    },
+    async fetchTurn() {
+      fetchCalls += 1;
+      return cardTurn("pending");
+    },
+    async sleep() {
+      controller.abort();
+    },
+    signal: controller.signal,
+    onUpdate(turn) {
+      updates.push(String((turn.payload as Record<string, unknown>)?.state ?? ""));
+    },
+  });
+
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(updates, ["rejected", "processing", "retryable_error"]);
+  assert.equal((result.turn.payload as Record<string, unknown>).state, "retryable_error");
+  assert.equal(result.response.outcome, "retryable_error");
+  assert.equal(result.response.reason, "aborted");
 });
 
 test("failed card action rolls the optimistic state back to the durable original", async () => {

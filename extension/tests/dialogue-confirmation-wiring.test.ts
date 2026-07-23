@@ -17,6 +17,8 @@ test("popup wires pending list, card actions, and the shared renderer into the d
   assert.match(popup, /OpenBiliClawDialogueConfirmation/);
   assert.match(popup, /selectDialogueTurns/);
   assert.match(popup, /executeCardAction/);
+  assert.match(popup, /fetchTurn[\s\S]*fetchChatTurn/);
+  assert.match(popup, /dialogueCardActionAbortController\.signal/);
   assert.match(popup, /session:\s*CHAT_SESSION/);
   assert.match(html, /id="chatPendingToggle"/);
   assert.match(html, /id="chatPendingList"/);
@@ -45,6 +47,8 @@ test("desktop mirrors popup semantics with webui session and a visible pending c
   assert.match(app, /pendingConfirmations:\s*"\/chat\/pending-confirmations"/);
   assert.match(app, /OpenBiliClawDialogueConfirmation/);
   assert.match(app, /executeCardAction/);
+  assert.match(app, /fetchTurn[\s\S]*ENDPOINTS\.chatTurns/);
+  assert.match(app, /dialogueCardActionAbortController\.signal/);
   assert.match(app, /session:\s*"webui"/);
   assert.match(html, /id="chatPendingCountBadge"/);
   assert.match(html, /id="desktopPendingConfirmations"/);

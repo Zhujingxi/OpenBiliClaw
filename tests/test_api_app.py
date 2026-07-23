@@ -11752,6 +11752,275 @@ class TestDialogueConfirmationCards:
         assert [item["turn_id"] for item in webui] == ["card-webui"]
         assert popup[0]["payload"]["state"] == webui[0]["payload"]["state"] == "confirmed"
 
+    def test_blocked_worker_card_action_returns_processing_without_cancelling_job(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJob,
+            DialogueJobKind,
+            DialogueJobResult,
+        )
+
+        initial_client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户重视排队后的最终一致性"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            initial_client,
+            turn_id="card-processing",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        app = initial_client.app
+        initial_client.close()
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        real_dispatcher = queue._dispatcher
+        blocker_entered = threading.Event()
+        release_blocker = threading.Event()
+        submitted_action: list[DialogueJob] = []
+
+        async def blocking_dispatcher(job: DialogueJob):
+            if (
+                job.kind is DialogueJobKind.LEARN
+                and job.payload.get("source") == "task-3.3-blocker"
+            ):
+                blocker_entered.set()
+                while not release_blocker.is_set():
+                    await asyncio.sleep(0.005)
+                return DialogueJobResult(outcome="completed")
+            return await real_dispatcher(job)
+
+        real_submit = queue.submit
+
+        def observe_submit(
+            kind: DialogueJobKind | str,
+            payload: dict[str, object],
+            *,
+            completion: bool = False,
+        ) -> DialogueJob | None:
+            job = real_submit(kind, payload, completion=completion)
+            if DialogueJobKind(kind) is DialogueJobKind.SETTLE_HYPOTHESIS and job is not None:
+                submitted_action.append(job)
+            return job
+
+        queue._dispatcher = blocking_dispatcher
+        queue.submit = observe_submit
+        with TestClient(app) as client:
+            client.portal.call(
+                queue.submit,
+                DialogueJobKind.LEARN,
+                {"source": "task-3.3-blocker"},
+            )
+            assert blocker_entered.wait(timeout=1)
+
+            started_at = time.monotonic()
+            response = client.post(
+                "/api/chat/cards/card-processing/action",
+                json={"action": "confirm"},
+            )
+            elapsed = time.monotonic() - started_at
+
+            assert response.status_code == 202
+            assert response.json()["outcome"] == "processing"
+            assert elapsed <= 1.5
+            assert len(submitted_action) == 1
+            assert submitted_action[0].completion is not None
+            assert not submitted_action[0].completion.cancelled()
+            assert not submitted_action[0].completion.done()
+
+            release_blocker.set()
+            deadline = time.monotonic() + 2.0
+            durable_state = ""
+            while time.monotonic() < deadline:
+                durable = client.get("/api/chat/turns/card-processing")
+                assert durable.status_code == 200
+                durable_state = str(durable.json()["payload"]["state"])
+                if durable_state == "confirmed":
+                    break
+                time.sleep(0.01)
+
+        assert durable_state == "confirmed"
+        assert submitted_action[0].completion is not None
+        assert submitted_action[0].completion.done()
+        assert not submitted_action[0].completion.cancelled()
+
+    @pytest.mark.parametrize(
+        "receipt_gap",
+        ["no_receipt", "applied_0_winner", "applied_1_publication_only"],
+    )
+    def test_processing_job_lost_on_restart_can_be_resubmitted(
+        self,
+        tmp_path: Path,
+        receipt_gap: str,
+    ) -> None:
+        import threading
+        from contextlib import suppress
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJob, DialogueJobKind
+        from openbiliclaw.soul.engine import SoulEngine
+
+        initial_client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"重启重投-{receipt_gap}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        turn_id = f"lost-on-restart-{receipt_gap}"
+        self._create_card(
+            initial_client,
+            turn_id=turn_id,
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        first_app = initial_client.app
+        initial_client.close()
+        first_queue = first_app.state.runtime_context.dialogue_settlement_queue
+        real_dispatcher = first_queue._dispatcher
+        blocker_entered = threading.Event()
+
+        async def blocking_dispatcher(job: DialogueJob):
+            if (
+                job.kind is DialogueJobKind.LEARN
+                and job.payload.get("source") == "restart-loss-blocker"
+            ):
+                blocker_entered.set()
+                await asyncio.Event().wait()
+            return await real_dispatcher(job)
+
+        async def crash_and_discard_pending() -> None:
+            first_queue._accepting = False
+            first_queue._closed = True
+            worker = first_queue._worker
+            if worker is not None:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+                first_queue._worker = None
+            while not first_queue._queue.empty():
+                lost_job = first_queue._queue.get_nowait()
+                first_queue._complete_cancelled(lost_job)
+                first_queue._registry.release(lost_job.anchor_snapshot)
+                first_queue._queue.task_done()
+            first_queue._registry.clear()
+
+        first_queue._dispatcher = blocking_dispatcher
+        with TestClient(first_app) as first_runtime:
+            first_runtime.portal.call(
+                first_queue.submit,
+                DialogueJobKind.LEARN,
+                {"source": "restart-loss-blocker"},
+            )
+            assert blocker_entered.wait(timeout=1)
+            first = first_runtime.post(
+                f"/api/chat/cards/{turn_id}/action",
+                json={"action": "confirm"},
+            )
+            assert first.status_code == 202
+            assert first.json()["outcome"] == "processing"
+            assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "pending"
+            first_runtime.portal.call(crash_and_discard_pending)
+
+        winning_payload = {
+            "kind": "hypothesis",
+            "title": hypothesis,
+            "action": "confirmed",
+            "derived": [],
+            "anchor_generation": 0,
+            "source": "card_action",
+        }
+        if receipt_gap != "no_receipt":
+            assert memory._database.try_create_card_settlement(
+                ref=ref,
+                verdict="confirmed",
+                turn_id=turn_id,
+                payload=winning_payload,
+            )
+        if receipt_gap == "applied_1_publication_only":
+            memory._database.record_card_settlement_event_once(
+                ref=ref,
+                event={
+                    "event_type": "feedback",
+                    "title": hypothesis,
+                    "metadata": {
+                        "settlement_ref": ref,
+                        "settlement_kind": "hypothesis",
+                        "settlement_verdict": "confirmed",
+                        "turn_id": turn_id,
+                        "source": "card_action",
+                    },
+                },
+            )
+            layer = memory.get_layer("insight")
+            for item in layer.data["hypotheses"]:
+                if item["hypothesis"] == hypothesis:
+                    item["validated"] = True
+            layer.save()
+            assert memory._database.complete_card_settlement(
+                ref=ref,
+                result={
+                    "matched": True,
+                    "hypothesis": hypothesis,
+                    "signal": "confirm",
+                    "validated": True,
+                    "confidence": 0.66,
+                },
+            )
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "pending"
+
+        class Registry:
+            async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+                return LLMResponse(content="[]", provider="fake")
+
+        class RestartedDialogue:
+            async def respond(
+                self,
+                message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del scope, turn_id, session
+                return f"回复：{message}"
+
+        restarted_engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+        object_calls = 0
+        real_object_apply = restarted_engine._apply_dialogue_settlement_object
+
+        async def count_object_apply(**kwargs: object):
+            nonlocal object_calls
+            object_calls += 1
+            return await real_object_apply(**kwargs)
+
+        restarted_engine._apply_dialogue_settlement_object = count_object_apply  # type: ignore[method-assign]
+        restarted_app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=restarted_engine,
+            dialogue=RestartedDialogue(),
+        )
+        with TestClient(restarted_app) as restarted:
+            retry = restarted.post(
+                f"/api/chat/cards/{turn_id}/action",
+                json={"action": "confirm"},
+            )
+            assert retry.status_code == 200
+            assert retry.json()["state"] == "confirmed"
+            assert restarted.get(f"/api/chat/turns/{turn_id}").json()["payload"]["state"] == (
+                "confirmed"
+            )
+
+        expected_object_calls = 0 if receipt_gap == "applied_1_publication_only" else 1
+        assert object_calls == expected_object_calls
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert settlement["applied"] == 1
+        assert settlement["payload"] == winning_payload
+
     def test_get_reconcile_projects_applied_receipt_without_reapplying_object_semantics(
         self,
         tmp_path: Path,
