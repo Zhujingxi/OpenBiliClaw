@@ -142,6 +142,18 @@ class DialogueAnchorManager:
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
         self._volatile_state = _default_state()
         self._volatile_lock = threading.RLock()
+        self._mutation_guard: Callable[[], None] | None = None
+
+    def install_mutation_guard(self, guard: Callable[[], None]) -> None:
+        """Require ``guard`` for runtime mutations while keeping low-level tests injectable."""
+        if self._mutation_guard is not None and self._mutation_guard != guard:
+            raise RuntimeError("Dialogue anchor mutation guard is already installed")
+        self._mutation_guard = guard
+
+    def _require_dialogue_settlement_worker(self) -> None:
+        guard = self._mutation_guard
+        if guard is not None:
+            guard()
 
     @property
     def database(self) -> Any | None:
@@ -175,10 +187,10 @@ class DialogueAnchorManager:
         ref: str,
         origin_turn_id: str,
         entry: str,
-        attempt_token: str = "",
         now: datetime | None = None,
     ) -> DialogueAnchor:
         """Establish an anchor from one of the three declared product entries."""
+        self._require_dialogue_settlement_worker()
         normalized_kind = kind.strip().lower()
         normalized_ref = ref.strip()
         normalized_entry = entry.strip().lower()
@@ -188,11 +200,6 @@ class DialogueAnchorManager:
             raise ValueError("Dialogue anchor ref is required")
         if normalized_entry not in _VALID_ENTRIES:
             raise ValueError(f"Unsupported dialogue anchor entry: {entry!r}")
-        if normalized_entry == ENTRY_CARD_DISCUSS:
-            self._validate_card_discussion_attempt(
-                origin_turn_id=origin_turn_id.strip(),
-                attempt_token=attempt_token.strip(),
-            )
         established_at = _normalized_now(now or self._now_provider()).isoformat()
         released: DialogueAnchor | None = None
         released_replays: list[dict[str, Any]] = []
@@ -207,7 +214,6 @@ class DialogueAnchorManager:
                 existing is not None
                 and existing.kind == normalized_kind
                 and existing.ref == normalized_ref
-                and existing.origin_turn_id == normalized_origin
             ):
                 established = existing
                 return
@@ -238,34 +244,6 @@ class DialogueAnchorManager:
             self._record_established(established, normalized_entry)
         return established
 
-    def _validate_card_discussion_attempt(
-        self,
-        *,
-        origin_turn_id: str,
-        attempt_token: str,
-    ) -> None:
-        """Fence a card-discuss anchor against stale request resumption."""
-        database = self._database
-        if database is None:
-            return
-        validate = getattr(database, "validate_chat_card_discussion_attempt", None)
-        if attempt_token and callable(validate):
-            if not bool(validate(origin_turn_id, attempt_token)):
-                raise ValueError("Card discussion attempt is stale or no longer active")
-            return
-        get_turn = getattr(database, "get_chat_turn", None)
-        if not callable(get_turn) or not origin_turn_id:
-            return
-        row = get_turn(origin_turn_id)
-        if not isinstance(row, dict):
-            return
-        payload = row.get("payload", {})
-        if not isinstance(payload, dict) or str(payload.get("type", "")) != "card":
-            return
-        stored_token = str(payload.get("attempt_token", "")).strip()
-        if stored_token or str(payload.get("state", "")) != "discussing":
-            raise ValueError("Card discussion attempt token is required")
-
     def release(
         self,
         *,
@@ -274,6 +252,7 @@ class DialogueAnchorManager:
         expected_generation: int | None = None,
     ) -> DialogueAnchor | None:
         """Release the anchor for one of the four declared lifecycle reasons."""
+        self._require_dialogue_settlement_worker()
         normalized_reason = reason.strip().lower()
         normalized_card_state = card_state.strip().lower()
         if normalized_reason not in _VALID_RELEASE_REASONS:
@@ -322,6 +301,7 @@ class DialogueAnchorManager:
         expected_generation: int | None = None,
     ) -> DialogueAnchor | None:
         """Persist unrelated/ambiguous counters and release after two unrelated turns."""
+        self._require_dialogue_settlement_worker()
         normalized_relation = relation.strip().lower()
         released: DialogueAnchor | None = None
         updated: DialogueAnchor | None = None
@@ -379,6 +359,7 @@ class DialogueAnchorManager:
 
     def expire(self, *, now: datetime | None = None) -> bool:
         """Release an anchor whose absolute two-hour TTL has elapsed."""
+        self._require_dialogue_settlement_worker()
         anchor = self.current()
         if anchor is None:
             return False

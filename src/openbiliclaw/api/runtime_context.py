@@ -37,10 +37,15 @@ from openbiliclaw.runtime.source_policy import effective_pool_source_shares
 from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from fastapi import FastAPI
 
     from openbiliclaw.config import Config
-    from openbiliclaw.soul.dialogue_learn_queue import DialogueDispatcher
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueDispatcher,
+        DialogueJobKind,
+    )
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -135,21 +140,29 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
-def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatcher:
+def _build_dialogue_settlement_dispatcher(
+    soul_engine: Any,
+    api_handlers: Mapping[DialogueJobKind, DialogueDispatcher] | None = None,
+) -> DialogueDispatcher:
     """Build the one typed dispatcher installed by the API runtime.
 
-    Wave 1 admits ``learn``; Wave 2 additionally admits publication-only
-    ``card.reconcile``. Every mutation entry remains explicitly reserved for
-    the Wave 3 cutover.
+    Engine-owned settlement kinds are dispatched directly. API-owned card,
+    pending-open, and durable-reply effects are supplied through the stable
+    runtime handler façade so hot reload can replace the worker without
+    capturing an HTTP request object.
     """
+    from types import MappingProxyType
+
     from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorAdmissionSnapshot,
         AnchorPersisted,
+        DialogueDispatchReturn,
         DialogueJob,
         DialogueJobKind,
         DialogueJobResult,
     )
 
-    async def _dispatch(job: DialogueJob) -> DialogueJobResult:
+    async def _dispatch(job: DialogueJob) -> DialogueDispatchReturn:
         if job.kind is DialogueJobKind.LEARN:
             from openbiliclaw.llm.service import _background_admission_bypass
 
@@ -165,6 +178,9 @@ def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatche
                 await soul_engine.learn_from_dialogue(**payload)
             return DialogueJobResult(outcome="completed")
         if job.kind is DialogueJobKind.CARD_RECONCILE:
+            handler = api_handlers.get(job.kind) if api_handlers is not None else None
+            if handler is not None:
+                return await handler(job)
             reconcile = getattr(soul_engine, "_apply_card_reconcile", None)
             if not callable(reconcile):
                 raise RuntimeError("card.reconcile worker handler is not ready")
@@ -173,11 +189,43 @@ def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatche
                 raise RuntimeError("card.reconcile returned an invalid result")
             return DialogueJobResult(
                 outcome=str(result.get("outcome", "completed")),
-                settlement=dict(result),
+                settlement=MappingProxyType(dict(result)),
             )
+        snapshot = cast("AnchorAdmissionSnapshot", job.effective_anchor_snapshot)
+        if job.kind is DialogueJobKind.SETTLE_HYPOTHESIS:
+            result = await soul_engine._apply_hypothesis_settlement(
+                ref=str(job.payload.get("ref", "")),
+                hypothesis=str(job.payload.get("hypothesis", "")),
+                requested_verdict=str(job.payload.get("requested_verdict", "")),
+                turn_id=str(job.payload.get("turn_id", "")),
+                source=str(job.payload.get("source", "")),
+                derived=[
+                    dict(item)
+                    for item in cast("list[dict[str, object]]", job.payload.get("derived", []))
+                ],
+                anchor_snapshot=snapshot,
+            )
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=MappingProxyType(dict(result)),
+            )
+        if job.kind is DialogueJobKind.SETTLE_CONFUSION:
+            result = await soul_engine._apply_confusion_settlement(
+                ref=str(job.payload.get("ref", "")),
+                requested_verdict=str(job.payload.get("requested_verdict", "")),
+                note=str(job.payload.get("note", "")),
+                turn_id=str(job.payload.get("turn_id", "")),
+                source=str(job.payload.get("source", "")),
+                anchor_snapshot=snapshot,
+            )
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=MappingProxyType(dict(result)),
+            )
+        handler = api_handlers.get(job.kind) if api_handlers is not None else None
+        if handler is not None:
+            return await handler(job)
         if job.kind in {
-            DialogueJobKind.SETTLE_HYPOTHESIS,
-            DialogueJobKind.SETTLE_CONFUSION,
             DialogueJobKind.CARD_DEFER,
             DialogueJobKind.CARD_DISCUSS,
             DialogueJobKind.ANCHOR_ESTABLISH,
@@ -186,7 +234,7 @@ def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatche
             DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
             DialogueJobKind.CONFUSION_OPEN_SYNC,
         }:
-            raise RuntimeError(f"{job.kind.value} is reserved for the Wave 3 endpoint cutover")
+            raise RuntimeError(f"{job.kind.value} runtime handler is not installed")
         raise AssertionError(f"Unhandled dialogue settlement kind: {job.kind!r}")
 
     return _dispatch
@@ -390,6 +438,8 @@ class RuntimeContext:
     # Wave 1: the one self-owned typed dialogue settlement queue. It is not in
     # cancel_all and uses pause/drain + exact permit handoff on hot reload.
     dialogue_settlement_queue: Any = None
+    dialogue_settlement_handlers: dict[Any, Any] = field(default_factory=dict)
+    dialogue_settlement_guard: Any = None
     discovery_engine: Any = None
     recommendation_engine: Any = None
     runtime_controller: Any = None
@@ -399,6 +449,10 @@ class RuntimeContext:
     def __post_init__(self) -> None:
         """Initialize stable callbacks and local-only saved-list behavior."""
         self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+        if self.dialogue_settlement_guard is None:
+            from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+            self.dialogue_settlement_guard = DialogueSettlementGuard()
 
         if self.database is None:
             return
@@ -1346,9 +1400,20 @@ class RuntimeContext:
         anchor_manager = getattr(new_soul_engine, "_dialogue_anchor_manager", None)
         anchor_provider = getattr(anchor_manager, "snapshot", None)
         new_settlement_queue = DialogueSettlementQueue(
-            _build_dialogue_settlement_dispatcher(new_soul_engine),
+            _build_dialogue_settlement_dispatcher(
+                new_soul_engine,
+                self.dialogue_settlement_handlers,
+            ),
             anchor_provider=anchor_provider if callable(anchor_provider) else None,
+            guard=self.dialogue_settlement_guard,
         )
+        bind_settlement_queue = getattr(
+            new_soul_engine,
+            "bind_dialogue_settlement_queue",
+            None,
+        )
+        if callable(bind_settlement_queue):
+            bind_settlement_queue(new_settlement_queue)
         new_dialogue = SocraticDialogue(
             llm=None,
             soul_engine=new_soul_engine,

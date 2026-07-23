@@ -32,6 +32,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from openbiliclaw.soul.ledger import ProfileLedger
 
 logger = logging.getLogger(__name__)
@@ -187,6 +189,18 @@ class ConfusionManager:
     ) -> None:
         self._db = database
         self._ledger = ledger
+        self._mutation_guard: Callable[[], None] | None = None
+
+    def install_mutation_guard(self, guard: Callable[[], None]) -> None:
+        """Require ``guard`` for dialogue-owned runtime mutations."""
+        if self._mutation_guard is not None and self._mutation_guard != guard:
+            raise RuntimeError("Confusion mutation guard is already installed")
+        self._mutation_guard = guard
+
+    def _require_dialogue_settlement_worker(self) -> None:
+        guard = self._mutation_guard
+        if guard is not None:
+            guard()
 
     # -- Producing sources ----------------------------------------------------
 
@@ -339,6 +353,7 @@ class ConfusionManager:
         for the explicit pending-list open action; the database's global
         ``clarifying <= 1`` constraint still applies.
         """
+        self._require_dialogue_settlement_worker()
         if self._db is None:
             return False
         confusion = self.get(confusion_id)
@@ -464,6 +479,7 @@ class ConfusionManager:
         the head in place; later turns append behind it and can never overtake.
         ``None`` therefore means "retained for replay", not "ignored".
         """
+        self._require_dialogue_settlement_worker()
         if self._db is None:
             return None
         normalized_action = action.strip().lower()
@@ -515,6 +531,7 @@ class ConfusionManager:
         expected_generation: int | None = None,
     ) -> str | None:
         """Drain an existing durable settlement queue from its head."""
+        self._require_dialogue_settlement_worker()
         if self._db is None:
             return None
         pop_head = getattr(self._db, "pop_confusion_replay_head", None)

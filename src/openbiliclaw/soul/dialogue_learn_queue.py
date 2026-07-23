@@ -568,6 +568,42 @@ class AnchorAdmissionRegistry:
             state = self.actual_state(target_kind=target_kind, target_ref=target_ref)
         return state
 
+    def refresh_after_non_builder(
+        self,
+        *,
+        target_kind: str,
+        target_ref: str,
+        completed_sequence: int,
+    ) -> None:
+        """Publish a non-builder anchor mutation without erasing later admission.
+
+        A settlement, defer, or relation job may release the active anchor.
+        Refreshing after its handler returns keeps future admission aligned with
+        persistence. A reservation admitted later in the same event-loop
+        timeline remains the logical head.
+        """
+        if not target_kind or not target_ref:
+            return
+        key = (target_kind, target_ref)
+        head = self._heads.get(key)
+        if isinstance(head, AnchorReserved) and head.owner_sequence > completed_sequence:
+            return
+        actual = self.actual_state(
+            target_kind=target_kind,
+            target_ref=target_ref,
+        )
+        if (
+            isinstance(head, AnchorPersisted)
+            and isinstance(actual, AnchorPersisted)
+            and (head.kind, head.ref, head.generation)
+            == (actual.kind, actual.ref, actual.generation)
+        ):
+            return
+        if isinstance(head, AnchorAbsent) and isinstance(actual, AnchorAbsent):
+            return
+        self._heads[key] = actual
+        self._latest_head_key = key
+
     def has_reservation(self, reservation_id: str) -> bool:
         return reservation_id in self._entries
 
@@ -728,6 +764,7 @@ class DialogueSettlementQueue:
         self._guard = guard or default_dialogue_settlement_guard()
         self._registry = AnchorAdmissionRegistry(anchor_provider)
         self._queue: asyncio.Queue[DialogueJob] = asyncio.Queue()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
         self._worker: asyncio.Task[None] | None = None
         self._worker_permit: DialogueSettlementWorkerPermit | None = None
         self._accepting = True
@@ -758,6 +795,10 @@ class DialogueSettlementQueue:
     def depth(self) -> int:
         return self._queue.qsize()
 
+    def require_dialogue_settlement_worker(self) -> None:
+        """Require the permit owned by this queue's actual worker Task."""
+        self._guard.require_dialogue_settlement_worker()
+
     def start(self) -> None:
         """Create and synchronously authorize the actual worker Task."""
         if self._closed:
@@ -765,13 +806,21 @@ class DialogueSettlementQueue:
         if self.worker_alive:
             return
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             self._worker = None
             return
+        if self._event_loop is not None and self._event_loop is not loop:
+            if not self._queue.empty():
+                raise RuntimeError("Cannot move a non-empty dialogue queue across event loops")
+            self._queue = asyncio.Queue()
+            self._resume = asyncio.Event()
+            self._resume.set()
+        self._event_loop = loop
         self._started = asyncio.Event()
         self._startup_error = None
         worker = asyncio.create_task(self._run(), name=self._name)
+        worker.add_done_callback(self._consume_worker_exception)
         self._worker = worker
         try:
             permit = self._guard.register_worker(cast("asyncio.Task[object]", worker))
@@ -1012,6 +1061,11 @@ class DialogueSettlementQueue:
                         result = followup_result
             else:
                 result = self._normalize_non_builder_result(raw_result)
+                self._registry.refresh_after_non_builder(
+                    target_kind=str(job.payload.get("target_kind", "")).strip(),
+                    target_ref=str(job.payload.get("target_ref", "")).strip(),
+                    completed_sequence=job.sequence,
+                )
             self._complete_result(job, result)
             outcome = result.outcome
         except BaseException as exc:
@@ -1096,3 +1150,9 @@ class DialogueSettlementQueue:
         completion = job.completion
         if completion is not None and not completion.done():
             completion.cancel()
+
+    @staticmethod
+    def _consume_worker_exception(worker: asyncio.Task[None]) -> None:
+        """Retrieve loop-shutdown failures so embedded test loops stay quiet."""
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            worker.result()

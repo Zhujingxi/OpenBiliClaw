@@ -51,7 +51,6 @@ from .dialogue_learn_queue import (
     DialogueJobKind,
     DialogueSettlementQueue,
 )
-from .dialogue_settlement_guard import require_dialogue_settlement_worker
 from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
@@ -397,6 +396,7 @@ class SoulEngine:
         # the dispatcher cycle. Public submit façades fail closed until then;
         # worker-only apply methods never infer a fallback executor.
         self._dialogue_settlement_queue: DialogueSettlementQueue | None = None
+        self._dialogue_mutation_guard: Callable[[], None] | None = None
         # Wire the same ledger into the speculator so promote/confirm/reject
         # write points (D5 #5) land in the same audit trail.
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
@@ -1095,6 +1095,22 @@ class SoulEngine:
         if current is not None and current is not queue:
             raise RuntimeError("SoulEngine already has a dialogue settlement queue")
         self._dialogue_settlement_queue = queue
+        guard = queue.require_dialogue_settlement_worker
+        self._dialogue_mutation_guard = guard
+        self._dialogue_anchor_manager.install_mutation_guard(guard)
+        self._confusion_manager.install_mutation_guard(guard)
+
+    def _require_dialogue_settlement_worker(self) -> None:
+        guard = self._dialogue_mutation_guard
+        if guard is None:
+            # Low-level queue tests construct the dispatcher before binding an
+            # engine façade. Production runtimes always install their own
+            # per-context guard through ``bind_dialogue_settlement_queue``.
+            from .dialogue_settlement_guard import require_dialogue_settlement_worker
+
+            require_dialogue_settlement_worker()
+            return
+        guard()
 
     async def submit_hypothesis_settlement(
         self,
@@ -1295,7 +1311,7 @@ class SoulEngine:
 
     async def _apply_card_reconcile(self, *, ref: str) -> dict[str, Any]:
         """Replay publication only for one already-applied winner receipt."""
-        require_dialogue_settlement_worker()
+        self._require_dialogue_settlement_worker()
         database = self._ledger_database
         if database is None:
             raise RuntimeError("Dialogue settlement store is not ready")
@@ -1339,7 +1355,7 @@ class SoulEngine:
         anchor_snapshot: AnchorAdmissionSnapshot,
     ) -> dict[str, Any]:
         """Apply one frozen winner through idempotent effects in the worker."""
-        require_dialogue_settlement_worker()
+        self._require_dialogue_settlement_worker()
         database = self._ledger_database
         required_methods = (
             "try_create_card_settlement",
