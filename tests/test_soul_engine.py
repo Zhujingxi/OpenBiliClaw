@@ -2532,6 +2532,44 @@ def _anchor_extract(
     return fake_extract
 
 
+def _two_round_anchor_extract(
+    relation: str,
+    *,
+    interpretation: str = "",
+    derived: list[dict[str, object]] | None = None,
+):  # type: ignore[no-untyped-def]
+    """Return one anchored decision followed by a normal unanchored analysis."""
+    calls: list[str] = []
+    first_round = _anchor_extract(
+        relation,
+        interpretation=interpretation,
+        derived=derived,
+    )
+
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
+        anchor: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        calls.append(user_message)
+        if len(calls) == 1:
+            assert anchor is not None
+            return await first_round(
+                user_message=user_message,
+                assistant_reply=assistant_reply,
+                core_memory=core_memory,
+                active_list=active_list,
+                anchor=anchor,
+            )
+        assert anchor is None
+        return {"candidates": [], "settles": []}
+
+    return fake_extract, calls
+
+
 async def test_generation_zero_never_captures_future_anchor(tmp_path: Path) -> None:
     """Q3/F2: an admitted absent snapshot never captures a later non-reserved anchor."""
     from openbiliclaw.soul.dialogue_learn_queue import (
@@ -2851,7 +2889,8 @@ async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
         engine,
         hypothesis="用户重视深度内容",
     )
-    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", _anchor_extract(relation))
+    extract, analyzer_calls = _two_round_anchor_extract(relation)
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", extract)
 
     async with _test_dialogue_runtime(engine) as queue:
         result = await _learn_in_test_dialogue_runtime(
@@ -2860,6 +2899,13 @@ async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
             assistant_reply="明白了",
             session="popup",
             turn_id="anchor-turn",
+        )
+        next_result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="这是结算后的下一轮正常对话",
+            assistant_reply="继续聊",
+            session="popup",
+            turn_id="post-anchor-turn",
         )
 
     stored = engine._load_insights()[0]
@@ -2872,6 +2918,8 @@ async def test_hypothesis_anchor_support_and_contradict_settle_via_feedback(
     assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == card_state
     assert engine._dialogue_anchor_manager.current() is None
     assert result["anchor_outcome"] == outcome
+    assert analyzer_calls == ["这是我的明确回答", "这是结算后的下一轮正常对话"]
+    assert "anchor_outcome" not in next_result
 
 
 async def test_hypothesis_anchor_obeys_existing_object_arbitration_and_projects_all_cards(
@@ -2948,26 +2996,29 @@ async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_
         engine,
         hypothesis="用户只在意理论深度",
     )
-    monkeypatch.setattr(
-        engine._dialogue_insight_analyzer,
-        "extract",
-        _anchor_extract(
-            "revise",
-            derived=[
-                {
-                    "content": "用户更看重能落地的深度",
-                    "confidence": 0.82,
-                    "evidence": "用户主动修正",
-                }
-            ],
-        ),
+    extract, analyzer_calls = _two_round_anchor_extract(
+        "revise",
+        derived=[
+            {
+                "content": "用户更看重能落地的深度",
+                "confidence": 0.82,
+                "evidence": "用户主动修正",
+            }
+        ],
     )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", extract)
 
     async with _test_dialogue_runtime(engine) as queue:
         result = await _learn_in_test_dialogue_runtime(
             queue,
             user_message="不是只要理论，我更看重能落地",
             assistant_reply="这个修正很关键",
+            session="popup",
+        )
+        next_result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="修正后的下一轮正常对话",
+            assistant_reply="继续",
             session="popup",
         )
 
@@ -2981,6 +3032,8 @@ async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_
     assert (settlement["verdict"], settlement["applied"]) == ("revised", 1)
     assert result["anchor_outcome"] == "revised"
     assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "rejected"
+    assert analyzer_calls == ["不是只要理论，我更看重能落地", "修正后的下一轮正常对话"]
+    assert "anchor_outcome" not in next_result
 
 
 async def test_confusion_anchor_answer_resolves_matching_interpretation(
@@ -3004,17 +3057,23 @@ async def test_confusion_anchor_answer_resolves_matching_interpretation(
         origin_turn_id="question",
         entry=ENTRY_CONFUSION_PROMPT,
     )
-    monkeypatch.setattr(
-        engine._dialogue_insight_analyzer,
-        "extract",
-        _anchor_extract("answer", interpretation="real_interest"),
+    extract, analyzer_calls = _two_round_anchor_extract(
+        "answer",
+        interpretation="real_interest",
     )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", extract)
 
     async with _test_dialogue_runtime(engine) as queue:
         result = await _learn_in_test_dialogue_runtime(
             queue,
             user_message="是真的喜欢",
             assistant_reply="明白",
+            session="popup",
+        )
+        next_result = await _learn_in_test_dialogue_runtime(
+            queue,
+            user_message="疑惑结算后的下一轮正常对话",
+            assistant_reply="继续",
             session="popup",
         )
 
@@ -3026,6 +3085,8 @@ async def test_confusion_anchor_answer_resolves_matching_interpretation(
     assert settlement["verdict"] == "answer:real_interest"
     assert engine._dialogue_anchor_manager.current() is None
     assert result["anchor_outcome"] == "answered"
+    assert analyzer_calls == ["是真的喜欢", "疑惑结算后的下一轮正常对话"]
+    assert "anchor_outcome" not in next_result
 
 
 async def test_completed_confusion_reply_scan_replays_attribution_once(
@@ -3034,7 +3095,11 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
 ) -> None:
     from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
     from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
-    from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJob,
+        DialogueJobKind,
+        DialogueSettlementQueue,
+    )
 
     memory = MemoryManager(tmp_path)
     memory.initialize()
@@ -3060,18 +3125,22 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
         message="这确实是我的兴趣",
     )
     memory._database.complete_chat_turn("completed-reply", reply="明白了")
-    extract_calls = 0
-    fake_extract = _anchor_extract("answer", interpretation="real_interest")
+    extract, analyzer_calls = _two_round_anchor_extract(
+        "answer",
+        interpretation="real_interest",
+    )
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", extract)
 
-    async def counted_extract(**kwargs: object) -> dict[str, object]:
-        nonlocal extract_calls
-        extract_calls += 1
-        return await fake_extract(**kwargs)  # type: ignore[arg-type]
+    runtime_dispatch = _build_dialogue_settlement_dispatcher(engine, {})
+    replay_builders: list[bool] = []
 
-    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", counted_extract)
+    async def observe_builder(job: DialogueJob):  # type: ignore[no-untyped-def]
+        if job.kind is DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY:
+            replay_builders.append(job.owned_anchor_reservation_id is not None)
+        return await runtime_dispatch(job)
 
     queue = DialogueSettlementQueue(
-        _build_dialogue_settlement_dispatcher(engine, {}),
+        observe_builder,
         anchor_provider=engine._dialogue_anchor_manager.snapshot,
     )
     engine.bind_dialogue_settlement_queue(queue)
@@ -3081,9 +3150,24 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
         assert memory._database.get_confusion(confusion_id)["replay_queue"] == []
         assert engine._dialogue_anchor_manager.current() is None
         assert await engine.replay_confusion_dialogue_attributions() == 0
+        completion = await queue.submit_and_wait(
+            DialogueJobKind.LEARN,
+            {
+                "user_message": "replay 结算后的下一轮正常对话",
+                "assistant_reply": "继续",
+                "session": "popup",
+                "scope": "chat",
+                "turn_id": "post-replay-turn",
+            },
+        )
+        assert completion.outcome == "completed"
     finally:
         await queue.shutdown(timeout=2)
-    assert extract_calls == 1
+    assert replay_builders == [True]
+    assert analyzer_calls == [
+        "[关于我有点困惑的「桌游」的澄清] 这确实是我的兴趣",
+        "replay 结算后的下一轮正常对话",
+    ]
 
 
 async def test_confusion_attribution_replay_dispatches_dedicated_kind(

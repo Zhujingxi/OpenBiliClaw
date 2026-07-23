@@ -463,9 +463,11 @@ inline child delegation、临时授权或 delegated-task reset 生命周期。
    `logical_head.reservation_id == owned_reservation_id` 时，才把 head 原子折叠为该
    resolution 的 effective `persisted/absent` actual state。若 head 已是同 ref 的更晚
    reservation，较早 result（包括 persisted、no-op、superseded、failed）都只能
-   resolve 较早 entry，绝不能覆盖 head。release 等 non-builder anchor mutation 仍按
-   sequence 回报 actual state；较早 completion 刷新自己的 per-ref state 时，若全局
-   latest 已是跨 ref 的更晚 reservation，也不得把 `_latest_head_key` 回拨到旧 ref。
+   resolve 较早 entry，绝不能覆盖 head。每个 completed dispatch 都按显式 target、
+   effective frozen snapshot（包括 targetless `learn`）或 builder transition 推导受
+   影响 ref，并在 builder follow-up 结束后按 sequence 回报 actual state；较早
+   completion 刷新自己的 per-ref state 时，若同 ref head 或全局 latest 已是更晚
+   reservation，不得覆盖该 reservation，也不得把 `_latest_head_key` 回拨到旧 ref。
    **[F2][R2-2][R3-1]**
 10. registry 对每个 reservation 只统计已经冻结该 id 的 queued/running envelope。
     terminal resolution 后 entry 保留到旧引用排空；归零时 GC，并在它仍是 head 时先

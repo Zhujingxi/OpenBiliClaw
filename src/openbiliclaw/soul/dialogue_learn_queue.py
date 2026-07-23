@@ -575,19 +575,19 @@ class AnchorAdmissionRegistry:
             state = self.actual_state(target_kind=target_kind, target_ref=target_ref)
         return state
 
-    def refresh_after_non_builder(
+    def refresh_after_dispatch(
         self,
         *,
         target_kind: str,
         target_ref: str,
         completed_sequence: int,
     ) -> None:
-        """Publish a non-builder anchor mutation without erasing later admission.
+        """Publish a completed dispatch mutation without erasing later admission.
 
-        A settlement, defer, or relation job may release the active anchor.
-        Refreshing after its handler returns keeps future admission aligned with
-        persistence. A reservation admitted later in the same event-loop
-        timeline remains the logical head.
+        A settlement, relation, or builder follow-up may release/change the
+        active anchor. Refreshing after its handler returns keeps future
+        admission aligned with persistence. A reservation admitted later in
+        the same event-loop timeline remains the logical head.
         """
         if not target_kind or not target_ref:
             return
@@ -1074,6 +1074,7 @@ class DialogueSettlementQueue:
             return
         dispatch_job = replace(job, effective_anchor_snapshot=effective)
         builder_resolved = False
+        refresh_kind, refresh_ref = self._anchor_refresh_target(job, effective)
         try:
             raw_result = await self._dispatcher(dispatch_job)
             if job.owned_anchor_reservation_id is not None:
@@ -1098,11 +1099,6 @@ class DialogueSettlementQueue:
                         result = followup_result
             else:
                 result = self._normalize_non_builder_result(raw_result)
-                self._registry.refresh_after_non_builder(
-                    target_kind=str(job.payload.get("target_kind", "")).strip(),
-                    target_ref=str(job.payload.get("target_ref", "")).strip(),
-                    completed_sequence=job.sequence,
-                )
             self._complete_result(job, result)
             outcome = result.outcome
         except BaseException as exc:
@@ -1124,6 +1120,11 @@ class DialogueSettlementQueue:
                 )
             raise
         finally:
+            self._registry.refresh_after_dispatch(
+                target_kind=refresh_kind,
+                target_ref=refresh_ref,
+                completed_sequence=job.sequence,
+            )
             finished_at = asyncio.get_running_loop().time()
             logger.debug(
                 "dialogue settlement job",
@@ -1136,6 +1137,27 @@ class DialogueSettlementQueue:
                     "outcome": locals().get("outcome", "error"),
                 },
             )
+
+    @staticmethod
+    def _anchor_refresh_target(
+        job: DialogueJob,
+        effective: AnchorAdmissionSnapshot,
+    ) -> tuple[str, str]:
+        """Resolve the durable target even when a LEARN payload omits it."""
+        if job.anchor_transition.establishes_anchor:
+            return (
+                job.anchor_transition.target_kind,
+                job.anchor_transition.target_ref,
+            )
+        target_kind = str(job.payload.get("target_kind", "")).strip()
+        target_ref = str(job.payload.get("target_ref", "")).strip()
+        if target_kind and target_ref:
+            return target_kind, target_ref
+        if isinstance(effective, AnchorPersisted):
+            return effective.kind, effective.ref
+        if isinstance(effective, AnchorAbsent):
+            return effective.target_kind, effective.target_ref
+        return "", ""
 
     @staticmethod
     def _normalize_builder_result(

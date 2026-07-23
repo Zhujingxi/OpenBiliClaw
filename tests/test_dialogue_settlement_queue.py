@@ -1906,6 +1906,83 @@ async def test_old_non_builder_refresh_cannot_replace_new_cross_ref_reservation(
         await queue.shutdown(timeout=0.5)
 
 
+async def test_targetless_learn_refresh_preserves_new_cross_ref_reservation() -> None:
+    """F1/F2: inferred A refresh cannot replace a later B reservation."""
+    active: dict[str, object] = {
+        "anchor_kind": "hypothesis",
+        "anchor_ref": "A",
+        "anchor_generation": 1,
+    }
+    old_effect_applied = asyncio.Event()
+    release_old_completion = asyncio.Event()
+    builder_b_entered = asyncio.Event()
+    release_builder_b = asyncio.Event()
+
+    async def dispatcher(
+        job: DialogueJob,
+    ) -> DialogueJobResult | AnchorMutationTerminal:
+        label = str(job.payload["label"])
+        if label == "targetless-learn-A-release":
+            active.clear()
+            old_effect_applied.set()
+            await release_old_completion.wait()
+            return DialogueJobResult(outcome="completed")
+        builder_b_entered.set()
+        await release_builder_b.wait()
+        active.update(
+            anchor_kind="hypothesis",
+            anchor_ref="B",
+            anchor_generation=2,
+        )
+        return AnchorMutationTerminal.persisted(
+            kind="hypothesis",
+            ref="B",
+            generation=2,
+        )
+
+    queue = DialogueSettlementQueue(dispatcher, anchor_provider=lambda: dict(active))
+    queue.start()
+    try:
+        old_a = queue.submit(
+            DialogueJobKind.LEARN,
+            {"label": "targetless-learn-A-release"},
+            completion=True,
+        )
+        assert old_a is not None and old_a.completion is not None
+        assert isinstance(old_a.anchor_snapshot, AnchorPersisted)
+        await asyncio.wait_for(old_effect_applied.wait(), timeout=0.5)
+
+        new_b = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "label": "new-B-builder",
+                "target_kind": "hypothesis",
+                "target_ref": "B",
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
+        )
+        assert new_b is not None and new_b.completion is not None
+        assert new_b.owned_anchor_reservation_id is not None
+
+        release_old_completion.set()
+        await asyncio.wait_for(builder_b_entered.wait(), timeout=0.5)
+        assert (await asyncio.shield(old_a.completion)).outcome == "completed"
+
+        latest = queue.registry.snapshot()
+        assert isinstance(latest, AnchorReserved)
+        assert latest.ref == "B"
+        assert latest.reservation_id == new_b.owned_anchor_reservation_id
+        queue.registry.release(latest)
+
+        release_builder_b.set()
+        assert (await asyncio.shield(new_b.completion)).outcome == "persisted"
+    finally:
+        release_old_completion.set()
+        release_builder_b.set()
+        await queue.shutdown(timeout=0.5)
+
+
 def test_owner_cas_failed_gc_and_double_builder_state_machines_repeat_100_times() -> None:
     """Q18/Q19: owner checks, failed GC, and later-head protection are stable."""
     from openbiliclaw.soul.dialogue_learn_queue import (
