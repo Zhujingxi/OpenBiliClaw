@@ -1,7 +1,7 @@
 # 对话结算单队列 Spec
 
 **Created:** 2026-07-23
-**Status:** Proposed — revised after adversarial review round 1
+**Status:** Proposed — revised after adversarial review round 2
 **Baseline:** `feat/cognitive-profile-pipeline` @ `e16797ec`
 **Plan:** [`2026-07-23-dialogue-settlement-queue-plan.md`](./2026-07-23-dialogue-settlement-queue-plan.md)
 **Supersedes:** 已撤回的 `2026-07-23-settlement-serialization-{spec,plan}.md`
@@ -19,7 +19,13 @@
   claim/fencing token 或三段 claim-CAS；
 - 锚 generation 在**结算 job 受理/入队时**冻结，worker 只校验冻结值，
   绝不在执行时补抓当前锚；队列级 admission registry 同时看见尚未执行的
-  `anchor.establish` 预约，不能只读当前持久化锚；**[F2]**
+  **全部建锚 job** 预约，包括 `anchor.establish`、worker 内建锚的
+  `card.discuss`，以及探针/疑惑抛出后会建锚的 §2.2 路径，不能只读当前持久化锚；
+  **[F2][R2-1]**
+- 建锚失败会把旧 reservation 显式 resolve 为 `failed`，同时把 logical head
+  原子前移到失败后的实际 `persisted/absent`；failed entry 只服务失败前已经受理的
+  依赖，不得继续吸收新 submit，引用归零后可回收并允许 fresh reservation 重试。
+  **[R2-2]**
 - 保留 ref 级 SQLite winner 收据、卡片 payload 投影与可重试的副作用幂等，
   但收据也只由 worker 写，不增加 durable inbox、跨进程 owner 或启动恢复扫描。
 
@@ -34,9 +40,10 @@
 | 单消费者 | 100 个混合 job 并发提交，`max_active == 1`，严格按受理序执行 |
 | 入口收口 | §2.2 的入口清单覆盖率 100%；runtime/API spy 中 worker 外业务 mutation 为 0；pending-open 的 `schedule_ask`、retarget、rollback 与原始 `Database.update_confusion` sink 也计入 **[F3]** |
 | ref 仲裁 | 同 ref 100 个相反 confirm/reject 请求只有 1 个 winner；event、对象更新、rebuild marker、投影各至多 1 次 |
-| generation/admission | “无锚 job 先受理、后建锚”与“`anchor.establish` 已入队未执行、后续 settle 再入队”各交错 100 次；后者绑定 admission 预约、前者保留 no-anchor tombstone，均不在执行期重读/升级 **[F2]** |
+| generation/admission | “无锚 job 先受理、后建锚”、“`anchor.establish` 已入队未执行、后续 settle 再入队”与“`card.discuss` 已入队未执行、后续 settle 再入队”各交错 100 次；所有建锚 kind/路径先预约，前者保留 no-anchor tombstone，均不在执行期重读/升级 **[F2][R2-1]** |
+| failed reservation | 建锚失败后，在旧依赖运行前提交的新 job 100 次均冻结实际 `persisted/absent`、引用 failed 次数为 0；旧依赖全部返回 `anchor_dependency_failed` 后 failed entry 100% GC，fresh retry 使用新 reservation 并可成功 **[R2-2]** |
 | 事件循环安全 | worker 等待 LLM 时 20 Hz heartbeat 连续运行；不存在同步文件锁跨 `await`，不存在 worker 等待自己入队 Future |
-| worker 身份 | worker 直接调用 protected mutator 成功；worker 内 `create_task()` 的 child 即使继承 context 也必须失败，证明 permit 绑定实际 worker Task **[F4]** |
+| worker 身份 | worker 直接调用 protected mutator 成功；worker 内 `create_task()` 的 child 即使继承 context 也必须失败；热重载先撤旧 permit 再注册新 permit，旧 worker 的迟到 `finally` 不能清掉新 permit，证明授权始终只属于当前实际 worker Task **[F4][R2-3]** |
 | replay kind | 12h attribution 只提交 `confusion.attribution.replay`；dispatcher 有独立分支，同 replay identity 重放 10 次只分析/应用一次 **[F1]** |
 | action 契约 | 空队列本地 action 仍返回 `200`；阻塞一个 LLM job 后 action 在 1.5 s 内返回既有 `202 processing`；有限 poll deadline 后进入可重试状态，模拟重启丢 job 后可再次提交 **[F6]** |
 | crash/retry | event/object/derived/rebuild/`after_applied_before_projection`/projection/anchor 七个边界逐一故障注入；applied gap 可由 GET reconcile 补投影且不重做对象语义 **[F7]** |
@@ -103,14 +110,14 @@ handler 不预留 receipt，不在 worker 外形成第二个仲裁点。
 | --- | --- | --- |
 | 卡片 `confirm/reject` | `api/app.py:8117-8144` | `settle.hypothesis` |
 | 卡片 `defer` | `api/app.py:7925-7959` | `card.defer` |
-| 卡片 `discuss` | `api/app.py:7961-8013` | `card.discuss`，worker 内建锚 |
-| pending open / confusion question claim、retarget、rollback | `api/app.py:2743-2906`，尤其 `2762-2782,2879-2891` | `confusion.open.sync` 的同一 handler 处理 `schedule/retarget/rollback`；成功后 `anchor.establish`；turn 创建仍使用既有 SQLite 去重 **[F3]** |
-| durable confusion turn 建锚 | `api/app.py:7641-7674` | `anchor.establish`，先于该 turn 的 learn job |
+| 卡片 `discuss` | `api/app.py:7961-8013` | `card.discuss`，因该 kind 在 worker 内建锚，admission 必须先登记 reservation，再入队 **[R2-1]** |
+| pending open / confusion question claim、retarget、rollback | `api/app.py:2743-2906`，尤其 `2762-2782,2879-2891` | `confusion.open.sync` 的同一 handler 处理 `schedule/retarget/rollback`；探针/疑惑抛出后凡会建锚的分支，必须通过同一原子 admission helper 先预约再提交 `anchor.establish`，turn 创建仍使用既有 SQLite 去重 **[F3][R2-1]** |
+| durable confusion turn 建锚 | `api/app.py:7641-7674` | `anchor.establish`，在同一 admission critical section 预约并入队，先于该 turn 的 learn job **[R2-1]** |
 | 锚 relation/解除/归属结算 | `soul/engine.py:2872-3037` | 已处于 learn job 的 worker context，调用内部 apply，不二次入队 |
 | 普通 chat `settles` | `soul/engine.py:1811-1820,3239-3310` | 已处于 learn job 的 worker context，调用内部 apply |
 | durable `scope=probe` 回复侧效应 | `api/app.py:7730-7794` | `probe.reply.apply`；worker 返回 typed classification/exploration intent，exploration 写由原调用 task 在队外消费 **[F8]** |
 | durable `scope=confusion` 回复侧效应 | `api/app.py:7869-7882` | `confusion.reply.apply` |
-| confusion attribution 补放 | `soul/engine.py:2669-2803` | 12h hook 只提交独立 `confusion.attribution.replay`；分析/应用在其专属 dispatcher handler，不借 `learn`/`confusion.reply.apply` **[F1]** |
+| confusion attribution 补放 | `soul/engine.py:2669-2803` | 12h hook 只提交独立 `confusion.attribution.replay`；该 handler 若需为疑惑补建锚，也必须在此 job admission 声明建锚 transition 并先预约；分析/应用不借 `learn`/`confusion.reply.apply` **[F1][R2-1]** |
 | legacy insight feedback | `api/app.py:9038-9092` | façade 提交 `settle.hypothesis`，保留 deprecated headers |
 | card projection / orphan discussion repair | `api/app.py:2622-2683` | GET 不直接写；需要时投递 `card.reconcile` |
 
@@ -136,6 +143,12 @@ buffer record/promotion 仍属于 §2.3，必须从 handler 边界上明确拆�
 `probe.reply.apply` 把 exploration 写入偷带进队列。worker 只在 completion result
 返回 immutable exploration intent；提交它的原 task 在 await completion 后、无
 worker permit 时调用既有 exploration helper，且不得再次分类。**[F8]**
+
+本节“探针/疑惑抛出建锚”只指 pending confirmation/durable confusion 中已经属于
+§2.2、且确实会建立 dialogue anchor 的 producer 分支。它们必须复用
+`reserve_then_put_nowait()`（名称可等价），不能先 enqueue、再在 worker 内临时补
+reservation。§2.3 的 direct interest/avoidance probe button、exploration writer
+仍不进入本队列。**[R2-1]**
 
 ### 2.3 Out of scope
 
@@ -196,7 +209,7 @@ worker permit 时调用既有 exploration helper，且不得再次分类。**[F8
 | OS 文件锁跨 `await` 导致事件循环自锁 | 删除 settlement 文件锁、guard 和 `asyncio.to_thread(claim)`，整类死锁消失 |
 | 卡片、legacy、普通 chat、锚、probe reply 在对话域内旁路 | §2.2 全部 submit；worker 内嵌套 settle 走内部 apply，不递归排队 |
 | LLM 后 generation 校验与对象提交间仍有窗口 | 同一 worker 内校验 frozen generation 后连续 apply；本队列内无第二锚 writer 插入 |
-| `engine.py:1089` 捕获未来锚 | 删除执行期推断；真实无锚冻结 absent tombstone，已排队 establish 冻结 reservation，worker 均只用 admission snapshot **[F2]** |
+| `engine.py:1089` 捕获未来锚 | 删除执行期推断；真实无锚冻结 absent tombstone，全部已排队建锚 kind/路径冻结 reservation，worker 均只用 admission snapshot **[F2][R2-1]** |
 | effect 后、旧 segment flag 前崩溃可能重复 ledger/derived | effect 使用稳定 key/幂等 set-upsert；不再依靠三段 fencing CAS 获得正确性 |
 | force_tick/pipeline/OpenClaw 等跨任务同时写 | 不自动消失；只在 §10 已知限制中承认，不扩为跨进程协调器 |
 
@@ -214,19 +227,27 @@ worker permit 时调用既有 exploration helper，且不得再次分类。**[F8
 | F8 | typed completion/result 把 exploration intent 交到队外（§8.3） | Task 3.2 |
 | F9 | 三个点名旧测试与全部旧机制测试逐项改写 | Task 2.1、3.4 的具名映射表 |
 
+### 4.2 对抗 review round 2 追踪
+
+| Finding | 本 spec 的封口 | Implementation plan |
+| --- | --- | --- |
+| R2-1 BLOCKER | 建锚能力采用 exhaustive admission policy；`anchor.establish`、`card.discuss`、探针/疑惑抛出建锚与 replay 补建锚都先预约；新增 discuss→settle barrier（§2.2、§5.1、§6） **[R2-1]** | Task 0.1、1.1、2.2、3.1、3.2 |
+| R2-2 BLOCKER | `failed` 进入 logical-state union；失败原子推进 head 到实际 `persisted/absent`，旧依赖排空后 GC，重试分配 fresh id（§5.1、§6） **[R2-2]** | Task 0.1、1.1、2.2 |
+| R2-3 MAJOR | reload handoff 先撤旧 permit、再注册新 worker；迟到 `finally` 只能 compare-and-clear 自己的 task+nonce（§5.2） **[R2-3]** | Task 0.2、1.1、1.2 |
+
 ## 5. 目标结构
 
 ```text
 card action / pending-open / legacy / durable reply / Socratic learn
                               |
-         queue-global admission snapshot / anchor reservation [F2]
+     exhaustive anchor-builder admission / snapshot + reservation [F2][R2-1]
                               |
                               v
              one in-memory asyncio.Queue[DialogueJob]
                               |
                     one async worker task
                               |
-       actual-worker-Task-bound permit + typed dispatcher [F4]
+       actual-worker-Task-bound permit + typed dispatcher [F4][R2-3]
           /          |           |          \
        learn      settle       anchor       card/probe effect
     (LLM+apply)  (internal)   (internal)       (internal)
@@ -248,17 +269,28 @@ card action / pending-open / legacy / durable reply / Socratic learn
   `confusion.reply.apply` 或 `anchor.establish`；**[F1][F3]**
 - `payload`：提交时复制，worker 不读取调用方后续可变对象；
 - `anchor_snapshot: AnchorAdmissionSnapshot`：提交时从队列级 registry 冻结，
-  是 `persisted(kind, ref, generation)`、`reserved(kind, ref, reservation_id)`、
-  `absent(target_kind, target_ref, tombstone_epoch)` 或 `not_applicable` 之一；不能用
-  `("", 0)` 同时表示“没有锚”与“不涉锚”；**[F2]**
+  logical-state union 是 `persisted(kind, ref, generation)`、
+  `reserved(kind, ref, reservation_id)`、`failed(kind, ref, reservation_id, cause)`、
+  `absent(target_kind, target_ref, tombstone_epoch)` 或
+  `not_applicable`；新 submit 不得从 logical head 捕获 `failed`，但失败前已受理且
+  引用 reservation 的 envelope 可在 resolve 时得到 `failed`。不能用 `("", 0)`
+  同时表示“没有锚”与“不涉锚”；**[F2][R2-2]**
+- `anchor_transition`：由 `kind + immutable payload` 在 admission 以 exhaustive
+  policy 归类为 `establish(kind, ref, origin)`、其他已知 anchor transition 或
+  `none`。任何 dispatcher 分支只要可能调用建锚 mutator，就必须在
+  `put_nowait` 前持有 reservation；当前 exhaustive 集合是
+  `anchor.establish`（producer source 包含探针抛出、疑惑抛出与 durable
+  confusion ensure）、`card.discuss`，以及
+  `confusion.attribution.replay(needs_anchor=true)`。**[R2-1]**
 - `accepted_at` / 单调 `sequence`；
 - 可选 `completion: asyncio.Future[DialogueJobResult]`：
   action/legacy 使用；`probe.reply.apply` 还通过 result 返回 worker 已计算的
   classification 与可选 exploration intent，队外不得再分类。**[F8]**
 
 队列本身不写 `settlement_jobs` 表，不扫描 SQLite，不做 owner lock。
-`shutdown`/热重载沿用当前 self-owned worker 的 pause/drain 语义；进程被强杀时未执行
-job 可丢。
+`shutdown`/热重载沿用当前 self-owned worker 的 pause/drain 语义；热重载的 permit
+交接还必须遵守 §5.2 的 revoke/register/compare-and-clear 顺序。进程被强杀时未执行
+job 可丢。**[R2-3]**
 
 ### 5.2 单 worker、实际 Task permit 与禁止递归入队
 
@@ -267,8 +299,28 @@ nonce，dispatch 前可用私有 `ContextVar` 携带 nonce，但
 `require_dialogue_settlement_worker()` 必须同时验证
 `asyncio.current_task() is registered_worker_task`。ContextVar 传播本身永远不能
 授权 mutation；worker handler 内 `asyncio.create_task()` 出来的 child 即使继承
-nonce，也必须抛 `DialogueSettlementMutationOutsideWorker`。worker 退出/热替换时
-在 `finally` 注销 task + nonce，旧 task 不得复用许可。**[F4]**
+nonce，也必须抛 `DialogueSettlementMutationOutsideWorker`。**[F4]**
+
+permit registry 任一时刻只保存一个 `(worker_task, lifecycle_nonce)`。热替换必须先
+pause/drain 旧 worker，再以旧 tuple 做精确 revoke，确认旧 worker 已无 mutation
+授权后，才注册新 tuple；不能等旧 task 走到 `finally` 才撤权，也不能先让两个 tuple
+同时有效。每个 worker 的 `finally` 只能执行
+`clear_if_current(its_task, its_nonce)`：若 registry 已指向新 worker，旧
+`finally` 必须 no-op，绝不能无条件清空。这样“新 worker 已注册 → 旧 worker
+迟到 finally”后，新 worker 仍获授权，旧 worker 始终无授权。**[R2-3]**
+
+若新 worker 构造/启动失败，rollback 只能在没有新 tuple 生效时重新登记已
+pause/drain 且尚可恢复的旧 worker；恢复也分配新 lifecycle nonce，不能复活已撤销
+nonce。permit revoke/register 都是同步、无 `await` 的单槽状态变更，不引入
+coordinator 或第二 worker。**[R2-3]**
+
+必须有无 sleep 的
+`test_old_worker_finally_cannot_clear_new_worker_permit_after_reload_handoff`：
+barrier 把 old
+卡在 `finally` cleanup 前，handoff 撤销 old 后注册 new；固定观察
+“new 已注册 → old finally 注销尝试 → new mutation 成功”，并在 revoke 后及 old
+finally 后都断言 old mutation 抛
+`DialogueSettlementMutationOutsideWorker`。**[R2-3]**
 
 如果 worker 内的 learn/anchor handler 再调用公开 `submit_and_wait()`，队列立即抛
 `DialogueSettlementReentryError`；不得把子 job 放到自己身后再等待。普通 chat
@@ -279,6 +331,11 @@ settles 与锚 relation 必须调用 `_apply_*` 内部函数，共享当前 work
 
 ### 5.3 Typed dispatcher 与结果边界
 
+- dispatcher 的每个 kind 都必须声明 `anchor_transition_policy`；声明
+  `may_establish` 却没有 reservation 的 envelope 在 dispatch 前 fail closed。
+  policy/exhaustiveness test 必须覆盖直接 `anchor.establish`、inline
+  `card.discuss`、探针/疑惑抛出建锚与 replay 缺锚补建，新增建锚 callsite 而未加入
+  policy 即失败。**[R2-1]**
 - `confusion.attribution.replay` 有具名 handler；12h hook 只做 read-only candidate
   enumeration + submit。handler 先查现有 turn/replay/settlement receipt：已有终态
   返回同一 result；classification gap 才分析一次，然后以稳定
@@ -291,60 +348,103 @@ settles 与锚 relation 必须调用 `_apply_*` 内部函数，共享当前 work
   feedback history、visible cognition/event 在 worker 内完成；exploration intent
   只是数据，不在 dispatcher 内执行。**[F8]**
 
-## 6. Admission anchor timeline 与 Generation 冻结 **[F2]**
+## 6. Admission anchor timeline 与 Generation 冻结 **[F2][R2-1][R2-2]**
 
-只读持久化 anchor 不能定义 admission：`anchor.establish` 可能已经排在队列里却尚未
+只读持久化 anchor 不能定义 admission：任何建锚 job 都可能已经排在队列里却尚未
 写文件。为此统一队列必须拥有一个**进程内、队列全局、单调推进**的
 `AnchorAdmissionRegistry`。它不是第二个队列、不是 durable owner，也不跨进程。
+**[R2-1]**
 
 1. queue 启动时从持久化 anchor 初始化 logical state。每次 submit 在同一个不含
-   `await` 的 admission critical section 内完成：分配 sequence → 更新/读取 logical
-   state → 深拷贝 snapshot → `put_nowait`；并发 producer 不能在 snapshot 与入队
-   之间穿插。
-2. `anchor.establish` admission 必须**先**创建 opaque `reservation_id`，把 logical
-   state 设为 `reserved(kind, ref, reservation_id)`，再入队。后续 learn/settle 即使
-   此时持久化层仍无锚，也冻结该 reservation，而不是错误冻结空 generation。
-3. establish handler 成功后把 reservation 原地 resolve 为实际
-   `(kind, ref, generation)`；失败/补偿则标为 failed。后续持 reservation 的 job
-   只能使用 resolved generation；reservation failed 时返回
-   `anchor_dependency_failed`，绝不能退回 current/no-anchor 推断。
-4. logical state 真正无锚时创建
+   `await` 的 admission critical section 内完成：分配 sequence → exhaustive
+   classify `anchor_transition` → 更新/读取 logical state → 深拷贝 snapshot →
+   `put_nowait`；并发 producer 不能在 reservation/snapshot 与入队之间穿插。
+   **[R2-1]**
+2. **所有可能建锚的 kind/producer 路径**必须先创建 opaque `reservation_id`，把
+   logical head 设为 `reserved(kind, ref, reservation_id)`，再入队。当前
+   exhaustive policy 只有三类：
+   - 所有 `anchor.establish`，明确包含 `pending_probe_throw`、
+     `pending_confusion_throw` 与 `durable_confusion_ensure` producer source；
+   - inline `card.discuss`；
+   - `confusion.attribution.replay(needs_anchor=true)`。
+   `confusion.open.sync` 本身不得 inline 建锚；schedule/retarget 成功后，由
+   producer 用同一原子 helper 完成
+   “reserve + enqueue anchor.establish”，之后才可接受依赖 learn/settle。后续 job
+   即使持久化层仍无锚，也冻结该 reservation，不能错误冻结 absent/旧 generation。
+   新增第四类必须先修改本 spec/policy 与 exhaustiveness test。**[R2-1]**
+3. 建锚 handler 成功后把 reservation entry 原地 resolve 为
+   `persisted(kind, ref, generation)`；失败前已受理并持该 reservation 的依赖只可
+   使用此 resolved generation，绝不能执行期重读 current。**[F2]**
+4. 建锚失败时，在一个不含 `await` 的 registry transition 内同时完成两件事：
+   reservation entry 变为 union 中的
+   `failed(kind, ref, reservation_id, cause)`，供**失败前已受理**的依赖解析为
+   `anchor_dependency_failed`；若 logical head 仍指向该 reservation，则 head
+   原子前移到 mutation 失败后的实际 `persisted` 或带新 epoch 的 `absent`。若已有
+   更晚 transition，则失败 completion 不覆盖更晚 head。新 submit 只能读取前移后的
+   head，绝不能引用 failed entry；读取 failed 作为新 head 必须 fail closed。
+   **[R2-2]**
+5. logical state 真正无锚时创建
    `absent(target_kind, target_ref, tombstone_epoch)`。tombstone 是“本请求受理时无
    锚”的全局 admission 事实，不是空字符串。worker 只验证该 logical snapshot；
    若执行前出现一个不属于该 snapshot 的锚，则返回 `stale_anchor`，不把 `0`
-   升级成未来 generation。
-5. 对 `persisted`/已 resolve `reserved` snapshot，worker 在第一个业务 effect 前
-   要求 active anchor 的 kind/ref/generation 精确相等；不匹配时不写 object、
-   candidate、replay、ledger、profile、projection，也不 release 当前锚。
-6. 删除 `SoulEngine.settle_hypothesis()` 及其他 handler 的所有 current-anchor
+   升级成未来 generation。**[F2]**
+6. 对 `persisted`/成功 resolve 的 `reserved` snapshot，worker 在第一个业务 effect
+   前要求 active anchor 的 kind/ref/generation 精确相等；`failed` dependency 直接
+   返回 `anchor_dependency_failed`。任一失败都不写 object、candidate、replay、
+   ledger、profile、projection，也不 release 当前锚。**[F2][R2-2]**
+7. 删除 `SoulEngine.settle_hypothesis()` 及其他 handler 的所有 current-anchor
    推断。worker 可以 resolve envelope 已携带的 reservation，不能向 anchor manager
-   询问“现在该归谁”后改写 snapshot。
-7. 每个 worker-side anchor mutation 完成后，都把实际 `persisted/absent/failed`
-   outcome 回报 registry。回报只 resolve 对应 sequence/reservation；若已有更晚的
-   admission transition（例如 B 的 establish reservation），旧 sequence 的完成
-   不得覆盖 logical head。这样 release 完成后的新 submit 能看到 absent，而较早
-   establish 的完成也不能抹掉已登记的较晚预约。
-8. reservation/tombstone 只保留到没有 queued/running envelope 引用；queue
-   shutdown 后丢弃，重启从持久化 anchor 重建。它不恢复丢失 job，符合 §12。
+   询问“现在该归谁”后改写 snapshot。registry 在建锚失败 completion 中读取/接收
+   实际 persisted/absent 只用于推进**未来 admission head**，不得反向改写旧依赖。
+   **[F2][R2-2]**
+8. 每个 worker-side anchor mutation 完成后，都把实际
+   `persisted/absent/failed` outcome 与原 sequence/reservation 回报 registry。较早
+   completion 只 resolve 自己；若已有更晚 reservation，不得覆盖 logical head。
+   release 完成后的新 submit 因而看见 absent，较早 builder 完成也不能抹掉较晚预约。
+   **[F2][R2-2]**
+9. registry 对每个 reservation 只统计已经冻结该 id 的 queued/running envelope。
+   failure transition 后禁止新引用；旧依赖完成/取消时逐一减计数，归零立即 GC
+   failed entry。后续重试必须分配 fresh `reservation_id`，不得复活 failed id；
+   retry 成功可正常成为新 logical head。tombstone 同样只保留到无引用。
+   **[R2-2]**
+10. queue shutdown 后丢弃 registry，重启从持久化 anchor 重建；它不恢复丢失 job，
+    符合 §12。**[F2]**
 
-必须有两个无 sleep 的确定性交错：
+必须有以下无 sleep 的确定性交错：
 
 - `anchor.establish(A)` submit 后用 barrier 阻止 worker → `settle(A)` submit →
   放行 worker；settle envelope 在 admission 已引用 A 的 reservation，执行时使用
-  establish 返回的 generation，不能冻结空锚、不能二次读取 current；
+  establish 返回的 generation，不能冻结空锚、不能二次读取 current。**[F2]**
+- `card.discuss(A)` submit 后用 barrier 阻止 worker → `settle(A)` submit →
+  放行 worker；settle snapshot 必须是由 `card.discuss` admission 创建的
+  `reserved`，不能是 absent 或旧 persisted generation；discuss 成功后依赖使用其
+  generation。该交错具名为
+  `test_card_discuss_reservation_is_visible_to_later_settlement_admission`。
+  **[R2-1]**
+- 表驱动枚举 `anchor.establish` 的探针抛出/疑惑抛出/durable-confusion producer
+  sources、`card.discuss` 与
+  `confusion.attribution.replay(needs_anchor=true)`，逐个断言 reservation 在
+  envelope `put_nowait` 前已经成为 logical head；dispatcher 出现未分类建锚
+  callsite 时测试失败。**[R2-1]**
 - `settle(A)` 先在真实无锚状态 submit → 后续 `anchor.establish(A)` submit；前者
   保持自己的 no-anchor tombstone，并按 FIFO 在新锚前执行，不能被后一次 admission
-  反向升级。
+  反向升级。**[F2]**
+- 建锚 job 与两个旧依赖入队 → builder 失败后、旧依赖 dispatch 前用 barrier 暂停
+  → 新 submit；新 envelope 必须冻结实际 `persisted/absent` 且不增加 failed ref。
+  放行后旧依赖均返回 `anchor_dependency_failed`/effect=0，最后一个引用归零即 GC；
+  再 submit retry 必须得到不同 reservation id 并可成功。该交错具名为
+  `test_failed_reservation_advances_head_for_new_submit_and_gc_after_old_dependents_drain`。
+  **[R2-2]**
 
-每个交错循环 100 次并断言 snapshot kind/reservation/tombstone、对象 effect 与
-anchor release 都符合受理时 timeline。单测还要覆盖 establish 失败：依赖 job
-得到 `anchor_dependency_failed` 且业务 effect=0；以及 “A 完成后、B reservation
-已登记” 时 A 的 completion 不覆盖 B logical head。
+前三个核心 timeline 交错与 failed state-machine 交错各循环 100 次，断言 snapshot
+kind/reservation/tombstone、对象 effect、anchor release、failed refcount/GC 都符合
+受理时 timeline。另覆盖 “A 完成后、B reservation 已登记” 时 A completion 不覆盖
+B logical head。**[F2][R2-1][R2-2]**
 
-显式 await `anchor.establish` completion 仍可用于 durable confusion UI 的产品
-时序（拿到 generation 后才生成 reply），但 correctness 不能依赖每个 producer 都
-记得 await；admission registry 必须兜住“establish 已入队、后续 job 随即入队”的
-合法顺序。
+显式 await 建锚 completion 仍可用于 durable confusion UI 的产品时序（拿到
+generation 后才生成 reply），但 correctness 不能依赖每个 producer 都记得 await；
+admission registry 必须兜住“任一建锚 kind 已入队、后续 job 随即入队”的合法顺序。
+**[R2-1]**
 
 对 `learn` job，“受理”定义为 Socratic reply 完成后向统一队列提交学习/结算分析的
 时刻；对 HTTP action/legacy/open，则定义为 handler 完成校验并进入上述 admission
@@ -503,8 +603,8 @@ completion 恢复的是提交 job 的原 task，不是 worker 或 worker child�
 | ID | MUST | 失败判据 |
 | --- | --- | --- |
 | Q1 | §2.2 的对话结算全部经同一 queue | 任一入口 spy 到 worker 外 protected mutation，包括 pending-open 原始 confusion sink **[F3]** |
-| Q2 | 主进程内恰一个 active consumer | 100-job 测试出现 `max_active > 1` 或热重载出现新旧 worker 重叠 |
-| Q3 | queue-global admission timeline 冻结 persisted/reserved/absent 状态 | 已入队 establish 对后续 job 不可见、worker 补抓 current、absent 升级为未来代次任一发生 **[F2]** |
+| Q2 | 主进程内恰一个 active consumer/permit holder | 100-job 测试出现 `max_active > 1`，或 reload 在撤旧 permit 前注册新 permit **[R2-3]** |
+| Q3 | queue-global admission timeline 对所有建锚 kind 冻结 persisted/reserved/failed/absent 状态 | 已入队 `card.discuss`/任一建锚路径对后续 job 不可见、worker 补抓 current、absent 升级为未来代次任一发生 **[F2][R2-1][R2-2]** |
 | Q4 | worker 不等待自己 | worker 内 public submit 未立即报 reentry，或测试超过 100 ms 未结束 |
 | Q5 | 不持同步 settlement lock 跨 await | 旧锁符号仍存在，或 heartbeat 在 LLM await 期间停止 |
 | Q6 | ref receipt 仅由 worker 创建，且 winner payload 不变 | handler 预留 receipt、同 ref 两 verdict 都写对象，或 retry 使用 contender payload |
@@ -515,19 +615,20 @@ completion 恢复的是提交 job 的原 task，不是 worker 或 worker child�
 | Q11 | action 常态 200、拥塞才 202 | 空队列总是 202，或拥塞请求同步挂到 LLM 完成 |
 | Q12 | 对话域旁路矛盾只可在已知限制场景复现 | 单 backend、仅 §2.2 入口仍能产生相反对象终态 |
 | Q13 | 12h attribution 使用独立 typed kind | hook 直接分析/应用，dispatcher 无 `confusion.attribution.replay` 分支，或借用 learn/reply kind **[F1]** |
-| Q14 | mutation permit 绑定实际 worker Task | worker child task 继承 context 后可调用 protected mutator **[F4]** |
+| Q14 | mutation permit 绑定当前实际 worker Task，reload cleanup 只能 compare-and-clear 自己 | worker child 继承 context 后可 mutation，旧 worker 撤权后仍可 mutation，或旧 `finally` 清掉新 worker permit **[F4][R2-3]** |
 | Q15 | 202 一定有有限页内退路 | 30 秒后仍永久 processing，或重启丢 job 后同 action 不能再提交 **[F6]** |
 | Q16 | probe classification 与 exploration 写跨边界交接 | classifier 调用 >1、exploration 在 worker/child task 内 mutation，或 worker 直接 promotion **[F8]** |
 | Q17 | CLI/OpenClaw 兼容模式显式且行为不变 | 任一被接进 queue/guard、变成只回复不学习，或新增第三个 legacy-direct callsite **[F5]** |
+| Q18 | failed reservation 不再成为 logical head 或吸收新引用 | builder 失败后的新 submit 引用 failed、旧依赖排空后 entry 未 GC，或 retry 复用 failed reservation id **[R2-2]** |
 
 ## 11. Wave
 
 | Wave | 内容 | 交付门 |
 | --- | --- | --- |
-| Wave 0 | 冻结入口/raw sink/受保护 mutator 清单；把 deadlock、admission reservation、child-task permit、旁路与重试语义写成 RED tests | 清单覆盖 100%，F2/F3/F4 失败原因确定 |
-| Wave 1 | 泛化 `DialogueLearnQueue` 为 typed 统一队列；queue-global anchor registry、Future、actual-Task permit、reentry/lifecycle；显式保留两处 legacy-direct 兼容 | 100 mixed jobs 单消费者；API 无隐式 detached fallback，CLI/OpenClaw 行为不变 **[F2][F4][F5]** |
-| Wave 2 | 简化 SQLite receipt/effect 幂等；删除锁/lease/token/三段 executor；删除执行期 generation 推断 | 旧符号 0；七 crash gap 可重试，applied gap GET reconcile 通过 **[F7]** |
-| Wave 3 | cards/pending-open/anchor/chat/probe/confusion/replay/legacy cutover；有限 202 轮询；护栏、旧测试改写、文档与全量门 | F1/F3/F6/F8/F9 与所有量化门全绿 |
+| Wave 0 | 冻结入口/raw sink/受保护 mutator/建锚 kind 清单；把 deadlock、三类 admission barrier、failed-head GC、reload permit 交接、旁路与重试语义写成 RED tests | 清单覆盖 100%，F2/F3/F4 与 R2-1/R2-2/R2-3 失败原因确定 **[R2-1][R2-2][R2-3]** |
+| Wave 1 | 泛化 `DialogueLearnQueue` 为 typed 统一队列；queue-global anchor registry、Future、actual-Task permit、reentry/lifecycle；显式保留两处 legacy-direct 兼容 | 100 mixed jobs 单消费者；全部建锚 kind 先预约；failed head 前移/GC；reload permit 单槽交接；API 无隐式 detached fallback，CLI/OpenClaw 行为不变 **[F2][F4][F5][R2-1][R2-2][R2-3]** |
+| Wave 2 | 简化 SQLite receipt/effect 幂等；删除锁/lease/token/三段 executor；删除执行期 generation 推断 | 旧符号 0；所有建锚依赖只用 admission reservation；七 crash gap 可重试，applied gap GET reconcile 通过 **[F7][R2-1][R2-2]** |
+| Wave 3 | cards/pending-open/anchor/chat/probe/confusion/replay/legacy cutover；有限 202 轮询；护栏、旧测试改写、文档与全量门 | F1/F3/F6/F8/F9 与 R2-1/R2-2/R2-3 及所有量化门全绿 **[R2-1][R2-2][R2-3]** |
 
 Waves 0–1 可独立提交。Wave 2 的 schema/executor 删除与 Wave 3 的入口 cutover
 属于同一个不可拆分的 runtime 迁移窗口：可按 Task 顺序开发，但不得发布只含
@@ -557,8 +658,10 @@ Wave 2 的中间状态；任何入口也不得同时 direct mutation 又 submit�
 
 ## 13. 文档义务
 
-本次 review revision 只修改本 spec 与 companion plan，不改变 runtime/API，因此
-不改模块文档、changelog 或架构图。
+本次 review round 2 revision 只修改本 spec 与 companion plan，不改变
+runtime/API，因此不改模块文档、changelog 或架构图；R2-1～R2-3 只收紧既有单进程、
+单 `asyncio` 队列的 admission/registry/permit 契约，不引入新 writer 或新范围。
+**[R2-1][R2-2][R2-3]**
 
 实现 PR 必须按 `CLAUDE.md#documentation-requirements` 同步：
 
