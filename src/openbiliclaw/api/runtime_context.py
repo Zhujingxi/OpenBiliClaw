@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from openbiliclaw.config import Config
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueDispatcher
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
-def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> Any:
+def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatcher:
     """Build the one typed dispatcher installed by the API runtime.
 
     Wave 1 admits only ``learn`` from production entry points.  Every later
@@ -143,11 +144,12 @@ def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> Any:
     """
     from openbiliclaw.soul.dialogue_learn_queue import (
         AnchorPersisted,
+        DialogueJob,
         DialogueJobKind,
         DialogueJobResult,
     )
 
-    async def _dispatch(job: Any) -> DialogueJobResult:
+    async def _dispatch(job: DialogueJob) -> DialogueJobResult:
         if job.kind is DialogueJobKind.LEARN:
             from openbiliclaw.llm.service import _background_admission_bypass
 

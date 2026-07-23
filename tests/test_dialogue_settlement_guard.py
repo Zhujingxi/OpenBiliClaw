@@ -100,23 +100,23 @@ RAW_SINK_INVENTORY = (
         "confusion_schedule",
         "ConfusionManager.schedule_ask",
         ("schedule",),
-        ((2762, "confusion_manager.schedule_ask("),),
+        ((2771, "confusion_manager.schedule_ask("),),
     ),
     _RawSink(
         "confusion_ask_turn_update",
         "Database.update_confusion",
         ("retarget", "create_failure_rollback"),
         (
-            (2778, "updater("),
-            (2882, 'updater(int(ref), status="open", ask_turn_id="")'),
-            (2887, "updater("),
+            (2787, "updater("),
+            (2891, 'updater(int(ref), status="open", ask_turn_id="")'),
+            (2896, "updater("),
         ),
     ),
     _RawSink(
         "pending_open_anchor",
         "DialogueAnchorManager.establish",
         ("establish",),
-        ((2901, "anchor_manager.establish("),),
+        ((2910, "anchor_manager.establish("),),
     ),
 )
 

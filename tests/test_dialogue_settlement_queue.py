@@ -1548,6 +1548,143 @@ async def test_queue_reload_start_registers_actual_worker_permit_before_publish(
     await queue.shutdown()
 
 
+def test_dialogue_llm_dispatcher_boundary_is_typed_and_inline() -> None:
+    """Task 1.3: the runtime dispatcher is typed and owns the direct await."""
+    import inspect
+
+    from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
+
+    assert _build_dialogue_settlement_dispatcher.__annotations__["return"] == "DialogueDispatcher"
+    source = inspect.getsource(_build_dialogue_settlement_dispatcher)
+    assert "await soul_engine.learn_from_dialogue" in source
+    assert "create_task" not in source
+    assert "wait_for" not in source
+
+
+async def test_dialogue_llm_jobs_are_serial_while_heartbeat_stays_responsive(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Task 1.3: blocked LLM work stays in one worker without blocking the loop."""
+    import logging
+
+    from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
+
+    class FakeSoulEngine:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.first_started = asyncio.Event()
+            self.second_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.worker_tasks: list[asyncio.Task[object] | None] = []
+            self.force_tick_calls = 0
+            self.exploration_calls = 0
+            self.openclaw_dispatch_calls = 0
+
+        async def learn_from_dialogue(self, **payload: object) -> None:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.worker_tasks.append(asyncio.current_task())
+            try:
+                if payload["user_message"] == "first":
+                    self.first_started.set()
+                    await self.release_first.wait()
+                else:
+                    self.second_started.set()
+                    await asyncio.sleep(0)
+            finally:
+                self.active -= 1
+
+        async def force_tick(self) -> None:
+            self.force_tick_calls += 1
+
+        async def exploration(self) -> None:
+            self.exploration_calls += 1
+
+        async def dispatch_openclaw(self) -> None:
+            self.openclaw_dispatch_calls += 1
+
+    fake_soul = FakeSoulEngine()
+    queue = DialogueSettlementQueue(_build_dialogue_settlement_dispatcher(fake_soul))
+    caplog.set_level(
+        logging.DEBUG,
+        logger="openbiliclaw.soul.dialogue_learn_queue",
+    )
+    queue.start()
+    worker_task = queue.worker_task
+    assert worker_task is not None
+    first = queue.submit(
+        DialogueJobKind.LEARN,
+        {
+            "user_message": "first",
+            "assistant_reply": "one",
+            "session": "popup",
+            "scope": "chat",
+            "turn_id": "turn-1",
+        },
+        completion=True,
+    )
+    second = queue.submit(
+        DialogueJobKind.LEARN,
+        {
+            "user_message": "second",
+            "assistant_reply": "two",
+            "session": "popup",
+            "scope": "chat",
+            "turn_id": "turn-2",
+        },
+        completion=True,
+    )
+    assert first is not None and first.completion is not None
+    assert second is not None and second.completion is not None
+
+    try:
+        await asyncio.wait_for(fake_soul.first_started.wait(), timeout=1)
+        assert not fake_soul.second_started.is_set()
+
+        heartbeat_ticks = 0
+        loop = asyncio.get_running_loop()
+        heartbeat_deadline = loop.time() + 0.5
+        while loop.time() < heartbeat_deadline:
+            heartbeat_ticks += 1
+            await asyncio.sleep(0.02)
+
+        assert heartbeat_ticks >= 10
+        assert not fake_soul.second_started.is_set()
+        fake_soul.release_first.set()
+        first_result, second_result = await asyncio.gather(
+            asyncio.shield(first.completion),
+            asyncio.shield(second.completion),
+        )
+        assert first_result.outcome == "completed"
+        assert second_result.outcome == "completed"
+    finally:
+        fake_soul.release_first.set()
+        await queue.shutdown()
+
+    assert fake_soul.max_active == 1
+    assert fake_soul.worker_tasks == [worker_task, worker_task]
+    assert fake_soul.force_tick_calls == 0
+    assert fake_soul.exploration_calls == 0
+    assert fake_soul.openclaw_dispatch_calls == 0
+    timing_records = [
+        record for record in caplog.records if record.message == "dialogue settlement job"
+    ]
+    assert len(timing_records) == 2
+    assert all(record.queue_wait_ms >= 0 for record in timing_records)
+    assert all(record.run_ms >= 0 for record in timing_records)
+    assert timing_records[1].queue_wait_ms > 0
+
+
+def test_dialogue_serial_observability_thresholds_are_documented() -> None:
+    """Task 1.3: production split thresholds live in docs, not a second queue."""
+    module_doc = (Path(__file__).parents[1] / "docs/modules/soul.md").read_text(encoding="utf-8")
+
+    assert "`202 ratio >1%`" in module_doc
+    assert "`p95 >5s`" in module_doc
+    assert "不预埋第二队列" in module_doc
+
+
 def test_runtime_uses_one_settlement_queue_and_two_legacy_direct_callsites() -> None:
     """F5/R2-3: runtime naming is singular and production direct mode is allowlisted."""
     import ast

@@ -1698,7 +1698,9 @@ class SoulEngine:
         turns run inventory ``settles``. Probe settlement stays in its durable
         side effect; confusion settlement belongs exclusively to the serialized
         dialogue-anchor processor. ``turn_id`` is stamped on ledger rows as an
-        idempotency observation key.
+        idempotency observation key. Provider calls retain their own finite
+        timeouts; this mutation-bearing method intentionally has no whole-job
+        timeout that could cancel it between local effects.
         """
         await self._memory.propagate_event(
             {

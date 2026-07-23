@@ -47,6 +47,16 @@ class FakeRegistry:
         return LLMResponse(content=self.content, provider="openai")
 
 
+def test_dialogue_llm_learning_has_no_whole_job_timeout_wrapper() -> None:
+    """Task 1.3 keeps provider timeouts and never cancels mid-mutation locally."""
+    import inspect
+
+    source = inspect.getsource(SoulEngine.learn_from_dialogue)
+
+    assert "asyncio.wait_for(" not in source
+    assert "asyncio.timeout(" not in source
+
+
 def test_soul_engine_wires_module_overrides_to_internal_service(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()
