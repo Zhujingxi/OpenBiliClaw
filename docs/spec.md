@@ -226,15 +226,17 @@ guided init: signals → preferences → full profile commit
 
 durable dialogue → confirmation entry(pending list / cards)
                  → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
-                 → typed settlement queue[current production entry: learn] → one worker
+                 → typed settlement queue[production: learn + GET publication reconcile] → one worker
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
-                 → anchor snapshot(ref + generation) → existing insight extraction
+                 → anchor snapshot(kind + ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
-                   → lightweight ref winner receipt → event + object + rebuild-marker
-                   → applied-only cross-session projection
+                   → lightweight ref winner receipt
+                   → event → object → derived → rebuild-marker → applied
+                   → publication-only retry → cross-session projection → exact-generation release
+                   → stable-key audit observer (failure does not block applied)
 
 degraded registry → provider-free ping(degraded) → static /web | /setup | /m
                   ├─ GET/PUT config → restart runtime

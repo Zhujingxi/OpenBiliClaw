@@ -2704,6 +2704,19 @@ async def test_public_submit_uses_worker_only_apply_and_child_cannot_inherit_per
     assert memory._database.get_card_settlement(ref)["applied"] == 1
 
 
+async def test_card_reconcile_apply_is_worker_only(tmp_path: Path) -> None:
+    from openbiliclaw.soul.dialogue_settlement_guard import (
+        DialogueSettlementMutationOutsideWorker,
+    )
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+
+    with pytest.raises(DialogueSettlementMutationOutsideWorker):
+        await engine._apply_card_reconcile(ref="worker-only-reconcile")
+
+
 async def test_generation_change_after_analysis_before_effect_writes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3679,10 +3692,6 @@ async def test_confirm_and_reject_both_mark_rebuild_pending(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="[F7/F9] Task 2.3 rewrites marker recovery around stable effects",
-)
 async def test_rebuild_marker_write_failure_blocks_settlement_publication_and_cleans_tmp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3712,59 +3721,542 @@ async def test_rebuild_marker_write_failure_blocks_settlement_publication_and_cl
         },
     )
     real_replace = FilePath.replace
+    object_mutations = 0
+    real_save_insights = engine._save_insights
+
+    def count_object_mutation(hypotheses: list[object]) -> None:
+        nonlocal object_mutations
+        object_mutations += 1
+        real_save_insights(hypotheses)  # type: ignore[arg-type]
 
     def fail_rebuild_marker_replace(self: FilePath, target: FilePath) -> FilePath:
         if self.name == "rebuild_pending_state.json.tmp":
             raise OSError("injected marker replace failure")
         return real_replace(self, target)
 
+    monkeypatch.setattr(engine, "_save_insights", count_object_mutation)
     monkeypatch.setattr(FilePath, "replace", fail_rebuild_marker_replace)
+    async with _test_dialogue_runtime(engine):
+        with pytest.raises(OSError, match="injected marker replace failure"):
+            await engine.submit_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="confirm",
+                turn_id="marker-failure-card",
+                source="card_action",
+            )
 
-    with pytest.raises(OSError, match="injected marker replace failure"):
-        await engine.settle_hypothesis(
+        partial = memory._database.get_card_settlement(ref)
+        assert partial is not None
+        assert partial["event_id"]
+        assert partial["applied"] == 0
+        assert partial["verdict"] == "confirmed"
+        assert partial["payload"]["action"] == "confirmed"
+        assert (
+            memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "pending"
+        )
+        marker_path = tmp_path / "memory" / "rebuild_pending_state.json"
+        assert not marker_path.exists()
+        assert not marker_path.with_name(f"{marker_path.name}.tmp").exists()
+
+        monkeypatch.setattr(FilePath, "replace", real_replace)
+        recovered = await engine.submit_hypothesis_settlement(
             ref=ref,
             hypothesis=hypothesis,
-            requested_verdict="confirm",
-            turn_id="marker-failure-card",
-            source="card_action",
+            requested_verdict="reject",
+            turn_id="losing-contender",
+            source="legacy_endpoint",
         )
-
-    partial = memory._database.get_card_settlement(ref)
-    assert partial is not None
-    assert (
-        partial["seg_event"],
-        partial["seg_object"],
-        partial["seg_marker"],
-        partial["applied"],
-    ) == (1, 1, 0, 0)
-    assert memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "pending"
-    marker_path = tmp_path / "memory" / "rebuild_pending_state.json"
-    assert not marker_path.exists()
-    assert not marker_path.with_name(f"{marker_path.name}.tmp").exists()
-
-    monkeypatch.setattr(FilePath, "replace", real_replace)
-    memory._database.conn.execute(
-        "UPDATE card_settlements SET apply_claim_at = '2000-01-01T00:00:00+00:00' WHERE ref = ?",
-        (ref,),
-    )
-    memory._database.conn.commit()
-    recovered = await engine.settle_hypothesis(
-        ref=ref,
-        hypothesis=hypothesis,
-        requested_verdict="confirm",
-        turn_id="marker-failure-card",
-        source="card_action",
-    )
 
     assert recovered["state"] == "confirmed"
     final = memory._database.get_card_settlement(ref)
     assert final is not None
-    assert (final["seg_marker"], final["applied"]) == (1, 1)
+    assert (final["verdict"], final["turn_id"], final["applied"]) == (
+        "confirmed",
+        "marker-failure-card",
+        1,
+    )
+    assert final["payload"]["source"] == "card_action"
+    assert object_mutations == 1
+    assert len(memory.query_events(event_types=["feedback"])) == 1
+    assert len(_ledger_rows(memory, "settle_insight")) == 1
     assert marker_path.exists()
     assert memory._database.get_chat_turn("marker-failure-card")["payload"]["state"] == "confirmed"
 
 
-def test_claim_takeover_fences_object_derived_and_ledger_side_effects(
+async def test_revise_retry_after_derived_checkpoint_keeps_one_object_and_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户只在意理论深度"
+    derived_content = "用户更看重能落地的深度"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    injected = False
+
+    def fail_once(checkpoint: str, settlement_ref: str) -> None:
+        nonlocal injected
+        assert settlement_ref == ref
+        if checkpoint == "after_derived" and not injected:
+            injected = True
+            raise RuntimeError("injected after_derived")
+
+    monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_once)
+    async with _test_dialogue_runtime(engine):
+        with pytest.raises(RuntimeError, match="injected after_derived"):
+            await engine.submit_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="revise",
+                turn_id="derived-winner",
+                source="card_action",
+                derived=[
+                    {
+                        "content": derived_content,
+                        "confidence": 0.82,
+                        "evidence": "用户主动修正",
+                    }
+                ],
+            )
+
+        partial = memory._database.get_card_settlement(ref)
+        assert partial is not None
+        assert partial["applied"] == 0
+        recovered = await engine.submit_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="confirm",
+            turn_id="losing-contender",
+            source="legacy_endpoint",
+            derived=[
+                {
+                    "content": "竞争请求不应落库",
+                    "confidence": 0.99,
+                    "evidence": "loser",
+                }
+            ],
+        )
+
+    insights = engine._load_insights()
+    matching = [item for item in insights if item.hypothesis == derived_content]
+    assert len(matching) == 1
+    assert matching[0].validated is True
+    assert matching[0].confidence == 0.82
+    assert all(item.hypothesis != "竞争请求不应落库" for item in insights)
+    rows = _ledger_rows(memory, "anchor_revise_derived")
+    assert len(rows) == 1
+    final = memory._database.get_card_settlement(ref)
+    assert final is not None
+    assert (final["verdict"], final["turn_id"], final["applied"]) == (
+        "revised",
+        "derived-winner",
+        1,
+    )
+    assert recovered["outcome"] == "applied"
+
+
+_DIALOGUE_SETTLEMENT_CRASH_CHECKPOINTS = (
+    "after_event",
+    "after_object",
+    "after_derived",
+    "after_rebuild_marker",
+    "after_applied_before_projection",
+    "after_projection",
+    "after_anchor_release",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", _DIALOGUE_SETTLEMENT_CRASH_CHECKPOINTS)
+async def test_hypothesis_confirm_crash_gap_retry_has_one_semantic_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = f"用户重视可验证结论-{checkpoint}"
+    anchor = _seed_dialogue_anchor_hypothesis(
+        memory,
+        engine,
+        hypothesis=hypothesis,
+        origin_turn_id=f"crash-card-{checkpoint}",
+    )
+    memory._database.create_chat_turn(
+        turn_id=f"crash-card-web-{checkpoint}",
+        session="webui",
+        scope="hypothesis",
+        subject_id=anchor.ref,
+        subject_title=hypothesis,
+        message="另一会话中的同一张卡",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": anchor.ref,
+            "title": hypothesis,
+            "state": "pending",
+        },
+    )
+    object_mutations = 0
+    real_save_insights = engine._save_insights
+
+    def count_object_mutation(hypotheses: list[object]) -> None:
+        nonlocal object_mutations
+        object_mutations += 1
+        real_save_insights(hypotheses)  # type: ignore[arg-type]
+
+    successful_releases = 0
+    real_release = engine._dialogue_anchor_manager.release
+
+    def count_release(**kwargs: object) -> object:
+        nonlocal successful_releases
+        released = real_release(**kwargs)  # type: ignore[arg-type]
+        if released is not None:
+            successful_releases += 1
+        return released
+
+    injected = False
+
+    def fail_once(current: str, settlement_ref: str) -> None:
+        nonlocal injected
+        assert settlement_ref == anchor.ref
+        if current == checkpoint and not injected:
+            injected = True
+            raise RuntimeError(f"injected {checkpoint}")
+
+    monkeypatch.setattr(engine, "_save_insights", count_object_mutation)
+    monkeypatch.setattr(engine._dialogue_anchor_manager, "release", count_release)
+    monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_once)
+    async with _test_dialogue_runtime(engine):
+        with pytest.raises(RuntimeError, match=f"injected {checkpoint}"):
+            await engine.submit_hypothesis_settlement(
+                ref=anchor.ref,
+                hypothesis=hypothesis,
+                requested_verdict="confirm",
+                turn_id=f"winner-{checkpoint}",
+                source="card_action",
+            )
+
+        partial = memory._database.get_card_settlement(anchor.ref)
+        assert partial is not None
+        assert bool(partial["applied"]) is checkpoint.startswith(
+            ("after_applied", "after_projection", "after_anchor")
+        )
+        if checkpoint == "after_applied_before_projection":
+            assert (
+                memory._database.get_chat_turn(f"crash-card-web-{checkpoint}")["payload"]["state"]
+                == "pending"
+            )
+        marker_before = engine._load_rebuild_state().get("pending")
+        set_at_before = (
+            str(marker_before.get("set_at", "")) if isinstance(marker_before, dict) else ""
+        )
+
+        recovered = await engine.submit_hypothesis_settlement(
+            ref=anchor.ref,
+            hypothesis=hypothesis,
+            requested_verdict="reject",
+            turn_id=f"loser-{checkpoint}",
+            source="legacy_endpoint",
+        )
+
+    receipt = memory._database.get_card_settlement(anchor.ref)
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "confirmed",
+        f"winner-{checkpoint}",
+        1,
+    )
+    assert recovered["settlement_verdict"] == "confirmed"
+    assert object_mutations == 1
+    assert successful_releases == 1
+    assert engine._dialogue_anchor_manager.current() is None
+    assert len(memory.query_events(event_types=["feedback"])) == 1
+    assert len(_ledger_rows(memory, "settle_insight")) == 1
+    for turn_id in (
+        f"crash-card-{checkpoint}",
+        f"crash-card-web-{checkpoint}",
+    ):
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "confirmed"
+    marker = engine._load_rebuild_state()["pending"]
+    assert len(marker["trigger_refs"]) == 1
+    if set_at_before:
+        assert marker["set_at"] == set_at_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkpoint",
+    ("after_object", "after_applied_before_projection"),
+)
+async def test_hypothesis_revise_crash_gap_retry_upserts_derived_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = f"用户只在意理论-{checkpoint}"
+    derived_content = f"用户也在意落地-{checkpoint}"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    for session in ("popup", "webui"):
+        memory._database.create_chat_turn(
+            turn_id=f"revise-{session}-{checkpoint}",
+            session=session,
+            scope="hypothesis",
+            subject_id=ref,
+            subject_title=hypothesis,
+            message="修正这张卡",
+            payload={
+                "type": "card",
+                "kind": "hypothesis",
+                "ref": ref,
+                "title": hypothesis,
+                "state": "pending",
+            },
+        )
+    object_mutations = 0
+    real_save_insights = engine._save_insights
+
+    def count_object_mutation(hypotheses: list[object]) -> None:
+        nonlocal object_mutations
+        object_mutations += 1
+        real_save_insights(hypotheses)  # type: ignore[arg-type]
+
+    injected = False
+
+    def fail_once(current: str, settlement_ref: str) -> None:
+        nonlocal injected
+        assert settlement_ref == ref
+        if current == checkpoint and not injected:
+            injected = True
+            raise RuntimeError(f"injected {checkpoint}")
+
+    monkeypatch.setattr(engine, "_save_insights", count_object_mutation)
+    monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_once)
+    async with _test_dialogue_runtime(engine):
+        with pytest.raises(RuntimeError, match=f"injected {checkpoint}"):
+            await engine.submit_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict="revise",
+                turn_id=f"revise-winner-{checkpoint}",
+                source="card_action",
+                derived=[
+                    {
+                        "content": derived_content,
+                        "confidence": 0.84,
+                        "evidence": "用户明确修正",
+                    }
+                ],
+            )
+        if checkpoint == "after_applied_before_projection":
+            assert (
+                memory._database.get_chat_turn(f"revise-webui-{checkpoint}")["payload"]["state"]
+                == "pending"
+            )
+        recovered = await engine.submit_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="confirm",
+            turn_id=f"revise-loser-{checkpoint}",
+            source="legacy_endpoint",
+            derived=[
+                {
+                    "content": "loser-derived",
+                    "confidence": 0.99,
+                    "evidence": "不得落库",
+                }
+            ],
+        )
+
+    receipt = memory._database.get_card_settlement(ref)
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "revised",
+        f"revise-winner-{checkpoint}",
+        1,
+    )
+    assert recovered["settlement_verdict"] == "revised"
+    insights = engine._load_insights()
+    assert len([item for item in insights if item.hypothesis == derived_content]) == 1
+    assert all(item.hypothesis != "loser-derived" for item in insights)
+    assert object_mutations == 2
+    assert len(memory.query_events(event_types=["feedback"])) == 1
+    assert len(_ledger_rows(memory, "settle_insight")) == 1
+    assert len(_ledger_rows(memory, "anchor_revise_derived")) == 1
+    marker = engine._load_rebuild_state()["pending"]
+    assert len(marker["trigger_refs"]) == 2
+    for session in ("popup", "webui"):
+        assert (
+            memory._database.get_chat_turn(f"revise-{session}-{checkpoint}")["payload"]["state"]
+            == "rejected"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkpoint",
+    ("after_object", "after_applied_before_projection", "after_anchor_release"),
+)
+async def test_confusion_answer_crash_gap_retry_resolves_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(
+        topic=f"桌游-{checkpoint}",
+        observation="连续浏览",
+    )
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id=f"confusion-question-{checkpoint}",
+        asked_at="2026-07-22T01:00:00+00:00",
+    )
+    anchor = engine._dialogue_anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id=f"confusion-question-{checkpoint}",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+    successful_releases = 0
+    real_release = engine._dialogue_anchor_manager.release
+
+    def count_release(**kwargs: object) -> object:
+        nonlocal successful_releases
+        released = real_release(**kwargs)  # type: ignore[arg-type]
+        if released is not None:
+            successful_releases += 1
+        return released
+
+    injected = False
+
+    def fail_once(current: str, settlement_ref: str) -> None:
+        nonlocal injected
+        assert settlement_ref == anchor.ref
+        if current == checkpoint and not injected:
+            injected = True
+            raise RuntimeError(f"injected {checkpoint}")
+
+    monkeypatch.setattr(engine._dialogue_anchor_manager, "release", count_release)
+    monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_once)
+    async with _test_dialogue_runtime(engine):
+        with pytest.raises(RuntimeError, match=f"injected {checkpoint}"):
+            await engine.submit_confusion_answer_settlement(
+                ref=anchor.ref,
+                confusion_id=confusion_id,
+                interpretation="real_interest",
+                note="winner",
+                turn_id=f"confusion-winner-{checkpoint}",
+                source="dialogue_anchor",
+            )
+        recovered = await engine.submit_confusion_answer_settlement(
+            ref=anchor.ref,
+            confusion_id=confusion_id,
+            interpretation="proxy_behavior",
+            note="loser",
+            turn_id=f"confusion-loser-{checkpoint}",
+            source="card_action",
+        )
+
+    receipt = memory._database.get_card_settlement(anchor.ref)
+    assert receipt is not None
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "answer:real_interest",
+        f"confusion-winner-{checkpoint}",
+        1,
+    )
+    assert receipt["payload"]["note"] == "winner"
+    assert recovered["settlement_verdict"] == "answer:real_interest"
+    confusion = memory._database.get_confusion(confusion_id)
+    assert confusion is not None
+    assert (confusion["status"], confusion["resolution"]) == (
+        "resolved",
+        "real_interest",
+    )
+    assert successful_releases == 1
+    assert engine._dialogue_anchor_manager.current() is None
+    assert len(memory.query_events(event_types=["confusion_settlement"])) == 1
+    assert len(_ledger_rows(memory, "confusion_resolve")) == 1
+    assert len(_ledger_rows(memory, "settle_confusion")) == 1
+
+
+@pytest.mark.asyncio
+async def test_revise_ledger_failure_receipt_retry_fills_stable_effect_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.soul.identity import insight_hash8
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    hypothesis = "用户不只在意理论"
+    derived_content = "用户更在意可执行结论"
+    _seed_insight(memory, hypothesis, validated=False, confidence=0.6)
+    ref = insight_hash8(hypothesis)
+    original_insert = memory._database.insert_profile_ledger
+
+    def fail_stable_ledger(*, effect_key: str = "", **kwargs: object) -> int:
+        if effect_key:
+            raise OSError("injected stable ledger failure")
+        return original_insert(effect_key=effect_key, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(memory._database, "insert_profile_ledger", fail_stable_ledger)
+    async with _test_dialogue_runtime(engine):
+        applied = await engine.submit_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="revise",
+            turn_id="ledger-winner",
+            source="card_action",
+            derived=[
+                {
+                    "content": derived_content,
+                    "confidence": 0.83,
+                    "evidence": "用户明确修正",
+                }
+            ],
+        )
+        assert applied["outcome"] == "applied"
+        assert _ledger_rows(memory, "settle_insight") == []
+        assert _ledger_rows(memory, "anchor_revise_derived") == []
+
+        monkeypatch.setattr(memory._database, "insert_profile_ledger", original_insert)
+        for contender in ("confirm", "reject"):
+            replay = await engine.submit_hypothesis_settlement(
+                ref=ref,
+                hypothesis=hypothesis,
+                requested_verdict=contender,
+                turn_id=f"ledger-loser-{contender}",
+                source="legacy_endpoint",
+            )
+            assert replay["outcome"] == "already_settled"
+
+    assert len(_ledger_rows(memory, "settle_insight")) == 1
+    assert len(_ledger_rows(memory, "anchor_revise_derived")) == 1
+    assert (
+        len([item for item in engine._load_insights() if item.hypothesis == derived_content]) == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_unapplied_receipt_retry_after_runtime_restart_requires_explicit_submit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3772,112 +4264,64 @@ def test_claim_takeover_fences_object_derived_and_ledger_side_effects(
 
     first_memory = MemoryManager(tmp_path)
     first_memory.initialize()
-    hypothesis = "用户只在意理论深度"
+    first_engine = SoulEngine(llm=FakeRegistry("{}"), memory=first_memory)
+    hypothesis = "用户重视可复核事实"
     _seed_insight(first_memory, hypothesis, validated=False, confidence=0.6)
     ref = insight_hash8(hypothesis)
-    first_engine = SoulEngine(llm=FakeRegistry("{}"), memory=first_memory)
+    injected = False
 
-    takeover_memory = MemoryManager(tmp_path)
-    takeover_memory.initialize()
-    takeover_engine = SoulEngine(llm=FakeRegistry("{}"), memory=takeover_memory)
+    def fail_after_event(current: str, settlement_ref: str) -> None:
+        nonlocal injected
+        assert settlement_ref == ref
+        if current == "after_event" and not injected:
+            injected = True
+            raise RuntimeError("injected runtime exit")
 
-    paused_before_object = threading.Event()
-    resume_first = threading.Event()
-    real_record_event = first_memory._database.record_card_settlement_event
-
-    def record_then_pause(**kwargs: object) -> bool:
-        recorded = real_record_event(**kwargs)  # type: ignore[arg-type]
-        paused_before_object.set()
-        assert resume_first.wait(timeout=5)
-        return recorded
-
-    monkeypatch.setattr(first_memory._database, "record_card_settlement_event", record_then_pause)
-
-    object_calls = 0
-    object_calls_lock = threading.Lock()
-
-    def count_object_calls(engine: SoulEngine) -> None:
-        nonlocal object_calls
-        real_apply = engine.apply_feedback_object
-
-        async def counted(feedback: dict[str, object]) -> dict[str, object]:
-            nonlocal object_calls
-            with object_calls_lock:
-                object_calls += 1
-            return await real_apply(feedback)
-
-        monkeypatch.setattr(engine, "apply_feedback_object", counted)
-
-    count_object_calls(first_engine)
-    count_object_calls(takeover_engine)
-    derived = [
-        {
-            "content": "用户更看重能落地的深度",
-            "confidence": 0.82,
-            "evidence": "用户主动修正",
-        }
-    ]
-
-    def run_first() -> dict[str, object]:
-        return asyncio.run(
-            first_engine.settle_hypothesis(
+    monkeypatch.setattr(
+        first_engine,
+        "_dialogue_settlement_checkpoint",
+        fail_after_event,
+    )
+    async with _test_dialogue_runtime(first_engine):
+        with pytest.raises(RuntimeError, match="injected runtime exit"):
+            await first_engine.submit_hypothesis_settlement(
                 ref=ref,
                 hypothesis=hypothesis,
-                requested_verdict="revise",
-                turn_id="lease-first",
+                requested_verdict="confirm",
+                turn_id="restart-winner",
                 source="card_action",
-                derived=derived,
             )
+
+    partial = first_memory._database.get_card_settlement(ref)
+    assert partial is not None and partial["applied"] == 0
+    assert first_engine._load_insights()[0].validated is False
+
+    restarted_memory = MemoryManager(tmp_path)
+    restarted_memory.initialize()
+    restarted_engine = SoulEngine(llm=FakeRegistry("{}"), memory=restarted_memory)
+    still_partial = restarted_memory._database.get_card_settlement(ref)
+    assert still_partial is not None and still_partial["applied"] == 0
+    assert restarted_engine._load_insights()[0].validated is False
+
+    async with _test_dialogue_runtime(restarted_engine):
+        recovered = await restarted_engine.submit_hypothesis_settlement(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict="reject",
+            turn_id="restart-loser",
+            source="legacy_endpoint",
         )
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        first_future = pool.submit(run_first)
-        assert paused_before_object.wait(timeout=5)
-        first_memory._database.conn.execute(
-            "UPDATE card_settlements "
-            "SET apply_claim_at = '2000-01-01T00:00:00+00:00' WHERE ref = ?",
-            (ref,),
-        )
-        first_memory._database.conn.commit()
-        try:
-            takeover_result = asyncio.run(
-                takeover_engine.settle_hypothesis(
-                    ref=ref,
-                    hypothesis=hypothesis,
-                    requested_verdict="confirm",
-                    turn_id="lease-takeover",
-                    source="legacy_endpoint",
-                )
-            )
-        finally:
-            resume_first.set()
-        first_result = first_future.result(timeout=5)
-
-    receipt = first_memory._database.get_card_settlement(ref)
+    receipt = restarted_memory._database.get_card_settlement(ref)
     assert receipt is not None
-    assert takeover_result["outcome"] == "applied"
-    assert first_result["outcome"] == "processing"
-    assert (receipt["verdict"], receipt["applied"]) == ("revised", 1)
-    assert object_calls == 1
-    assert (
-        len(
-            first_memory._database.query_profile_ledger(
-                days=1,
-                write_point="anchor_revise_derived",
-            )
-        )
-        == 1
+    assert (receipt["verdict"], receipt["turn_id"], receipt["applied"]) == (
+        "confirmed",
+        "restart-winner",
+        1,
     )
-    assert (
-        len(
-            first_memory._database.query_profile_ledger(
-                days=1,
-                write_point="settle_insight",
-            )
-        )
-        == 1
-    )
-    assert len(first_memory._database.query_events(event_types=["feedback"])) == 1
+    assert recovered["outcome"] == "applied"
+    assert restarted_engine._load_insights()[0].validated is True
+    assert len(restarted_memory.query_events(event_types=["feedback"])) == 1
 
 
 @pytest.mark.asyncio

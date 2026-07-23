@@ -595,10 +595,11 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-持久对话回复：固定时间/payload → queued mode → typed 结算队列（当前生产入口为 learn）→ 单 worker
+持久对话回复：固定时间/payload → queued mode → typed 结算队列（生产入口：learn + GET publication reconcile）→ 单 worker
 确认入口（待聊列表/卡片）→ 单锚(ref+generation) → 归属矩阵（其余 typed kind 待 cutover）
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
-                       ├→ frozen anchor admission → worker-only apply → 轻量 ref winner receipt → applied-only 跨 session 投影
+                       ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
+                       │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
@@ -642,7 +643,7 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[learn] → 单 worker 在线内学习
+Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[learn + GET publication reconcile] → 单 worker 在线内学习
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
 学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
 失败/超时 → 回滚临时历史 → 安全错因 / failed turn

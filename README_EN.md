@@ -591,10 +591,11 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-durable reply: fixed time/payload → queued mode → typed settlement queue (current production entry: learn) → one worker
+durable reply: fixed time/payload → queued mode → typed settlement queue (production: learn + GET publication reconcile) → one worker
 confirmation entry (pending list/cards) → one anchor(ref+generation) → relation matrix (other typed kinds await cutover)
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
-                          ├→ frozen anchor admission → worker-only apply → lightweight ref winner receipt → applied-only projection
+                          ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
+                          │                                                └→ publication-only retry → projection / exact release
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
@@ -639,7 +640,7 @@ confirmation entry (pending list/cards) → one anchor(ref+generation) → relat
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[learn] → one in-line-await worker
+Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[learn + GET publication reconcile] → one in-line-await worker
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
 learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
 failure/timeout → rollback provisional history → safe error / failed turn

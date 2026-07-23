@@ -2628,15 +2628,50 @@ def create_app(
         method = getattr(ctx.database, name, None)
         return method if callable(method) else None
 
-    def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
+    def _read_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
         get_chat_turn = _chat_db_method("get_chat_turn")
         if get_chat_turn is not None:
-            row = cast("dict[str, Any] | None", get_chat_turn(turn_id))
-            if row is not None and _reconcile_chat_card_row(row):
-                row = cast("dict[str, Any] | None", get_chat_turn(turn_id))
-            return row
+            return cast("dict[str, Any] | None", get_chat_turn(turn_id))
         row = fallback_chat_turns.get(turn_id)
         return dict(row) if row else None
+
+    def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
+        row = _read_chat_turn_row(turn_id)
+        if row is not None and _reconcile_chat_card_row(row):
+            row = _read_chat_turn_row(turn_id)
+        return row
+
+    def _submit_chat_card_reconcile(row: dict[str, Any]) -> None:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return
+        if not isinstance(raw_payload, dict) or raw_payload.get("type") != "card":
+            return
+        state = str(raw_payload.get("state", "")).strip().lower()
+        if state in {"confirmed", "rejected"}:
+            return
+        ref = str(raw_payload.get("ref", "")).strip()
+        kind = str(raw_payload.get("kind", "hypothesis")).strip().lower()
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        submit = getattr(settlement_queue, "submit", None)
+        if not ref or not kind or not callable(submit):
+            return
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        try:
+            submit(
+                DialogueJobKind.CARD_RECONCILE,
+                {
+                    "ref": ref,
+                    "kind": kind,
+                    "source": "chat_turn_get",
+                },
+            )
+        except Exception:
+            logger.warning("card.reconcile submission failed for ref=%r", ref, exc_info=True)
 
     def _reconcile_chat_card_row(row: dict[str, Any]) -> bool:
         raw_payload = row.get("payload", {})
@@ -8167,10 +8202,11 @@ def create_app(
 
     @app.get("/api/chat/turns/{turn_id}", response_model=ChatTurnOut)
     async def get_chat_turn(turn_id: str) -> ChatTurnOut:
-        row = _get_chat_turn_row(turn_id.strip())
+        row = _read_chat_turn_row(turn_id.strip())
         if row is None:
             raise HTTPException(status_code=404, detail="Chat turn not found.")
         turn = _normalize_chat_turn(row)
+        _submit_chat_card_reconcile(row)
         if turn.status == "pending":
             asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
         return turn

@@ -154,11 +154,16 @@ class DialogueAnchorManager:
         return DialogueAnchor.from_dict(state.get("anchor"))
 
     def snapshot(self) -> dict[str, object]:
-        """Return the two fencing fields captured by the serial learn queue."""
+        """Return the exact typed anchor generation captured at admission."""
         anchor = self.current()
         if anchor is None:
-            return {"anchor_ref": "", "anchor_generation": 0}
+            return {
+                "anchor_kind": "",
+                "anchor_ref": "",
+                "anchor_generation": 0,
+            }
         return {
+            "anchor_kind": anchor.kind,
             "anchor_ref": anchor.ref,
             "anchor_generation": anchor.generation,
         }

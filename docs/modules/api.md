@@ -9,8 +9,8 @@
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
 | `POST /api/chat/turns` | ✅ | 普通消息先返回 `pending` 并由 durable worker 生成回复。`scope="hypothesis"` 时服务端生成结构化卡片 payload（`type/kind/ref/title/evidence_refs/actions/state`），直接返回 `status="completed"`，不会调用 LLM worker。若双轨冷却允许，普通 durable 用户消息会先原子插入一条系统确认卡/问题，再写用户 turn；payload 的 `attached_to_turn_id` 负责重试与重启去重。 |
-| `GET /api/chat/turns?session=<label>` | ✅ | `session` 只过滤当前 UI 可见 turn；不同 UI 仍共享一份认知 history。读取时会把 `applied=1` 的对象结算投影到所有 session 卡片，并校正超过 5 分钟且无活锚的遗留 `discussing` 卡片。 |
-| `GET /api/chat/turns/{turn_id}` | ✅ | 返回单个 durable turn，并执行与列表端点相同的 applied-only 投影/遗留讨论校正。 |
+| `GET /api/chat/turns?session=<label>` | ✅ | `session` 只过滤当前 UI 可见 turn；不同 UI 仍共享一份认知 history。Wave 2 中列表读取暂保留旧 applied 投影/遗留讨论校正，完整只-submit cutover 属 Wave 3。 |
+| `GET /api/chat/turns/{turn_id}` | ✅ | 返回单个 durable turn。若读到非终态卡片，只同步 admission `card.reconcile` 到唯一结算队列并返回本次读取快照；request task 不直接写 card/object/anchor。当前 Wave 2 handler 只为 `applied=1` receipt 补跑 stable audit、跨 session projection 与 exact-generation 解锚，因此 publication gap 的第一次 GET 可仍见 pending，queue 完成后的下一次 GET 见终态；orphan discussion 等其余 reconcile 分支留在 Wave 3。 |
 | `GET /api/chat/pending-confirmations` | ✅ | 返回 `{"count":N,"items":[...]}`，只列未结算的高优先级对象且最多 3 条：未验证假设 `confidence>=0.60`、open 疑惑 `interpretation_confidence>=0.50`，按置信度降序。`?count_only=1` 只返回 `{"count":N}`，供 service worker badge 轻量轮询；`openbiliclaw questions` 读取完整响应且不复制筛选规则。用户主动列表不套用系统冷却。 |
 | `POST /api/chat/pending-confirmations/{ref}/open` | ✅ | body 为 `{"session":"popup|webui|..."}`。用户主动打开零冷却；假设生成 completed card，疑惑生成 completed question 并 claim `clarifying`，两者都以 `pending_open` 建锚。相同 `(ref,session)` 原子复用，跨 session 各自产 turn。 |
 | `POST /api/chat/cards/{turn_id}/action` | ✅ | body 为 `{"action":"confirm|reject|discuss|defer"}`。confirm/reject 调用 `SoulEngine` 的共同对象结算器，和锚定 `support/contradict/revise/answer`、legacy endpoint 共用 ref 原子仲裁、可接管三段 apply 与 applied-only 全端投影；discuss 先 CAS 写 `discussing_at+attempt_token` 再建锚，失败补偿回 pending；defer 只写 72h 对象冷却，不进入结算表。 |

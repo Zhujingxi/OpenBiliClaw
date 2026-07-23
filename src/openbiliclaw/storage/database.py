@@ -92,6 +92,9 @@ _LLM_PAYLOAD_MARKERS = ("expression", "topic_label", "reason", "topic_group")
 _CARD_SETTLEMENT_REF_MAX_CHARS = 1024
 _CARD_SETTLEMENT_EFFECT_NAMES = frozenset({"event"})
 _CARD_SETTLEMENT_EFFECT_KEY_RE = re.compile(r"\Adialogue:[0-9a-f]{64}:[a-z_]+\Z")
+_PROFILE_LEDGER_EFFECT_KEY_RE = re.compile(
+    r"\Adialogue:[0-9a-f]{64}:(?:ledger|derived:[0-9a-f]{64})\Z"
+)
 
 
 def _validated_card_settlement_ref(ref: object) -> str:
@@ -117,6 +120,14 @@ def _card_settlement_effect_key(ref: object, effect: str) -> str:
     if not _CARD_SETTLEMENT_EFFECT_KEY_RE.fullmatch(key):  # pragma: no cover - construction proof
         raise RuntimeError("Card settlement effect key construction failed")
     return key
+
+
+def _validated_profile_ledger_effect_key(effect_key: object) -> str:
+    """Accept only fixed-shape worker-generated keys; blank keeps legacy append mode."""
+    normalized = str(effect_key or "").strip()
+    if normalized and not _PROFILE_LEDGER_EFFECT_KEY_RE.fullmatch(normalized):
+        raise ValueError("Profile ledger effect key is invalid")
+    return normalized
 
 
 def _looks_like_serialized_llm_payload(value: str) -> bool:
@@ -1062,6 +1073,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider, model);
 CREATE TABLE IF NOT EXISTS profile_update_ledger (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    effect_key     TEXT NOT NULL DEFAULT '',
     write_point    TEXT NOT NULL,
     source         TEXT NOT NULL DEFAULT '',
     before_summary TEXT NOT NULL DEFAULT '',
@@ -2782,6 +2794,7 @@ class Database:
         gate_verdict: str = "",
         held_id: str = "",
         error: str = "",
+        effect_key: str = "",
     ) -> int:
         """Append one profile write-point ledger row.
 
@@ -2793,12 +2806,14 @@ class Database:
         ledger must never break the underlying write.
         """
         refs_json = json.dumps(list(source_refs or []), ensure_ascii=False, sort_keys=True)
+        normalized_effect_key = _validated_profile_ledger_effect_key(effect_key)
         cursor = self._execute_write(
-            """INSERT INTO profile_update_ledger
-               (write_point, source, before_summary, after_summary, diff,
-                source_refs, outcome, turn_id, gate_verdict, held_id, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR IGNORE INTO profile_update_ledger
+               (effect_key, write_point, source, before_summary, after_summary,
+                diff, source_refs, outcome, turn_id, gate_verdict, held_id, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
+                normalized_effect_key,
                 str(write_point),
                 str(source or ""),
                 str(before_summary or ""),
@@ -2812,7 +2827,7 @@ class Database:
                 str(error or ""),
             ),
         )
-        return cursor.lastrowid or 0
+        return (cursor.lastrowid or 0) if cursor.rowcount else 0
 
     def query_profile_ledger(
         self,
@@ -2834,7 +2849,7 @@ class Database:
         params.append(max(1, int(limit)))
         cursor = self.conn.execute(
             f"""
-            SELECT id, timestamp, write_point, source, before_summary,
+            SELECT id, timestamp, effect_key, write_point, source, before_summary,
                    after_summary, diff, source_refs, outcome, turn_id,
                    gate_verdict, held_id, error
             FROM profile_update_ledger
@@ -9130,6 +9145,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS profile_update_ledger (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                effect_key     TEXT NOT NULL DEFAULT '',
                 write_point    TEXT NOT NULL,
                 source         TEXT NOT NULL DEFAULT '',
                 before_summary TEXT NOT NULL DEFAULT '',
@@ -9142,10 +9158,23 @@ class Database:
                 held_id        TEXT NOT NULL DEFAULT '',
                 error          TEXT NOT NULL DEFAULT ''
             );
+        """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(profile_update_ledger)").fetchall()
+        }
+        if "effect_key" not in columns:
+            self.conn.execute(
+                "ALTER TABLE profile_update_ledger ADD COLUMN effect_key TEXT NOT NULL DEFAULT ''"
+            )
+        self.conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
                 ON profile_update_ledger(timestamp);
             CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
                 ON profile_update_ledger(write_point, timestamp);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_ledger_effect_key
+                ON profile_update_ledger(effect_key)
+                WHERE effect_key <> '';
         """)
 
     def _ensure_confusions_table(self) -> None:

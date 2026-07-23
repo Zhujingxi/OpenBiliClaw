@@ -138,9 +138,9 @@ def _build_yt_scraper_client() -> Any:
 def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatcher:
     """Build the one typed dispatcher installed by the API runtime.
 
-    Wave 1 admits only ``learn`` from production entry points.  Every later
-    cutover kind is nevertheless named explicitly and fails closed until its
-    Wave 3 handler is connected.
+    Wave 1 admits ``learn``; Wave 2 additionally admits publication-only
+    ``card.reconcile``. Every mutation entry remains explicitly reserved for
+    the Wave 3 cutover.
     """
     from openbiliclaw.soul.dialogue_learn_queue import (
         AnchorPersisted,
@@ -164,12 +164,22 @@ def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> DialogueDispatche
             with _background_admission_bypass():
                 await soul_engine.learn_from_dialogue(**payload)
             return DialogueJobResult(outcome="completed")
+        if job.kind is DialogueJobKind.CARD_RECONCILE:
+            reconcile = getattr(soul_engine, "_apply_card_reconcile", None)
+            if not callable(reconcile):
+                raise RuntimeError("card.reconcile worker handler is not ready")
+            result = await reconcile(ref=str(job.payload.get("ref", "")))
+            if not isinstance(result, dict):
+                raise RuntimeError("card.reconcile returned an invalid result")
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=dict(result),
+            )
         if job.kind in {
             DialogueJobKind.SETTLE_HYPOTHESIS,
             DialogueJobKind.SETTLE_CONFUSION,
             DialogueJobKind.CARD_DEFER,
             DialogueJobKind.CARD_DISCUSS,
-            DialogueJobKind.CARD_RECONCILE,
             DialogueJobKind.ANCHOR_ESTABLISH,
             DialogueJobKind.PROBE_REPLY_APPLY,
             DialogueJobKind.CONFUSION_REPLY_APPLY,

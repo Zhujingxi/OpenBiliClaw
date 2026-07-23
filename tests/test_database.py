@@ -435,6 +435,99 @@ def test_card_settlement_ref_validation_rejects_unsafe_effect_key_input(
         )
 
 
+def test_profile_ledger_stable_effect_key_inserts_once(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    effect_key = f"dialogue:{'a' * 64}:derived:{'b' * 64}"
+
+    first = db.insert_profile_ledger(
+        write_point="anchor_revise_derived",
+        source="dialogue_anchor",
+        source_refs=["derived"],
+        turn_id="turn-1",
+        effect_key=effect_key,
+    )
+    replay = db.insert_profile_ledger(
+        write_point="anchor_revise_derived",
+        source="dialogue_anchor",
+        source_refs=["derived"],
+        turn_id="turn-1",
+        effect_key=effect_key,
+    )
+
+    assert first > 0
+    assert replay == 0
+    assert (
+        len(
+            db.query_profile_ledger(
+                days=1,
+                write_point="anchor_revise_derived",
+            )
+        )
+        == 1
+    )
+    assert db.query_profile_ledger(days=1)[0]["effect_key"] == effect_key
+
+
+def test_profile_ledger_effect_key_migrates_legacy_table(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-profile-ledger.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE profile_update_ledger (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            write_point    TEXT NOT NULL,
+            source         TEXT NOT NULL DEFAULT '',
+            before_summary TEXT NOT NULL DEFAULT '',
+            after_summary  TEXT NOT NULL DEFAULT '',
+            diff           TEXT NOT NULL DEFAULT '',
+            source_refs    TEXT NOT NULL DEFAULT '',
+            outcome        TEXT NOT NULL DEFAULT 'success',
+            turn_id        TEXT NOT NULL DEFAULT '',
+            gate_verdict   TEXT NOT NULL DEFAULT '',
+            held_id        TEXT NOT NULL DEFAULT '',
+            error          TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO profile_update_ledger (write_point)
+        VALUES ('legacy-write');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    columns = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA table_info(profile_update_ledger)").fetchall()
+    }
+    assert "effect_key" in columns
+    rows = db.query_profile_ledger(days=1)
+    assert rows[0]["write_point"] == "legacy-write"
+    assert rows[0]["effect_key"] == ""
+
+
+@pytest.mark.parametrize(
+    "effect_key",
+    (
+        "dialogue:raw-ref:ledger",
+        f"dialogue:{'a' * 64}:derived:not-a-hash",
+    ),
+)
+def test_profile_ledger_rejects_unsafe_stable_effect_key(
+    tmp_path: Path,
+    effect_key: str,
+) -> None:
+    db = _db(tmp_path)
+
+    with pytest.raises(ValueError, match="effect key is invalid"):
+        db.insert_profile_ledger(
+            write_point="settle_insight",
+            effect_key=effect_key,
+        )
+
+
 def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
     tmp_path: Path,
 ) -> None:

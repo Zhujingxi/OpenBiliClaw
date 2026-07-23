@@ -11481,11 +11481,20 @@ class TestDialogueConfirmationCards:
         )
         assert len(memory.query_events(event_types=["feedback"])) == 1
 
-    def test_unapplied_conflict_reports_processing_then_stale_takeover_applies_winner(
+    def test_unapplied_winner_retry_immediately_applies_original_winner(
         self,
         tmp_path: Path,
     ) -> None:
-        client, memory, _engine, _dialogue = self._build(tmp_path)
+        from types import MappingProxyType
+
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJob,
+            DialogueJobKind,
+            DialogueJobResult,
+            DialogueSettlementQueue,
+        )
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
         hypothesis = "用户会追问证据链"
         ref = self._seed_hypothesis(memory, hypothesis)
         self._create_card(client, turn_id="card-owner", ref=ref, hypothesis=hypothesis)
@@ -11500,34 +11509,62 @@ class TestDialogueConfirmationCards:
             ref=ref,
             verdict="confirmed",
             turn_id="card-owner",
+            payload={
+                "kind": "hypothesis",
+                "title": hypothesis,
+                "action": "confirmed",
+                "derived": [],
+                "anchor_generation": 0,
+                "source": "card_action",
+            },
         )
-        assert memory._database.claim_card_settlement(
-            ref=ref,
-            claim_token="paused-owner",
-            now=datetime.now(UTC),
-        )
+        client.close()
 
-        processing = client.post(
-            "/api/chat/cards/card-contender/action",
-            json={"action": "reject"},
-        )
-        assert processing.status_code == 202
-        assert processing.json()["outcome"] == "processing"
-        assert memory._database.get_chat_turn("card-contender")["payload"]["state"] == "pending"
+        async def retry_original_winner() -> dict[str, object]:
+            async def dispatch(job: DialogueJob) -> DialogueJobResult:
+                assert job.kind is DialogueJobKind.SETTLE_HYPOTHESIS
+                assert job.effective_anchor_snapshot is not None
+                result = await engine._apply_hypothesis_settlement(
+                    ref=str(job.payload["ref"]),
+                    hypothesis=str(job.payload["hypothesis"]),
+                    requested_verdict=str(job.payload["requested_verdict"]),
+                    turn_id=str(job.payload["turn_id"]),
+                    source=str(job.payload["source"]),
+                    anchor_snapshot=job.effective_anchor_snapshot,
+                )
+                return DialogueJobResult(
+                    outcome=str(result["outcome"]),
+                    settlement=MappingProxyType(result),
+                )
 
-        memory._database.conn.execute(
-            "UPDATE card_settlements SET apply_claim_at = '2000-01-01T00:00:00+00:00' "
-            "WHERE ref = ?",
-            (ref,),
-        )
-        memory._database.conn.commit()
-        takeover = client.post(
-            "/api/chat/cards/card-contender/action",
-            json={"action": "reject"},
-        )
+            queue = DialogueSettlementQueue(
+                dispatch,
+                anchor_provider=engine._dialogue_anchor_manager.snapshot,
+            )
+            engine.bind_dialogue_settlement_queue(queue)
+            try:
+                return await engine.submit_hypothesis_settlement(
+                    ref=ref,
+                    hypothesis=hypothesis,
+                    requested_verdict="reject",
+                    turn_id="card-contender",
+                    source="legacy_endpoint",
+                )
+            finally:
+                await queue.shutdown(timeout=1)
 
-        assert takeover.status_code == 200
-        assert takeover.json()["verdict"] == "confirmed"
+        recovered = asyncio.run(retry_original_winner())
+
+        assert recovered["outcome"] == "applied"
+        assert recovered["verdict"] == "confirmed"
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert (settlement["verdict"], settlement["turn_id"], settlement["applied"]) == (
+            "confirmed",
+            "card-owner",
+            1,
+        )
+        assert settlement["payload"]["source"] == "card_action"
         assert memory._database.get_chat_turn("card-owner")["payload"]["state"] == "confirmed"
         assert memory._database.get_chat_turn("card-contender")["payload"]["state"] == "confirmed"
 
@@ -11561,6 +11598,171 @@ class TestDialogueConfirmationCards:
         assert [item["turn_id"] for item in popup] == ["card-popup"]
         assert [item["turn_id"] for item in webui] == ["card-webui"]
         assert popup[0]["payload"]["state"] == webui[0]["payload"]["state"] == "confirmed"
+
+    def test_get_reconcile_projects_applied_receipt_without_reapplying_object_semantics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import threading
+        from types import MappingProxyType
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJob,
+            DialogueJobKind,
+            DialogueJobResult,
+            DialogueSettlementQueue,
+        )
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户重视可复核证据"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            client,
+            turn_id="reconcile-popup",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        self._create_card(
+            client,
+            turn_id="reconcile-webui",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+        app = client.app
+        client.close()
+
+        object_calls = 0
+        derived_calls = 0
+        rebuild_calls = 0
+        real_object = engine.apply_feedback_object
+        real_derived = engine._apply_dialogue_settlement_derived
+        real_rebuild = engine._mark_rebuild_pending
+
+        async def count_object(feedback: dict[str, object]) -> dict[str, object]:
+            nonlocal object_calls
+            object_calls += 1
+            return await real_object(feedback)
+
+        async def count_derived(**kwargs: object) -> list[str]:
+            nonlocal derived_calls
+            derived_calls += 1
+            return await real_derived(**kwargs)  # type: ignore[arg-type]
+
+        async def count_rebuild(trigger_refs: list[str]) -> None:
+            nonlocal rebuild_calls
+            rebuild_calls += 1
+            await real_rebuild(trigger_refs)
+
+        injected = False
+
+        def fail_after_applied(checkpoint: str, settlement_ref: str) -> None:
+            nonlocal injected
+            assert settlement_ref == ref
+            if checkpoint == "after_applied_before_projection" and not injected:
+                injected = True
+                raise RuntimeError("injected applied publication gap")
+
+        monkeypatch.setattr(engine, "apply_feedback_object", count_object)
+        monkeypatch.setattr(engine, "_apply_dialogue_settlement_derived", count_derived)
+        monkeypatch.setattr(engine, "_mark_rebuild_pending", count_rebuild)
+        monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_after_applied)
+
+        async def apply_until_publication_gap() -> None:
+            async def dispatch(job: DialogueJob) -> DialogueJobResult:
+                assert job.kind is DialogueJobKind.SETTLE_HYPOTHESIS
+                assert job.effective_anchor_snapshot is not None
+                result = await engine._apply_hypothesis_settlement(
+                    ref=str(job.payload["ref"]),
+                    hypothesis=str(job.payload["hypothesis"]),
+                    requested_verdict=str(job.payload["requested_verdict"]),
+                    turn_id=str(job.payload["turn_id"]),
+                    source=str(job.payload["source"]),
+                    anchor_snapshot=job.effective_anchor_snapshot,
+                )
+                return DialogueJobResult(
+                    outcome=str(result["outcome"]),
+                    settlement=MappingProxyType(result),
+                )
+
+            queue = DialogueSettlementQueue(
+                dispatch,
+                anchor_provider=engine._dialogue_anchor_manager.snapshot,
+            )
+            engine.bind_dialogue_settlement_queue(queue)
+            try:
+                with pytest.raises(
+                    RuntimeError,
+                    match="injected applied publication gap",
+                ):
+                    await engine.submit_hypothesis_settlement(
+                        ref=ref,
+                        hypothesis=hypothesis,
+                        requested_verdict="confirm",
+                        turn_id="reconcile-winner",
+                        source="card_action",
+                    )
+            finally:
+                await queue.shutdown(timeout=1)
+
+        asyncio.run(apply_until_publication_gap())
+        receipt = memory._database.get_card_settlement(ref)
+        assert receipt is not None and receipt["applied"] == 1
+        assert memory._database.get_chat_turn("reconcile-popup")["payload"]["state"] == "pending"
+        assert memory._database.get_chat_turn("reconcile-webui")["payload"]["state"] == "pending"
+        assert (object_calls, derived_calls, rebuild_calls) == (1, 1, 1)
+
+        reconciled = threading.Event()
+        runtime_dispatch = _build_dialogue_settlement_dispatcher(engine)
+
+        async def observe_reconcile(job: DialogueJob) -> DialogueJobResult:
+            result = await runtime_dispatch(job)
+            if job.kind is DialogueJobKind.CARD_RECONCILE:
+                reconciled.set()
+            return result
+
+        reconcile_queue = DialogueSettlementQueue(
+            observe_reconcile,
+            anchor_provider=engine._dialogue_anchor_manager.snapshot,
+        )
+        app.state.runtime_context.dialogue_settlement_queue = reconcile_queue
+        worker_projection_calls = 0
+        request_projection_calls = 0
+        real_project = memory._database.project_applied_card_settlement
+
+        def count_projection(settlement_ref: str) -> int:
+            nonlocal request_projection_calls, worker_projection_calls
+            if asyncio.current_task() is reconcile_queue.worker_task:
+                worker_projection_calls += 1
+            else:
+                request_projection_calls += 1
+            return real_project(settlement_ref)
+
+        monkeypatch.setattr(
+            memory._database,
+            "project_applied_card_settlement",
+            count_projection,
+        )
+        with TestClient(app) as runtime_client:
+            first_get = runtime_client.get("/api/chat/turns/reconcile-popup")
+            assert first_get.status_code == 200
+            assert first_get.json()["payload"]["state"] == "pending"
+            assert request_projection_calls == 0
+            assert reconciled.wait(timeout=2)
+
+            second_get = runtime_client.get("/api/chat/turns/reconcile-webui")
+
+        assert second_get.status_code == 200
+        assert second_get.json()["payload"]["state"] == "confirmed"
+        assert worker_projection_calls == 1
+        assert request_projection_calls == 0
+        assert (object_calls, derived_calls, rebuild_calls) == (1, 1, 1)
+        assert memory._database.get_chat_turn("reconcile-popup")["payload"]["state"] == "confirmed"
+        assert memory._database.get_chat_turn("reconcile-webui")["payload"]["state"] == "confirmed"
 
     def test_discuss_cas_builds_anchor_and_failure_rolls_back(self, tmp_path: Path) -> None:
         client, memory, engine, _dialogue = self._build(tmp_path)
