@@ -93,4 +93,5 @@ Skill 文件描述该 Skill 的能力边界、CLI bridge 命令列表，以及�
 
 主干上的部分功能源自社区贡献者的实现，在此致谢：
 
+- **全端品牌图标** — [@xiongguixg](https://github.com/xiongguixg) 在 [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127) 中主动提供了移动端图标方案；v0.3.184 在此基础上统一了浏览器扩展、PWA、桌面与移动 Web、官网、安装包及系统托盘的品牌图标。
 - **探针「暂时忽略」搁置状态** — [@15515151](https://github.com/15515151) 在 [#82](https://github.com/whiteguo233/OpenBiliClaw/pull/82) 中提出并实现了中立/忽略态。主干实现（`83654613`）在其基础上改写为跨会话持久化的状态机，PR 因实现路径差异未直接合入，但方案与代码均来自该贡献。

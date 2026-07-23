@@ -6,7 +6,7 @@
 
 ## v0.3.184：全端品牌图标统一（2026-07-23）
 
-- **全产品品牌图标统一为新的粉色猫爪标记**：以用户提供的方形源图固化 `assets/brand/openbiliclaw-icon.png`，重新派生浏览器扩展 16 / 48 / 128px、PWA / favicon 192 / 512px 与官网图标；side panel、移动 Web、桌面 Web、首次设置页和 GitHub Pages 首页都从旧字母 `B` / CSS 圆环占位切到正式图标。桌面包同时补齐多尺寸 Windows `.ico` 与 macOS `.icns` 并接入 PyInstaller，系统托盘 / 菜单栏也直接加载同一随包 Web 图标，不再单独绘制旧临时标记；社交分享图源同步切换，资产尺寸、桌面容器与各界面引用均有回归测试。
+- **全产品品牌图标统一为新的粉色猫爪标记**：感谢 [@xiongguixg](https://github.com/xiongguixg) 在 [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127) 中主动提供移动端图标方案；项目以选定的方形源图固化 `assets/brand/openbiliclaw-icon.png`，重新派生浏览器扩展 16 / 48 / 128px、PWA / favicon 192 / 512px 与官网图标。side panel、移动 Web、桌面 Web、首次设置页和 GitHub Pages 首页都从旧字母 `B` / CSS 圆环占位切到正式图标。桌面包同时补齐多尺寸 Windows `.ico` 与 macOS `.icns` 并接入 PyInstaller，系统托盘 / 菜单栏也直接加载同一随包 Web 图标，不再单独绘制旧临时标记；社交分享图源同步切换，资产尺寸、桌面容器与各界面引用均有回归测试。
 
 ---
 
