@@ -78,12 +78,18 @@ class CandidateEvalCoordinator:
         post_commit_callback: Any | None = None,
         on_admitted: Callable[[int], None] | None = None,
         work_allowed: Any | None = None,
+        pre_admit_hook: Callable[[], None] | None = None,
         safety_wake_seconds: float = 60.0,
         time_fn: Any = time.monotonic,
     ) -> None:
         self.pipeline = pipeline
         self.snapshot_provider = snapshot_provider
         self.profile_provider = profile_provider
+        # Pool-share fairness (spec 2026-07-20, D7): a per-tick hook run right
+        # before admission — the controller wires its share rebalance + deficit
+        # summary here so those Phase 3/4 behaviors are reached under the
+        # production (coordinator) assembly, not only the legacy drain.
+        self.pre_admit_hook = pre_admit_hook
         # The approved inventory-safe design bounds live raw work to 3×30.
         # This constructor clamp protects direct composition roots as well as
         # normal config/API validation.
@@ -169,6 +175,7 @@ class CandidateEvalCoordinator:
                     continue
                 self._backoff_until = 0.0
 
+                self._run_pre_admit_hook()
                 snapshot = self._snapshot()
                 self._admit_evaluated(snapshot)
                 snapshot = self._snapshot()
@@ -259,6 +266,21 @@ class CandidateEvalCoordinator:
         if inspect.isawaitable(profile):
             profile = await profile
         return await self.pipeline.evaluate_claim(claim, profile)
+
+    def _run_pre_admit_hook(self) -> None:
+        """Run the controller's per-tick share maintenance before admission.
+
+        Pool-share fairness (spec 2026-07-20, D7). Runs before ``_admit_evaluated``
+        so any slot the rebalance frees is seated by under-share supply the same
+        tick. Never raises into the eval loop.
+        """
+        hook = self.pre_admit_hook
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:
+            logger.debug("candidate eval pre-admit hook failed", exc_info=True)
 
     def _admit_evaluated(self, snapshot: CandidateEvalSnapshot) -> None:
         if snapshot.evaluated_pending_admission <= 0:

@@ -133,25 +133,39 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
-def _build_account_sync_x_client(config: Any) -> Any | None:
-    """Build an ``XClient`` for scheduled X sync when a cookie resolves.
+def _build_account_sync_x_components(
+    config: Any,
+    database: Any,
+) -> tuple[Any | None, Any | None]:
+    """Build the client and credential-bound health store for scheduled X sync.
 
-    Reuses ``resolve_x_cookie`` exactly as init/discovery do; returns ``None``
-    when no cookie is available so account_sync's X path stays fully inert.
+    Reuses ``resolve_x_cookie`` exactly as init/discovery do; returns
+    ``(None, None)`` when the source is disabled or no cookie is available so
+    account_sync's X path stays fully inert.
     """
     try:
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
         from openbiliclaw.sources.x_auth import resolve_x_cookie
         from openbiliclaw.sources.x_client import XClient
+        from openbiliclaw.storage.x_health import XSourceHealthStore
 
         twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+        if twitter_cfg is None or not bool(getattr(twitter_cfg, "enabled", False)):
+            return None, None
         cookie_env = str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
         cookie = resolve_x_cookie(data_dir=config.data_path, cookie_env=cookie_env)
         if not cookie:
-            return None
-        return XClient(cookie=cookie)
+            return None, None
+        return (
+            XClient(cookie=cookie),
+            XSourceHealthStore(
+                database,
+                credential_fingerprint=credential_fingerprint("twitter", cookie),
+            ),
+        )
     except Exception:
-        logger.debug("account_sync: X client construction skipped", exc_info=True)
-        return None
+        logger.debug("account_sync: X components construction skipped", exc_info=True)
+        return None, None
 
 
 def build_youtube_discovery_producer(
@@ -1154,6 +1168,12 @@ class RuntimeContext:
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
             ),
+            # Pool-share fairness (spec 2026-07-20, D7): run the controller's
+            # share rebalance + deficit summary each coordinator tick before
+            # admission. The coordinator assembly replaces _loop_candidate_eval,
+            # so without this the Phase 3/4 hooks are dead code in production.
+            # Guarded for controllers/test doubles lacking the helper.
+            pre_admit_hook=getattr(new_runtime_controller, "run_pool_share_maintenance", None),
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
@@ -1162,6 +1182,16 @@ class RuntimeContext:
         new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
             new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
         )
+        # Pool-share fairness (spec 2026-07-20, Phase 2): let admission see the
+        # per-family visible-pool targets so under-share sources win freed slots
+        # ahead of an over-supplied source's backlog. Bound after controller
+        # construction so the pipeline reuses the controller's canonical
+        # ``_source_target_counts`` (family-keyed) share口径. Guarded so test
+        # doubles / alternate controllers without the helper keep legacy (None)
+        # admission instead of raising at bootstrap.
+        _source_target_counts = getattr(new_runtime_controller, "_source_target_counts", None)
+        if callable(_source_target_counts):
+            new_candidate_pipeline.source_share_targets = _source_target_counts
         for producer in (
             new_douyin_producer,
             new_youtube_producer,
@@ -1179,6 +1209,10 @@ class RuntimeContext:
             set_pool_commit_callback(self.pool_inventory_commit_callback)
 
         # 9. Account sync
+        account_sync_x_client, account_sync_x_health = _build_account_sync_x_components(
+            new_config,
+            self.database,
+        )
         new_account_sync = AccountSyncService(
             memory_manager=self.memory_manager,
             bilibili_client=new_bilibili_client,
@@ -1186,7 +1220,12 @@ class RuntimeContext:
             sync_interval_hours=new_config.scheduler.account_sync_interval_hours,
             llm_work_allowed=self.background_llm_work_allowed,
             database=self.database,
-            x_client=_build_account_sync_x_client(new_config),
+            x_client=account_sync_x_client,
+            # A separate store instance shares the producer's one-row DB state
+            # but is fingerprint-bound to this exact client's cookie. That keeps
+            # cooldown global without crediting a success to a different cookie
+            # if configuration changes during a rebuild.
+            x_health_store=account_sync_x_health,
         )
 
         # 10. Dialogue (with source management tools)

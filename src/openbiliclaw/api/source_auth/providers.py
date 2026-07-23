@@ -301,7 +301,11 @@ def _probe_verdict(
     if ctx.probes.contradicts(verdict, _fingerprint(slug, cookie)):
         return "unverified", ""
 
-    ttl = _PROBE_OK_TTL_SECONDS if verdict.authenticated else _PROBE_FAIL_TTL_SECONDS
+    # Probe *reuse* stays deliberately short, but the status badge describes
+    # how recently a successful login was confirmed.  Those are separate
+    # promises: after 60s the next explicit verify must go back to the platform,
+    # while the previous success remains honest user-visible evidence for 6h.
+    ttl = _VERIFIED_FRESH_SECONDS if verdict.authenticated else _PROBE_FAIL_TTL_SECONDS
     if not verdict.is_fresh(ttl):
         return ("stale", verdict.checked_at) if verdict.authenticated else ("unverified", "")
     return ("verified" if verdict.authenticated else "failed"), verdict.checked_at

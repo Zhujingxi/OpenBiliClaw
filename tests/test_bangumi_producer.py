@@ -60,13 +60,21 @@ def _subject(subject_id: int, title: str) -> dict[str, object]:
 
 
 class _Pipeline:
-    def __init__(self, *, full: bool = False) -> None:
+    def __init__(self, *, full: bool = False, under_share_families: tuple[str, ...] = ()) -> None:
         self.full = full
+        self.under_share_families = set(under_share_families)
         self.enqueued: list[tuple[list[Any], str]] = []
         self.drains: list[int] = []
 
     def pool_full(self) -> bool:
         return self.full
+
+    def pool_full_for_source(self, source_family: str) -> bool:
+        # Mirror the real pipeline's share-aware gate: an under-share family is
+        # not "full" even when the global pool is at target.
+        if not self.full:
+            return False
+        return source_family not in self.under_share_families
 
     def enqueue_candidates(self, items: list[Any], *, source_context: str) -> int:
         self.enqueued.append((items, source_context))
@@ -398,6 +406,24 @@ async def test_producer_stops_when_disabled_or_pool_full(db: Database) -> None:
         candidate_pipeline=_Pipeline(full=True),
     )
     assert await full.produce_if_due() == {"discovered": 0, "reason": "pool_full"}
+
+
+@pytest.mark.asyncio
+async def test_producer_runs_when_global_full_but_bangumi_under_share(db: Database) -> None:
+    # Pool-share fairness (spec 2026-07-20, Phase 5 / D6): the producer-internal
+    # global pool_full gate must defer to the share-aware gate. Global pool is
+    # full but bangumi is below its own share, so the producer must NOT skip
+    # with pool_full — it proceeds to produce (which unblocks the rebalance
+    # dead-lock: no supply → no eviction → pool stays full forever).
+    under_share = BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=_Client(),
+        enabled=True,
+        candidate_pipeline=_Pipeline(full=True, under_share_families=("bangumi",)),
+    )
+    result = await under_share.produce_if_due()
+    assert result.get("reason") != "pool_full"
 
 
 @pytest.mark.asyncio

@@ -247,8 +247,11 @@ test("progress view advances through the sequential full-profile stage", () => {
   assert.equal(view.active, true);
   assert.equal(view.doneCount, 2);
   assert.ok(view.stageLabel.includes("生成并保存完整画像"));
-  // 2 done + 0.5 in-flight over 4 → ~63%.
-  assert.ok(view.pct > 50 && view.pct < 75);
+  // 2 done + nothing invented for the running stage → exactly 50%. The stage
+  // has no per-unit progress signal (one LLM call), so the bar reports what is
+  // actually finished and goes indeterminate rather than faking a half-step.
+  assert.equal(view.pct, 50);
+  assert.equal(view.indeterminate, true);
   assert.equal(view.failed, false);
 });
 
@@ -583,7 +586,8 @@ import {
   INIT_PROGRESS_STALL_FLOOR_SECONDS,
   INIT_STALL_THRESHOLD_SECONDS,
   resetInitProgressViewState,
-  stageEtaText,
+  stageDetailText,
+  INIT_RUNNING_HINT,
   stalenessView,
 } from "../popup/popup-init-control.js";
 
@@ -635,21 +639,10 @@ test("running stage label appends the sub-progress note", () => {
   assert.equal(view.stageLabel, "2/4 分析偏好 · 第 3/8 批");
 });
 
-test("eta-based pseudo progress advances with elapsed time and caps at 0.95", () => {
+test("legacy status without new fields no longer fakes a half-step", () => {
   resetInitProgressViewState();
-  const t0 = 2_000_000;
-  const status = () => stage2With(null, 180, "run-eta");
-  const first = initProgressView(status(), t0);
-  assert.equal(first.pct, 25); // elapsed 0 → fraction 0
-  const later = initProgressView(status(), t0 + 180_000); // one eta → 1-1/e ≈ .63
-  assert.ok(later.pct >= 40 && later.pct <= 41, `got ${later.pct}`);
-  const capped = initProgressView(status(), t0 + 3_600_000);
-  assert.equal(capped.pct, 49); // (1 + 0.95) / 4 → never claims the stage done
-});
-
-test("legacy status without new fields keeps the historic static ticks", () => {
-  resetInitProgressViewState();
-  // No run_id, no progress, no eta_seconds → the old 0.5 half-step (38%).
+  // No run_id, no progress → the stage contributes nothing (25%) instead of
+  // the old flat 0.5 half-step, which implied progress it had not made.
   const legacy = statusWith({
     running: true,
     current_stage: 2,
@@ -660,7 +653,7 @@ test("legacy status without new fields keeps the historic static ticks", () => {
       { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
   });
-  assert.equal(initProgressView(legacy).pct, 38);
+  assert.equal(initProgressView(legacy).pct, 25);
 });
 
 test("pct is monotonic per run_id even when statuses regress out of order", () => {
@@ -871,26 +864,70 @@ test("stalenessView is inert for non-running statuses", () => {
   assert.equal(idle.text, "");
 });
 
-test("stageEtaText rounds up to half minutes and expectation copy exists", () => {
-  assert.equal(stageEtaText({ eta_seconds: 180 }), "本阶段通常约 3 分钟");
-  assert.equal(stageEtaText({ eta_seconds: 70 }), "本阶段通常约 1.5 分钟");
-  assert.equal(stageEtaText({ eta_seconds: 120 }), "本阶段通常约 2 分钟");
+test("stageDetailText reports observed facts and never a forecast", () => {
+  // Elapsed alone for a stage with no sub-progress (stage 3, one LLM call).
+  assert.equal(stageDetailText({ progress: { elapsed_seconds: 360 } }), "已用时 6 分钟");
+  // Elapsed + real counts when the backend publishes them.
   assert.equal(
-    stageEtaText({
-      eta_seconds: 180,
-      progress: { elapsed_seconds: 181, max_seconds: 900 },
-    }),
-    "已超常见用时；本轮上限 15 分钟",
+    stageDetailText({ progress: { elapsed_seconds: 720, done: 3, total: 6 } }),
+    "已用时 12 分钟 · 已完成 3/6",
   );
+  // Sub-minute waits do not round to a misleading "0 分钟".
+  assert.equal(stageDetailText({ progress: { elapsed_seconds: 20 } }), "已用时不到 1 分钟");
+  // done is clamped to total; a stage with no progress payload says nothing.
   assert.equal(
-    stageEtaText({ eta_seconds: 180, progress: { elapsed_seconds: 181 } }),
-    "已超常见用时；AI 或平台仍可能在处理",
+    stageDetailText({ progress: { done: 9, total: 4 } }),
+    "已完成 4/4",
   );
-  assert.equal(stageEtaText({}), "");
-  assert.equal(stageEtaText(null), "");
+  assert.equal(stageDetailText({}), "");
+  assert.equal(stageDetailText(null), "");
   assert.ok(INIT_EXPECTATION_HINT.includes("严格按顺序生成"));
-  assert.ok(INIT_EXPECTATION_HINT.includes("4–20 分钟"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("不预估时间"));
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
+  assert.ok(INIT_RUNNING_HINT.includes("只要还在出结果就不会被打断"));
+});
+
+test("progress bar is driven only by real counts, never by a hidden eta", () => {
+  resetInitProgressViewState();
+  const base = {
+    running: true,
+    run_id: "run-eta-free",
+    total_stages: 4,
+    current_stage: 2,
+  };
+  // Stage 2 running with NO sub-progress: contributes nothing to the bar and
+  // renders indeterminate rather than a faked elapsed-based fill.
+  const blind = initProgressView({
+    ...base,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok" },
+      { n: 2, label: "分析偏好", status: "running" },
+      { n: 3, label: "生成并保存完整画像", status: "pending" },
+      { n: 4, label: "生成首轮可用推荐", status: "pending" },
+    ],
+  });
+  assert.equal(blind.indeterminate, true);
+  assert.equal(blind.pct, 25);
+
+  // Real counts move it; the monotonic clamp still holds afterwards.
+  const real = initProgressView({
+    ...base,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok" },
+      {
+        n: 2,
+        label: "分析偏好",
+        status: "running",
+        progress: { done: 3, total: 6, mode: "determinate" },
+      },
+      { n: 3, label: "生成并保存完整画像", status: "pending" },
+      { n: 4, label: "生成首轮可用推荐", status: "pending" },
+    ],
+  });
+  assert.equal(real.indeterminate, false);
+  assert.equal(real.pct, 38);
+  assert.equal(real.stageDetailText, "已完成 3/6");
+  assert.equal(initProgressView({ ...base, stages: blind.stages || [] }).pct >= 38, true);
 });
 
 test("shouldAttachRunningInitProgress: boot re-attach only when a run is live", () => {

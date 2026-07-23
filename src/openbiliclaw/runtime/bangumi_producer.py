@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_BANGUMI
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.bangumi import bangumi_subject_to_content
 from openbiliclaw.sources.bangumi_client import BangumiAPIError
 
@@ -504,14 +505,9 @@ class BangumiDiscoveryProducer:
             _clear_token_rejection(self.database)
 
     def _candidate_pool_full(self) -> bool:
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug("bangumi producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "bangumi", logger=logger, label="bangumi producer"
+        )
 
     def _ensure_tables(self) -> None:
         self.database.conn.executescript(

@@ -27,6 +27,8 @@ SPEC_FILE = PROJECT_ROOT / "packaging" / "openbiliclaw.spec"
 MACOS_FIRST_LAUNCH_GUIDE_NAME = "首次打开说明 First Launch.html"
 MACOS_FIRST_LAUNCH_IMAGE_NAME = "首次打开提示 First Launch.png"
 MACOS_DMG_BACKGROUND_NAME = "openbiliclaw-dmg-guide.png"
+MACOS_INSTALLER_COMMAND_NAME = "安装并启动 Install OpenBiliClaw.command"
+MACOS_INSTALLER_COMMAND_SOURCE = PROJECT_ROOT / "packaging" / "install_macos.command"
 
 
 def ensure_pyinstaller() -> None:
@@ -379,10 +381,18 @@ def write_macos_first_launch_guide(stage_dir: Path) -> Path:
   </p>
   <h2>安装</h2>
   <ol>
-    <li>把 <strong>OpenBiliClaw</strong> 拖到 <strong>Applications</strong>。</li>
     <li>
-      首次打开如果提示“无法验证开发者”或“未经安全验证”，请右键 / Control-click 应用图标，
-      选择 <strong>Open / 打开</strong>，再在弹窗中点 <strong>Open / 打开</strong>。
+      推荐：双击 <strong>安装并启动 Install OpenBiliClaw.command</strong>。
+      它会先校验新应用，再退出旧版本、原子替换 Applications 中的 app，并启动刚安装的版本。
+    </li>
+    <li>
+      兼容方式：先从菜单栏退出旧版本，把 <strong>OpenBiliClaw</strong> 拖到
+      <strong>Applications</strong> 并确认替换，然后手动重新打开。
+    </li>
+    <li>
+      首次运行安装助手或应用时如果提示“无法验证开发者”或“未经安全验证”，
+      请右键 / Control-click 对应项目，选择 <strong>Open / 打开</strong>，
+      再在弹窗中点 <strong>Open / 打开</strong>。
     </li>
     <li>
       如果仍被拦截，打开 <strong>System Settings -> Privacy & Security</strong>，
@@ -402,10 +412,20 @@ xattr -dr com.apple.quarantine "$APP"</code></pre>
   <h2>English</h2>
   <p>The current Release is ad-hoc signed, but not notarized.</p>
   <ol>
-    <li>Drag <strong>OpenBiliClaw</strong> into <strong>Applications</strong>.</li>
     <li>
-      If macOS says it cannot verify the developer, use
-      <strong>right-click / Control-click -> Open</strong>,
+      Recommended: double-click
+      <strong>安装并启动 Install OpenBiliClaw.command</strong>.
+      It verifies the new bundle, quits the old version, atomically replaces the app in
+      Applications, and launches the version just installed.
+    </li>
+    <li>
+      Compatibility path: quit the old version from the menu bar, drag
+      <strong>OpenBiliClaw</strong> into <strong>Applications</strong>, confirm Replace,
+      then reopen it manually.
+    </li>
+    <li>
+      If macOS blocks the install helper or the app, use
+      <strong>right-click / Control-click -> Open</strong> on that item,
       then click <strong>Open</strong> in the dialog.
     </li>
     <li>
@@ -424,6 +444,18 @@ xattr -dr com.apple.quarantine "$APP"</code></pre>
         encoding="utf-8",
     )
     return guide_path
+
+
+def stage_macos_installer_command(stage_dir: Path) -> Path:
+    """Stage the DMG's explicit install/restart helper with executable mode."""
+    if not MACOS_INSTALLER_COMMAND_SOURCE.is_file():
+        raise FileNotFoundError(
+            f"macOS installer helper not found: {MACOS_INSTALLER_COMMAND_SOURCE}"
+        )
+    destination = stage_dir / MACOS_INSTALLER_COMMAND_NAME
+    shutil.copy2(MACOS_INSTALLER_COMMAND_SOURCE, destination)
+    destination.chmod(0o755)
+    return destination
 
 
 def _load_dmg_font(size: int, *, bold: bool = False):
@@ -477,18 +509,26 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
     draw.text((78, 82), "OpenBiliClaw macOS 首次打开", fill="#111827", font=title_font)
     draw.text(
         (80, 144),
-        "Drag to Applications, then approve the first launch.",
+        "One-click install + restart, with drag-to-Applications fallback.",
         fill="#4b5563",
         font=subtitle_font,
     )
 
     steps = [
-        ("1", "拖到 Applications", "Drag OpenBiliClaw into Applications."),
-        ("2", "安全阻挡: 右键 / Control-click -> 打开", "Use Open from the context menu first."),
+        (
+            "1",
+            "双击「安装并启动 Install OpenBiliClaw.command」",
+            "Double-click the one-click installer in this DMG.",
+        ),
+        (
+            "2",
+            "自动停旧版、校验替换并启动刚安装的版本",
+            "It quits the old app, verifies the copy, then launches the new one.",
+        ),
         (
             "3",
-            "已损坏: 先看 First Launch.html 里的 xattr 命令",
-            "If macOS says damaged, remove quarantine after verifying source.",
+            "安全阻挡: 右键打开；已损坏: 查看 First Launch.html",
+            "For Gatekeeper help, open the First Launch guide.",
         ),
     ]
     y = 218
@@ -517,11 +557,13 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
 
 
 def make_macos_dmg(*, app_bundle: Path, output_dir: Path, version: str) -> Path:
-    """Build a drag-to-Applications ``.dmg`` from the ``.app`` bundle (macOS only).
+    """Build a helper-assisted ``.dmg`` from the ``.app`` bundle (macOS only).
 
     Uses ``ditto`` (bundle-faithful copy that preserves the in-bundle symlinks)
-    into a staging dir with an ``/Applications`` shortcut, then ``hdiutil`` to a
-    compressed UDZO image — the conventional macOS drag-install experience.
+    into a staging dir with an explicit verified install/restart helper and an
+    ``/Applications`` shortcut, then ``hdiutil`` to a compressed UDZO image.
+    The helper is the reliable upgrade path; conventional drag-install remains
+    available as a compatibility fallback.
     """
     import tempfile
     import time
@@ -536,6 +578,7 @@ def make_macos_dmg(*, app_bundle: Path, output_dir: Path, version: str) -> Path:
     try:
         subprocess.check_call(["ditto", str(app_bundle), str(stage / app_bundle.name)])
         (stage / "Applications").symlink_to("/Applications")
+        stage_macos_installer_command(stage)
         write_macos_first_launch_guide(stage)
         write_macos_dmg_background(stage)
         hdiutil_cmd = [

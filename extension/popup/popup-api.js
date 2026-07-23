@@ -287,8 +287,14 @@ export async function refreshRecommendations() {
   return requestJson("/recommendations/refresh", { method: "POST" });
 }
 
-export async function reshuffleRecommendations() {
-  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+export async function reshuffleRecommendations(excludedBvids = []) {
+  const payload = await requestJson("/recommendations/reshuffle", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ excluded_bvids: excludedBvids }),
+  });
   return {
     ...payload,
     items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
@@ -644,7 +650,7 @@ export async function respondToDelight(bvid, responseType, title = "", message =
 }
 
 export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
+  const config = await requestJson("/config", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }

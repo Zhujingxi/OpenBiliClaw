@@ -209,11 +209,12 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.179（2026-07-20）**
+📌 最新版本：**v0.3.182（2026-07-21）**
 
-- **AI 服务配置有误时，平台源设置不再被连坐** —— 来源状态、测试连接、向量模型修复照常可用，可以边修 LLM 边把各平台登录态配好。
-- **报错说人话** —— 不再出现「降级模式」这种内部术语，统一说「AI 服务配置有误，修复并重启后端」。
-- **新装机遇到 AI 服务配置有误时直接进初始化引导** —— 插件照常展示初始化面板，检查项如实说明阻塞原因，修好即可继续。
+- **同步报错说得清是哪一步、为什么** —— 首页按「账号同步 / 来源接入」分栏定位到具体平台与原因，不再只有一句「同步出错」。
+- **X 限流只跳过 X** —— 不再被误报成整条账号同步故障，也不会绕过冷却继续请求。
+- **「换一批」回归纯去重** —— 三端统一排除当前卡片，不再被当成批量「不喜欢」污染画像。
+- **Windows / macOS 桌面包升级后真的切到新版本** —— macOS 新增 DMG 内安装助手，校验签名与版本后原子换位并重启。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -285,13 +286,13 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 - 当前插件 release：`extension-v*`，并附 `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.zip`（Firefox 临时调试）；启用 AMO signing 时还会附 `openbiliclaw-extension-v*-firefox.xpi`（Firefox 正式安装）
 - 当前桌面安装包 release：`desktop-v*`，同版本桌面 channel 完成后会附可用的 `.dmg` / `.exe`；缺失 channel 显示未发布，不回填上一版资产
 
-- **macOS**：从发布页下载与你的 Mac 匹配的 DMG：Apple 芯片用 `OpenBiliClaw-macos-v*-arm64.dmg`；Intel 用 `OpenBiliClaw-macos-v*-x64.dmg`（如发布页提供）。打开后先看 DMG 里的 `首次打开说明 First Launch.html`，再把 OpenBiliClaw 拖进「应用程序」。
-- **Windows**：下载 `OpenBiliClaw-windows-*-Setup.exe`，双击安装。
+- **macOS**：从发布页下载与你的 Mac 匹配的 DMG：Apple 芯片用 `OpenBiliClaw-macos-v*-arm64.dmg`；Intel 用 `OpenBiliClaw-macos-v*-x64.dmg`（如发布页提供）。打开后推荐双击 `安装并启动 Install OpenBiliClaw.command`：它会校验新包、退出旧实例、原子替换「应用程序」中的 app，再启动刚安装的版本；传统拖拽仍可用，但升级时需先退出旧版并在替换后手动重开。
+- **Windows**：下载 `OpenBiliClaw-windows-*-Setup.exe`，双击安装。安装或升级成功后，安装器会结束旧实例并从安装目录自动启动刚安装的新版本（静默安装也一样）。
 
 安装包自带本地 Ollama + `bge-m3` embedding，开箱即用；也内置默认内容源依赖，包括 X 的 `twitter-cli` 和 Reddit 的 `rdt-cli`（Reddit rdt 命令后端会优先使用已连接插件同步的 `reddit_session`，插件不可用时可手动运行 `rdt login`，未登录会 fallback 插件）。启动后常驻 **macOS 菜单栏 / Windows 系统托盘**，右键可「打开 Web 界面 / 查看运行日志 / 退出」。数据与 AI / 脚本安装复用同一个目录：`~/OpenBiliClaw`（macOS / Linux）/ `%USERPROFILE%\OpenBiliClaw`（Windows），升级或卸载不会动它；旧安装包曾写入的 `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` 会在新版本首次启动时非覆盖拷贝回来。若 `config.toml` / `config.local.toml` 损坏导致启动失败，桌面包会把坏文件备份为 `*.invalid` 并重新生成默认配置，随后打开 `/setup/` 重新初始化；`data/` 不会被删除。
 
 > ⚠️ **macOS 安全阻挡（应用尚未签名 / 公证）**：
-> - 当前 Release 是 ad-hoc signed、未 notarized。首次打开如果提示“无法验证开发者”或“未经安全验证”，先把应用拖进「应用程序」，再右键 / Control-click `OpenBiliClaw.app` →「打开」→ 在弹窗里再点「打开」；也可以到「系统设置 → 隐私与安全性」点击「仍要打开」。
+> - 当前 Release 是 ad-hoc signed、未 notarized。首次打开安装助手或应用时如果提示“无法验证开发者”或“未经安全验证”，请右键 / Control-click 对应项目 →「打开」→ 在弹窗里再点「打开」；也可以到「系统设置 → 隐私与安全性」点击「仍要打开」。
 > - 如果提示“`OpenBiliClaw.app` 已损坏，无法打开。您应该将它移到废纸篓”，通常是下载隔离属性导致。确认包来自本项目 Releases 后运行：
 >
 >   ```bash
@@ -567,7 +568,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🧭 **避雷探针** — 主动确认你想避开的内容形态和风格边界，确认后才写入过滤偏好
 - 🌐 **跨平台内容源** — B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web，兴趣不再被单一平台割裂（[详解](docs/modules/discovery.md)）
 - 🎯 **智能多样性** — 主题配额 + 跨平台混排 + 小源保护，告别「一刷都是 AI」
-- ⚡ **「换一批」瞬间响应** — reshuffle ~0.6s，连续刷不卡顿
+- ⚡ **「换一批」瞬间响应且默认去重** — reshuffle ~0.6s；当前卡、推荐历史和持久化已看账本三层排除，连续刷不卡顿也不靠“忽略当前”开关
 - 💬 **有温度的推荐理由** — 像朋友一样解释为什么你会喜欢，而不是「因为你看过类似视频」
 - 🔄 **持续学习** — 苏格拉底式对话 + 行为分析 + 反馈即时生效，越用越懂你
 - ⭐ **本地优先收藏 / 稍后看** — 推荐卡先写本地 SQLite，自动同步默认关闭；B站和六个扩展平台均支持收藏与原生稍后看/收藏回退，2026-07-14 七平台两类动作真实账号回归均为 `synced/already_synced`
@@ -618,11 +619,14 @@ background ─ background admission (default 3) ──────┘
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
 │   配置草稿 → 精确实例 /models → 可编辑选择（不写盘）      │
 │  来源族注册表：alias · strategy · URL host             │
-│             → pool 统计 · 已看身份                     │
+│             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
+│ 惊喜就绪门：正式推荐词/主题就绪 → 打分并原子快照 → 四端 │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
-│ 换屏快路：PoolServeSnapshot → 独立 Serve DB worker → recommendation+shown 短事务 │
+│ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │
+│ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
+│ 平台库存：platform-availability → 同一 canonical 可推集合 → total == Σ by_platform │
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
@@ -631,7 +635,7 @@ background ─ background admission (default 3) ──────┘
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
 │ unsupported_adapter_missing 可重试 · unsupported_content_type local-only │
-│ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 候选池 · 推荐 · 保存/任务）│
+│ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 已看账本 · 候选池 · 推荐 · 保存/任务）│
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 

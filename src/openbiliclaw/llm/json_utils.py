@@ -344,7 +344,12 @@ def _iter_list_candidates(
                         if nested_key in nested:
                             candidates.append(nested[nested_key])
         if allow_singleton:
-            candidates.append(value)
+            # A root object is one list item, not itself a list candidate.
+            # Keeping the wrapper explicit also handles pretty-printed JSON:
+            # the JSONL fallback only happened to rescue one-line singleton
+            # objects, masking this contract bug until a real provider emitted
+            # the same valid object across multiple lines.
+            candidates.append([value])
     return candidates
 
 

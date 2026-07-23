@@ -1300,6 +1300,11 @@ test("popup manual refresh applies the preserved empty replacement", () => {
   assert.match(body, /reconcileRecommendationReplacement\(/);
   assert.match(body, /state\.recommendations = replacement\.items/);
   assert.match(body, /preservedCurrent: replacement\.preserved/);
+  assert.match(
+    body,
+    /const excludedBvids = state\.recommendations\.map\(\(item\) => item\?\.bvid\)\.filter\(Boolean\)/,
+  );
+  assert.match(body, /reshuffleRecommendations\(excludedBvids\)/);
   assert.doesNotMatch(body, /state\.recommendations = result\.items/);
 });
 

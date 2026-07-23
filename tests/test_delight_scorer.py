@@ -19,6 +19,33 @@ def _make_database(tmp_path: Path) -> Database:
     return db
 
 
+def _mark_delight_ready(
+    database: Database,
+    bvid: str,
+    *,
+    delight_score: float,
+    reason: str,
+    hook: str,
+) -> None:
+    database.update_pool_copy(bvid, expression=reason, topic_label=hook)
+    database.update_delight_score(
+        bvid,
+        delight_score=delight_score,
+        delight_reason=reason,
+        delight_hook=hook,
+    )
+
+
+def _mark_pool_copy_ready(
+    database: Database,
+    bvid: str,
+    *,
+    reason: str = "测试推荐文案",
+    hook: str = "测试主题",
+) -> None:
+    database.update_pool_copy(bvid, expression=reason, topic_label=hook)
+
+
 # ---------------------------------------------------------------------------
 # Threshold behavior
 # ---------------------------------------------------------------------------
@@ -76,11 +103,12 @@ def test_database_delight_columns_exist_after_init(tmp_path: Path) -> None:
 def test_database_update_and_get_delight_candidate(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1DL", title="惊喜内容", relevance_score=0.9)
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1DL",
         delight_score=0.92,
-        delight_reason="这条会戳到你的深层需求",
-        delight_hook="深层共鸣",
+        reason="这条会戳到你的深层需求",
+        hook="深层共鸣",
     )
 
     candidate = database.get_delight_candidate(min_delight_score=0.85)
@@ -97,6 +125,7 @@ def test_database_get_delight_candidate_returns_none_below_threshold(
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1LOW", title="普通内容", relevance_score=0.5)
+    _mark_pool_copy_ready(database, "BV1LOW")
     database.update_delight_score(
         "BV1LOW",
         delight_score=0.3,
@@ -109,19 +138,68 @@ def test_database_get_delight_candidate_returns_none_below_threshold(
     assert candidate is None
 
 
-def test_database_get_delight_candidate_requires_ready_copy(tmp_path: Path) -> None:
+def test_database_rejects_delight_state_before_pool_copy_is_ready(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
-    database.cache_content("BV1BLANK", title="只有分数没有文案", relevance_score=0.9)
-    database.update_delight_score(
+    database.cache_content(
+        "BV1BLANK",
+        title="只有分数没有文案",
+        relevance_score=0.9,
+        relevance_reason="评估器判断它与用户兴趣高度相关。",
+    )
+    persisted = database.update_delight_score(
         "BV1BLANK",
         delight_score=0.92,
-        delight_reason="",
-        delight_hook="",
+        delight_reason="评估器判断它与用户兴趣高度相关。",
+        delight_hook="高契合",
     )
 
+    row = database.conn.execute(
+        """
+        SELECT delight_score, delight_reason, delight_hook
+        FROM content_cache
+        WHERE bvid = 'BV1BLANK'
+        """
+    ).fetchone()
     candidate = database.get_delight_candidate(min_delight_score=0.70)
 
+    assert persisted is False
+    assert row is not None
+    assert float(row["delight_score"]) == 0.0
+    assert row["delight_reason"] == ""
+    assert row["delight_hook"] == ""
     assert candidate is None
+    assert database.count_delight_candidates(min_delight_score=0.70) == 0
+
+
+def test_database_rejects_evaluator_reason_after_pool_copy_is_ready(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1WRONGCOPY", title="已有正式推荐词", relevance_score=0.92)
+    _mark_pool_copy_ready(
+        database,
+        "BV1WRONGCOPY",
+        reason="这是正式推荐理由。",
+        hook="正式主题",
+    )
+
+    persisted = database.update_delight_score(
+        "BV1WRONGCOPY",
+        delight_score=0.92,
+        delight_reason="评估器内部判断",
+        delight_hook="高契合",
+    )
+
+    row = database.conn.execute(
+        """
+        SELECT delight_score, delight_reason, delight_hook
+        FROM content_cache
+        WHERE bvid = 'BV1WRONGCOPY'
+        """
+    ).fetchone()
+    assert persisted is False
+    assert row is not None
+    assert float(row["delight_score"]) == 0.0
+    assert row["delight_reason"] == ""
+    assert row["delight_hook"] == ""
 
 
 def test_database_get_delight_candidate_excludes_suppressed_pool_items(
@@ -151,11 +229,12 @@ def test_database_get_delight_candidate_excludes_suppressed_pool_items(
         ("BV1SUPPRESS",),
     )
     database.conn.commit()
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1SUPPRESS",
         delight_score=0.91,
-        delight_reason="历史评分残留，应当被新规则过滤。",
-        delight_hook="压箱惊喜",
+        reason="历史评分残留，应当被新规则过滤。",
+        hook="压箱惊喜",
     )
 
     candidate = database.get_delight_candidate(min_delight_score=0.70)
@@ -166,11 +245,12 @@ def test_database_get_delight_candidate_excludes_suppressed_pool_items(
 def test_database_mark_delight_notified(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1DLN", title="已通知", relevance_score=0.9)
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1DLN",
         delight_score=0.95,
-        delight_reason="reason",
-        delight_hook="hook",
+        reason="reason",
+        hook="hook",
     )
     database.mark_delight_notified("BV1DLN")
 
@@ -184,23 +264,26 @@ def test_database_delight_candidates_skip_feedbacked_items(tmp_path: Path) -> No
     database.cache_content("BV1LIKE", title="已反馈", relevance_score=0.9)
     database.cache_content("BV1FRESH", title="新惊喜", relevance_score=0.9)
     database.cache_content("BV1HATE", title="已点不感兴趣", relevance_score=0.9)
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1LIKE",
         delight_score=0.95,
-        delight_reason="liked reason",
-        delight_hook="liked hook",
+        reason="liked reason",
+        hook="liked hook",
     )
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1FRESH",
         delight_score=0.94,
-        delight_reason="fresh reason",
-        delight_hook="fresh hook",
+        reason="fresh reason",
+        hook="fresh hook",
     )
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1HATE",
         delight_score=0.93,
-        delight_reason="disliked reason",
-        delight_hook="disliked hook",
+        reason="disliked reason",
+        hook="disliked hook",
     )
     database.conn.execute(
         "UPDATE content_cache SET feedback_type = 'like' WHERE bvid = ?",
@@ -246,11 +329,12 @@ def _seed_delight_scored_pool(
             title=f"{prefix} {index}",
             relevance_score=relevance_score(index),
         )
-        database.update_delight_score(
+        _mark_delight_ready(
+            database,
             bvid,
             delight_score=delight_score(index),
-            delight_reason="",
-            delight_hook="",
+            reason=f"{prefix} 推荐文案 {index}",
+            hook=f"{prefix} 主题 {index}",
         )
 
 
@@ -264,23 +348,26 @@ def test_database_delight_candidates_include_liked_keeps_liked_rows(tmp_path: Pa
     database.cache_content("BV1LIKE", title="已喜欢", relevance_score=0.9)
     database.cache_content("BV1FRESH", title="新惊喜", relevance_score=0.9)
     database.cache_content("BV1HATE", title="已点不感兴趣", relevance_score=0.9)
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1LIKE",
         delight_score=0.95,
-        delight_reason="liked reason",
-        delight_hook="liked hook",
+        reason="liked reason",
+        hook="liked hook",
     )
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1FRESH",
         delight_score=0.94,
-        delight_reason="fresh reason",
-        delight_hook="fresh hook",
+        reason="fresh reason",
+        hook="fresh hook",
     )
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1HATE",
         delight_score=0.93,
-        delight_reason="disliked reason",
-        delight_hook="disliked hook",
+        reason="disliked reason",
+        hook="disliked hook",
     )
     database.conn.execute(
         "UPDATE content_cache SET feedback_type = 'like' WHERE bvid = ?",
@@ -306,17 +393,19 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1A", title="A", relevance_score=0.9)
     database.cache_content("BV1B", title="B", relevance_score=0.8)
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1A",
         delight_score=0.92,
-        delight_reason="r1",
-        delight_hook="h1",
+        reason="r1",
+        hook="h1",
     )
-    database.update_delight_score(
+    _mark_delight_ready(
+        database,
         "BV1B",
         delight_score=0.88,
-        delight_reason="r2",
-        delight_hook="h2",
+        reason="r2",
+        hook="h2",
     )
 
     count = database.count_delight_candidates(min_delight_score=0.85)
@@ -406,6 +495,25 @@ def test_database_dynamic_delight_threshold_never_drops_below_default(tmp_path: 
     assert database.dynamic_delight_threshold(default_threshold=0.75) == pytest.approx(0.75)
 
 
+def test_database_dynamic_delight_threshold_ignores_legacy_uncopied_scores(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    for index in range(160):
+        bvid = f"BV1LEGACY{index:04d}"
+        score = 0.20 + (index * 0.005)
+        database.cache_content(bvid, title=bvid, relevance_score=score)
+        database.conn.execute(
+            "UPDATE content_cache SET delight_score = ? WHERE bvid = ?",
+            (score, bvid),
+        )
+    database.conn.commit()
+
+    threshold = database.dynamic_delight_threshold(default_threshold=0.75)
+
+    assert threshold == pytest.approx(0.75)
+
+
 def test_database_dynamic_delight_threshold_bad_default_uses_claim_floor(
     tmp_path: Path,
 ) -> None:
@@ -464,8 +572,10 @@ def test_database_get_pool_candidates_needing_delight_score(tmp_path: Path) -> N
     database = _make_database(tmp_path)
     # Unscored item (delight_score = 0.0 default)
     database.cache_content("BV1UNSCORE", title="Unscored", relevance_score=0.8)
+    _mark_pool_copy_ready(database, "BV1UNSCORE")
     # Already scored item
     database.cache_content("BV1SCORED", title="Scored", relevance_score=0.7)
+    _mark_pool_copy_ready(database, "BV1SCORED")
     database.update_delight_score(
         "BV1SCORED",
         delight_score=0.5,
@@ -480,11 +590,23 @@ def test_database_get_pool_candidates_needing_delight_score(tmp_path: Path) -> N
     assert "BV1SCORED" not in bvids
 
 
+def test_database_delight_scoring_backlog_excludes_uncopied_rows(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1WAITCOPY", title="推荐词仍在生成", relevance_score=0.91)
+    database.cache_content("BV1COPYREADY", title="推荐词已完成", relevance_score=0.90)
+    _mark_pool_copy_ready(database, "BV1COPYREADY")
+
+    candidates = database.get_pool_candidates_needing_delight_score(limit=10)
+
+    assert [candidate["bvid"] for candidate in candidates] == ["BV1COPYREADY"]
+
+
 def test_database_get_pool_candidates_needing_delight_score_includes_high_score_backfill(
     tmp_path: Path,
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1READY", title="Ready", relevance_score=0.9)
+    _mark_pool_copy_ready(database, "BV1READY", reason="已经有解释", hook="已完成")
     database.update_delight_score(
         "BV1READY",
         delight_score=0.77,
@@ -492,6 +614,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
         delight_hook="已完成",
     )
     database.cache_content("BV1BACKFILL", title="Backfill", relevance_score=0.88)
+    _mark_pool_copy_ready(database, "BV1BACKFILL", reason="等待补齐", hook="待完成")
     database.update_delight_score(
         "BV1BACKFILL",
         delight_score=0.76,
@@ -504,6 +627,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
     )
     database.conn.commit()
     database.cache_content("BV1LOW", title="Low", relevance_score=0.7)
+    _mark_pool_copy_ready(database, "BV1LOW", reason="普通推荐", hook="普通")
     database.update_delight_score(
         "BV1LOW",
         delight_score=0.55,
@@ -527,6 +651,12 @@ def test_database_get_pool_candidates_needing_delight_score_includes_stale_score
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1STALE", title="Stale", relevance_score=0.92)
+    _mark_pool_copy_ready(
+        database,
+        "BV1STALE",
+        reason="旧阈值留下的理由",
+        hook="旧钩子",
+    )
     database.update_delight_score(
         "BV1STALE",
         delight_score=0.72,
@@ -547,6 +677,7 @@ def test_database_get_pool_candidates_needing_delight_score_prioritizes_current_
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1LOWOLD", title="Old high score", relevance_score=0.60)
+    _mark_pool_copy_ready(database, "BV1LOWOLD", reason="旧高分", hook="旧")
     database.update_delight_score(
         "BV1LOWOLD",
         delight_score=0.99,
@@ -554,6 +685,7 @@ def test_database_get_pool_candidates_needing_delight_score_prioritizes_current_
         delight_hook="旧",
     )
     database.cache_content("BV1HIGHNEW", title="Current high score", relevance_score=0.92)
+    _mark_pool_copy_ready(database, "BV1HIGHNEW", reason="旧低分", hook="旧")
     database.update_delight_score(
         "BV1HIGHNEW",
         delight_score=0.72,
@@ -574,6 +706,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_shown_stale
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1SHOWN", title="Shown stale", relevance_score=0.92)
+    _mark_pool_copy_ready(database, "BV1SHOWN", reason="旧低分", hook="旧")
     database.update_delight_score(
         "BV1SHOWN",
         delight_score=0.72,
@@ -599,6 +732,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_shown_histo
 ) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1HISTORY", title="Shown history stale", relevance_score=0.92)
+    _mark_pool_copy_ready(database, "BV1HISTORY", reason="旧低分", hook="旧")
     database.update_delight_score(
         "BV1HISTORY",
         delight_score=0.72,
@@ -670,6 +804,8 @@ def test_get_pool_candidates_filters_by_min_relevance(tmp_path: Path) -> None:
     database.cache_content("BV1HIGH", title="High fit", relevance_score=0.85)
     database.cache_content("BV1MED", title="Moderate", relevance_score=0.60)
     database.cache_content("BV1LOW", title="Weak", relevance_score=0.40)
+    for bvid in ("BV1HIGH", "BV1MED", "BV1LOW"):
+        _mark_pool_copy_ready(database, bvid)
 
     rows = database.get_pool_candidates_needing_delight_score(
         limit=10,
@@ -687,6 +823,8 @@ def test_get_pool_candidates_default_min_relevance_is_055(tmp_path: Path) -> Non
     database = _make_database(tmp_path)
     database.cache_content("BV1HALF", title="Right at edge", relevance_score=0.54)
     database.cache_content("BV1OVER", title="Just over", relevance_score=0.56)
+    _mark_pool_copy_ready(database, "BV1HALF")
+    _mark_pool_copy_ready(database, "BV1OVER")
 
     # No min_relevance_score passed — uses default
     rows = database.get_pool_candidates_needing_delight_score(limit=10)
@@ -699,11 +837,12 @@ def test_delight_serving_uses_exact_explore_relaxed_admission_floor(tmp_path: Pa
     database = _make_database(tmp_path)
     for bvid, source in (("BVEXP", "explore"), ("BVTREND", "trending")):
         database.cache_content(bvid, title=bvid, source=source, relevance_score=0.58)
-        database.update_delight_score(
+        _mark_delight_ready(
+            database,
             bvid,
             delight_score=0.90,
-            delight_reason="值得看看",
-            delight_hook="新方向",
+            reason="值得看看",
+            hook="新方向",
         )
 
     assert [

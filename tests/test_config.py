@@ -100,6 +100,26 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("", False), ("0", False), ("false", False), ("1", True), ("true", True)],
+    )
+    def test_scheduler_enabled_env_override_is_always_a_bool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str,
+        expected: bool,
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[scheduler]\nenabled = true\n", encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_SCHEDULER_ENABLED", raw)
+
+        config = load_config(config_path)
+
+        assert config.scheduler.enabled is expected
+        assert type(config.scheduler.enabled) is bool
+
     def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
         from openbiliclaw.llm.concurrency import background_llm_concurrency
 

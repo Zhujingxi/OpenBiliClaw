@@ -6308,7 +6308,11 @@ async def _fetch_x_init_data(
     never hard-fail ``init``. Returns ``(likes, bookmarks)`` as
     ``tweet_to_dict`` dicts.
     """
+    import logging
+
     from openbiliclaw.config import load_config
+
+    logger = logging.getLogger("openbiliclaw.cli")
 
     cfg = load_config()
     x_cfg = getattr(getattr(cfg, "sources", None), "twitter", None)
@@ -6324,22 +6328,68 @@ async def _fetch_x_init_data(
         )
         return [], []
 
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
     from openbiliclaw.sources.x_client import XClient
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
 
     x_client = XClient(cookie=cookie)
+    health_db: Database | None = None
+    health_store: XSourceHealthStore | None = None
+    try:
+        health_db = Database(cfg.data_path / "openbiliclaw.db")
+        health_db.initialize()
+        health_store = XSourceHealthStore(
+            health_db,
+            credential_fingerprint=credential_fingerprint("twitter", cookie),
+        )
+    except Exception:
+        # Health evidence is observability, not a prerequisite for the user's
+        # read-only smoke/init fetch. Keep the request path available if the
+        # local status database is temporarily unavailable.
+        logger.debug("fetch-x: failed to open the shared X health store", exc_info=True)
+        if health_db is not None:
+            health_db.close()
+        health_db = None
+        health_store = None
+
+    def _record_success(strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_success(strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s success", strategy, exc_info=True)
+
+    def _record_error(exc: BaseException, strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_error(exc, strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s error", strategy, exc_info=True)
+
     likes: list[dict[str, Any]] = []
     bookmarks: list[dict[str, Any]] = []
-    if likes_limit > 0:
-        try:
-            likes = await x_client.likes(limit=likes_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
-    if bookmarks_limit > 0:
-        try:
-            bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
-    return likes, bookmarks
+    try:
+        if likes_limit > 0:
+            try:
+                likes = await x_client.likes(limit=likes_limit)
+                _record_success("likes")
+            except Exception as exc:
+                _record_error(exc, "likes")
+                console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
+        if bookmarks_limit > 0:
+            try:
+                bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
+                _record_success("bookmarks")
+            except Exception as exc:
+                _record_error(exc, "bookmarks")
+                console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
+        return likes, bookmarks
+    finally:
+        if health_db is not None:
+            health_db.close()
 
 
 def _load_extension_bangumi_identity() -> tuple[str, bool]:
@@ -7727,19 +7777,26 @@ def init(
 
     _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
-        "拉 B 站历史 / 收藏 / 关注（≈ 20–60s，看你的列表大小）"
+        "拉 B 站历史 / 收藏 / 关注（时长看你的列表大小）"
         if include_bili
         else "拉取所选平台数据（B 站已跳过）"
     )
+    # No total-duration forecast: it depends on the selected platforms, the
+    # collected history AND the provider's latency, so any number here would be
+    # wrong for someone and make a healthy long run read as broken (field
+    # report 2026-07-20). State the variability, then let the per-step heartbeat
+    # report elapsed time as evidence of progress.
     console.print(
-        "[bold yellow]⏱  这一步首次运行通常需要 4–20 分钟，"
-        "请保持网络畅通别中断。[/bold yellow]\n"
+        "[bold yellow]⏱  这一步首次运行耗时差别很大，取决于你勾了几个平台、"
+        "拉到多少历史，以及 AI 服务的快慢，请保持网络畅通别中断。[/bold yellow]\n"
+        "  只要还在出结果就不会被打断，慢一些是正常的。\n"
         "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
-        "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成并保存完整画像（LLM 调用，≈ 30–70s）\n"
-        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案，≈ 2–5 分钟）\n"
-        "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
+        "    2/4  分析偏好（LLM 调用，按事件量分片，每片单独计时）\n"
+        "    3/4  生成并保存完整画像（单次 LLM 调用）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案）\n"
+        "[dim]全程会打印已用时和已完成的量，不要以为卡住了——"
+        "远程 AI 服务单次响应就可能要几分钟。[/dim]\n"
     )
     if not include_bili:
         console.print(
@@ -8430,6 +8487,8 @@ def _run_single_source_bootstrap(
 
     events, scope_counts, status_label = collect(task_id)
     summary_renderer(scope_counts, status_label, len(events))
+    if status_label in {"timeout", "failed"}:
+        raise typer.Exit(code=1)
 
 
 @app.command("profile-consolidate")

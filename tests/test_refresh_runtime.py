@@ -3176,7 +3176,13 @@ def test_source_target_counts_use_configured_platform_shares() -> None:
     }
 
 
-def test_source_requested_count_is_bounded_by_global_available_deficit() -> None:
+def test_source_requested_count_uses_own_share_not_global_headroom() -> None:
+    # Pool-share fairness spec (2026-07-20, invariant 2): per-source deficit is
+    # NO LONGER clamped by the small global headroom (100-98=2). bilibili owns
+    # 100% of the target (share 1), sits at 10/100, and has ample raw headroom,
+    # so it requests its full own-share deficit of 90. The previous口径
+    # (``min(available_deficit, global_available_deficit)`` → 2) is exactly the
+    # starvation bug this fix removes.
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
         database=_FakeDatabase(
@@ -3192,7 +3198,7 @@ def test_source_requested_count_is_bounded_by_global_available_deficit() -> None
         pool_source_shares={"bilibili": 1},
     )
 
-    assert controller._source_requested_count("bilibili") == 2
+    assert controller._source_requested_count("bilibili") == 90
 
 
 async def test_refresh_replenishes_when_raw_ceiling_is_full_but_available_pool_is_low() -> None:
@@ -3221,7 +3227,12 @@ async def test_refresh_replenishes_when_raw_ceiling_is_full_but_available_pool_i
     assert discovery.calls[0][1] == ["search", "related_chain", "trending", "explore"]
 
 
-async def test_non_bili_producer_not_called_when_global_pool_is_full() -> None:
+async def test_under_share_non_bili_producer_runs_even_when_global_pool_is_full() -> None:
+    # Pool-share fairness spec (2026-07-20, invariant 2 / Goal 1): xhs owns 1/9
+    # of a 100-slot target (≈11) but sits at 0. Even though the global pool is
+    # full, the producer must run so its supply can wait in the raw/evaluated
+    # backlog and win a freed slot once share-aware admission (Phase 2/3) makes
+    # room. The old behavior (never called while global full) starved it.
     xhs = _FakeXhsProducer()
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3237,14 +3248,18 @@ async def test_non_bili_producer_not_called_when_global_pool_is_full() -> None:
         xhs_producer=xhs,
         pool_target_count=100,
         pool_source_shares={"bilibili": 8, "xiaohongshu": 1},
+        discovery_limit=30,
     )
 
     await controller._tick_xhs_producer()
 
-    assert xhs.calls == []
+    assert xhs.calls == [11]
 
 
-async def test_douyin_producer_not_called_when_global_pool_is_full() -> None:
+async def test_under_share_douyin_producer_runs_even_when_global_pool_is_full() -> None:
+    # Pool-share fairness spec (2026-07-20, invariant 2 / Goal 1): douyin owns
+    # 1/9 (≈11) but sits at 0 while the global pool is full. It must still run
+    # to feed the backlog for share-aware admission. Old behavior starved it.
     douyin = _FakeDouyinProducer()
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3260,14 +3275,18 @@ async def test_douyin_producer_not_called_when_global_pool_is_full() -> None:
         douyin_producer=douyin,
         pool_target_count=100,
         pool_source_shares={"bilibili": 8, "douyin": 1},
+        discovery_limit=30,
     )
 
     await controller._tick_douyin_producer()
 
-    assert douyin.calls == []
+    assert douyin.calls == [11]
 
 
-async def test_youtube_producer_not_called_when_global_pool_is_full() -> None:
+async def test_under_share_youtube_producer_runs_even_when_global_pool_is_full() -> None:
+    # Pool-share fairness spec (2026-07-20, invariant 2 / Goal 1): youtube owns
+    # 1/9 (≈11) but sits at 0 while the global pool is full. It must still run
+    # to feed the backlog for share-aware admission. Old behavior starved it.
     youtube = _FakeYoutubeProducer()
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3283,11 +3302,12 @@ async def test_youtube_producer_not_called_when_global_pool_is_full() -> None:
         youtube_producer=youtube,
         pool_target_count=100,
         pool_source_shares={"bilibili": 8, "youtube": 1},
+        discovery_limit=30,
     )
 
     await controller._tick_youtube_producer()
 
-    assert youtube.calls == []
+    assert youtube.calls == [11]
 
 
 def test_source_replenishment_plan_maps_bilibili_deficit_to_bilibili_strategies() -> None:
@@ -3308,8 +3328,12 @@ def test_source_replenishment_plan_maps_bilibili_deficit_to_bilibili_strategies(
         pool_target_count=600,
     )
 
+    # Pool-share fairness spec (2026-07-20, invariant 2): bilibili owns 100% of
+    # the 600 target and sits at 300 available → its own-share deficit is 300,
+    # bounded only by raw headroom (900 here), not by the smaller global
+    # headroom (600-420=180) the old口径 clamped to.
     assert controller._build_source_replenishment_plan() == [
-        (["search", "related_chain", "trending", "explore"], 180)
+        (["search", "related_chain", "trending", "explore"], 300)
     ]
 
 

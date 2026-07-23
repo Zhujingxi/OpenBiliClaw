@@ -32,7 +32,7 @@ import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
 import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
-import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
+import { runtimeAssetCandidates } from "../shared/asset-prefix.ts";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
 // the same field on globalThis. See dispatcher-mutex.ts for the
@@ -694,27 +694,32 @@ async function injectFetchTapInto(tabId: number): Promise<void> {
     _lastInjectStatus = "scripting_api_missing";
     return;
   }
-  try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: false },
-      files: [`${ASSET_PREFIX}main/dy-fetch-tap.js`],
-      world: "MAIN",
-    });
-    _lastInjectStatus = `ok_results=${Array.isArray(result) ? result.length : "n/a"}`;
-  } catch (err) {
-    // Firefox structured-clones the completion value of a MAIN-world file
-    // injection and rejects a non-clonable result even though the script
-    // executed fine (only the result clone failed). Treat that as success.
-    if (String(err).includes("non-structured-clonable")) {
-      _lastInjectStatus = "ok_uncloneable_result";
+  let lastError = "unknown injection error";
+  for (const file of runtimeAssetCandidates("main/dy-fetch-tap.js")) {
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: false },
+        files: [file],
+        world: "MAIN",
+      });
+      _lastInjectStatus =
+        `ok_file=${file};results=${Array.isArray(result) ? result.length : "n/a"}`;
       return;
+    } catch (err) {
+      // Firefox structured-clones the completion value of a MAIN-world file
+      // injection and rejects a non-clonable result even though the script
+      // executed fine (only the result clone failed). Treat that as success.
+      if (String(err).includes("non-structured-clonable")) {
+        _lastInjectStatus = `ok_file=${file};uncloneable_result`;
+        return;
+      }
+      lastError = String(err);
     }
-    // Inject failed — could be scripting permission missing, file
-    // not in web_accessible_resources, captcha intermediate page,
-    // or chrome:// blocked. Capture the error so the content script
-    // can ship it back through scope debug.
-    _lastInjectStatus = `error: ${String(err).slice(0, 120)}`;
   }
+  // Inject failed — could be a mismatched unpacked layout, scripting
+  // permission missing, captcha intermediate page, or chrome:// blocked.
+  // Capture the final error so the content script can ship it through debug.
+  _lastInjectStatus = `error: ${lastError.slice(0, 120)}`;
 }
 
 function normalizeHotTaskItems(items: DyHotTaskItem[] | undefined): DyHotTaskItem[] {

@@ -18,3 +18,21 @@ declare const __OBC_ASSET_PREFIX__: string | undefined;
 
 export const ASSET_PREFIX: string =
   typeof __OBC_ASSET_PREFIX__ !== "undefined" ? __OBC_ASSET_PREFIX__ : "dist/";
+
+/**
+ * Candidate paths for a dynamically injected bundled asset.
+ *
+ * Release archives and the documented unpacked layout use `dist/…`, while
+ * some existing unpacked installs point Chrome directly at the built output
+ * and therefore expose the same file as `main/…`. Manifest content scripts
+ * cannot repair an already-installed layout; dynamic injection can safely
+ * support both without weakening host permissions.
+ */
+export function runtimeAssetCandidates(
+  relativePath: string,
+  prefix: string = ASSET_PREFIX,
+): string[] {
+  const rootRelative = relativePath.replace(/^\/+/, "");
+  const prefixed = `${prefix}${rootRelative}`;
+  return prefixed === rootRelative ? [rootRelative] : [prefixed, rootRelative];
+}

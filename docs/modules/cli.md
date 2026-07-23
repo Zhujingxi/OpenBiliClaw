@@ -837,6 +837,8 @@ $ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点�
 
 ### `openbiliclaw fetch-douyin`
 
+`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
+
 单独触发抖音 `bootstrap_profile` 拉取，适合 smoke 测试扩展和补拉抖音信号。它只执行“入队 → 唤醒扩展 → 等结果 → 打印 scope counts”，不跑 B 站认证检查、不跑 `analyze_events()` / `build_initial_profile()` / discovery。事件由 daemon 在接收 `/api/sources/dy/task-result` partial 时写入 memory，CLI 自身不会再传播一次，避免重复入库。
 
 ```bash
@@ -907,7 +909,7 @@ $ openbiliclaw fetch-x -n 50
   已写入 memory：73 条事件。 跑 `openbiliclaw rebuild-profile` 让画像吃进新信号。
 ```
 
-`--limit/-n` 控制每类最多拉取条数（默认 50，`init` 回填用 200）；`--dry-run` 只拉取并打印、不写 memory。点赞 → `event_type="like"`、收藏 → `event_type="favorite"`（均为显式正向信号）。cookie 未同步时静默跳过（0 条事件、退出码 0），不报错；拉取本身 best-effort，单类失败（cookie 过期 / 限流 / 偶发 TLS）只打印告警、不中断。
+`--limit/-n` 控制每类最多拉取条数（默认 50，`init` 回填用 200）；`--dry-run` 只拉取并打印、不写 memory。点赞 → `event_type="like"`、收藏 → `event_type="favorite"`（均为显式正向信号）。cookie 未同步时静默跳过（0 条事件、退出码 0），不报错；拉取本身 best-effort，单类失败（cookie 过期 / 限流 / 偶发 TLS）只打印告警、不中断。每个真实请求无论成功或失败都会更新共享 `XSourceHealthStore`（证据绑定当前 Cookie 指纹），所以 dry-run 成功后来源状态能立即显示「请求反馈」验证，401/403/429 也会给设置页留下可定位的健康状态；dry-run 仍然不会写画像事件。
 
 ### `openbiliclaw import-youtube <path>`
 

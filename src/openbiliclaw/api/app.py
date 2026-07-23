@@ -100,6 +100,7 @@ from openbiliclaw.api.models import (
     PendingDelightResponse,
     PendingNotificationOut,
     PendingNotificationResponse,
+    PlatformAvailabilityResponse,
     ProfileEditIn,
     ProfileSummaryResponse,
     RecommendationAppendIn,
@@ -259,6 +260,10 @@ _FIRST_PAGE_TOPUP_FLOOR = 10
 # polling clients must not re-run it every few seconds. An empty history
 # (fresh install) bypasses the debounce — matching the original bootstrap.
 _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
+# Collapse simultaneous boot reads from restored/stale browser tabs. The cache
+# is intentionally tiny: it is a load-shedding single-flight window, not a
+# user-visible freshness policy. Mutating recommendation routes invalidate it.
+_RECOMMENDATION_SNAPSHOT_TTL_SECONDS = 1.0
 _PROFILE_UPDATE_BACKFILL_LIMIT = 200
 _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
     "view",
@@ -1563,15 +1568,19 @@ def create_app(
             return max(0, int(cast("Any", configured_target)))
         return 0
 
-    def _canonical_pool_available() -> int | None:
-        nickname = ""
+    def _xhs_self_nickname() -> str:
+        """Persisted xhs nickname used by the pool's self-authored guard."""
         load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
         if callable(load_state):
             with suppress(Exception):
                 state = load_state()
                 info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
                 if isinstance(info, dict):
-                    nickname = str(info.get("nickname", "") or "").strip()
+                    return str(info.get("nickname", "") or "").strip()
+        return ""
+
+    def _canonical_pool_available() -> int | None:
+        nickname = _xhs_self_nickname()
         readiness = getattr(ctx.database, "count_pool_readiness", None)
         if callable(readiness):
             with suppress(Exception):
@@ -1594,6 +1603,15 @@ def create_app(
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
     first_page_topup_attempted_at = 0.0
+    recommendation_snapshot_cache: RecommendationListResponse | None = None
+    recommendation_snapshot_cached_at = 0.0
+    recommendation_snapshot_lock = asyncio.Lock()
+
+    def _invalidate_recommendation_snapshot() -> None:
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        recommendation_snapshot_cache = None
+        recommendation_snapshot_cached_at = 0.0
+
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
@@ -2356,6 +2374,21 @@ def create_app(
         _lan_ip_checked_at = time.monotonic()
         return _lan_ip_value
 
+    async def _fresh_lan_ip() -> str | None:
+        """Detect the LAN IP now, bypassing the ``/api/health`` TTL cache.
+
+        Opening the QR panel is a rare, user-initiated action, and a stale
+        address there is worse than a marginally slower panel: right after a
+        Wi-Fi switch the cached value still encodes a host the phone cannot
+        reach. Detection shells out to ifconfig / ip, so it runs in a worker
+        thread to keep the event loop responsive, and the result refreshes the
+        shared cache that ``/api/health`` reads.
+        """
+        nonlocal _lan_ip_value, _lan_ip_checked_at
+        _lan_ip_value = await asyncio.to_thread(_detect_lan_ip)
+        _lan_ip_checked_at = time.monotonic()
+        return _lan_ip_value
+
     # Embedding readiness is probed live (see _health_embedding_ready) and the
     # result cached here so frequent /api/health polls share one provider call.
     _embedding_probe_outcome: _EmbeddingProbeOutcome = "failed"
@@ -2602,9 +2635,12 @@ def create_app(
         """Lightweight endpoint for mobile QR code: LAN IP only.
 
         Unlike ``/api/health``, this skips the embedding readiness probe
-        so the QR drawer never blocks on a cold Ollama model load.
+        so the QR drawer never blocks on a cold Ollama model load, and it
+        detects the address fresh instead of serving the health TTL cache
+        (see ``_fresh_lan_ip``) so a scanned code is never a network change
+        behind.
         """
-        return JSONResponse({"lan_ip": _health_lan_ip()})
+        return JSONResponse({"lan_ip": await _fresh_lan_ip()})
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
@@ -4815,8 +4851,7 @@ def create_app(
                     )
         return EventIngestResponse(accepted=accepted, rejected=rejected)
 
-    @app.get("/api/recommendations", response_model=RecommendationListResponse)
-    async def recommendations() -> RecommendationListResponse:
+    async def _load_recommendations() -> RecommendationListResponse:
         nonlocal first_page_topup_attempted_at
 
         def _admission_min_score() -> float:
@@ -4940,7 +4975,45 @@ def create_app(
             ]
         )
 
+    @app.get("/api/recommendations", response_model=RecommendationListResponse)
+    async def recommendations() -> RecommendationListResponse:
+        """Return one coalesced recommendation snapshot.
+
+        Restored browser sessions can contain dozens of stale dashboard tabs.
+        When the backend comes back, those tabs all issue the same expensive
+        history/content join at once. A one-second cache plus single-flight
+        lock turns that burst into one database read while keeping interactive
+        mutations immediately visible through explicit invalidation.
+        """
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+
+        now = time.monotonic()
+        if (
+            recommendation_snapshot_cache is not None
+            and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+        ):
+            return recommendation_snapshot_cache.model_copy(deep=True)
+
+        async with recommendation_snapshot_lock:
+            now = time.monotonic()
+            if (
+                recommendation_snapshot_cache is not None
+                and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+            ):
+                return recommendation_snapshot_cache.model_copy(deep=True)
+            snapshot = await _load_recommendations()
+            recommendation_snapshot_cache = snapshot.model_copy(deep=True)
+            recommendation_snapshot_cached_at = time.monotonic()
+            return snapshot
+
     # ── Platform-neutral saved memberships and native sync ─────────
+
+    saved_state_snapshot_cache: dict[
+        tuple[SavedListKind, str], tuple[float, SavedItemStateResponse]
+    ] = {}
+
+    def _invalidate_saved_state(list_kind: SavedListKind, item_key: str) -> None:
+        saved_state_snapshot_cache.pop((list_kind, item_key), None)
 
     def _saved_service() -> Any:
         service = getattr(ctx, "saved_sync_service", None)
@@ -4972,19 +5045,29 @@ def create_app(
         list_kind: SavedListKind,
         item_key: str,
     ) -> SavedItemStateResponse:
+        cache_key = (list_kind, item_key)
+        cached = saved_state_snapshot_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS:
+            return cached[1].model_copy(deep=True)
         row = ctx.database.get_saved_membership(list_kind, item_key)
         if row is None:
-            return SavedItemStateResponse(saved=False, item_key=item_key)
-        return SavedItemStateResponse(
-            saved=True,
-            item_key=item_key,
-            sync_status=_safe_native_status(row.get("sync_status")),
-            sync_task_id=str(row.get("sync_task_id", "")),
-            resolved_action=str(row.get("resolved_action", "")),
-            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
-            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
-            error_message=_safe_result_text(row.get("last_error_message", "")),
-        )
+            response = SavedItemStateResponse(saved=False, item_key=item_key)
+        else:
+            response = SavedItemStateResponse(
+                saved=True,
+                item_key=item_key,
+                sync_status=_safe_native_status(row.get("sync_status")),
+                sync_task_id=str(row.get("sync_task_id", "")),
+                resolved_action=str(row.get("resolved_action", "")),
+                resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                error_message=_safe_result_text(row.get("last_error_message", "")),
+            )
+        if len(saved_state_snapshot_cache) >= 1000:
+            saved_state_snapshot_cache.clear()
+        saved_state_snapshot_cache[cache_key] = (now, response.model_copy(deep=True))
+        return response
 
     def _saved_list_item(row: dict[str, Any]) -> SavedListItem:
         return SavedListItem(
@@ -5048,6 +5131,7 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="invalid saved item") from exc
+        _invalidate_saved_state(list_kind, result.item_key)
         if result.sync_status == "pending" and result.sync_task_id:
             return SavedItemStateResponse(
                 saved=result.saved,
@@ -5091,6 +5175,7 @@ def create_app(
         payload: SavedItemKeyIn,
     ) -> SavedItemStateResponse:
         ctx.database.remove_saved_membership(list_kind, payload.item_key)
+        _invalidate_saved_state(list_kind, payload.item_key)
         return _saved_state_response(list_kind, payload.item_key)
 
     @app.get("/api/saved/{list_kind}/status", response_model=SavedItemStateResponse)
@@ -5679,10 +5764,70 @@ def create_app(
         _fire_and_forget_tasks.add(task)
         task.add_done_callback(_fire_and_forget_tasks.discard)
 
+    def _platform_scope_kwargs(source_platform: str) -> dict[str, str]:
+        """Forward the platform scope only when the client actually sent one.
+
+        Engines and test doubles that predate platform scoping implement the
+        historical signature, so an unscoped request must keep its old call
+        shape rather than passing an empty keyword they cannot accept.
+        """
+        scope = str(source_platform or "").strip()
+        return {"source_platform": scope} if scope else {}
+
+    def _scoped_batch_came_up_short(
+        source_platform: str,
+        items: list[Any],
+        limit: int,
+    ) -> bool:
+        """Whether a platform-scoped request under-delivered.
+
+        A short scoped batch is the only signal that one platform ran dry
+        while the pool as a whole looks healthy, so it wakes the existing
+        replenishment entry point. This only requests a background refresh —
+        no discovery runs inside the HTTP request, and nothing here promises
+        the platform is refilled by the time the response returns.
+        """
+        if not str(source_platform or "").strip():
+            return False
+        return len(items) < max(0, int(limit))
+
+    @app.get(
+        "/api/recommendations/platform-availability",
+        response_model=PlatformAvailabilityResponse,
+    )
+    async def recommendation_platform_availability() -> PlatformAvailabilityResponse:
+        """Report servable inventory per canonical platform for the tab badges."""
+        loader = getattr(ctx.database, "load_pool_platform_availability_async", None)
+        if not callable(loader):
+            raise HTTPException(
+                status_code=503,
+                detail="platform availability is unavailable on this storage backend",
+            )
+        try:
+            snapshot = await loader(xhs_self_nickname=_xhs_self_nickname())
+        except Exception as exc:
+            # Never answer a failed read with zeros: the desktop keeps its last
+            # good snapshot, and a silent all-zero would read as "no stock
+            # anywhere" and disable auto-load across every platform.
+            logger.exception("Failed to read platform availability snapshot")
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to read platform availability: {exc}",
+            ) from exc
+        by_platform = {
+            str(name): max(0, int(count))
+            for name, count in dict(getattr(snapshot, "by_platform", {}) or {}).items()
+        }
+        return PlatformAvailabilityResponse(
+            total_available=max(0, int(getattr(snapshot, "total_available", 0))),
+            by_platform=by_platform,
+        )
+
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
     async def reshuffle_recommendations(
         payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
     ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
         request_started = time.perf_counter()
         precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
@@ -5711,11 +5856,14 @@ def create_app(
                 if bvid and bvid.strip()
             )
         )
+        source_platform = payload.source_platform if payload is not None else ""
+        scope_kwargs = _platform_scope_kwargs(source_platform)
         if callable(result_fn):
             serve_result = await result_fn(
                 profile=profile,
                 excluded_bvids=excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             items = serve_result.items
             counts_after = dict(serve_result.pool_counts_after)
@@ -5725,13 +5873,43 @@ def create_app(
                 profile=profile,
                 excluded_bvids=excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             counts_after = {}
             timings = None
+        if items:
+            propagate_event = getattr(ctx.memory_manager, "propagate_event", None)
+            if callable(propagate_event):
+                from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
+
+                returned_item_ids = [
+                    str(getattr(getattr(item, "content", None), "bvid", "") or "").strip()
+                    for item in items
+                ]
+                returned_item_ids = [item_id for item_id in returned_item_ids if item_id]
+                try:
+                    await propagate_event(
+                        build_event(
+                            event_type="reshuffle",
+                            source_platform=SOURCE_WEB,
+                            title="推荐列表",
+                            context="你在推荐页换了一批内容。",
+                            metadata={
+                                "recommendation_source_platform": source_platform or "all",
+                                "excluded_item_ids": excluded_bvids[:100],
+                                "returned_item_ids": returned_item_ids[:100],
+                                "batch_size": len(items),
+                            },
+                        )
+                    )
+                except Exception:
+                    # A behavioral breadcrumb must never turn a successful
+                    # recommendation response into an HTTP failure.
+                    logger.warning("Failed to persist reshuffle batch event", exc_info=True)
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
-            force=available_after == 0,
+            force=available_after == 0 or _scoped_batch_came_up_short(source_platform, items, 10),
             available_count=available_after,
         )
         logger.info(
@@ -5754,6 +5932,7 @@ def create_app(
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
         request_started = time.perf_counter()
         precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
@@ -5775,11 +5954,13 @@ def create_app(
         except Exception:
             return RecommendationReshuffleResponse(items=[])
         profile_ms = (time.perf_counter() - profile_started) * 1000.0
+        scope_kwargs = _platform_scope_kwargs(payload.source_platform)
         if callable(result_fn):
             serve_result = await result_fn(
                 profile=profile,
                 excluded_bvids=payload.excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             items = serve_result.items
             counts_after = dict(serve_result.pool_counts_after)
@@ -5789,13 +5970,17 @@ def create_app(
                 profile=profile,
                 excluded_bvids=payload.excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             counts_after = {}
             timings = None
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
-            force=available_after == 0,
+            force=(
+                available_after == 0
+                or _scoped_batch_came_up_short(payload.source_platform, items, 10)
+            ),
             available_count=available_after,
         )
         logger.info(
@@ -7710,6 +7895,7 @@ def create_app(
             feedback_type=feedback_type,
             feedback_note=note,
         )
+        _invalidate_recommendation_snapshot()
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
@@ -9946,7 +10132,13 @@ def create_app(
 
     @app.get("/api/sources/credentials", response_model=SourcesCredentialsResponse)
     def sources_credentials(reveal_keys: bool = False) -> SourcesCredentialsResponse:
-        """Return current local Cookie / token snapshots for source settings pages."""
+        """Return masked local credential snapshots for settings pages.
+
+        ``reveal_keys`` remains a no-op for older desktop/extension builds.
+        Secrets are write-only: a same-origin settings read must not become a
+        bulk credential export.
+        """
+        del reveal_keys
         from openbiliclaw.api.source_auth.forms import (
             build_credential_form,
             credential_summary,
@@ -9992,7 +10184,7 @@ def create_app(
             form = build_credential_form(slug, cfg=cfg)
             return SourceCredentialItem(
                 label=label,
-                value=_mask_source_credential(value, reveal=reveal_keys or not secret),
+                value=_mask_source_credential(value, reveal=not secret),
                 available=available,
                 detail=detail,
                 form=form,
@@ -11313,7 +11505,14 @@ def create_app(
 
     @app.get("/api/config", response_model=ConfigResponse)
     def get_config(reveal_keys: bool = False) -> ConfigResponse:
-        """Return the current configuration (API keys masked by default)."""
+        """Return the current configuration with every secret masked.
+
+        Older clients append ``?reveal_keys=true``. Keep accepting that query
+        parameter so they continue to load, but never put raw API keys or
+        credential-bearing proxy userinfo in a browser-readable response.
+        Masked echoes are already treated as "keep existing" by PUT /api/config.
+        """
+        del reveal_keys
         from openbiliclaw.config import (
             _collect_config_issues,
             load_config,
@@ -11326,7 +11525,7 @@ def create_app(
         return _config_to_response(
             cfg,
             issues,
-            mask_keys=not reveal_keys,
+            mask_keys=True,
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
         )

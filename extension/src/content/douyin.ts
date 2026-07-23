@@ -27,7 +27,7 @@ import type {
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
-import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
+import { runtimeAssetCandidates } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
 import { registerE2EExecutor } from "./e2e-executor.ts";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
@@ -95,11 +95,20 @@ function debugLog(event: string, data?: unknown): void {
  */
 function reinjectFetchTap(): void {
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.getURL) return;
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL(`${ASSET_PREFIX}main/dy-fetch-tap.js`);
-  script.onload = () => script.remove();
-  script.onerror = () => script.remove();
-  (document.head || document.documentElement).appendChild(script);
+  const candidates = runtimeAssetCandidates("main/dy-fetch-tap.js");
+  const injectCandidate = (index: number): void => {
+    const file = candidates[index];
+    if (!file) return;
+    const script = document.createElement("script");
+    script.src = chrome.runtime.getURL(file);
+    script.onload = () => script.remove();
+    script.onerror = () => {
+      script.remove();
+      injectCandidate(index + 1);
+    };
+    (document.head || document.documentElement).appendChild(script);
+  };
+  injectCandidate(0);
 }
 
 // Dynamic import for the chrome-lifecycle code path so node:test's

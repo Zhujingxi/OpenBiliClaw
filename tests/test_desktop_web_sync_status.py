@@ -15,6 +15,7 @@ def test_desktop_normalizes_account_sync_error_fields() -> None:
     body = normalize.group("body")
     assert "last_account_sync_error" in body
     assert "last_account_sync_error_kind" in body
+    assert "last_account_sync_issues" in body
 
 
 def test_desktop_renders_account_sync_error_chip() -> None:
@@ -31,6 +32,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     assert "B 站登录已失效，账号同步已停止 — 请重新登录" in app_js
     assert 'kind === "auth_expired"' in app_js
     assert "last_account_sync_message" in app_js
+    assert 'severity === "warning"' in app_js
 
     render = re.search(
         r"function renderAccountSyncStatus\((?P<args>[^)]*)\) \{(?P<body>.*?)\n    \}",
@@ -43,8 +45,25 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     # error stays available for diagnostics even though it is no longer shown.
     assert "last_account_sync_error" in render_body
     assert "last_account_sync_at" in render_body
+    assert "last_account_sync_issues" in render_body
+    assert "last_account_sync_severity" in render_body
+    assert "collectEnabledSourceIssues(state.sourceStatus)" in render_body
+    assert "sourceIssues.map((issue) =>" in render_body
+    assert "`${issue.source}：${issue.detail}`" in render_body
+    assert 'classList.toggle("is-warning"' in render_body
+    assert "（上次同步 ${when}）" in render_body
+    assert "账号同步出错" not in render_body
+    assert "未分类异常" in render_body
     # Timestamps go through the shared local-time formatter, not raw ISO.
     assert "formatLocalTime(" in render_body
+
+    # Source diagnostics are loaded on the dashboard itself, not only after a
+    # user opens settings; all eight platforms use the shared classifier and
+    # backend detail rather than frontend-specific error copy.
+    assert "function collectEnabledSourceIssues(data)" in app_js
+    assert "SourceStatus.describeSourceIssue(data[key])" in app_js
+    assert "SourceStatus.sourceLabel(key)" in app_js
+    assert "renderAccountSyncStatus(state.runtimeStatus);" in app_js
 
     # normalizeRuntimeStatus() rebuilds the payload from an explicit key list,
     # so a field missing there is dropped before render. That is exactly how
@@ -58,6 +77,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     assert normalize is not None, "desktop normalizeRuntimeStatus not found"
     for field in (
         "last_account_sync_error_kind",
+        "last_account_sync_issues",
         "last_account_sync_message",
         "last_account_sync_severity",
     ):
@@ -65,6 +85,7 @@ def test_desktop_renders_account_sync_error_chip() -> None:
 
     assert 'id="accountSyncStatus"' in index_html
     assert ".account-sync-status" in app_css
+    assert ".account-sync-status.is-warning" in app_css
 
 
 def test_desktop_apply_runtime_status_renders_sync_chip() -> None:

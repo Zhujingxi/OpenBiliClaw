@@ -2268,6 +2268,35 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"lan_ip": "192.168.1.7"}
 
+    def test_qr_info_endpoint_detects_lan_ip_fresh_on_every_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Wi-Fi switch must reach the QR panel at once, not after the TTL.
+
+        ``/api/health`` caches ``lan_ip`` for 30s. If the QR endpoint shared
+        that cache, a code scanned right after a network change would still
+        encode the old, phone-unreachable host.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        addresses = iter(["192.168.1.7", "192.168.31.98"])
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: next(addresses))
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        first = client.get("/api/qr-info")
+        second = client.get("/api/qr-info")
+
+        assert first.json() == {"lan_ip": "192.168.1.7"}
+        assert second.json() == {"lan_ip": "192.168.31.98"}
+        # The fresh probe also refreshes the cache /api/health serves, so health
+        # never regresses to the superseded address (a third _detect_lan_ip call
+        # would exhaust the iterator and raise).
+        assert client.get("/api/health").json()["lan_ip"] == "192.168.31.98"
+
     def test_sources_status_returns_every_source(self) -> None:
         """Unified /api/sources/status reports a status item per source."""
         from fastapi.testclient import TestClient
@@ -2482,11 +2511,17 @@ class TestBackendAPI:
 
         body = client.get("/api/sources/credentials?reveal_keys=true").json()
 
-        assert body["bilibili"]["value"] == "SESSDATA=bili; bili_jct=jct; DedeUserID=1;"
-        assert body["douyin"]["value"] == "msToken=dy; ttwid=tw;"
-        assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
+        # The legacy reveal flag is intentionally a no-op: settings snapshots
+        # report presence with a mask and never export the stored credential.
+        assert "SESSDATA=bili" not in body["bilibili"]["value"]
+        assert "msToken=dy" not in body["douyin"]["value"]
+        assert "auth_token=x" not in body["twitter"]["value"]
+        assert "*" in body["bilibili"]["value"]
+        assert "*" in body["douyin"]["value"]
+        assert "*" in body["twitter"]["value"]
         assert body["xiaohongshu"]["label"] == "xsec_token"
-        assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert body["xiaohongshu"]["value"] != "xhs-token"
+        assert "*" in body["xiaohongshu"]["value"]
         assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
@@ -2494,8 +2529,7 @@ class TestBackendAPI:
         assert body["bangumi"]["label"] == "可选个人令牌"
 
         masked = client.get("/api/sources/credentials").json()
-        assert masked["bilibili"]["value"] != body["bilibili"]["value"]
-        assert "*" in masked["bilibili"]["value"]
+        assert masked["bilibili"]["value"] == body["bilibili"]["value"]
 
     def test_sources_status_xhs_recent_login_state_ready_without_tokens(
         self, tmp_path: Path
@@ -4712,6 +4746,30 @@ class TestBackendAPI:
         assert data["items"][0]["up_mid"] == 112233
         assert_publication(data["items"][0])
 
+    def test_recommendations_endpoint_coalesces_immediate_duplicate_reads(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def get_recommendations(
+                self, limit: int = 20, *, exclude_processed: bool = False
+            ) -> list[dict[str, object]]:
+                assert limit == 40
+                assert exclude_processed is True
+                self.reads += 1
+                return []
+
+        database = FakeDatabase()
+        app = create_app(database=database)
+        client = TestClient(app)
+
+        assert client.get("/api/recommendations").status_code == 200
+        assert client.get("/api/recommendations").status_code == 200
+
+        assert database.reads == 1
+
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
         franchise_key column, the API trims down to ``max_per_franchise=2``
@@ -4894,6 +4952,7 @@ class TestBackendAPI:
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
             "last_account_sync_error_kind": "",
+            "last_account_sync_issues": [],
             # Display copy is rendered backend-side so every surface shows the
             # same sentence; the raw error above stays for diagnostics.
             "last_account_sync_message": "",
@@ -4928,6 +4987,9 @@ class TestBackendAPI:
                     "last_account_sync_at": "2026-03-14T18:00:00+00:00",
                     "last_account_sync_error": "logged out",
                     "last_account_sync_error_kind": "auth_expired",
+                    "last_account_sync_issues": [
+                        {"stage": "bilibili_history", "kind": "auth_expired"}
+                    ],
                     "last_account_sync_message": "B 站登录已失效，请重新登录。",
                     "last_account_sync_severity": "warning",
                 }
@@ -4946,6 +5008,9 @@ class TestBackendAPI:
         assert response.status_code == 200
         payload = response.json()
         assert payload["last_account_sync_error_kind"] == "auth_expired"
+        assert payload["last_account_sync_issues"] == [
+            {"stage": "bilibili_history", "kind": "auth_expired"}
+        ]
         # Surfaces render this instead of the provider's raw English error.
         assert payload["last_account_sync_message"] == "B 站登录已失效，请重新登录。"
         assert payload["last_account_sync_severity"] == "warning"
@@ -10308,7 +10373,8 @@ class TestBackendAPI:
         assert data["llm"]["default_provider"] == "gemini"
         assert data["llm"]["fallback_provider"] == "openai"
         assert "fallback_enabled" not in data["llm"]  # removed legacy flag
-        assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
+        assert data["llm"]["gemini"]["api_key"] != "test-gemini-key"
+        assert "*" in data["llm"]["gemini"]["api_key"]
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
         # Embedding fields
@@ -11029,10 +11095,10 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in emb["api_key"]
         assert "sk-embed-secret-1234567890" not in emb["api_key"]
 
-    def test_get_config_with_reveal_keys_returns_raw_secrets(self, monkeypatch, tmp_path) -> None:
-        """``GET /api/config?reveal_keys=true`` returns unmasked keys
-        for both new fields (openai_compatible.api_key + embedding.api_key).
-        Used by the popup when the user clicks "show" to edit."""
+    def test_get_config_reveal_keys_compat_flag_still_masks_secrets(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Legacy reveal requests remain compatible but never export secrets."""
         from openbiliclaw.config import (
             Config,
             EmbeddingConfig,
@@ -11052,8 +11118,10 @@ class TestEmbeddingAndCompatProviderE2E:
         client = self._make_client(monkeypatch, tmp_path, cfg)
 
         revealed = client.get("/api/config", params={"reveal_keys": "true"}).json()
-        assert revealed["llm"]["openai_compatible"]["api_key"] == "gsk-raw-1234567890"
-        assert revealed["llm"]["embedding"]["api_key"] == "sk-emb-raw-1234567890"
+        assert revealed["llm"]["openai_compatible"]["api_key"] != "gsk-raw-1234567890"
+        assert revealed["llm"]["embedding"]["api_key"] != "sk-emb-raw-1234567890"
+        assert "*" in revealed["llm"]["openai_compatible"]["api_key"]
+        assert "*" in revealed["llm"]["embedding"]["api_key"]
 
     # ── PUT round-trip: openai_compatible ───────────────────────────
 
@@ -14557,16 +14625,19 @@ class TestRecommendationsFirstPageTopUp:
         assert resp.status_code == 200
         assert served == []
 
-    def test_empty_history_bootstrap_is_not_debounced(self, tmp_path: Path) -> None:
+    def test_empty_history_bootstrap_is_coalesced_inside_snapshot_window(
+        self, tmp_path: Path
+    ) -> None:
         from fastapi.testclient import TestClient
 
-        # Fresh-install bootstrap keeps its original semantics: while the
-        # history stays empty every GET may retry the bootstrap serve.
+        # A restored browser session can reopen dozens of empty dashboards at
+        # once. They share one short snapshot window instead of each calling
+        # the side-effecting bootstrap serve path.
         app, served = self._make_app(tmp_path, history_rows=0)
         with TestClient(app) as client:
             client.get("/api/recommendations")
             client.get("/api/recommendations")
-        assert served == [10, 10]
+        assert served == [10]
 
 
 class TestEmbeddingDiagnosisAndRepair:
@@ -16301,6 +16372,327 @@ def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
         ({"profile": "ok"}, [], 10),
         ({"profile": "ok"}, ["BV1VISIBLE", "BV2VISIBLE"], 10),
     ]
+
+
+def test_successful_reshuffle_records_one_batch_event_and_empty_result_records_none() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.discovery.engine import DiscoveredContent
+    from openbiliclaw.recommendation.engine import Recommendation
+
+    class FakeRuntimeController:
+        event_hub = None
+
+        def get_runtime_status(self) -> dict[str, object]:
+            return {
+                "initialized": True,
+                "pool_available_count": 3,
+                "pool_pending_count": 0,
+            }
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"profile": "ok"}
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def reshuffle_recommendations(
+            self,
+            *,
+            profile: object,
+            limit: int = 10,
+            excluded_bvids: list[str] | None = None,
+        ) -> list[Recommendation]:
+            del profile, limit, excluded_bvids
+            self.calls += 1
+            if self.calls > 1:
+                return []
+            return [
+                Recommendation(
+                    content=DiscoveredContent(
+                        bvid="BV1NEWBATCH",
+                        title="新批次",
+                        up_name="UP",
+                        cover_url="",
+                    ),
+                    recommendation_id=91,
+                    expression="这是一条新推荐。",
+                    topic_label="换批测试",
+                    confidence=0.9,
+                    presented=False,
+                )
+            ]
+
+    memory = FakeMemoryManager()
+    app = create_app(
+        memory_manager=memory,
+        database=object(),
+        soul_engine=FakeSoulEngine(),
+        recommendation_engine=FakeRecommendationEngine(),
+        runtime_controller=FakeRuntimeController(),
+    )
+    client = TestClient(app)
+
+    success = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1CURRENT", " BV1CURRENT ", "BV2CURRENT"]},
+    )
+    empty = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1NEWBATCH"]},
+    )
+
+    assert success.status_code == 200
+    assert empty.status_code == 200
+    assert len(memory.events) == 1
+    event = memory.events[0]
+    assert event["event_type"] == "reshuffle"
+    assert event["context"] == "你在推荐页换了一批内容。"
+    assert event["metadata"] == {
+        "recommendation_source_platform": "all",
+        "excluded_item_ids": ["BV1CURRENT", "BV2CURRENT"],
+        "returned_item_ids": ["BV1NEWBATCH"],
+        "batch_size": 1,
+        "source_platform": "web",
+        "signal_strength": 0.1,
+    }
+
+
+# ── Platform-scoped recommendation requests ─────────────────────────
+
+
+class _ScopedFakeSoulEngine:
+    async def get_profile(self) -> dict[str, object]:
+        return {"profile": "ok"}
+
+
+class _ScopedFakeRuntimeController:
+    event_hub = None
+
+    def __init__(self, available: int = 5) -> None:
+        self.available = available
+        self.requests: list[tuple[str, bool]] = []
+
+    def get_runtime_status(self) -> dict[str, object]:
+        return {
+            "initialized": True,
+            "pool_available_count": self.available,
+            "pool_pending_count": 0,
+        }
+
+    async def request_replenishment(self, *, reason: str, force: bool = False) -> dict[str, object]:
+        self.requests.append((reason, force))
+        return {"accepted": True, "state": "running", "reason": reason}
+
+
+class _ScopedResultEngine:
+    """Engine exposing the modern ``*_with_result`` surface."""
+
+    def __init__(self, items: list[object] | None = None) -> None:
+        self.reshuffle_kwargs: list[dict[str, object]] = []
+        self.append_kwargs: list[dict[str, object]] = []
+        self._items = items or []
+
+    def _result(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            items=list(self._items),
+            pool_counts_after={"available": 5, "raw": 5, "pending": 0},
+            timings=None,
+        )
+
+    async def reshuffle_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.reshuffle_kwargs.append(dict(kwargs))
+        return self._result()
+
+    async def append_recommendations_with_result(self, **kwargs: object) -> SimpleNamespace:
+        self.append_kwargs.append(dict(kwargs))
+        return self._result()
+
+
+def _scoped_app(engine: object, runtime: object, database: object | None = None) -> object:
+    return create_app(
+        memory_manager=object(),
+        database=database if database is not None else object(),
+        soul_engine=_ScopedFakeSoulEngine(),
+        recommendation_engine=engine,
+        runtime_controller=runtime,
+    )
+
+
+def test_reshuffle_and_append_forward_canonical_source_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    reshuffle = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+    append = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+    )
+
+    assert reshuffle.status_code == 200
+    assert append.status_code == 200
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "zhihu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_recommendation_requests_normalize_platform_aliases() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    assert (
+        client.post(
+            "/api/recommendations/reshuffle",
+            json={"source_platform": "xhs"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/recommendations/append",
+            json={"excluded_bvids": [], "source_platform": " ZH "},
+        ).status_code
+        == 200
+    )
+
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "xiaohongshu"
+    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+
+
+def test_omitted_platform_preserves_the_legacy_engine_call_shape() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    client.post("/api/recommendations/reshuffle", json={"excluded_bvids": []})
+    client.post("/api/recommendations/append", json={"excluded_bvids": []})
+    client.post("/api/recommendations/reshuffle", json={"source_platform": ""})
+
+    for call in (*engine.reshuffle_kwargs, *engine.append_kwargs):
+        assert "source_platform" not in call
+
+
+def test_recommendation_requests_reject_unknown_platform() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine()
+    client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
+
+    for path in ("/api/recommendations/reshuffle", "/api/recommendations/append"):
+        for bogus in ("weibo", "'; DROP TABLE content_cache; --", "bilibili2"):
+            response = client.post(path, json={"excluded_bvids": [], "source_platform": bogus})
+            assert response.status_code == 422, (path, bogus)
+
+    # A rejected request must never reach the engine or silently mean "全部".
+    assert engine.reshuffle_kwargs == []
+    assert engine.append_kwargs == []
+
+
+def test_scoped_short_batch_wakes_existing_replenishment_path() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post(
+        "/api/recommendations/append",
+        json={"excluded_bvids": [], "source_platform": "zhihu"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    # Pool-wide inventory is healthy, so only the scoped shortfall can explain
+    # this; it must wake the existing forced replenishment path.
+    assert runtime.requests and runtime.requests[0][1] is True
+
+
+def test_unscoped_short_batch_with_healthy_pool_does_not_force_replenishment() -> None:
+    from fastapi.testclient import TestClient
+
+    engine = _ScopedResultEngine(items=[])
+    runtime = _ScopedFakeRuntimeController(available=42)
+    client = TestClient(_scoped_app(engine, runtime))
+
+    response = client.post("/api/recommendations/append", json={"excluded_bvids": []})
+
+    assert response.status_code == 200
+    assert runtime.requests == []
+
+
+class _AvailabilityDatabase:
+    def __init__(self, snapshot: object | None = None, error: Exception | None = None) -> None:
+        self._snapshot = snapshot
+        self._error = error
+        self.calls = 0
+
+    async def load_pool_platform_availability_async(self, **_kwargs: object) -> object:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._snapshot
+
+
+def test_platform_availability_endpoint_returns_canonical_map() -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.storage.database import PoolPlatformAvailability
+
+    database = _AvailabilityDatabase(
+        PoolPlatformAvailability(
+            total_available=37,
+            by_platform={"bilibili": 18, "zhihu": 7, "xiaohongshu": 5, "reddit": 7},
+        )
+    )
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database)
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_available"] == 37
+    assert payload["by_platform"] == {
+        "bilibili": 18,
+        "zhihu": 7,
+        "xiaohongshu": 5,
+        "reddit": 7,
+    }
+    assert sum(payload["by_platform"].values()) == payload["total_available"]
+
+
+def test_platform_availability_read_failure_is_a_diagnosable_5xx() -> None:
+    """A failed read must not be published as an all-zero snapshot."""
+    from fastapi.testclient import TestClient
+
+    database = _AvailabilityDatabase(error=RuntimeError("database is locked"))
+    client = TestClient(
+        _scoped_app(_ScopedResultEngine(), _ScopedFakeRuntimeController(), database),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get("/api/recommendations/platform-availability")
+
+    assert response.status_code >= 500
+    assert "0" not in str(response.json().get("total_available", ""))
+    assert database.calls == 1
 
 
 def test_apply_retraction_db_marks_marks_matching_positive(tmp_path: Path) -> None:

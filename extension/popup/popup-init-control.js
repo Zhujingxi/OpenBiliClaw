@@ -345,7 +345,10 @@ function stageList(status) {
 const STAGE_FRACTION_CAP = 0.95;
 // Legacy half-step for statuses without progress/eta fields (old backends):
 // preserves the historic 13/38/63/88 ticks exactly.
-const STAGE_FRACTION_FALLBACK = 0.5;
+// A stage with no real done/total contributes NOTHING to the bar. It used to
+// contribute a flat half-step (0.5), which implied progress the stage had not
+// made; such stages now render indeterminate instead.
+const STAGE_FRACTION_UNKNOWN = 0;
 // Stall threshold. Calibration: backend heartbeat period 30s × 3 missed beats
 // (api/app.py _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
 // This governs the CONNECTION check only.
@@ -372,7 +375,11 @@ function _progressStallThreshold(st, stage) {
 }
 // Expectation copy shared by the idle checklist and the start-button area.
 export const INIT_EXPECTATION_HINT =
-  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或模型较慢时可能超过 1 小时，只要仍有进展就不会被中断。期间可离开此页面，进度会保留。";
+  "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+
+// Said ONCE while the user waits, not repeated on every stage row.
+export const INIT_RUNNING_HINT =
+  "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
 
 // Per-run client view state: elapsed-based pseudo-progress anchors (first
 // client observation of each running stage) + the monotonic pct clamp + the
@@ -384,7 +391,6 @@ function _viewState(runId) {
   let st = _runViewState.get(runId);
   if (!st) {
     st = {
-      stageStartMs: new Map(),
       maxPct: 0,
       lastHeartbeatMark: null,
       lastHeartbeatChangeMs: 0,
@@ -410,64 +416,48 @@ export function resetInitProgressViewState() {
   _runViewState.clear();
 }
 
-// Fraction of a RUNNING stage: real sub-progress (done/total) when the backend
-// exposes it; otherwise an elapsed/eta pseudo-progress (1 - e^-t/eta) anchored
-// at the first client observation of the stage running; otherwise the legacy
-// half-step. ``st`` is null when the status carries no run_id (legacy) — then
-// only the stateless paths apply.
-function _runningStageFraction(stage, st, nowMs) {
-  const prog = stage && stage.progress;
-  if (prog && prog.mode === "indeterminate") {
-    const eta = Number((stage && stage.eta_seconds) || 0);
-    if (eta > 0 && st) {
-      let startMs = st.stageStartMs.get(stage.n);
-      if (startMs === undefined) {
-        startMs = nowMs;
-        st.stageStartMs.set(stage.n, startMs);
-      }
-      return Math.min(
-        STAGE_FRACTION_CAP,
-        1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta),
-      );
-    }
-    return STAGE_FRACTION_FALLBACK;
+// Fraction of a RUNNING stage: ONLY real sub-progress (done/total) moves the
+// bar. The old elapsed/eta pseudo-progress (1 - e^-t/eta) is gone along with
+// the forecasts that fed it — faking a moving bar from a made-up duration is
+// the same lie in another shape. A stage without done/total contributes
+// nothing and is rendered indeterminate by ``initProgressView``.
+function _runningStageFraction(stage) {
+  const total = Number((stage && stage.progress && stage.progress.total) || 0);
+  if (total > 0) {
+    const done = Math.max(0, Math.min(Number(stage.progress.done || 0), total));
+    return Math.min(STAGE_FRACTION_CAP, done / total);
   }
-  const progTotal = prog ? Number(prog.total || 0) : 0;
-  if (progTotal > 0) {
-    const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
-    return Math.min(STAGE_FRACTION_CAP, done / progTotal);
-  }
-  const eta = Number((stage && stage.eta_seconds) || 0);
-  if (eta > 0 && st) {
-    let startMs = st.stageStartMs.get(stage.n);
-    if (startMs === undefined) {
-      startMs = nowMs;
-      st.stageStartMs.set(stage.n, startMs);
-    }
-    const elapsed = Math.max(0, (nowMs - startMs) / 1000);
-    return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
-  }
-  return STAGE_FRACTION_FALLBACK;
+  return STAGE_FRACTION_UNKNOWN;
 }
 
-// Show the calibrated duration before it elapses; afterwards stop repeating an
-// already-broken estimate and surface the real hard ceiling instead.
-export function stageEtaText(stage) {
-  const eta = Number((stage && stage.eta_seconds) || 0);
-  if (eta <= 0) {
+// A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+// duration we cannot honour is worse than none: every wrong estimate reads as
+// "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and stage 4
+// announced 5, both legitimately ran far longer). The running row therefore
+// reports only observed facts the backend already publishes: how long this
+// stage has been running, and real sub-progress counts when they exist. No
+// estimate, no ceiling, no extrapolation.
+function formatElapsedText(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+}
+
+export function stageDetailText(stage) {
+  const progress = stage && stage.progress;
+  if (!progress) {
     return "";
   }
-  const progress = stage && stage.progress;
-  const elapsed = Number((progress && progress.elapsed_seconds) || 0);
-  if (elapsed > eta) {
-    const maxSeconds = Number((progress && progress.max_seconds) || 0);
-    if (maxSeconds > 0) {
-      return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
-    }
-    return "已超常见用时；AI 或平台仍可能在处理";
+  const parts = [];
+  const elapsed = Number(progress.elapsed_seconds || 0);
+  if (elapsed > 0) {
+    parts.push(formatElapsedText(elapsed));
   }
-  const halfMinutes = Math.ceil(eta / 30) / 2;
-  return `本阶段通常约 ${halfMinutes} 分钟`;
+  const total = Number(progress.total || 0);
+  if (total > 0) {
+    const done = Math.max(0, Math.min(Number(progress.done || 0), total));
+    parts.push(`已完成 ${done}/${total}`);
+  }
+  return parts.join(" · ");
 }
 
 // Track backend heartbeat and substantive progress separately. The heartbeat
@@ -552,8 +542,14 @@ export function initProgressView(status, nowMs = Date.now()) {
   const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
   const current = (status && status.current_stage) || 0;
   const currentStage = stages.find((s) => s.n === current);
+  // Indeterminate covers both the backend's explicit flag and any running
+  // stage with no real done/total — with the eta gone there is nothing honest
+  // left to fill such a bar with.
   const indeterminate = Boolean(
-    running && currentStage && currentStage.progress?.mode === "indeterminate",
+    running &&
+      currentStage &&
+      (currentStage.progress?.mode === "indeterminate" ||
+        !(Number(currentStage.progress?.total || 0) > 0)),
   );
   let stageLabel = currentStage
     ? `${currentStage.n}/${total} ${currentStage.label}`
@@ -564,7 +560,7 @@ export function initProgressView(status, nowMs = Date.now()) {
   }
   const runningStages = stages.filter((s) => s.status === "running");
   const inFlight = runningStages.length
-    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s), 0) /
       runningStages.length
     : 0;
   const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
@@ -582,7 +578,7 @@ export function initProgressView(status, nowMs = Date.now()) {
     doneCount,
     current,
     stageLabel,
-    etaText: running ? stageEtaText(currentStage) : "",
+    stageDetailText: running ? stageDetailText(currentStage) : "",
     pct,
     indeterminate,
     failed: Boolean(failedStage),

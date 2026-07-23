@@ -15,17 +15,17 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，避免 pool readiness / maintenance 的推荐历史排除和最近已看读取反复全表扫描。 |
+| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史 `view` 事件，不受旧版 2000 条窗口限制。 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
 | Retraction 事件折价（离线重读面） | ✅ | `mark_positive_events_retracted(identity_urls, retracted_action, *, retraction_at)` 在独立短连接的一次事务中，对 `event_type == retracted_action` 且 URL 归一化 identity key（`sources/identity_keys.dedup_key`：tweet_id / bvid / mid / xhs note_id）命中、**且事件时间早于 `retraction_at`** 的行 patch `metadata.retracted=true` + `signal_strength=min(现值,0.2)`；事件时间不可得的行保守不标。无时间窗口（identity key 全局唯一），覆盖 `openbiliclaw init` 全量重建与 12h 认知整理等重读 events 表路径；不删行、不改 `event_type`/`url`。`latest_retraction_time_for(url, action)` 返回该 identity + action 最新的已存 retraction 事件时间，供落库路径对账迟到正向事件（account_sync 回填）。`retracted_action` 越界返回 0/None。 |
-| 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、近期已看、self-XHS 与 delight guards。 |
+| 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、`seen_items`、self-XHS 与 delight guards。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
 | 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；task URL 只允许平台 HTTPS host 与默认端口，输出移除 fragment/非导航 query（YouTube 仅保留身份参数 `v`；小红书仅保留打开公开笔记所需的单值非空 `xsec_token/xsec_source`，其它 key 仍剥离）。partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
 | 推荐链路 canonical identity | ✅ | `content_cache.item_key` 对**非空值**使用 partial unique index（`WHERE item_key != ''`），另有普通 lookup index，`recommendations.item_key` 使用普通索引；空值只作为 v0.3.166 及更早写入器不知道 additive 列时的兼容窗口，避免旧桌面版与新版源码共用数据库后第二条补池候选开始持续触发 `UNIQUE constraint failed`。当前版本初始化会临时移除旧全量 guard，按平台 + raw `content_id` 回填空 identity，并在恢复 partial unique 前确定性合并 canonical 重复行（优先 canonical storage key、填补非空元数据、重定向 recommendation 引用）。若 loser 仍被旧 `watch_later` / `favorites` 引用，consolidation 会先为真实 legacy schema 补 additive `item_key` 并写入 canonical key；后续 normalized saved migration 在 exact `bvid` 不存在时用该稳定键 join keeper，既保留 membership，也不绕过 Task 2 的单次 marker / no-resurrection 语义。B 站 `bvid` 主键保持 raw BV 兼容，非 B 站 `bvid` 存储键使用 namespaced identity，API 继续从独立字段输出 raw ID 与 authoritative URL。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
 | 有界库存维护与历史恢复 | ✅ | `maintain_pool_inventory(max_mutations=50)` 在独立短连接 `BEGIN IMMEDIATE` 中先恢复仍合格的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；单事务最多修改 50 行，返回 `has_more` 供 runtime 分批收敛。维护连接只等写锁 75ms，交互写入优先；每批仍保护 canonical available 底线并在不变量失败时整体回滚。 |
-| 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、最近已看和 curator 信号；同一快照只解析一次最近浏览身份，B 站事件走 BVID 快路径，并按最新 view event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
+| 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、持久化已看账本和 curator 信号；同一快照只物化一次 `seen_items`，并按账本最新 event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
 | 八平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
@@ -33,15 +33,29 @@
 | discovery keyword store | ✅ | `discovery_keywords` 用 `keyword_kind` 区分常规 search 词与 explore 词；默认 `regular`，`explore` 词只供 `ExploreStrategy` 专用 claim，不会被普通 B 站 search 消费。 |
 | discovery inspiration cache | ✅ | 新增 `discovery_inspiration_probe_cache`、`discovery_inspiration_expansion_cache`、`discovery_inspiration_axis` 与 `discovery_interest_selection_ledger`，持久化搜索探针证据、可复用 inspiration 轴、旧横向扩展缓存、yield 反馈计数和二级兴趣抽中事件；`search_local_inspiration_evidence()` 从 `content_cache` 抽取 local-first grounding evidence；`upsert_inspiration_axes()` / `list_inspiration_axes()` 管理轴库复用和轮转；`backfill_inspiration_axis_yield()` 用 trailing-window 全量重算（SET，幂等）把轴的 `yield_score` 从恒 0 变成由真实 `admissions` / `window_uses` 驱动，`apply_inspiration_axis_lifecycle()` 落库 stale / retired 状态迁移并物理清理 90 天陈旧行；`list_inspiration_axes_by_source()` 按 `source`（非 interest_label）过滤 + `min_yield` 高产筛 + 镜像生命周期排序，供跨域 explore 通道复用 `source='explore'` 的高产轴；`get_keyword_interest_coverage_snapshot()` 归一化汇总 keyword / raw candidate / admitted pool 覆盖和 recent selection count，用于下轮二级兴趣抽样降权；`get_keyword_cohort_stats()` 输出 inspiration / merged cohort 对比、local-first stub 字段和 replace 门禁指标。 |
 | keyword interest label migration | ✅ | `migrate_keyword_interest_labels()` 根据画像整理产生的重命名 mapping 迁移 `discovery_keywords.source_interest` 和 `discovery_interest_selection_ledger.source_interest`，降低画像标签漂移造成的 coverage / selection cooldown 死桶。 |
-| 最近已看过滤 | ✅ | 可换、raw 和评估路径复用 `source_platform:content_id` 与旧 BVID key，避免已看内容重复入池。 |
+| 持久化已看去重 | ✅ | `seen_items(item_key)` 保存所有已知 `view` 的 canonical `source_platform:content_id`，B 站同时向旧调用方暴露 raw BVID。单条 `insert_event()` 与批量 `insert_events_batch()` 都在事件事务内同步 upsert 账本；初始化会按 `seen_items_backfill_state` 增量回填旧事件。可换、raw、评估和平台库存路径读取这份无界账本，`get_recent_viewed_*` 仅作为兼容别名，不再代表“最近 N 条”。 |
 | 统一 admission 分数门 | ✅ | 推荐池读取、raw/headroom 统计、topic/franchise 分布、suppressed 复活、delight 候选和历史推荐读取都会应用统一最低分；初始化会清理旧低分 `content_cache` / `recommendations` 脏数据。 |
-| 惊喜通道占位排除 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` 统一排除被惊喜通道认领的行（`delight_notified=1`，或 delight 分数达动态阈值且 reason/hook 非空即当前惊喜队列候选），普通推荐与惊喜推荐不再重复出同一条内容；`dynamic_delight_threshold()` 以 `0.70` 为默认底线，候选池样本不少于 20 条时抬高到正式池 Top 10% 分数边界；delight backfill 会重新领取旧 `delight_score` 与当前 `relevance_score` 不一致的行，包括 `shown` 历史行。 |
-| serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
+| 惊喜文案就绪门与通道占位排除 | ✅ | `get_pool_candidates_needing_delight_score()` 只领取 `pool_expression / pool_topic_label` 已同时生成的行；`update_delight_score()` 再以条件写入拒绝未就绪或非正式文案快照，因此推荐词生成前不会形成任何 delight 状态。`get_delight_candidates()` / `count_delight_candidates()` 继续只返回精确同步快照，evaluator 的内部 `relevance_reason` 不能进入惊喜状态或展示出口。`get_pool_candidates()` / `count_pool_candidates()` 统一排除已送达惊喜，或 delight 分数达动态阈值且正式文案快照已同步的行。动态阈值默认底线为 `0.75`，copy-ready 样本不少于 150 条且总体标准差至少 `0.08` 时才按 Top 10% 边界抬高；backfill 会修复旧版 reason/hook 快照。 |
+| 平台定向候选读取 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 直接从 canonical available 集合（`_load_available_pool_candidate_rows_on(..., full_rows=True)`）取整行，与 `count_pool_candidates()` 共用 servability / `seen_items` / linkability / delight / topic-window 守卫与排序，因此 `strict_platform_candidates(p) ⊆ available_candidates_for(p)` 恒成立。平台过滤用 `_pool_source_family(source, source_platform)` 在 Python 侧归类而非裸列比较——`source_platform` 为空的 legacy 行要靠 `zhihu-hot` / `xhs-extension-task` 之类策略前缀才能归族，裸列比较会漏掉它们并破坏 `total == sum(by_platform)`。别名（`xhs`/`zh`）先 canonical 化，空值沿用 bilibili 默认。同时服务 serve 窗口的平台保底与 PC Web 的平台定向推荐请求；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（同口径守卫）。 |
+| 平台库存快照 | ✅ | `load_pool_platform_availability()` / `load_pool_platform_availability_async()` 在独立短连接的单次只读事务里物化一次 canonical available 集合，返回 `PoolPlatformAvailability(total_available, by_platform)`。两个数字出自同一份行集合，`total_available == sum(by_platform.values())` 是结构性成立而非两次独立查询的巧合（后者可能观察到不同 WAL 状态）。零库存平台不出现在 `by_platform` 中，由调用方按已启用来源补 `0`。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
 | 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
+
+### 持久化已看身份
+
+```python
+seen_keys = db.get_seen_content_keys()  # source_platform:content_id
+seen_bvids = db.get_seen_bvids()        # B 站兼容集合
+```
+
+`seen_items` 是 discovery 与 recommendation 的已看硬去重来源。它记录首次/最近事件 ID
+与时间；再次观看只更新同一 canonical 行。升级旧库时会增量回填所有历史 `view` 事件，
+因此第 2001 条以前的已看内容也不会重新进入候选。旧的
+`get_recent_viewed_content_keys()` / `get_recent_viewed_bvids()` 保留为兼容 API，
+但返回同一个无界账本。
 
 ### 事件回看（跨源去重用）
 
@@ -232,7 +246,11 @@ known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
 - `rating_score / rating_count / source_rank` 是 additive 目录指标列，同时存在于 `discovery_candidates` 与 `content_cache`；旧数据库启动时自动补列。重复候选会刷新这些上游目录值，claim → evaluation → admission → cache round-trip 不丢失；评分不会写进 like/comment 字段。
 - `claim_discovery_candidates_for_eval(limit=..., claim_token=...)` 原子领取 `pending_eval`，按来源 round-robin 混合取样，并把同一 token 写到整批；不传 token 时自动生成，兼容单次 CLI drain。
 - `persist_claimed_discovery_candidate_evaluations(..., claim_token=...)` 返回实际更新的 ID 集合，只接受仍为 `evaluating` 且 token 匹配的行；完成后清空 token / claimed_at。`reset_claimed_discovery_candidates_to_pending()` 使用相同所有权条件，因此旧 worker 不能覆盖或释放重新领取的行。
-- `get_evaluated_discovery_candidates_for_admission(limit=...)` 读取已完成评估但尚未写入 `content_cache` 的行，供池子从满池降回目标以下后重试 admission。
+- `get_evaluated_discovery_candidates_for_admission(limit=..., preferred_source_platforms=None)` 读取已完成评估但尚未写入 `content_cache` 的行，供池子从满池降回目标以下后重试 admission。v0.3.181+（份额公平 spec 2026-07-20）：传入 `preferred_source_platforms` 时用 `CASE WHEN source_platform IN (…) THEN 0 ELSE 1 END` 把欠份额来源排到 FIFO 前面，防止超份额积压霸占取行窗口；缺省不传时排序与旧 `evaluated_at ASC` 逐字节一致。
+- `count_evaluated_discovery_candidates_by_source()`（v0.3.181+）按 family 统计 `status='evaluated'` 的待入池供给。
+- `count_admission_waiting_discovery_candidates_by_source()`（v0.3.181+，Phase 8）按 family 统计 `status IN ('pending_eval','evaluating','evaluated')` 的全部非终态待入池供给。份额再平衡的「欠份额来源是否有供给等待」判定用它而非仅 `evaluated`——占坑者钉满池时欠份额来源根本到不了 `evaluated`,只认 `evaluated` 会让退坑永不触发。
+- `claim_discovery_candidates_for_eval(limit=..., claim_token=..., preferred_source_platforms=None)`（`preferred_source_platforms` 为 v0.3.181+ Phase 8 新增）：窥探窗口 ORDER BY 前置 `CASE WHEN source_platform IN (…) THEN 0 ELSE 1 END` 把欠份额来源拉进窗口,选择改两层 round-robin(先抽干 preferred 来源再抽其余);缺省不传时单层 round-robin 与旧行为逐字节一致。避免超份额积压霸占评估算力(评估注定入不了池的行是纯 token 浪费)。
+- `demote_lowest_ranked_pool_rows(source_family=..., limit=...)`（v0.3.181+）把某来源族在正式池内 `relevance_score` 最低、`last_scored_at` 最老的至多 `limit` 条 `fresh`、未推荐、未 dislike 行置为既有 `pool_status='stale'`（不新增枚举），返回退坑行数；供份额温和再平衡使用，质量最高的行始终保留。
 - `reset_discovery_candidates_to_pending([...], reason=..., max_attempts=5, max_batch_attempts=50, increment_attempts=True)` 释放 evaluator failure 中被 claim 的行；`increment_attempts=True` 时连续失败达到上限后进入 `failed_eval`。pipeline 对 batch 级 LLM/provider transient 会传 `increment_attempts=False`，不消耗单条候选预算，但会递增 `batch_eval_attempts`；达到较高 `max_batch_attempts` 后进入 `failed_eval`，避免永久坏 provider 让同一批候选无限 churn。
 - `reset_stale_discovery_candidate_evaluations(max_age_minutes=...)` 将崩溃遗留的旧 `evaluating` 行释放回 `pending_eval`。
 - `mark_discovery_candidate_cached()` / `reject_discovery_candidate(..., status=...)` 只改写 `evaluating` / `evaluated` 行；terminal rows 不会被 stale caller 复活或覆盖。常见 rejection status 包括 `rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_recently_viewed`、`rejected_franchise_quota`。
@@ -389,8 +407,44 @@ raw_by_source = db.count_pool_raw_material_by_source()
 
 - `available` 与 `count_pool_candidates()` 保持推荐 serve 同口径。
 - `raw` 包含正式池 fresh raw material 和 `discovery_candidates` 中尚未缓存的候选。
-- `pending` 独立计算，不用 `raw - available` 近似，避免 recently viewed 内容被误算为待整理。
+- `pending` 独立计算，不用 `raw - available` 近似，避免 `seen_items` 已命中的内容被误算为待整理。
 - `pending_eval` 统计 `pending_eval + evaluating`；`evaluated_pending` 统计已评估但尚未 admission 到 `content_cache` 的候选。
+
+### Delight Readiness
+
+```python
+rows = db.get_delight_candidates(min_delight_score=0.75, limit=20)
+count = db.count_delight_candidates(min_delight_score=0.75)
+backlog = db.get_pool_candidates_needing_delight_score(
+    limit=30,
+    min_delight_score_for_reason=0.75,
+)
+```
+
+行为说明：
+
+- `get_delight_candidates()` 与 `count_delight_candidates()` 使用相同的 copy-ready 条件：`pool_expression / pool_topic_label` 必须非空，且 `delight_reason / delight_hook` 必须是它们的同步快照。
+- evaluator 的 `relevance_reason` 只是评估诊断字段；即使旧数据已把它写进 `delight_reason`，快照不一致的行也不会被任何 pending/API/runtime 出口读取。
+- `get_pool_candidates_needing_delight_score()` 只领取正式文案已就绪的行；未生成推荐词的内容不会开始 delight 打分。`update_delight_score()` 返回是否真正写入，并在 SQL 层要求文案非空；带 `reason/hook` 的写入还必须与当前正式快照逐项一致，从查询到写入之间文案发生变化时会整体拒绝。profile floor 或动态阈值升高时，copy-ready 且已低于新门槛、仍带旧 `reason/hook` 的行会被领取并清空。
+- 动态阈值样本只统计 copy-ready 的已打分行，旧版在推荐词生成前留下的分数不再影响 Top 10% 校准。
+- 普通推荐的 delight claim guard 以“已送达，或达阈值且正式文案快照已精确同步”为准。任意非空 evaluator reason 不能占位，尚未生成文案的行仍留给 expression-copy backlog，copy-ready 但尚未同步的行也保留给 profile-aware scorer 作最终门槛判断。
+
+### Platform Availability
+
+```python
+snapshot = await db.load_pool_platform_availability_async()
+assert snapshot.total_available == sum(snapshot.by_platform.values())
+
+rows = db.get_pool_candidates_for_platform("zhihu", limit=10)
+assert len(rows) <= snapshot.by_platform.get("zhihu", 0)
+```
+
+行为说明：
+
+- `total_available` 与 `count_pool_candidates()` 同口径（fresh、非 dislike、达 admission floor、文案与分类齐全、链接可用、未被 delight 认领、未进推荐历史、未命中持久化已看账本，并遵循当前 topic window）。
+- `by_platform` 用 `_pool_source_family()` 归类，兼容 `source_platform` 为空的 legacy `source_strategy` 前缀行。
+- 计数与平台定向选片来自**同一份** canonical 行集合，不存在「Tab 显示有货但选片器取不到」的分叉。这里的必然推论是：被全局 topic window 挤出的行既不计数也不可选——它本来就不是库存。
+- 读取走独立短连接，不把进程共享连接交给线程；读取失败向上抛出，由 API 转成可诊断 5xx，绝不返回全零。
 
 ### Atomic Pool Maintenance
 
@@ -417,10 +471,16 @@ raw ceiling 同时统计 `content_cache` 和 `discovery_candidates` active 行�
 
 ```python
 snapshot = await db.load_pool_serve_snapshot_async(limit=40)
+# 平台定向请求：只装载该 canonical 平台的候选，且不做跨平台保底补位
+scoped = await db.load_pool_serve_snapshot_async(limit=40, source_platform="zhihu")
 persisted = await db.persist_pool_serve_async(recommendation_rows, selected_bvids)
 ```
 
-两者都由 database-owned serve executor 串行执行，并为每次操作创建/关闭独立连接。snapshot 在显式只读事务内提供一致的 readiness、候选窗口、平台补位、最近已看与 curator/feedback rows；persist 把推荐历史和 shown 状态放进一次 `BEGIN IMMEDIATE`。后台维护有自己的 executor/连接，因此阻塞 maintenance worker 不会把交互读排在同一队列后面。交互写锁每次最多等待 250ms，沿既有 8 次有界重试最坏约 2.14s，保留 HTTP 3s 尾延迟预算。
+两者都由 database-owned serve executor 串行执行，并为每次操作创建/关闭独立连接。snapshot 在显式只读事务内提供一致的 readiness、候选窗口、平台补位、`seen_items` 与 curator/feedback rows；persist 把推荐历史和 shown 状态放进一次 `BEGIN IMMEDIATE`。
+
+`source_platform` 为可选 canonical 平台作用域：非空时候选行改由 `_available_platform_rows_on()` 装载，并**跳过平台保底补位**——给平台定向批次补进别的平台，正是该作用域要防的泄漏。`readiness` 始终保持全池口径（它是 API 上报与补货判断依据的库存），排序、持久化与 shown 提交全部与跨平台路径共用。省略该参数时调用形状与行为与引入前一致。
+
+平台定向窗口同样经过 `_balance_pool_rows()` 的 topic 轮转再截断，与 `get_pool_candidates()` 一致。若按 relevance 直接截断，少数 topic_group 会占满整个候选窗口（实测同样 12 条窗口只覆盖 4 个组 vs 轮转后的 12 个组），下游 MMR / 多样性拿到的选择面比混合流窄得多——平台 Tab 会仅仅因为候选装载方式不同而显得比「全部」重复。后台维护有自己的 executor/连接，因此阻塞 maintenance worker 不会把交互读排在同一队列后面。交互写锁每次最多等待 250ms，沿既有 8 次有界重试最坏约 2.14s，保留 HTTP 3s 尾延迟预算。
 
 ### Admission Cleanup
 
@@ -455,7 +515,7 @@ db.suppress_low_confidence_recommendations()
 3. **池满时不继续消耗**：runtime 以 `count_pool_candidates()` 的真实可换数为上限判断，正式池满时不 claim / evaluate 待评估候选。
 4. **评估和入池可分步恢复**：`evaluated` 表示“已经通过喜好评估但还没 admission”，不是失败终态；池子恢复容量后会优先入池。batch 级 provider transient failure 释放回 `pending_eval` 且不递增 `eval_attempts`，但会递增 `batch_eval_attempts` 作为高阈值熔断；只有调用方显式要求递增 attempts 的可归因失败才会使用常规 `eval_attempts` 预算。
 5. **状态机必须防 stale caller**：`evaluating` 有过期回收，terminal rows 有 status guard，避免进程 crash 或并发 caller 让候选永久卡住或复活。
-6. **pending 不是 raw 减 available**：最近已看、缺文案、缺分类、缺链接、待评估属于不同诊断含义，必须分开统计。
+6. **pending 不是 raw 减 available**：持久化已看、缺文案、缺分类、缺链接、待评估属于不同诊断含义，必须分开统计。
 7. **低分清理和展示防线都在存储层落地**：admission 仍由 discovery evaluator 决定；storage 只用统一阈值阻止旧脏数据、suppressed 低分复活和未来绕过入口继续进入可展示读取路径。
 8. **keyword kind 是用途隔离，不是平台隔离**：`regular` 和 `explore` 共享同一张 `discovery_keywords` 表与生命周期，便于复用 claim / lease / yield 基础设施；但默认 claim / history / recycle 只读 `regular`，避免探索 query 被普通 search 提前消费或被常规补货历史污染。
 9. **`style_key` 迁移只改已知旧值**：历史安装用户的本地 SQLite 里可能已有 `deep_dive`、`story_doc`、`lifestyle` 等旧内容风格 key。初始化迁移会把这些已知值物理改写为 `deep_focus`、`story_immersion`、`daily_wander` 等新观看模式；未知自定义值会原样保留，避免误删无法识别的历史数据。

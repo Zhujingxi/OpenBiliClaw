@@ -1915,6 +1915,20 @@ def _build_config(raw: dict[str, Any]) -> Config:
         scheduler=SchedulerConfig(
             **{
                 **sched_raw,
+                # Environment overrides arrive as strings. Leaving these raw
+                # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
+                # CLI while still being the string ``""``; the typed config
+                # API then rejected that same value. Normalize every scheduler
+                # boolean at the boundary so all consumers see a real bool.
+                "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
+                "pause_on_extension_disconnect": _coerce_bool(
+                    sched_raw.get("pause_on_extension_disconnect"),
+                    default=False,
+                ),
+                "profile_consolidation_enabled": _coerce_bool(
+                    sched_raw.get("profile_consolidation_enabled"),
+                    default=True,
+                ),
                 "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
                     sched_raw.get("extension_disconnect_grace_seconds")
                 ),
@@ -1981,6 +1995,14 @@ def _build_config(raw: dict[str, Any]) -> Config:
                 "profile_consolidation_archive_enabled": _coerce_bool(
                     sched_raw.get("profile_consolidation_archive_enabled"),
                     default=True,
+                ),
+                "auto_update_enabled": _coerce_bool(
+                    sched_raw.get("auto_update_enabled"),
+                    default=False,
+                ),
+                "auto_update_allow_prerelease": _coerce_bool(
+                    sched_raw.get("auto_update_allow_prerelease"),
+                    default=False,
                 ),
                 "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
                     sched_raw.get("avoidance_speculation_interval_minutes"),

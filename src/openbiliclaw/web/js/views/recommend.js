@@ -89,6 +89,16 @@ let runtimeStatusGeneration = 0;
 let recommendationActionMessage = "";
 
 // Delight auto-advance
+// 轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文摘录读下来
+// 就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 / 下一条。
+// 与桌面端 web/desktop/assets/js/app.js 的同名常量保持一致。
+const DELIGHT_AUTO_ADVANCE_MS = 60000;
+// 拖拽死区：位移 <10px 视为点击而非滑动，整卡点击直接打开内容（与信息流普通卡片
+// 一致，见 issue #126）。与桌面端 _DELIGHT_DRAG_DEAD_ZONE 保持同值。
+// 10px < 位移 < 50px（DELIGHT_SWIPE_THRESHOLD）是有意留白：既不算点击也不切卡，
+// 避免手指轻微拖动时误开内容。
+const DELIGHT_DRAG_DEAD_ZONE = 10;
+const DELIGHT_SWIPE_THRESHOLD = 50;
 let _delightAutoTimer = null;
 let _delightDragging = false;
 let _delightSwipeStartX = 0;
@@ -698,6 +708,14 @@ function renderDelightTray() {
   tray.querySelectorAll("button, [data-delight], input, select, textarea, .delight-composer, .delight-corner-nav, .delight-inline-nav").forEach((el) => {
     el.addEventListener("pointerdown", (e) => e.stopPropagation());
   });
+  // 整卡点击打开内容（issue #126：惊喜卡此前只有「看看」可跳转，和下方信息流卡片
+  // 的整卡点击不一致）。已反馈过（show_actions=false）、正在输入聊天、或拿不到
+  // URL 时不接管点击。
+  const canTapOpenDelight = Boolean(uiState.show_actions && !d.composer_open && buildContentUrl(d));
+  if (canTapOpenDelight) {
+    tray.style.cursor = "pointer";
+  }
+
   // 指针拖拽切换
   tray.addEventListener("pointerdown", (e) => {
     _stopDelightAutoAdvance();
@@ -722,12 +740,16 @@ function renderDelightTray() {
     tray.classList.remove("is-dragging");
     tray.releasePointerCapture(e.pointerId);
     const dx = e.clientX - _delightSwipeStartX;
-    if (Math.abs(dx) >= 50) {
+    if (Math.abs(dx) >= DELIGHT_SWIPE_THRESHOLD) {
       if (dx > 0) {
         navigateDelight(state.delightCurrentIndex <= 0 ? delights.length - 1 : state.delightCurrentIndex - 1);
       } else {
         navigateDelight(state.delightCurrentIndex >= delights.length - 1 ? 0 : state.delightCurrentIndex + 1);
       }
+    } else if (Math.abs(dx) < DELIGHT_DRAG_DEAD_ZONE && canTapOpenDelight) {
+      // 死区内松手 = 点击整卡，等同「看看」。按钮 / 输入框在 pointerdown 就
+      // stopPropagation，不会进到这里，所以不会和反馈操作打架。
+      handleDelightAction(d, "view");
     } else {
       _startDelightAutoAdvance();
     }
@@ -872,7 +894,7 @@ function _startDelightAutoAdvance() {
     if (delightUserEngaged()) return;
     const next = state.delightCurrentIndex + 1;
     navigateDelight(next >= state.activeDelights.length ? 0 : next);
-  }, 4000);
+  }, DELIGHT_AUTO_ADVANCE_MS);
 }
 
 function _stopDelightAutoAdvance() {
@@ -1448,7 +1470,8 @@ async function handleReshuffle() {
   resetAutoAppendIntent();
   render();
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     const replacement = reconcileRecommendationReplacement(
       state.recommendations,
       result.items || [],

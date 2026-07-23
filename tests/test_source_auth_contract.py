@@ -2319,6 +2319,7 @@ def test_form_actions_are_backed_by_a_real_capability(contract_env: _Env, slug: 
     actions = {entry["action"] for entry in form["actions"]}
 
     assert "clear" not in actions, slug
+    assert "copy" not in actions, slug
     # POST /api/sources/{slug}/verify serves all seven, YouTube included.
     assert "verify" in actions, slug
     for entry in form["actions"]:

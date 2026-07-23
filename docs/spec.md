@@ -233,6 +233,13 @@ degraded registry → provider-free ping(degraded) → static /web | /setup | /m
 
 reshuffle HTTP → PoolServeSnapshot → isolated serve DB worker/read transaction
                → unchanged MMR → short atomic recommendation+shown write
+               → current-card exclusions + durable seen_items are mandatory guards
+               → non-empty success records one neutral reshuffle event, never N dismisses
+  PC Web platform tab → optional source_platform (additive, canonical)
+                      → platform-scoped candidates, no cross-platform floor
+                      → same curator / MMR / diversity / persist path
+  platform-availability → isolated read of the canonical available set
+                        → {total_available, by_platform}; total == sum(by_platform)
 pool maintenance → isolated maintenance DB worker → ≤50 mutations/transaction
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
@@ -321,7 +328,8 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
-│  │ reshuffle: PoolServeSnapshot/serve worker -> MMR worker -> isolated atomic persist │ │
+│  │ delight: expression/topic ready -> score + atomic copy snapshot -> API/runtime UI │ │
+│  │ reshuffle: current IDs + seen_items -> PoolServeSnapshot/MMR -> atomic persist -> one batch event │ │
 │  │ maintenance worker: isolated connection -> <=50 mutations/batch -> commit/yield │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
@@ -383,7 +391,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ XAdapter + XDiscoveryProducer: 服务端 cookie 重放(twitter-cli) │ │
-│  │   search / feed(For-You) / creator(账号订阅) + 源健康状态机   │   │
+│  │   search / feed / creator + likes/bookmarks 共用源健康状态机 │   │
 │  │   行为采集: 扩展 MAIN-world GraphQL tap + generic collector   │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -422,7 +430,8 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │ (JSON)     │ │ (SQLite +   │ │ (知识图谱/  │ │ (内存)  │  │
 │  │ Soul+偏好   │ │  向量索引)   │ │  JSON)     │ │         │  │
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
-│  SQLite: events(inferred_satisfaction) / discovery_candidates     │
+│  SQLite: events(inferred_satisfaction) / seen_items(canonical all-time views) │
+│          discovery_candidates                                      │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache(item_key: nonblank partial unique + legacy blank repair)              │
 │          recommendations(item_key) / chat_turns / avoidance_state                             │

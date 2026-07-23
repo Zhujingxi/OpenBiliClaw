@@ -193,16 +193,12 @@
               <p>阿B 根据你的近期兴趣筛选的内容，有任何意见尽管和我聊~</p>
             </div>
             <div class="drawer-actions recommendation-actions">
-              <label class="reshuffle-toggle" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-                <input id="dismissOnReshuffleToggle" type="checkbox">
-                <span class="reshuffle-switch" aria-hidden="true"></span>
-                <span>换一批时忽略当前</span>
-              </label>
               <button class="icon-btn" id="reshuffleBtn" type="button" aria-label="换一批" title="换一批">↻</button>
               <button class="pill-btn" id="resetFiltersBtn" type="button" hidden="">重置筛选</button>
             </div>
           </div>
-          <div class="filter-row" id="filterRow" aria-label="推荐筛选"></div>
+          <!-- chip 由 renderFilters 渲染成 role=tab（含 aria-selected 与库存计数） -->
+          <div class="filter-row" id="filterRow" role="tablist" aria-label="推荐平台与库存"></div>
           <!-- 首屏骨架占位：后端推荐取回前先撑住版面，renderVideos 首次渲染时整体替换 -->
           <div class="card-grid" id="videoGrid">
             <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
@@ -470,48 +466,40 @@
               </div>
             </div>
           </div>
-          <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
+          <p class="settings-section-title">Cookie / 登录凭据状态</p>
+          <p class="settings-note-inline">默认折叠；这里只显示脱敏预览、凭据是否已保存以及非敏感的 Cookie 名称，后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
           <div id="sourceCredentialList" class="source-credential-list">
             <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bilibili<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>小红书<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>抖音<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>YouTube<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>知乎<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Reddit<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="bangumi">
-              <summary><strong>Bangumi<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bangumi<span class="source-credential-ro-tag">脱敏</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
           </div>
           <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>
@@ -771,15 +759,6 @@
             </div>
             <p class="settings-hue-hint" hidden>经典模式下不可用，切换至动态主题色后可自定义色相</p>
           </div>
-          <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-            <span>换一批时忽略当前</span>
-            <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>
-            <span class="reshuffle-toggle settings-toggle-inline">
-              <input id="dismissOnReshuffleSetting" type="checkbox">
-              <span class="reshuffle-switch" aria-hidden="true"></span>
-              <span id="dismissOnReshuffleSettingText">关闭</span>
-            </span>
-          </label>
           <label class="settings-field full settings-switch-field" title="开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。">
             <span>滚动到底自动加载推荐</span>
             <span class="settings-switch-copy">开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。</span>
@@ -789,7 +768,7 @@
               <span id="autoLoadOnScrollSettingText">开启</span>
             </span>
           </label>
-          <p class="settings-note-inline">后端地址、端口、外观主题、色彩引擎、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
+          <p class="settings-note-inline">后端地址、端口、外观主题、色彩引擎和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="logging" hidden>
