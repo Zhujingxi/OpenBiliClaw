@@ -244,6 +244,29 @@ def test_wave_3_has_no_strict_xfail_markers() -> None:
     assert markers == {}
 
 
+def test_worker_guard_has_no_inline_child_delegation_escape_hatch() -> None:
+    """M7: temporary child authorization cannot survive because it does not exist."""
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    guard_source = inspect.getsource(DialogueSettlementGuard)
+    queue_source = inspect.getsource(DialogueSettlementQueue)
+
+    assert "_delegated_task" not in guard_source
+    assert "activate_inline_lineage_task" not in guard_source
+    assert "_submit_and_wait_inline" not in queue_source
+
+
+def test_orphan_claim_recovery_keeps_age_and_live_turn_fences() -> None:
+    """M3: recovery must retain both the age gate and atomic live-turn fence."""
+    source = _production_symbol_source("Database.release_orphan_confusion_claim")
+
+    assert "julianday(updated_at) <= julianday('now', ?)" in source
+    assert "NOT EXISTS (" in source
+    assert "FROM chat_turns" in source
+    assert "WHERE turn_id = ?" in source
+
+
 def test_cognition_replay_producer_only_submits_dedicated_typed_kind() -> None:
     """F1: the read-only replay producer cannot analyze or mutate inline."""
     from openbiliclaw.soul.engine import SoulEngine
