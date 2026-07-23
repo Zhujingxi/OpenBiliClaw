@@ -189,11 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.183 (2026-07-23)**
+📌 Latest: **v0.3.184 (2026-07-23)**
 
-- **Create multiple independent instances of the same model channel** — each keeps its own Base URL, token, model, and protocol, then joins an ordered global or per-module failover chain.
-- **Model selection no longer depends on typing everything** — desktop web, the extension, and Setup can fetch real models from the current OpenAI-compatible endpoint, while Effort suggestions remain editable.
-- **Legacy upgrades stay recoverable and reversible** — old provider settings project losslessly, the first migration keeps a permanent backup, and an old-version-compatible config can be exported.
+- **One brand icon across every surface** — the extension, PWA, desktop and mobile Web, website, Windows / macOS packages, and tray or menu bar now use the new pink paw icon.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

@@ -4,9 +4,13 @@
 
 ---
 
-## v0.3.183：多实例模型路由与真实模型发现（2026-07-23）
+## v0.3.184：全端品牌图标统一（2026-07-23）
 
 - **全产品品牌图标统一为新的粉色猫爪标记**：以用户提供的方形源图固化 `assets/brand/openbiliclaw-icon.png`，重新派生浏览器扩展 16 / 48 / 128px、PWA / favicon 192 / 512px 与官网图标；side panel、移动 Web、桌面 Web、首次设置页和 GitHub Pages 首页都从旧字母 `B` / CSS 圆环占位切到正式图标。桌面包同时补齐多尺寸 Windows `.ico` 与 macOS `.icns` 并接入 PyInstaller，系统托盘 / 菜单栏也直接加载同一随包 Web 图标，不再单独绘制旧临时标记；社交分享图源同步切换，资产尺寸、桌面容器与各界面引用均有回归测试。
+
+---
+
+## v0.3.183：多实例模型路由与真实模型发现（2026-07-23）
 
 - **模型配置从“Provider 名 + 一个迷惑的备选项”升级为可编排的端点实例路由**：新增 `[llm.instances.<id>]`，每个实例独立保存 Provider 类型、Base URL、token、模型与协议选项，同类型渠道可同时存在；`default_chain` 支持任意长度、可拖拽排序的全局故障切换，Soul / Discovery / Recommendation / Evaluation 默认继承，也能各自配置严格不越界的实例链。Registry 改为实例 ID 注册与实例级 cooldown，响应和探针返回实际命中的 `instance_id`，初始化前置检查会沿完整链寻找可用端点。桌面设置页提供实例卡片、编辑器、链条排序与逐实例 / 整链真实测试；插件也可新建、编辑、删除和逐实例测试，使用窄屏友好的上移 / 下移维护全局默认链，并完整回传 PC Web 创建的模块链（模块链编辑仍留在 PC Web）。两端保存其他设置都不会再把新路由压回旧格式，密钥输入留空时保留已保存值。旧 `default_provider` / `fallback_provider`、Provider 分段和模块 model override 会无损投影，只有新版 UI 保存时才迁移；仅含样例默认模型、没有凭据且未被引用的远程模板分段不会误迁移成实例。安装器、CLI、setup、Docker 模板与配置 API 均保留全部实例和顺序。Embedding 本轮仍保持独立配置，避免 chat 切换时悄悄改变向量空间。
 
