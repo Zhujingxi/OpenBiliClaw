@@ -2472,15 +2472,10 @@ class Database:
             raise ValueError(
                 f"Unsupported card payload transition: {expected_state!r} -> {new_state!r}"
             )
-        payload_expression = "json_set(payload, '$.state', ?)"
-        if expected_state == "discussing":
-            payload_expression = (
-                "json_set(json_remove(payload, '$.discussing_at', '$.attempt_token'), '$.state', ?)"
-            )
         cursor = self._execute_write(
-            f"""
+            """
             UPDATE chat_turns
-            SET payload = {payload_expression},
+            SET payload = json_set(payload, '$.state', ?),
                 updated_at = CURRENT_TIMESTAMP
             WHERE turn_id = ?
               AND json_valid(payload)
@@ -2665,10 +2660,7 @@ class Database:
         cursor = self._execute_write(
             """
             UPDATE chat_turns
-            SET payload = json_set(
-                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
-                    '$.state', ?
-                ),
+            SET payload = json_set(payload, '$.state', ?),
                 updated_at = CURRENT_TIMESTAMP
             WHERE json_valid(payload)
               AND json_extract(payload, '$.type') = 'card'
@@ -2678,98 +2670,6 @@ class Database:
             (terminal, ref),
         )
         return int(cursor.rowcount or 0)
-
-    def begin_chat_card_discussion(
-        self,
-        turn_id: str,
-        *,
-        attempt_token: str,
-        now: datetime,
-    ) -> bool:
-        """CAS a pending card into one fenced discussion attempt."""
-        normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-        cursor = self._execute_write(
-            """
-            UPDATE chat_turns
-            SET payload = json_set(
-                    payload,
-                    '$.state', 'discussing',
-                    '$.discussing_at', ?,
-                    '$.attempt_token', ?
-                ),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE turn_id = ?
-              AND json_valid(payload)
-              AND json_extract(payload, '$.type') = 'card'
-              AND json_extract(payload, '$.state') = 'pending'
-            """,
-            (normalized_now.astimezone(UTC).isoformat(), attempt_token, turn_id),
-        )
-        return int(cursor.rowcount or 0) == 1
-
-    def rollback_chat_card_discussion(self, turn_id: str, *, attempt_token: str) -> bool:
-        """Compensate a failed anchor build without touching a newer attempt."""
-        cursor = self._execute_write(
-            """
-            UPDATE chat_turns
-            SET payload = json_set(
-                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
-                    '$.state', 'pending'
-                ),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE turn_id = ?
-              AND json_valid(payload)
-              AND json_extract(payload, '$.state') = 'discussing'
-              AND json_extract(payload, '$.attempt_token') = ?
-            """,
-            (turn_id, attempt_token),
-        )
-        return int(cursor.rowcount or 0) == 1
-
-    def validate_chat_card_discussion_attempt(self, turn_id: str, attempt_token: str) -> bool:
-        """Return whether a card still owns the supplied discuss attempt."""
-        self._ensure_fresh_read()
-        row = self.conn.execute(
-            """
-            SELECT 1
-            FROM chat_turns
-            WHERE turn_id = ?
-              AND json_valid(payload)
-              AND json_extract(payload, '$.type') = 'card'
-              AND json_extract(payload, '$.state') = 'discussing'
-              AND json_extract(payload, '$.attempt_token') = ?
-            """,
-            (turn_id, attempt_token),
-        ).fetchone()
-        return row is not None
-
-    def repair_stale_chat_card_discussion(
-        self,
-        turn_id: str,
-        *,
-        stale_before: datetime,
-    ) -> bool:
-        """Return an abandoned discussion to pending and clear its fence."""
-        normalized = (
-            stale_before if stale_before.tzinfo is not None else stale_before.replace(tzinfo=UTC)
-        )
-        cursor = self._execute_write(
-            """
-            UPDATE chat_turns
-            SET payload = json_set(
-                    json_remove(payload, '$.discussing_at', '$.attempt_token'),
-                    '$.state', 'pending'
-                ),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE turn_id = ?
-              AND json_valid(payload)
-              AND json_extract(payload, '$.type') = 'card'
-              AND json_extract(payload, '$.state') = 'discussing'
-              AND julianday(json_extract(payload, '$.discussing_at')) < julianday(?)
-            """,
-            (turn_id, normalized.astimezone(UTC).isoformat()),
-        )
-        return int(cursor.rowcount or 0) == 1
 
     def list_dialogue_history(
         self,

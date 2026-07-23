@@ -92,7 +92,7 @@ class _RawSink:
     name: str
     source_symbol: str
     operations: tuple[str, ...]
-    current_callsites: tuple[tuple[int, str], ...]
+    worker_callsites: tuple[tuple[str, str], ...]
 
 
 RAW_SINK_INVENTORY = (
@@ -100,22 +100,25 @@ RAW_SINK_INVENTORY = (
         "confusion_schedule",
         "ConfusionManager.schedule_ask",
         ("schedule",),
-        ((8295, "confusion_manager.schedule_ask("),),
+        (("create_app._handle_confusion_open_sync", "confusion_manager.schedule_ask("),),
     ),
     _RawSink(
         "confusion_ask_turn_update",
         "Database.update_confusion",
         ("retarget", "create_failure_rollback"),
         (
-            (8307, "updater("),
-            (8313, 'updater(confusion_id, status="open", ask_turn_id="")'),
+            ("create_app._handle_confusion_open_sync", "updater("),
+            (
+                "create_app._handle_confusion_open_sync",
+                'updater(confusion_id, status="open", ask_turn_id="")',
+            ),
         ),
     ),
     _RawSink(
         "pending_open_anchor",
         "DialogueAnchorManager.establish",
         ("establish",),
-        ((8248, "established = anchor_manager.establish("),),
+        (("create_app._handle_anchor_establish", "established = anchor_manager.establish("),),
     ),
 )
 
@@ -157,7 +160,7 @@ def test_protected_mutator_inventory_has_ten_dialogue_categories() -> None:
 
 
 def test_pending_open_raw_sink_inventory_is_complete() -> None:
-    """Q1/F3: freeze schedule, retarget/rollback, and establish raw sinks."""
+    """Q1/F3: every raw sink is present only in its worker-guarded handler."""
     assert [sink.source_symbol for sink in RAW_SINK_INVENTORY] == [
         "ConfusionManager.schedule_ask",
         "Database.update_confusion",
@@ -169,14 +172,70 @@ def test_pending_open_raw_sink_inventory_is_complete() -> None:
         "create_failure_rollback",
         "establish",
     }
-    app_lines = (
-        (Path(__file__).parents[1] / "src/openbiliclaw/api/app.py")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    )
     for sink in RAW_SINK_INVENTORY:
-        for line_number, snippet in sink.current_callsites:
-            assert snippet in app_lines[line_number - 1]
+        for worker_symbol, snippet in sink.worker_callsites:
+            source = _production_symbol_source(worker_symbol)
+            assert "_require_dialogue_settlement_worker()" in source
+            assert snippet in source
+    endpoint_sources = "\n".join(
+        _production_symbol_source(symbol)
+        for symbol in (
+            "create_app._prepare_confusion_confirmation",
+            "create_app._create_confirmation_turn",
+        )
+    )
+    assert "confusion_manager.schedule_ask(" not in endpoint_sources
+    assert "updater(" not in endpoint_sources
+    assert "anchor_manager.establish(" not in endpoint_sources
+
+
+def test_retired_dialogue_cross_process_lock_stack_is_absent() -> None:
+    """F9: the single worker replaces discuss CAS/scanner and settlement ownership."""
+    root = Path(__file__).parents[1] / "src/openbiliclaw"
+    sources = {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in root.rglob("*.py")
+    }
+    combined = "\n".join(sources.values())
+    retired_symbols = (
+        "begin_chat_card_" + "discussion",
+        "rollback_chat_card_" + "discussion",
+        "validate_chat_card_discussion_" + "attempt",
+        "repair_stale_chat_card_" + "discussion",
+        "attempt_" + "token",
+        "discussing_" + "at",
+        "claim_card_" + "settlement",
+        "card_settlement_" + "claim_guard",
+        "paused-" + "owner",
+        "lease-" + "takeover",
+    )
+    assert {symbol: combined.count(symbol) for symbol in retired_symbols} == {
+        symbol: 0 for symbol in retired_symbols
+    }
+
+
+def test_wave_3_has_no_strict_xfail_markers() -> None:
+    """Wave 0 wiring contracts are ordinary green tests after final cutover."""
+    tests_root = Path(__file__).parent
+    marker = "pytest.mark." + "xfail"
+    markers = {
+        path.name: source.count(marker)
+        for path in tests_root.glob("test_*.py")
+        if (source := path.read_text(encoding="utf-8")).count(marker)
+    }
+    assert markers == {}
+
+
+def test_cognition_replay_producer_only_submits_dedicated_typed_kind() -> None:
+    """F1: the read-only replay producer cannot analyze or mutate inline."""
+    from openbiliclaw.soul.engine import SoulEngine
+
+    source = inspect.getsource(SoulEngine.replay_confusion_dialogue_attributions)
+    assert "queue.submit(" in source
+    assert "DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY" in source
+    assert "_dialogue_insight_analyzer.extract(" not in source
+    assert "_apply_confusion_answer_settlement(" not in source
+    assert "_dialogue_anchor_manager.establish(" not in source
 
 
 @pytest.mark.parametrize("category", PROTECTED_MUTATORS, ids=lambda item: item.name)

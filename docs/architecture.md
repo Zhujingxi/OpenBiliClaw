@@ -21,15 +21,18 @@ guided init: signals → preferences → full profile commit
 
 durable dialogue → confirmation entry(pending list / cards)
                  → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
-                 → typed settlement queue[production: learn + GET publication reconcile] → one worker
+                 → typed settlement queue[all 11 declared kinds] → one actual worker + guard
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
-                 → anchor snapshot(ref + generation) → existing insight extraction
+                 → anchor snapshot(kind + ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
+                   action: local completion≤1s → 200
+                         | blocked head → 202 processing → popup/desktop GET 1/2/5s, ≤30s
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
-                   → lightweight ref winner receipt → event + object + rebuild-marker
-                   → applied-only cross-session projection
+                   → lightweight ref winner receipt
+                   → event → object → derived → rebuild-marker → applied
+                   → stable audit / cross-session projection / exact-generation release
 
 config hot-reload → pause/drain old settlement worker → exact revoke old permit
                   → start/register new → publish new → stop old
@@ -89,7 +92,7 @@ background refresh → maintenance DB worker / isolated connection
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建
 - 五层灵魂模型（事件→偏好→觉察→洞察→灵魂）
-- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线之上叠加统一审计与一致性纪律。**单锚**由 queue admission 冻结成带 kind/ref/generation 的 persisted/reserved/failed/absent snapshot；worker 只做 exact validation，绝不把受理时的 generation 0 升级成执行时出现的未来锚。**对象结算**在 `SoulEngine` 中拆成公开 `submit_*` 与 worker-only `_apply_*`；锚 relation 和普通 chat settles 已在当前 learn worker 内直接 apply，不递归排队。`card_settlements` 只保存 immutable winner、result、stable event identity 与 `applied`，数据库级文件锁、5 分钟 lease、claim token 和三段 CAS 已删除。apply 顺序固定为 event → object → derived → rebuild marker → applied → projection → exact-generation anchor release；前四类 effect 可幂等重放，`applied=1` 后的显式 retry 只补 ledger observer / projection / anchor publication。结算与 revise-derived 台账使用稳定 hash effect key，首次 audit 写失败不阻断业务，恢复后补写不重复。单 turn GET 已只 submit `card.reconcile`，由同一 worker 补 applied receipt 的 publication；卡片 mutation/legacy/锚 builder/疑惑入口的其余 production dispatcher cutover 留在 Wave 3。疑惑锚对象段仍先入 `confusions.replay_queue`（FIFO 5、队头 fencing、四类解锚清空台账），12h cycle 补扫 completed crash gap。疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
+- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线之上叠加统一审计与一致性纪律。**单锚**由 queue admission 冻结成带 kind/ref/generation 的 persisted/reserved/failed/absent snapshot；worker 只做 exact validation，绝不把受理时的 generation 0 升级成执行时出现的未来锚。**对象结算**在 `SoulEngine` 中拆成公开 `submit_*` 与 worker-only `_apply_*`；11 个 declared kind 的生产入口已全部接入一个 in-memory queue/actual worker，锚 relation 和普通 chat settles 在当前 learn worker 内直接 apply，不递归排队。guard 校验 actual worker Task + lifecycle nonce，request task 与 inherited child 均不能进入 protected façade。`card_settlements` 只保存 immutable winner、result、stable event identity 与 `applied`，数据库级文件锁、5 分钟 lease、claim token、三段 CAS、discussion attempt token 与恢复 scanner 已删除。apply 顺序固定为 event → object → derived → rebuild marker → applied → projection → exact-generation anchor release；前四类 effect 可幂等重放，`applied=1` 后的显式 retry 只补 ledger observer / projection / anchor publication。结算与 revise-derived 台账使用稳定 hash effect key，首次 audit 写失败不阻断业务，恢复后补写不重复。列表/单 turn GET 只 submit `card.reconcile`，由 worker 补 publication 或修复无活锚 orphan discussion。队列 job 不落盘；重启后由 action retry/GET reconcile 重新 admission，不增加 scanner/job table。疑惑锚对象段仍先入 `confusions.replay_queue`（FIFO 5、精确队头、四类解锚清空台账），12h cycle 只枚举并提交专属 attribution replay。疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
 - 分类词表（`taxonomy.py`）：偏好层一级分类收敛到固定 `CATEGORY_VOCAB`，`PreferenceAnalyzer` 在写入前用精确命中 / embedding 最近邻 /「其他」兜底解析，避免自由文本分类污染长期画像。
 - 分类迁移与画像整理：`CategoryMigrator` 通过 `profile-consolidate --migrate-categories` 把存量自由分类迁到固定词表；`ProfileConsolidator` 的 12h 整理流程按 `(name, category)` 处理同名异义主题，支持 LLM 用 `{name, category}` 精确引用成员。
 - 用户画像覆盖层（`overrides.py`）：用户手动编辑存独立 `profile_overrides.json`，在读收口 `get_profile()` 与镜像收口 `sync_profile_files()` 叠加到 AI 画像之上（有效画像 = AI ⊕ 覆盖），画像重建不覆盖用户编辑；删 / 拉黑经有效 dislikes 影响 discovery / recommendation / delight 硬过滤（Phase 1 后端；编辑 UI 见 Phase 2/3）
@@ -99,13 +102,14 @@ background refresh → maintenance DB worker / isolated connection
 - `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
 - `InterestSpeculator` — 兴趣推测与投机性发现
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
-- 苏格拉底式用户对话；API runtime 显式使用 `queued`，成功回复后同步提交 typed `learn` 到唯一 `DialogueSettlementQueue`，worker 在线内直接 await 学习；CLI/OpenClaw 两处显式使用 `legacy_direct`，保持既有 detached direct learning 且位于 queue/guard 外。两条学习链都用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
+- 苏格拉底式用户对话；API runtime 显式使用 `queued`，成功回复后同步提交 typed `learn` 到唯一 `DialogueSettlementQueue`，worker 在线内直接 await 学习；同一队列还拥有卡片动作、锚、普通 settles、探针/疑惑与 legacy façade。CLI/OpenClaw 两处显式使用 `legacy_direct`，保持既有 detached direct learning 且位于 queue/guard 外。两条学习链都用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
 
 对话链路的失败边界是端到端一致的：
 
 ```text
 Web/API durable → SocraticDialogue(queued) → user+agent history
-                  └─ sync submit learn → DialogueSettlementQueue → one worker → await learning
+                  └─ all declared settlement entries → DialogueSettlementQueue → one worker
+card action → await local job ≤1s → 200 | 202 processing → popup/desktop poll ≤30s
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history
                └─ detached direct learning (outside queue/guard)
 learning → bypass background admission; keep total gate
@@ -197,8 +201,8 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
 2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
-3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker。Wave 2 已提供 frozen-snapshot + lightweight winner receipt 的 worker-only executor；锚处理器与无锚 chat settles 已在 learn worker 内使用它。confirm/reject、legacy、discuss/defer 与 reconciliation 的 endpoint submit cutover 属 Wave 3；旧 discuss attempt-token 路径也在该原子 cutover 中移除。
-4. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 可见历史；Dialogue prompt 则统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。
+3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker。confirm/reject、legacy、discuss/defer 与 reconciliation 均只 submit frozen-snapshot worker executor；旧 discuss attempt-token/CAS/scanner 已删除。action 最多 shield 等本地 job 1 秒：完成保持 200，队头阻塞返回 202 且 job 继续。
+4. popup 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。两端初始化时仍按 `session/scope` hydrate 可见历史；Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。移动 Web 没有卡片 action UI，保持只读。
 
 历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 
@@ -265,7 +269,7 @@ X 是第六个内容源，分两条独立通路：
 - `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未命中 `seen_items` 的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `maintain_pool_inventory()` 是 runtime 唯一 destructive maintenance 边界：`canonical available -> recover eligible suppressed -> protected IDs -> stale/explore/topic/source plans -> cross-table raw plan -> invariant validation -> commit`；恢复复用 canonical readiness，仅额外要求 `recommended_at IS NULL`，并按来源缺口、相关度、评分时间和稳定 ID 排序。每批最多修改 50 行，维护查询、持久化已看身份与动态 delight 阈值都接受同一显式 isolated connection；专属 worker 与 serve worker 分队列，绝不把共享 `Database.conn` 直接扔进 `to_thread()` 并发事务。
 - `load_pool_serve_snapshot_async()` / `persist_pool_serve_async()` 是交互读写边界：前者在一个一致只读事务中聚合推荐所需状态，后者在短 `BEGIN IMMEDIATE` 中原子写 recommendation + shown；交互锁等待按 8×250ms 有界，维护锁等待固定 75ms。
-- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。`card_settlements` 是轻量 ref winner receipt：`INSERT OR IGNORE` 固化 `verdict/turn_id/payload`，`result/applied` 划定对象语义终态，`event_id` 与事件 INSERT 同一 SQLite 事务。表中不再有 lease、claim token 或 `seg_*`；非 SQLite mandatory effect 只由单 worker 执行，stable-key/set-upsert 的全故障点验收在 Wave 2 Task 2.3 完成。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描。
+- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。discussion 只使用 payload `state`，不存在 `attempt_token/discussing_at` 或 stale scanner。`card_settlements` 是轻量 ref winner receipt：`INSERT OR IGNORE` 固化 `verdict/turn_id/payload`，`result/applied` 划定对象语义终态，`event_id` 与事件 INSERT 同一 SQLite 事务。表中不再有 lease、claim token 或 `seg_*`；非 SQLite mandatory effect 只由单 worker 执行，stable-key/set-upsert 覆盖全部故障点。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描；它是对象归属数据，不是 settlement job inbox。
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 
 ## 运行时数据库约束

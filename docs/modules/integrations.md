@@ -26,7 +26,7 @@ API runtime generation 拥有且只拥有一个 `ExpressionCopyCoordinator`，�
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 初始化 database/memory 后立刻用 canonical available 配置共享 LLM gate，再构造任何可调用 provider 的 service；暴露 adapter 前同步调用 controller 的幂等 `run_startup_maintenance()`。OpenClaw direct adapter 不启动 daemon `run_forever()`，因此不 attach `CandidateEvalCoordinator` 或 `ExpressionCopyCoordinator`、不把 producer 标为 coordinator-owned；`recommend(refresh_if_needed=True)` 专用 controller 把首轮 source supply 与 inline claim 固定限制为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），后续调用再继续补货。每次 durable admission 会在同一请求内 await `RecommendationEngine.drain_pending_expression_copy(profile, limit=4, max_extra_requests=0)`：首 batch 的有效 subset 立刻成为 canonical available，未完成行保持 pending 由下一请求续补，避免在 45 秒交互窗口内递归拆分；若该 subset 非空且推荐历史为空，`recommend(refresh_if_needed=True)` 会直接 serve 已复制 pool。若首 batch 全部无效，本次仍可能返回空池并由后续请求重试。该首批限制是 bootstrap 内部策略，不新增 `config.toml` 字段，API daemon 的 coordinator、每轮 60 条 copy drain 与 4× supply oversample 保持不变。 |
-| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status / chat`；chat 构造点显式固定为 `legacy_direct`，成功回复后仍执行既有 detached direct learning，不提交 API runtime 的 queue、也不持有 worker guard permit；失败转为携带安全 LLM 分类文案的 `AdapterOperationError`，不暴露原始上游细节。 |
+| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status / chat`；chat 构造点显式固定为 `legacy_direct`，成功回复后仍执行既有 detached direct learning，不提交 API runtime 的 queue、也不持有 worker guard permit；Wave 3 的 HTTP `202 processing` / card poll 不改变 adapter 请求或响应。失败转为携带安全 LLM 分类文案的 `AdapterOperationError`，不暴露原始上游细节。 |
 | 推荐消费后的 durable inventory 同步 | ✅ | API 与 OpenClaw composition 都给真实 `RecommendationEngine` 注入 post-commit callback；独立 serve DB worker 把 recommendation + shown 在同一短事务提交成功后，callback 直接携带 `pool_counts_after` 更新共享 gate，不再同步重读共享连接。写失败不触发 callback，callback 失败也不改写 durable 提交结果；API 另在响应关键路径外读取精确 canonical snapshot 收敛广播。 |
 | OpenClaw skill descriptors | ✅ | 已提供协议中立的 skill descriptor 列表与 async handler |
 | OpenClaw CLI bridge | ✅ | 已提供 `python -m openbiliclaw.integrations.openclaw.cli`，输出稳定 JSON |
@@ -88,7 +88,8 @@ skills = build_openclaw_skills(adapter)
 - `chat(request)`：成功返回 `ChatResponse`，并通过显式 `legacy_direct` 保持原有
   学习行为（queue submit=0，不承诺 queue 串行/receipt/guard）；失败抛出包含
   `safe_llm_failure_message()` 分类文案的 `AdapterOperationError`，同时用
-  `raise ... from exc` 保留内部 cause 供日志/调试，不序列化该 cause
+  `raise ... from exc` 保留内部 cause 供日志/调试，不序列化该 cause。API runtime
+  的 `202 processing` 与 30 秒卡片轮询不适用于该 operation
 - `get_next_probe()`
 - `get_next_avoidance_probe()`
 - `respond_avoidance_probe(request)`

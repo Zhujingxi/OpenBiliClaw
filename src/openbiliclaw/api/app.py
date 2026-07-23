@@ -2860,7 +2860,7 @@ def create_app(
         turn_id: str,
         ignore_cooldown: bool,
     ) -> bool:
-        """Claim/retarget one confusion; return whether this call claimed open."""
+        """Schedule or retarget one confusion; report whether open became clarifying."""
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
         if confusion_manager is None:
             raise HTTPException(status_code=503, detail="Confusion manager not ready.")
@@ -9646,7 +9646,7 @@ def create_app(
         """Deprecated compatibility forwarder for insight feedback.
 
         New clients act on durable dialogue cards. Old clients retain the same
-        response shape while entering the identical fenced settlement path.
+        response shape while entering the identical serialized settlement path.
         """
         signal = payload.signal.strip().lower()
         if signal not in {"confirm", "like", "support", "reject", "dislike", "deny"}:

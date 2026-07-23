@@ -592,37 +592,24 @@ def test_legacy_card_settlement_columns_are_migration_only() -> None:
     )
 
 
-def test_discussion_attempt_token_is_cleared_by_stale_repair_and_fences_resume(
+def test_orphan_discussing_card_returns_to_pending_without_recovery_token(
     tmp_path: Path,
 ) -> None:
     db = _db(tmp_path)
-    started = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
     db.create_chat_turn(
         turn_id="card-discuss",
         message="阿b 的猜测",
         scope="hypothesis",
-        payload={"type": "card", "ref": "abc12345", "state": "pending"},
+        payload={"type": "card", "ref": "abc12345", "state": "discussing"},
     )
 
-    assert db.begin_chat_card_discussion(
+    assert db.update_chat_turn_payload_state(
         "card-discuss",
-        attempt_token="attempt-old",
-        now=started,
+        expected_state="discussing",
+        new_state="pending",
     )
-    assert db.validate_chat_card_discussion_attempt("card-discuss", "attempt-old")
-    assert not db.repair_stale_chat_card_discussion(
-        "card-discuss",
-        stale_before=started - timedelta(seconds=1),
-    )
-    assert db.repair_stale_chat_card_discussion(
-        "card-discuss",
-        stale_before=started + timedelta(minutes=5, seconds=1),
-    )
-    assert not db.validate_chat_card_discussion_attempt("card-discuss", "attempt-old")
     payload = db.get_chat_turn("card-discuss")["payload"]
-    assert payload["state"] == "pending"
-    assert "attempt_token" not in payload
-    assert "discussing_at" not in payload
+    assert payload == {"type": "card", "ref": "abc12345", "state": "pending"}
 
 
 def test_chat_turn_list_uses_rowid_for_equal_created_at(tmp_path: Path) -> None:

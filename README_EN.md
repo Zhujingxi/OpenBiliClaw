@@ -591,11 +591,12 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-durable reply: fixed time/payload → queued mode → typed settlement queue (production: learn + GET publication reconcile) → one worker
-confirmation entry (pending list/cards) → one anchor(ref+generation) → relation matrix (other typed kinds await cutover)
+durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
+confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
                           ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                           │                                                └→ publication-only retry → projection / exact release
+                          ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
@@ -640,12 +641,13 @@ confirmation entry (pending list/cards) → one anchor(ref+generation) → relat
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[learn + GET publication reconcile] → one in-line-await worker
+Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[all declared entries] → one in-line worker
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
 learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
 failure/timeout → rollback provisional history → safe error / failed turn
 durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
-                                                  └→ nested learn settles apply in-worker; other entries await Wave 3 cutover
+                                                  └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
+card action → synchronous 200 fast path | 202 processing → popup/desktop poll; mobile/CLI have no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

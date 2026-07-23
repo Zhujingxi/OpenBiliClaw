@@ -1132,7 +1132,9 @@ openbiliclaw init
 进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。CLI 构造点显式固定为
 `legacy_direct`：得到回复后仍按既有 detached direct learning 学习，既不提交 API
 runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
-但不享受队列串行/receipt/guard 保证。输入 `exit`、`quit` 或空行可结束。聊天内容
+但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒
+卡片轮询只服务 popup/桌面卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
+`exit`、`quit` 或空行可结束。聊天内容
 仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
 单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
 

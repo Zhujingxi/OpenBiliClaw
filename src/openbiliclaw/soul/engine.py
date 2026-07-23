@@ -998,12 +998,12 @@ class SoulEngine:
         return result
 
     async def apply_feedback_object(self, feedback: dict[str, Any]) -> dict[str, Any]:
-        """Apply only the idempotent hypothesis-object feedback segment.
+        """Apply only the idempotent hypothesis-object feedback effect.
 
-        Durable card settlement owns event receipt and rebuild-marker segments
+        Durable card settlement owns event receipt and rebuild-marker effects
         separately, so the single settlement worker calls this method directly.
         ``update_from_feedback`` remains the compatibility facade that executes
-        all three segments in the historical order.
+        all three effects in the historical order.
         """
         hypotheses = self._load_insights()
         target = self._normalize_text(str(feedback.get("hypothesis", "")))

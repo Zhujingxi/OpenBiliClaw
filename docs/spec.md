@@ -226,12 +226,14 @@ guided init: signals → preferences → full profile commit
 
 durable dialogue → confirmation entry(pending list / cards)
                  → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
-                 → typed settlement queue[production: learn + GET publication reconcile] → one worker
+                 → typed settlement queue[all 11 declared kinds] → one actual worker + guard
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(kind + ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
+                   action≤1s: completed → 200 | blocked → 202 processing
+                              └→ popup/desktop GET poll 1/2/5s, deadline 30s
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → lightweight ref winner receipt
                    → event → object → derived → rebuild-marker → applied
@@ -259,8 +261,12 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 durable runtime 使用 `SocraticDialogue(queued)`，成功写入 user+agent 历史后同步
 提交 typed `learn`，由唯一 `DialogueSettlementQueue` worker 在线内 await
 `learn_from_dialogue`；CLI/OpenClaw 只在两个兼容构造点使用 `legacy_direct`，保持
-既有 detached direct learning，位于 queue/guard 外。当前其余 10 个 typed kind
-只保留穷尽 admission 契约，生产 dispatcher 在 Wave 3 cutover 前 fail closed。
+既有 detached direct learning，位于 queue/guard 外。其余 10 个 typed kind 的
+卡片四动作、锚建立/释放/恢复、普通 chat settles、探针/疑惑 reply/open/replay、
+GET reconcile 与 legacy façade 也已全部接入同一个 production dispatcher/worker；
+protected mutation 只允许 actual worker Task，继承 context 的 child 仍 fail closed。
+队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/桌面在 30 秒内读取
+durable turn，重启丢 job 时允许同 action 重新提交；不增加 job table 或恢复 scanner。
 两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
 避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享
 dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时

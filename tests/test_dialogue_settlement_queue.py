@@ -968,6 +968,83 @@ async def test_typed_queue_serializes_100_concurrent_mixed_submissions() -> None
     assert accepted_sequences == list(range(accepted_sequences[0], accepted_sequences[0] + 100))
 
 
+async def test_declared_entries_100_interleavings_publish_one_winner_without_contradiction() -> (
+    None
+):
+    """Task 3.4: declared writers share one order and publish one immutable winner."""
+    release_producers = asyncio.Event()
+    winner = ""
+    published: list[str] = []
+    active = 0
+    max_active = 0
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        nonlocal active, max_active, winner
+        active += 1
+        max_active = max(max_active, active)
+        requested = str(job.payload["verdict"])
+        if not winner:
+            winner = requested
+        await asyncio.sleep(0)
+        published.append(winner)
+        active -= 1
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+
+    async def submit(index: int) -> DialogueJobResult:
+        await release_producers.wait()
+        return await queue.submit_and_wait(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "target_kind": "hypothesis",
+                "target_ref": "shared-object",
+                "verdict": "confirmed" if index % 2 == 0 else "rejected",
+            },
+        )
+
+    tasks = [asyncio.create_task(submit(index)) for index in range(100)]
+    release_producers.set()
+    results = await asyncio.gather(*tasks)
+    await queue.shutdown()
+
+    assert max_active == 1
+    assert {result.outcome for result in results} == {"completed"}
+    assert len(published) == 100
+    assert set(published) == {winner}
+
+
+async def test_known_limit_out_of_scope_writer_is_not_coordinated() -> None:
+    """Known limit: an undeclared direct writer remains outside this guarantee."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    observations: list[str] = []
+
+    async def dispatcher(_job: DialogueJob) -> DialogueJobResult:
+        entered.set()
+        await release.wait()
+        observations.append("declared-worker")
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    completion = asyncio.create_task(
+        queue.submit_and_wait(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {"target_kind": "hypothesis", "target_ref": "known-limit"},
+        )
+    )
+    await entered.wait()
+    observations.append("out-of-scope-direct-writer")
+    release.set()
+    await completion
+    await queue.shutdown()
+
+    assert "force_tick" in OUT_OF_SCOPE_WRITERS
+    assert observations == ["out-of-scope-direct-writer", "declared-worker"]
+
+
 async def test_fire_and_forget_and_completion_jobs_share_one_queue() -> None:
     """Q2: learn fire-and-forget and request/response actions use one consumer."""
     from openbiliclaw.soul.dialogue_learn_queue import (

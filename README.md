@@ -595,11 +595,12 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-持久对话回复：固定时间/payload → queued mode → typed 结算队列（生产入口：learn + GET publication reconcile）→ 单 worker
-确认入口（待聊列表/卡片）→ 单锚(ref+generation) → 归属矩阵（其余 typed kind 待 cutover）
+持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
+确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
                        ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                        │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
+                       ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
@@ -643,12 +644,13 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[learn + GET publication reconcile] → 单 worker 在线内学习
+Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[全部 declared entries] → 单 worker 在线内学习/结算
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
 学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
 失败/超时 → 回滚临时历史 → 安全错因 / failed turn
 durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
-                                                   └→ learn 内 nested settle 直接 worker-only apply；其余入口待 Wave 3 cutover
+                                                   └→ 卡片/锚/chat/probe/confusion/replay/legacy 全部 worker-only
+卡片 action → 同步 200（空队列快路）| 202 processing → popup/桌面轮询；移动/CLI 无 action
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
