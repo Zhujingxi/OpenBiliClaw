@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -19,11 +20,10 @@ import threading
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -41,7 +41,6 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
-from openbiliclaw.memory.json_state import exclusive_file_lock
 from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.saved_sync.identity import (
     canonical_source_platform,
@@ -81,32 +80,43 @@ from openbiliclaw.sources.platforms import (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
-
-_CARD_SETTLEMENT_LOCKS: dict[Path, threading.RLock] = {}
-_CARD_SETTLEMENT_LOCKS_GUARD = threading.Lock()
-
-
-def _card_settlement_process_lock(path: Path) -> threading.RLock:
-    """Return the process-local half of one database's settlement fence."""
-    key = path.resolve()
-    with _CARD_SETTLEMENT_LOCKS_GUARD:
-        lock = _CARD_SETTLEMENT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.RLock()
-            _CARD_SETTLEMENT_LOCKS[key] = lock
-        return lock
-
 
 # Cap the probe so a long legitimate blurb never costs a full parse. Real
 # copy is a sentence or two; a serialized batch payload is far longer than
 # this, but the prefix alone is enough to identify one.
 _LLM_PAYLOAD_PROBE_MAX_CHARS = 512
 _LLM_PAYLOAD_MARKERS = ("expression", "topic_label", "reason", "topic_group")
+_CARD_SETTLEMENT_REF_MAX_CHARS = 1024
+_CARD_SETTLEMENT_EFFECT_NAMES = frozenset({"event"})
+_CARD_SETTLEMENT_EFFECT_KEY_RE = re.compile(r"\Adialogue:[0-9a-f]{64}:[a-z_]+\Z")
+
+
+def _validated_card_settlement_ref(ref: object) -> str:
+    """Return a bounded, non-control settlement ref for stable-key derivation."""
+    normalized = str(ref).strip()
+    if (
+        not normalized
+        or len(normalized) > _CARD_SETTLEMENT_REF_MAX_CHARS
+        or any(unicodedata.category(character).startswith("C") for character in normalized)
+    ):
+        raise ValueError("Card settlement ref is invalid")
+    return normalized
+
+
+def _card_settlement_effect_key(ref: object, effect: str) -> str:
+    """Build one fixed-shape effect key without exposing SQL identifiers."""
+    normalized_effect = effect.strip()
+    if normalized_effect not in _CARD_SETTLEMENT_EFFECT_NAMES:
+        raise ValueError(f"Unsupported card settlement effect: {effect!r}")
+    normalized_ref = _validated_card_settlement_ref(ref)
+    digest = hashlib.sha256(normalized_ref.encode("utf-8")).hexdigest()
+    key = f"dialogue:{digest}:{normalized_effect}"
+    if not _CARD_SETTLEMENT_EFFECT_KEY_RE.fullmatch(key):  # pragma: no cover - construction proof
+        raise RuntimeError("Card settlement effect key construction failed")
+    return key
 
 
 def _looks_like_serialized_llm_payload(value: str) -> bool:
@@ -1001,20 +1011,18 @@ CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
 CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
     ON chat_turns(scope, subject_id, created_at);
 
--- Atomic arbitration record for durable dialogue-confirmation cards.  Wave A
--- only reserves the winning verdict; later waves apply the side effects.
+-- Atomic winner receipt for durable dialogue-confirmation cards. Dialogue
+-- effects are serialized by the single in-process settlement worker.
 CREATE TABLE IF NOT EXISTS card_settlements (
-    ref               TEXT PRIMARY KEY,
-    verdict           TEXT NOT NULL,
-    turn_id           TEXT NOT NULL,
-    payload           TEXT NOT NULL DEFAULT '{}',
-    applied           INTEGER NOT NULL DEFAULT 0,
-    apply_claim_at    TEXT,
-    apply_claim_token TEXT NOT NULL DEFAULT '',
-    seg_event         INTEGER NOT NULL DEFAULT 0,
-    seg_object        INTEGER NOT NULL DEFAULT 0,
-    seg_marker        INTEGER NOT NULL DEFAULT 0,
-    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ref        TEXT PRIMARY KEY,
+    verdict    TEXT NOT NULL,
+    turn_id    TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '{}',
+    applied    INTEGER NOT NULL DEFAULT 0,
+    result     TEXT NOT NULL DEFAULT '{}',
+    event_id   TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Schema version tracking
@@ -1322,9 +1330,6 @@ class Database:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
-        self._card_settlement_lock_path = self._db_path.with_name(
-            f".{self._db_path.name}.card-settlement.lock"
-        )
         self._conn: sqlite3.Connection | None = None
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
         self._preserve_read_transaction = False
@@ -2482,13 +2487,14 @@ class Database:
         payload: Mapping[str, Any] | None = None,
     ) -> bool:
         """Atomically reserve one object verdict with SQLite INSERT OR IGNORE."""
+        normalized_ref = _validated_card_settlement_ref(ref)
         cursor = self._execute_write(
             """
             INSERT OR IGNORE INTO card_settlements (ref, verdict, turn_id, payload, applied)
             VALUES (?, ?, ?, ?, 0)
             """,
             (
-                ref,
+                normalized_ref,
                 verdict,
                 turn_id,
                 json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True),
@@ -2498,130 +2504,38 @@ class Database:
 
     def get_card_settlement(self, ref: str) -> dict[str, Any] | None:
         """Return the durable settlement arbitration row for one object."""
+        normalized_ref = _validated_card_settlement_ref(ref)
         self._ensure_fresh_read()
         row = self.conn.execute(
             """
-            SELECT ref, verdict, turn_id, payload, applied,
-                   apply_claim_at, apply_claim_token,
-                   seg_event, seg_object, seg_marker, created_at
+            SELECT ref, verdict, turn_id, payload, applied, result, event_id,
+                   created_at, updated_at
             FROM card_settlements
             WHERE ref = ?
             """,
-            (ref,),
+            (normalized_ref,),
         ).fetchone()
         if row is None:
             return None
         result = dict(row)
-        raw_payload = result.get("payload")
-        if isinstance(raw_payload, str):
+        for field in ("payload", "result"):
+            raw_payload = result.get(field)
             try:
-                decoded = json.loads(raw_payload)
+                decoded = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
             except (TypeError, ValueError):
                 decoded = {}
-            result["payload"] = decoded if isinstance(decoded, dict) else {}
-        elif not isinstance(raw_payload, dict):
-            result["payload"] = {}
+            result[field] = decoded if isinstance(decoded, dict) else {}
         return result
 
-    def claim_card_settlement(
+    def record_card_settlement_event_once(
         self,
         *,
         ref: str,
-        claim_token: str,
-        now: datetime,
-    ) -> bool:
-        """Claim or take over one unapplied settlement with a fencing token."""
-        normalized_token = claim_token.strip()
-        if not normalized_token:
-            raise ValueError("Card settlement claim token is required")
-        normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-        # r7 calibration: five minutes covers the synchronous three-segment
-        # apply path while bounding crash recovery. Revisit only with latency
-        # telemetry if the settlement path gains remote side effects.
-        stale_before = normalized_now - timedelta(minutes=5)
-        with self._card_settlement_fence():
-            conn = self.open_connection()
-            try:
-                cursor = conn.execute(
-                    """
-                    UPDATE card_settlements
-                    SET apply_claim_at = ?, apply_claim_token = ?
-                    WHERE ref = ?
-                      AND applied = 0
-                      AND (
-                          apply_claim_at IS NULL
-                          OR apply_claim_at = ''
-                          OR julianday(apply_claim_at) < julianday(?)
-                      )
-                    """,
-                    (
-                        normalized_now.astimezone(UTC).isoformat(),
-                        normalized_token,
-                        ref,
-                        stale_before.astimezone(UTC).isoformat(),
-                    ),
-                )
-                conn.commit()
-                return int(cursor.rowcount or 0) == 1
-            finally:
-                conn.close()
-
-    @contextmanager
-    def _card_settlement_fence(self) -> Iterator[None]:
-        """Serialize claim takeover with guarded non-SQLite side effects."""
-        process_lock = _card_settlement_process_lock(self._card_settlement_lock_path)
-        with process_lock, exclusive_file_lock(self._card_settlement_lock_path) as acquired:
-            if not acquired:  # pragma: no cover - blocking mode always acquires
-                raise RuntimeError("Failed to acquire card settlement fence")
-            yield
-
-    @contextmanager
-    def card_settlement_claim_guard(
-        self,
-        *,
-        ref: str,
-        claim_token: str,
-    ) -> Iterator[bool]:
-        """Hold the takeover fence and yield whether ``claim_token`` still owns ``ref``.
-
-        The fence remains held through the caller's object/derived/marker side
-        effect and segment CAS. A lease takeover therefore happens wholly before
-        the side effect (which then sees ``False``) or after its durable segment
-        marker; it cannot split the two operations.
-        """
-        normalized_token = claim_token.strip()
-        if not normalized_token:
-            raise ValueError("Card settlement claim token is required")
-        with self._card_settlement_fence():
-            conn = self.open_connection()
-            try:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM card_settlements
-                    WHERE ref = ?
-                      AND apply_claim_token = ?
-                      AND applied = 0
-                    """,
-                    (ref, normalized_token),
-                ).fetchone()
-            finally:
-                conn.close()
-            yield row is not None
-
-    def record_card_settlement_event(
-        self,
-        *,
-        ref: str,
-        claim_token: str,
         event: Mapping[str, Any],
     ) -> bool:
-        """Atomically occupy ``seg_event`` and insert its feedback event.
-
-        The token+segment guarded UPDATE and event INSERT share one SQLite
-        transaction. A fenced or resumed executor therefore cannot create a
-        duplicate event between a separate check and write.
-        """
+        """Atomically mark and insert the receipt's stable feedback event."""
+        normalized_ref = _validated_card_settlement_ref(ref)
+        event_id = _card_settlement_effect_key(normalized_ref, "event")
         event_type = str(event.get("event_type") or event.get("type") or "").strip()
         if not event_type:
             raise ValueError("Settlement event type is required")
@@ -2629,18 +2543,17 @@ class Database:
         conn = self.open_connection()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            occupied = conn.execute(
+            row = conn.execute(
                 """
-                UPDATE card_settlements
-                SET seg_event = 1
+                SELECT event_id
+                FROM card_settlements
                 WHERE ref = ?
-                  AND apply_claim_token = ?
-                  AND applied = 0
-                  AND seg_event = 0
                 """,
-                (ref, claim_token),
-            )
-            if int(occupied.rowcount or 0) != 1:
+                (normalized_ref,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Dialogue settlement receipt disappeared")
+            if str(row["event_id"] or ""):
                 conn.commit()
                 return False
             conn.execute(
@@ -2653,6 +2566,16 @@ class Database:
                 """,
                 params,
             )
+            updated = conn.execute(
+                """
+                UPDATE card_settlements
+                SET event_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE ref = ? AND event_id = ''
+                """,
+                (event_id, normalized_ref),
+            )
+            if int(updated.rowcount or 0) != 1:  # pragma: no cover - BEGIN IMMEDIATE owns writer
+                raise RuntimeError("Dialogue settlement event marker was not recorded")
             conn.commit()
             return True
         except Exception:
@@ -2661,123 +2584,28 @@ class Database:
         finally:
             conn.close()
 
-    def mark_card_settlement_segment(
+    def complete_card_settlement(
         self,
         *,
         ref: str,
-        claim_token: str,
-        segment: str,
+        result: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Mark an idempotent non-event segment under the active fence."""
-        column = {"object": "seg_object", "marker": "seg_marker"}.get(segment.strip())
-        if column is None:
-            raise ValueError(f"Unsupported card settlement segment: {segment!r}")
-        cursor = self._execute_write(
-            f"""
-            UPDATE card_settlements
-            SET {column} = 1
-            WHERE ref = ?
-              AND apply_claim_token = ?
-              AND applied = 0
-              AND {column} = 0
-            """,
-            (ref, claim_token),
-        )
-        return int(cursor.rowcount or 0) == 1
-
-    def finish_card_settlement_marker(
-        self,
-        *,
-        ref: str,
-        claim_token: str,
-        source: str,
-        hypothesis: str,
-        verdict: str,
-        turn_id: str,
-        matched: bool,
-        write_point: str = "settle_insight",
-    ) -> bool:
-        """Fence marker completion, then append its audit row best-effort.
-
-        The marker is settlement state; the ledger is only an observer. They
-        deliberately use separate transactions so an unavailable/corrupt
-        ledger can never roll back the marker or block ``applied=1``.
-        """
-        before = {"hypothesis": hypothesis[:80], "verdict": verdict}
-        after = {"matched": matched}
-        conn = self.open_connection()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            marked = conn.execute(
-                """
-                UPDATE card_settlements
-                SET seg_marker = 1
-                WHERE ref = ?
-                  AND apply_claim_token = ?
-                  AND applied = 0
-                  AND seg_marker = 0
-                """,
-                (ref, claim_token),
-            )
-            if int(marked.rowcount or 0) != 1:
-                conn.commit()
-                return False
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-        ledger_conn = self.open_connection()
-        try:
-            ledger_conn.execute(
-                """
-                INSERT INTO profile_update_ledger (
-                    write_point, source, before_summary, after_summary, diff,
-                    source_refs, outcome, turn_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    write_point,
-                    source,
-                    json.dumps(before, ensure_ascii=False, sort_keys=True),
-                    json.dumps(after, ensure_ascii=False, sort_keys=True),
-                    json.dumps({"changed_keys": ["matched"]}, sort_keys=True),
-                    json.dumps([hypothesis[:60]], ensure_ascii=False),
-                    "success" if matched else "failed",
-                    turn_id,
-                ),
-            )
-            ledger_conn.commit()
-        except Exception:
-            if ledger_conn.in_transaction:
-                ledger_conn.rollback()
-            logger.warning(
-                "card settlement ledger write failed for ref=%s "
-                "(best-effort, settlement continues)",
-                ref,
-                exc_info=True,
-            )
-        finally:
-            ledger_conn.close()
-        return True
-
-    def complete_card_settlement(self, *, ref: str, claim_token: str) -> bool:
-        """Publish a fully completed settlement under the active fence."""
+        """Mark a receipt applied after mandatory worker effects complete."""
+        normalized_ref = _validated_card_settlement_ref(ref)
         cursor = self._execute_write(
             """
             UPDATE card_settlements
-            SET applied = 1
+            SET applied = 1,
+                result = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE ref = ?
-              AND apply_claim_token = ?
               AND applied = 0
-              AND seg_event = 1
-              AND seg_object = 1
-              AND seg_marker = 1
+              AND event_id <> ''
             """,
-            (ref, claim_token),
+            (
+                json.dumps(dict(result or {}), ensure_ascii=False, sort_keys=True),
+                normalized_ref,
+            ),
         )
         return int(cursor.rowcount or 0) == 1
 
@@ -9182,17 +9010,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
                 ON chat_turns(scope, subject_id, created_at);
             CREATE TABLE IF NOT EXISTS card_settlements (
-                ref               TEXT PRIMARY KEY,
-                verdict           TEXT NOT NULL,
-                turn_id           TEXT NOT NULL,
-                payload           TEXT NOT NULL DEFAULT '{}',
-                applied           INTEGER NOT NULL DEFAULT 0,
-                apply_claim_at    TEXT,
-                apply_claim_token TEXT NOT NULL DEFAULT '',
-                seg_event         INTEGER NOT NULL DEFAULT 0,
-                seg_object        INTEGER NOT NULL DEFAULT 0,
-                seg_marker        INTEGER NOT NULL DEFAULT 0,
-                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ref        TEXT PRIMARY KEY,
+                verdict    TEXT NOT NULL,
+                turn_id    TEXT NOT NULL,
+                payload    TEXT NOT NULL DEFAULT '{}',
+                applied    INTEGER NOT NULL DEFAULT 0,
+                result     TEXT NOT NULL DEFAULT '{}',
+                event_id   TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         columns = {
@@ -9203,23 +9029,100 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE chat_turns ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
             )
+        self._migrate_card_settlements_to_wave_2()
+
+    def _migrate_card_settlements_to_wave_2(self) -> None:
+        """Rebuild legacy claim/segment receipts into the Wave 2 winner schema."""
         settlement_columns = {
             str(row["name"])
             for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
         }
-        settlement_additions = {
-            "payload": "TEXT NOT NULL DEFAULT '{}'",
-            "apply_claim_at": "TEXT",
-            "apply_claim_token": "TEXT NOT NULL DEFAULT ''",
-            "seg_event": "INTEGER NOT NULL DEFAULT 0",
-            "seg_object": "INTEGER NOT NULL DEFAULT 0",
-            "seg_marker": "INTEGER NOT NULL DEFAULT 0",
+        target_columns = {
+            "ref",
+            "verdict",
+            "turn_id",
+            "payload",
+            "applied",
+            "result",
+            "event_id",
+            "created_at",
+            "updated_at",
         }
-        for column_name, column_type in settlement_additions.items():
-            if column_name not in settlement_columns:
-                self.conn.execute(
-                    f"ALTER TABLE card_settlements ADD COLUMN {column_name} {column_type}"
+        legacy_columns = {
+            "apply_claim_at",
+            "apply_claim_token",
+            "seg_event",
+            "seg_object",
+            "seg_marker",
+        }
+        if settlement_columns == target_columns:
+            return
+
+        rows = [dict(row) for row in self.conn.execute("SELECT * FROM card_settlements")]
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS card_settlements_wave_2")
+            self.conn.execute(
+                """
+                CREATE TABLE card_settlements_wave_2 (
+                    ref        TEXT PRIMARY KEY,
+                    verdict    TEXT NOT NULL,
+                    turn_id    TEXT NOT NULL,
+                    payload    TEXT NOT NULL DEFAULT '{}',
+                    applied    INTEGER NOT NULL DEFAULT 0,
+                    result     TEXT NOT NULL DEFAULT '{}',
+                    event_id   TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+            for row in rows:
+                normalized_ref = _validated_card_settlement_ref(row.get("ref", ""))
+                applied = 1 if int(row.get("applied", 0) or 0) == 1 else 0
+                event_was_recorded = applied == 1 or (
+                    "seg_event" in settlement_columns and int(row.get("seg_event", 0) or 0) == 1
+                )
+                payload = row.get("payload", "{}")
+                result = row.get("result", "{}")
+                created_at = row.get("created_at") or datetime.now(UTC).isoformat()
+                updated_at = row.get("updated_at") or created_at
+                self.conn.execute(
+                    """
+                    INSERT INTO card_settlements_wave_2 (
+                        ref, verdict, turn_id, payload, applied, result, event_id,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_ref,
+                        str(row.get("verdict", "")),
+                        str(row.get("turn_id", "")),
+                        payload if isinstance(payload, str) else "{}",
+                        applied,
+                        result if isinstance(result, str) else "{}",
+                        (
+                            _card_settlement_effect_key(normalized_ref, "event")
+                            if event_was_recorded
+                            else ""
+                        ),
+                        created_at,
+                        updated_at,
+                    ),
+                )
+            self.conn.execute("DROP TABLE card_settlements")
+            self.conn.execute("ALTER TABLE card_settlements_wave_2 RENAME TO card_settlements")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        if legacy_columns.intersection(
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+        ):
+            raise RuntimeError("Legacy card settlement columns survived Wave 2 migration")
 
     def _ensure_profile_update_ledger_table(self) -> None:
         """Create the append-only profile write-point ledger for existing DBs."""

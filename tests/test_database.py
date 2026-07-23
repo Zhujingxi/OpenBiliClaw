@@ -8,18 +8,16 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.storage.database import Database
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _db(tmp_path: Path) -> Database:
@@ -41,17 +39,17 @@ def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -
         str(row["name"])
         for row in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
     }
-    assert {
+    assert settlement_columns == {
         "ref",
         "verdict",
         "turn_id",
+        "payload",
         "applied",
-        "apply_claim_at",
-        "apply_claim_token",
-        "seg_event",
-        "seg_object",
-        "seg_marker",
-    } <= settlement_columns
+        "result",
+        "event_id",
+        "created_at",
+        "updated_at",
+    }
 
 
 def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> None:
@@ -87,7 +85,9 @@ def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> No
     assert db.get_chat_turn("legacy-turn")["payload"] == {}
 
 
-def test_card_settlement_schema_migrates_wave_a_table(tmp_path: Path) -> None:
+def test_card_settlement_schema_rebuilds_wave_a_table_without_claim_columns(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "legacy-settlement.db"
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -111,10 +111,121 @@ def test_card_settlement_schema_migrates_wave_a_table(tmp_path: Path) -> None:
 
     row = db.get_card_settlement("abc12345")
     assert row is not None
-    assert row["apply_claim_token"] == ""
-    assert row["seg_event"] == 0
-    assert row["seg_object"] == 0
-    assert row["seg_marker"] == 0
+    assert row == {
+        "ref": "abc12345",
+        "verdict": "confirmed",
+        "turn_id": "legacy-card",
+        "payload": {},
+        "applied": 0,
+        "result": {},
+        "event_id": "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    assert row["created_at"]
+    assert row["updated_at"]
+    columns = {
+        str(info["name"])
+        for info in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert columns == {
+        "ref",
+        "verdict",
+        "turn_id",
+        "payload",
+        "applied",
+        "result",
+        "event_id",
+        "created_at",
+        "updated_at",
+    }
+
+
+@pytest.mark.parametrize(
+    ("applied", "seg_event", "expected_event_recorded"),
+    [(0, 0, False), (0, 1, True), (1, 0, True)],
+)
+def test_card_settlement_schema_rebuilds_claim_table_preserving_winner_and_event_identity(
+    tmp_path: Path,
+    applied: int,
+    seg_event: int,
+    expected_event_recorded: bool,
+) -> None:
+    path = tmp_path / f"legacy-claim-{applied}-{seg_event}.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        f"""
+        CREATE TABLE card_settlements (
+            ref TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{{}}',
+            applied INTEGER NOT NULL DEFAULT 0,
+            apply_claim_at TEXT,
+            apply_claim_token TEXT NOT NULL DEFAULT '',
+            seg_event INTEGER NOT NULL DEFAULT 0,
+            seg_object INTEGER NOT NULL DEFAULT 0,
+            seg_marker INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO card_settlements (
+            ref, verdict, turn_id, payload, applied, apply_claim_at,
+            apply_claim_token, seg_event, seg_object, seg_marker
+        )
+        VALUES (
+            'winner-ref', 'revised', 'winner-turn',
+            '{{"kind":"hypothesis","title":"原赢家"}}',
+            {applied}, '2026-07-22T04:00:00+00:00',
+            'old-owner', {seg_event}, 1, 1
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    row = db.get_card_settlement("winner-ref")
+    assert row is not None
+    assert row["verdict"] == "revised"
+    assert row["turn_id"] == "winner-turn"
+    assert row["payload"] == {"kind": "hypothesis", "title": "原赢家"}
+    assert row["applied"] == applied
+    assert bool(row["event_id"]) is expected_event_recorded
+    columns = {
+        str(info["name"])
+        for info in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert not columns.intersection(
+        {
+            "apply_claim_at",
+            "apply_claim_token",
+            "seg_event",
+            "seg_object",
+            "seg_marker",
+        }
+    )
+
+
+def test_card_settlement_fresh_schema_double_initialize_is_idempotent(tmp_path: Path) -> None:
+    path = tmp_path / "double-init.db"
+    db = Database(path)
+    db.initialize()
+    assert db.try_create_card_settlement(
+        ref="double-init-ref",
+        verdict="confirmed",
+        turn_id="double-init-turn",
+        payload={"kind": "hypothesis", "title": "保留赢家"},
+    )
+    before = db.get_card_settlement("double-init-ref")
+    db.close()
+
+    reopened = Database(path)
+    reopened.initialize()
+    reopened.initialize()
+
+    assert reopened.get_card_settlement("double-init-ref") == before
 
 
 @pytest.mark.parametrize(
@@ -175,35 +286,41 @@ def test_chat_turn_payload_state_cas_rejects_stale_or_illegal_transition(tmp_pat
 
 def test_card_settlement_insert_or_ignore_arbitrates_across_connections(tmp_path: Path) -> None:
     path = tmp_path / "settlement.db"
-    first = Database(path)
-    first.initialize()
-    second = Database(path)
-    second.initialize()
-    barrier = threading.Barrier(2)
+    seed = Database(path)
+    seed.initialize()
+    seed.close()
+    barrier = threading.Barrier(50)
 
-    def contend(db: Database, verdict: str, turn_id: str) -> bool:
-        barrier.wait()
-        return db.try_create_card_settlement(
-            ref="hypothesis:abc12345",
-            verdict=verdict,
-            turn_id=turn_id,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = list(
-            executor.map(
-                lambda args: contend(*args),
-                [(first, "confirmed", "turn-confirm"), (second, "rejected", "turn-reject")],
+    def contend(index: int) -> tuple[bool, str, str]:
+        database = Database(path)
+        database.initialize()
+        verdict = "confirmed" if index % 2 == 0 else "rejected"
+        turn_id = f"turn-{index}"
+        try:
+            barrier.wait(timeout=5)
+            inserted = database.try_create_card_settlement(
+                ref="hypothesis:abc12345",
+                verdict=verdict,
+                turn_id=turn_id,
+                payload={"request_index": index},
             )
-        )
+            return inserted, verdict, turn_id
+        finally:
+            database.close()
 
-    assert sorted(outcomes) == [False, True]
-    settlement = first.get_card_settlement("hypothesis:abc12345")
-    assert settlement is not None
-    assert (settlement["verdict"], settlement["turn_id"]) in {
-        ("confirmed", "turn-confirm"),
-        ("rejected", "turn-reject"),
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        outcomes = list(executor.map(contend, range(50)))
+
+    assert Counter(inserted for inserted, _verdict, _turn_id in outcomes) == {
+        False: 49,
+        True: 1,
     }
+    winner = next(item for item in outcomes if item[0])
+    reopened = Database(path)
+    reopened.initialize()
+    settlement = reopened.get_card_settlement("hypothesis:abc12345")
+    assert settlement is not None
+    assert (settlement["verdict"], settlement["turn_id"]) == winner[1:]
     assert settlement["applied"] == 0
 
 
@@ -261,217 +378,61 @@ def test_confirmation_turn_deduplicates_ref_session_atomically_but_not_cross_ses
     assert count == 2
 
 
-def test_card_settlement_claim_fences_paused_old_executor_after_takeover(
+def test_card_settlement_event_and_completion_are_idempotent_without_claims(
     tmp_path: Path,
 ) -> None:
     db = _db(tmp_path)
-    database_path = tmp_path / "init.db"
-    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
     assert db.try_create_card_settlement(
         ref="abc12345",
         verdict="confirmed",
         turn_id="card-popup",
+        payload={"kind": "hypothesis", "title": "用户偏爱深度内容"},
     )
-    old_claimed = threading.Event()
-    resume_old = threading.Event()
     event = {
         "event_type": "feedback",
         "title": "用户偏爱深度内容",
         "metadata": {"settlement_ref": "abc12345", "signal": "confirm"},
     }
 
-    def paused_old_executor() -> tuple[bool, bool, bool, bool]:
-        old_db = Database(database_path)
-        old_db.initialize()
-        try:
-            assert old_db.claim_card_settlement(
-                ref="abc12345",
-                claim_token="old-token",
-                now=now,
-            )
-            old_claimed.set()
-            assert resume_old.wait(timeout=5)
-            return (
-                old_db.record_card_settlement_event(
-                    ref="abc12345",
-                    claim_token="old-token",
-                    event=event,
-                ),
-                old_db.mark_card_settlement_segment(
-                    ref="abc12345",
-                    claim_token="old-token",
-                    segment="object",
-                ),
-                old_db.mark_card_settlement_segment(
-                    ref="abc12345",
-                    claim_token="old-token",
-                    segment="marker",
-                ),
-                old_db.complete_card_settlement(
-                    ref="abc12345",
-                    claim_token="old-token",
-                ),
-            )
-        finally:
-            old_db.close()
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        old_future = pool.submit(paused_old_executor)
-        assert old_claimed.wait(timeout=5)
-        assert not old_future.done()
-
-        db.conn.execute(
-            "UPDATE card_settlements SET apply_claim_at = ? WHERE ref = ?",
-            ((now - timedelta(minutes=6)).isoformat(), "abc12345"),
-        )
-        db.conn.commit()
-        assert db.claim_card_settlement(
+    event_results = [
+        db.record_card_settlement_event_once(ref="abc12345", event=event) for _ in range(10)
+    ]
+    assert event_results == [True, *([False] * 9)]
+    completion_results = [
+        db.complete_card_settlement(
             ref="abc12345",
-            claim_token="new-token",
-            now=now,
+            result={"matched": True, "state": "confirmed"},
         )
-
-        # Resume the executor that still believes it owns the claim *before*
-        # the taker writes any segment. Every attempted write must be fenced by
-        # the replacement token, not merely by an already-applied receipt.
-        resume_old.set()
-        assert old_future.result(timeout=5) == (False, False, False, False)
-
-    assert db.record_card_settlement_event(
-        ref="abc12345",
-        claim_token="new-token",
-        event=event,
-    )
-    assert not db.record_card_settlement_event(
-        ref="abc12345",
-        claim_token="new-token",
-        event=event,
-    )
-    assert db.mark_card_settlement_segment(
-        ref="abc12345",
-        claim_token="new-token",
-        segment="object",
-    )
-    assert db.mark_card_settlement_segment(
-        ref="abc12345",
-        claim_token="new-token",
-        segment="marker",
-    )
-    assert db.complete_card_settlement(
-        ref="abc12345",
-        claim_token="new-token",
-    )
+        for _ in range(10)
+    ]
+    assert completion_results == [True, *([False] * 9)]
 
     row = db.get_card_settlement("abc12345")
     assert row is not None
-    assert row["seg_event"] == 1
+    assert row["event_id"].startswith("dialogue:")
+    assert len(row["event_id"]) == 79
     assert row["applied"] == 1
+    assert row["result"] == {"matched": True, "state": "confirmed"}
     events = db.query_events(event_types=["feedback"])
     assert len(events) == 1
     assert json.loads(events[0]["metadata"])["settlement_ref"] == "abc12345"
 
 
-def test_card_settlement_segment_and_applied_writes_require_current_fence(
+@pytest.mark.parametrize(
+    "invalid_ref",
+    ["", "   ", "bad\x00ref", "x" * 1025],
+)
+def test_card_settlement_ref_validation_rejects_unsafe_effect_key_input(
     tmp_path: Path,
+    invalid_ref: str,
 ) -> None:
     db = _db(tmp_path)
-    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
-    db.try_create_card_settlement(ref="abc12345", verdict="rejected", turn_id="card-1")
-    assert db.claim_card_settlement(ref="abc12345", claim_token="winner", now=now)
-
-    assert db.record_card_settlement_event(
-        ref="abc12345",
-        claim_token="winner",
-        event={
-            "event_type": "feedback",
-            "title": "假设",
-            "metadata": {"settlement_ref": "abc12345"},
-        },
-    )
-    assert not db.mark_card_settlement_segment(
-        ref="abc12345",
-        claim_token="loser",
-        segment="object",
-    )
-    assert db.mark_card_settlement_segment(
-        ref="abc12345",
-        claim_token="winner",
-        segment="object",
-    )
-    assert db.finish_card_settlement_marker(
-        ref="abc12345",
-        claim_token="winner",
-        source="card_action",
-        hypothesis="假设",
-        verdict="rejected",
-        turn_id="card-1",
-        matched=True,
-    )
-    assert not db.complete_card_settlement(ref="abc12345", claim_token="loser")
-    assert db.complete_card_settlement(ref="abc12345", claim_token="winner")
-
-    row = db.get_card_settlement("abc12345")
-    assert row is not None
-    assert row["seg_object"] == 1
-    assert row["applied"] == 1
-
-
-def test_card_settlement_ledger_failure_cannot_roll_back_marker_or_block_apply(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    db = _db(tmp_path)
-    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
-    ref = "ledger-best-effort"
-    assert db.try_create_card_settlement(
-        ref=ref,
-        verdict="confirmed",
-        turn_id="card-ledger-failure",
-    )
-    assert db.claim_card_settlement(ref=ref, claim_token="winner", now=now)
-    assert db.record_card_settlement_event(
-        ref=ref,
-        claim_token="winner",
-        event={
-            "event_type": "feedback",
-            "title": "台账不是真相源",
-            "metadata": {"settlement_ref": ref},
-        },
-    )
-    assert db.mark_card_settlement_segment(
-        ref=ref,
-        claim_token="winner",
-        segment="object",
-    )
-    db.conn.execute(
-        """
-        CREATE TRIGGER reject_settlement_ledger
-        BEFORE INSERT ON profile_update_ledger
-        WHEN NEW.write_point = 'settle_insight'
-        BEGIN
-            SELECT RAISE(ABORT, 'injected ledger failure');
-        END
-        """
-    )
-    db.conn.commit()
-
-    with caplog.at_level("WARNING"):
-        assert db.finish_card_settlement_marker(
-            ref=ref,
-            claim_token="winner",
-            source="card_action",
-            hypothesis="台账不是真相源",
+    with pytest.raises(ValueError, match="ref is invalid"):
+        db.try_create_card_settlement(
+            ref=invalid_ref,
             verdict="confirmed",
-            turn_id="card-ledger-failure",
-            matched=True,
+            turn_id="unsafe-ref",
         )
-
-    marked = db.get_card_settlement(ref)
-    assert marked is not None
-    assert marked["seg_marker"] == 1
-    assert db.complete_card_settlement(ref=ref, claim_token="winner")
-    assert db.get_card_settlement(ref)["applied"] == 1
-    assert "best-effort, settlement continues" in caplog.text
 
 
 def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
@@ -491,17 +452,51 @@ def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
     assert db.project_applied_card_settlement("abc12345") == 0
     assert db.get_chat_turn("card-popup")["payload"]["state"] == "pending"
 
-    now = datetime(2026, 7, 22, 4, 0, tzinfo=UTC)
-    assert db.claim_card_settlement(ref="abc12345", claim_token="winner", now=now)
-    db.conn.execute(
-        "UPDATE card_settlements SET seg_event = 1, seg_object = 1, seg_marker = 1 "
-        "WHERE ref = 'abc12345'"
+    assert db.record_card_settlement_event_once(
+        ref="abc12345",
+        event={
+            "event_type": "feedback",
+            "title": "假设",
+            "metadata": {"settlement_ref": "abc12345"},
+        },
     )
-    db.conn.commit()
-    assert db.complete_card_settlement(ref="abc12345", claim_token="winner")
+    assert db.complete_card_settlement(ref="abc12345", result={"matched": True})
     assert db.project_applied_card_settlement("abc12345") == 2
     assert db.get_chat_turn("card-popup")["payload"]["state"] == "confirmed"
     assert db.get_chat_turn("card-webui")["payload"]["state"] == "confirmed"
+
+
+def test_legacy_card_settlement_columns_are_migration_only() -> None:
+    source_path = Path(Database.__module__.replace(".", "/") + ".py")
+    source = (Path(__file__).parents[1] / "src" / source_path).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    migration_start = next(
+        index
+        for index, line in enumerate(lines, start=1)
+        if "def _migrate_card_settlements_to_wave_2" in line
+    )
+    migration_end = next(
+        index
+        for index, line in enumerate(lines[migration_start:], start=migration_start + 1)
+        if line.startswith("    def ") and "_migrate_card_settlements_to_wave_2" not in line
+    )
+    legacy_names = {
+        "apply_claim_at",
+        "apply_claim_token",
+        "seg_event",
+        "seg_object",
+        "seg_marker",
+    }
+    occurrences = {
+        name: [index for index, line in enumerate(lines, start=1) if name in line]
+        for name in legacy_names
+    }
+    assert all(occurrences.values())
+    assert all(
+        migration_start <= line_number < migration_end
+        for line_numbers in occurrences.values()
+        for line_number in line_numbers
+    )
 
 
 def test_discussion_attempt_token_is_cleared_by_stale_repair_and_fences_resume(
