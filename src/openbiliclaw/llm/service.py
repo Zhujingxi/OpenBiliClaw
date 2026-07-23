@@ -75,7 +75,20 @@ class SupportsComplete(Protocol):
         model: str | None = None,
     ) -> LLMResponse: ...
 
+    async def complete_chain(
+        self,
+        instance_ids: list[str] | tuple[str, ...],
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        json_mode: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse: ...
+
     def is_chat_capable(self, name: str) -> bool: ...
+
+    def provider_type(self, name: str | None = None) -> str: ...
 
 
 class LLMServiceError(Exception):
@@ -134,6 +147,8 @@ class ModuleOverride:
 
     provider: str = ""
     model: str = ""
+    chain: tuple[str, ...] = ()
+    custom_chain: bool = False
 
 
 _MODULE_OVERRIDE_BUCKETS = ("soul", "discovery", "recommendation", "evaluation")
@@ -146,9 +161,22 @@ def module_overrides_from_config(config: object) -> dict[str, ModuleOverride]:
         return {}
 
     overrides: dict[str, ModuleOverride] = {}
+    instance_routing = bool(getattr(llm_config, "instance_routing", False))
     for bucket in _MODULE_OVERRIDE_BUCKETS:
         raw = getattr(llm_config, bucket, None)
         if raw is None:
+            continue
+        if instance_routing:
+            if bool(getattr(raw, "inherit", True)):
+                continue
+            chain = tuple(
+                dict.fromkeys(
+                    str(item).strip().lower()
+                    for item in getattr(raw, "chain", [])
+                    if str(item).strip()
+                )
+            )
+            overrides[bucket] = ModuleOverride(chain=chain, custom_chain=True)
             continue
         provider = str(getattr(raw, "provider", "") or "").strip().lower()
         model = str(getattr(raw, "model", "") or "").strip()
@@ -313,6 +341,32 @@ class LLMService:
             return None
         return provider, model or None
 
+    def _resolve_module_chain(self, caller: str) -> list[str] | None:
+        """Return a module's custom v2 chain; ``None`` means inherit global."""
+        bucket = self._route_bucket_for_caller(caller)
+        if bucket is None:
+            return None
+        override = self.module_overrides.get(bucket)
+        if override is None or not override.custom_chain:
+            return None
+        chain: list[str] = []
+        for raw_instance_id in override.chain:
+            instance_id = raw_instance_id.strip().lower()
+            if instance_id and self.registry.is_chat_capable(instance_id):
+                chain.append(instance_id)
+                continue
+            log_key = (bucket, instance_id)
+            if log_key not in self._logged_unknown_override_keys:
+                self._logged_unknown_override_keys.add(log_key)
+                logger.info(
+                    "LLM module route contains unavailable instance: bucket=%s instance=%s",
+                    bucket,
+                    instance_id,
+                )
+        # An explicitly custom but broken route must not silently spill into
+        # the global chain. An empty list makes the registry raise no-provider.
+        return chain
+
     @classmethod
     def _reasoning_effort_for_call(
         cls,
@@ -405,6 +459,16 @@ class LLMService:
         messages.append({"role": "user", "content": user_input})
 
         async def _do_llm_call() -> LLMResponse:
+            routed_chain = self._resolve_module_chain(caller)
+            if routed_chain is not None:
+                return await self.registry.complete_chain(
+                    routed_chain,
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                    reasoning_effort=effective_reasoning_effort,
+                )
             routed = self._resolve_module_override(caller)
             if routed is None:
                 return await self.registry.complete(
@@ -480,11 +544,27 @@ class LLMService:
 
     def supports_image_input(self, caller: str = "discovery.evaluate_batch") -> bool:
         """Best-effort check for OpenAI-compatible vision-capable routes."""
+        routed_chain = self._resolve_module_chain(caller)
+        bucket = self._route_bucket_for_caller(caller)
+        module_route = self.module_overrides.get(bucket) if bucket is not None else None
+        if module_route is not None and module_route.custom_chain and not routed_chain:
+            # Match completion routing: an explicitly custom but unusable
+            # chain must not be treated as if it inherited the global route.
+            return False
         routed = self._resolve_module_override(caller)
         provider_name = (
-            routed[0] if routed is not None else self.registry.default_provider
+            routed_chain[0]
+            if routed_chain
+            else routed[0]
+            if routed is not None
+            else self.registry.default_provider
         ).strip()
-        provider_key = provider_name.lower()
+        provider_type = getattr(self.registry, "provider_type", None)
+        provider_key = (
+            str(provider_type(provider_name) or "").strip().lower()
+            if callable(provider_type)
+            else provider_name.lower()
+        )
         if provider_key not in {"openai", "openai_compatible", "openrouter"}:
             return False
 
@@ -492,7 +572,7 @@ class LLMService:
         get_provider = getattr(self.registry, "get", None)
         if callable(get_provider):
             with suppress(Exception):
-                provider_obj = get_provider(provider_key)
+                provider_obj = get_provider(provider_name)
         model = ""
         if routed is not None and routed[1]:
             model = routed[1]
@@ -568,6 +648,16 @@ class LLMService:
         messages.append({"role": "user", "content": user_parts})
 
         async def _do_llm_call() -> LLMResponse:
+            routed_chain = self._resolve_module_chain(caller)
+            if routed_chain is not None:
+                return await self.registry.complete_chain(
+                    routed_chain,
+                    cast("Any", messages),
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                    reasoning_effort=effective_reasoning_effort,
+                )
             routed = self._resolve_module_override(caller)
             if routed is None:
                 return await self.registry.complete(

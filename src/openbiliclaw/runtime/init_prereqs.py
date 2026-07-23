@@ -176,11 +176,10 @@ class InitPrereqs:
         ``health_check`` (tiny completion) — cached, single-flighted, and
         strict on timeout (matches embedding readiness).
 
-        The default provider is probed first; when it fails and a usable
-        ``[llm].fallback_provider`` is registered, that provider is probed
-        too — every runtime chat call goes through the fallback chain, so a
-        healthy fallback means chat genuinely works and init must not be
-        blocked just because the primary is down.
+        The first instance is probed first; when it fails, every remaining
+        usable instance in the configured ordered chain is probed in turn.
+        A healthy fallback means chat genuinely works and init must not be
+        blocked just because an earlier endpoint is down.
         """
         registry = getattr(self._ctx, "llm_registry", None)
         if registry is None:
@@ -212,24 +211,31 @@ class InitPrereqs:
                 )
                 ready = False
             if not ready:
-                fallback_name = str(getattr(registry, "fallback_provider", "") or "")
-                if (
-                    fallback_name
-                    and fallback_name != default_name
-                    and callable(is_chat_capable)
-                    and is_chat_capable(fallback_name)
-                ):
+                configured_chain = getattr(registry, "fallback_chain", None)
+                if isinstance(configured_chain, list) and configured_chain:
+                    fallback_names = [
+                        str(name or "").strip()
+                        for name in configured_chain
+                        if str(name or "").strip() and str(name or "").strip() != default_name
+                    ]
+                else:
+                    fallback_name = str(getattr(registry, "fallback_provider", "") or "").strip()
+                    fallback_names = [fallback_name] if fallback_name else []
+                for fallback_name in fallback_names:
+                    if not callable(is_chat_capable) or not is_chat_capable(fallback_name):
+                        continue
                     ready, fallback_failure = await self._probe_chat_provider(
                         registry.get(fallback_name)
                     )
                     if ready:
                         logger.info(
-                            "Chat readiness: default provider %s failed the probe but "
-                            "fallback provider %s answered — chat is served via fallback.",
+                            "Chat readiness: earlier instance %s failed the probe but "
+                            "fallback instance %s answered — chat is served via fallback.",
                             default_name,
                             fallback_name,
                         )
-                    elif failure is None:
+                        break
+                    if failure is None:
                         # Keep the primary's cause when present; only fall back to
                         # the fallback provider's exception if the default failed
                         # without one (non-chat default / bare False health_check).

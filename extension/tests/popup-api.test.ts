@@ -7,6 +7,7 @@ import {
   applyBackendUpdate,
   checkBackendStatus,
   checkBackendUpdate,
+  discoverConfigModels,
   fetchPendingDelight,
   fetchPendingDelightBatch,
   fetchActivityFeed,
@@ -38,6 +39,32 @@ test("guided init API calls all have finite request deadlines", () => {
   assert.match(source, /requestJson\("\/init-status", \{ method: "GET", timeoutMs: 45000 \}\)/);
   assert.match(source, /body: JSON\.stringify\(payload\),\s+timeoutMs: 60000,/);
   assert.match(source, /requestJson\("\/init\/cancel", \{ method: "POST", timeoutMs: 15000 \}\)/);
+});
+
+test("discoverConfigModels sends a no-write exact-instance request", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      async json() {
+        return { ok: true, instance_id: "relay-main", models: ["model-a"] };
+      },
+    };
+  };
+
+  const result = await discoverConfigModels(
+    { llm: { routing_version: 2, instances: {} } },
+    "relay-main",
+  );
+
+  assert.equal(result.models[0], "model-a");
+  assert.match(calls[0].url, /\/api\/config\/discover-models$/);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    instance_id: "relay-main",
+    config: { llm: { routing_version: 2, instances: {} } },
+  });
+  assert.equal(calls[0].options.method, "POST");
 });
 
 test("startInit sends Bangumi username in scoped source_options", async () => {
@@ -989,6 +1016,44 @@ test("probeConfigService posts no-write config probe payload", async () => {
   });
   assert.equal(result.ok, true);
   assert.equal(result.provider, "openai");
+});
+
+test("probeConfigService targets one routed LLM instance when requested", async () => {
+  const calls: Array<{ url: string; options: any }> = [];
+  globalThis.fetch = async (url: any, options: any) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      async json() {
+        return { ok: true, kind: "llm_instance", instance_id: "relay-backup" };
+      },
+    };
+  };
+
+  await probeConfigService(
+    "llm_instance",
+    {
+      llm: {
+        routing_version: 2,
+        instances: { "relay-backup": { provider_type: "openai_compatible" } },
+        default_chain: ["relay-backup"],
+      },
+    },
+    "relay-backup",
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    kind: "llm_instance",
+    config: {
+      llm: {
+        routing_version: 2,
+        instances: { "relay-backup": { provider_type: "openai_compatible" } },
+        default_chain: ["relay-backup"],
+      },
+    },
+    instance_id: "relay-backup",
+  });
 });
 
 test("updateConfig sends PUT with embedding config", async () => {

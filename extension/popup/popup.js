@@ -108,6 +108,7 @@ import {
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
+  discoverConfigModels,
   fetchEmbeddingRepairStatus,
   fetchHealth,
   fetchInitStatus,
@@ -164,6 +165,9 @@ const state = {
   runtimeStatus: null,
   runtimeEvent: null,
   runtimeConfig: null,
+  llmDraft: null,
+  llmProbeResults: new Map(),
+  llmEditingInstanceId: "",
   initBangumiUsername: "",
   initBangumiUsernameTouched: false,
   initBangumiUsernamePrefilled: false,
@@ -7360,6 +7364,703 @@ function bindSettings() {
     void renderSourcesStatus();
   }, 30000);
 
+  const LLM_PROVIDER_LABELS = {
+    openai: "OpenAI",
+    claude: "Claude",
+    gemini: "Gemini",
+    deepseek: "DeepSeek",
+    openrouter: "OpenRouter",
+    ollama: "Ollama",
+    openai_compatible: "OpenAI-compatible",
+  };
+  const LLM_PROVIDER_DEFAULTS = {
+    openai: { model: "gpt-5-nano", base_url: "" },
+    claude: { model: "claude-sonnet-4-6", base_url: "" },
+    gemini: { model: "gemini-2.5-flash", base_url: "" },
+    deepseek: { model: "deepseek-v4-flash", base_url: "https://api.deepseek.com" },
+    openrouter: { model: "openai/gpt-5-nano", base_url: "https://openrouter.ai/api/v1" },
+    ollama: { model: "qwen2.5:7b", base_url: "http://127.0.0.1:11434/v1" },
+    openai_compatible: { model: "", base_url: "" },
+  };
+  const LLM_MODEL_DISCOVERY_PROVIDERS = new Set([
+    "openai",
+    "deepseek",
+    "openrouter",
+    "ollama",
+    "openai_compatible",
+  ]);
+  const LLM_MODULE_LABELS = {
+    soul: "画像理解",
+    discovery: "内容发现",
+    recommendation: "推荐表达",
+    evaluation: "内容评估",
+  };
+  const LLM_INSTANCE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  let llmDialogReturnFocus = null;
+
+  function clonePlain(value) {
+    return JSON.parse(JSON.stringify(value ?? null));
+  }
+
+  function normalizeLlmDraft(llm) {
+    const instances = {};
+    const rawInstances = llm?.instances && typeof llm.instances === "object"
+      ? llm.instances
+      : {};
+    for (const [rawId, rawInstance] of Object.entries(rawInstances)) {
+      const instanceId = String(rawId || "").trim().toLowerCase();
+      if (!instanceId || !rawInstance || typeof rawInstance !== "object") continue;
+      instances[instanceId] = {
+        name: String(rawInstance.name || instanceId),
+        provider_type: String(rawInstance.provider_type || ""),
+        enabled: rawInstance.enabled !== false,
+        api_key: String(rawInstance.api_key || ""),
+        model: String(rawInstance.model || ""),
+        base_url: String(rawInstance.base_url || ""),
+        auth_mode: String(rawInstance.auth_mode || ""),
+        api_flavor: String(rawInstance.api_flavor || ""),
+        http_referer: String(rawInstance.http_referer || ""),
+        x_title: String(rawInstance.x_title || ""),
+        reasoning_effort: String(rawInstance.reasoning_effort || ""),
+        num_ctx: parseInt(rawInstance.num_ctx, 10) || 0,
+      };
+    }
+    const defaultChain = Array.from(new Set(
+      (Array.isArray(llm?.default_chain) ? llm.default_chain : [])
+        .map((item) => String(item || "").trim().toLowerCase())
+        .filter(Boolean),
+    ));
+    const routes = {};
+    for (const moduleName of Object.keys(LLM_MODULE_LABELS)) {
+      const rawRoute = llm?.routes?.[moduleName] || llm?.[moduleName] || {};
+      routes[moduleName] = {
+        inherit: rawRoute.inherit !== false,
+        chain: Array.from(new Set(
+          (Array.isArray(rawRoute.chain) ? rawRoute.chain : [])
+            .map((item) => String(item || "").trim().toLowerCase())
+            .filter(Boolean),
+        )),
+      };
+    }
+    return { instances, default_chain: defaultChain, routes };
+  }
+
+  function llmInstanceReferences(instanceId) {
+    if (!state.llmDraft) return [];
+    const references = [];
+    if (state.llmDraft.default_chain.includes(instanceId)) references.push("默认链");
+    for (const [moduleName, label] of Object.entries(LLM_MODULE_LABELS)) {
+      const route = state.llmDraft.routes[moduleName];
+      if (route && route.inherit === false && route.chain.includes(instanceId)) {
+        references.push(label);
+      }
+    }
+    return references;
+  }
+
+  function llmEndpointSummary(instance) {
+    const raw = String(instance?.base_url || "").trim();
+    if (!raw) return "官方默认地址";
+    try {
+      const url = new URL(raw);
+      return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch {
+      return raw;
+    }
+  }
+
+  function createLlmBadge(text, tone = "") {
+    const badge = document.createElement("span");
+    badge.className = "settings-llm-badge";
+    if (tone) badge.dataset.tone = tone;
+    badge.textContent = text;
+    return badge;
+  }
+
+  function createLlmChainAction(action, label, disabled = false) {
+    const paths = {
+      up: '<path d="m6 15 6-6 6 6"></path>',
+      down: '<path d="m6 9 6 6 6-6"></path>',
+      remove: '<path d="M6 6l12 12M18 6 6 18"></path>',
+    };
+    const button = document.createElement("button");
+    button.className = "settings-llm-icon-btn";
+    button.type = "button";
+    button.dataset.llmChainAction = action;
+    button.setAttribute("aria-label", label);
+    button.disabled = disabled;
+    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[action]}</svg>`;
+    return button;
+  }
+
+  function renderLlmInstances() {
+    const container = document.getElementById("cfgLlmInstanceList");
+    if (!(container instanceof HTMLElement) || !state.llmDraft) return;
+    container.replaceChildren();
+    const entries = Object.entries(state.llmDraft.instances);
+    if (!entries.length) {
+      const empty = document.createElement("p");
+      empty.className = "settings-llm-empty";
+      empty.textContent = "尚未配置 LLM 实例。新建第一个已启用实例后，它会自动加入默认调用链。";
+      container.append(empty);
+      return;
+    }
+    for (const [instanceId, instance] of entries) {
+      const references = llmInstanceReferences(instanceId);
+      const probe = state.llmProbeResults.get(instanceId);
+      const card = document.createElement("article");
+      card.className = "settings-llm-instance-card";
+      card.dataset.enabled = instance.enabled !== false ? "true" : "false";
+      card.dataset.llmInstanceId = instanceId;
+
+      const head = document.createElement("div");
+      head.className = "settings-llm-instance-head";
+      const title = document.createElement("div");
+      title.className = "settings-llm-instance-title";
+      const name = document.createElement("strong");
+      name.textContent = instance.name || instanceId;
+      const id = document.createElement("code");
+      id.textContent = instanceId;
+      title.append(name, id);
+      head.append(
+        title,
+        createLlmBadge(instance.enabled !== false ? "已启用" : "已停用", instance.enabled !== false ? "success" : ""),
+      );
+
+      const badges = document.createElement("div");
+      badges.className = "settings-llm-badges";
+      badges.append(createLlmBadge(LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type || "未知类型"));
+      for (const reference of references) badges.append(createLlmBadge(reference));
+
+      const meta = document.createElement("p");
+      meta.className = "settings-llm-instance-meta";
+      const model = document.createElement("span");
+      model.textContent = `模型：${instance.model || "未填写"}`;
+      const endpoint = document.createElement("span");
+      endpoint.textContent = `地址：${llmEndpointSummary(instance)}`;
+      meta.append(model, endpoint);
+
+      const probeStatus = document.createElement("p");
+      probeStatus.className = "settings-llm-instance-probe";
+      probeStatus.setAttribute("aria-live", "polite");
+      if (probe?.pending) {
+        probeStatus.dataset.tone = "pending";
+        probeStatus.textContent = "正在测试真实连通性…";
+      } else if (probe) {
+        probeStatus.dataset.tone = probe.ok ? "success" : "error";
+        probeStatus.textContent = formatConfigProbeResult(probe);
+      } else {
+        probeStatus.textContent = "尚未测试";
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "settings-llm-instance-actions";
+      for (const [action, label] of [["probe", "测试"], ["edit", "编辑"], ["delete", "删除"]]) {
+        const button = document.createElement("button");
+        button.className = "settings-secondary-btn";
+        button.type = "button";
+        button.dataset.llmInstanceAction = action;
+        button.dataset.instanceId = instanceId;
+        button.textContent = label;
+        if (action === "probe") {
+          button.disabled = Boolean(probe?.pending) || instance.enabled === false;
+          if (instance.enabled === false) button.title = "请先启用实例再测试";
+        }
+        actions.append(button);
+      }
+      actions.querySelectorAll("[data-llm-instance-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const action = button.dataset.llmInstanceAction;
+          if (action === "probe") void runLlmInstanceProbe(instanceId);
+          if (action === "edit") openLlmInstanceDialog(instanceId);
+          if (action === "delete") deleteLlmInstance(instanceId);
+        });
+      });
+      card.append(head, badges, meta, probeStatus, actions);
+      container.append(card);
+    }
+  }
+
+  function renderLlmDefaultChain() {
+    const list = document.getElementById("cfgLlmDefaultChain");
+    const picker = document.getElementById("cfgLlmDefaultChainPicker");
+    const addButton = document.getElementById("cfgAddLlmDefaultChainItem");
+    if (!(list instanceof HTMLElement) || !(picker instanceof HTMLSelectElement) || !state.llmDraft) return;
+    list.replaceChildren();
+    const chain = state.llmDraft.default_chain;
+    if (!chain.length) {
+      const empty = document.createElement("li");
+      empty.className = "settings-llm-empty";
+      empty.textContent = "默认调用链为空。请创建或从下方加入一个已启用实例。";
+      list.append(empty);
+    }
+    chain.forEach((instanceId, index) => {
+      const instance = state.llmDraft.instances[instanceId];
+      const item = document.createElement("li");
+      item.className = "settings-llm-chain-item";
+      item.dataset.instanceId = instanceId;
+      const position = document.createElement("span");
+      position.className = "settings-llm-chain-position";
+      position.setAttribute("aria-label", `优先级 ${index + 1}`);
+      position.textContent = String(index + 1);
+      const copy = document.createElement("span");
+      copy.className = "settings-llm-chain-copy";
+      const title = document.createElement("strong");
+      title.textContent = instance?.name || instanceId;
+      const detail = document.createElement("small");
+      detail.textContent = instance
+        ? `${LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type} · ${instance.model || "未填写模型"}`
+        : "实例不存在";
+      copy.append(title, detail);
+      const actions = document.createElement("span");
+      actions.className = "settings-llm-chain-actions";
+      const up = createLlmChainAction("up", `上移 ${title.textContent}`, index === 0);
+      const down = createLlmChainAction("down", `下移 ${title.textContent}`, index === chain.length - 1);
+      const remove = createLlmChainAction("remove", `从默认链移除 ${title.textContent}`, chain.length <= 1);
+      for (const button of [up, down, remove]) {
+        button.addEventListener("click", () => {
+          const next = [...state.llmDraft.default_chain];
+          const currentIndex = next.indexOf(instanceId);
+          if (currentIndex < 0) return;
+          const action = button.dataset.llmChainAction;
+          if (action === "up" && currentIndex > 0) {
+            [next[currentIndex - 1], next[currentIndex]] = [next[currentIndex], next[currentIndex - 1]];
+          }
+          if (action === "down" && currentIndex < next.length - 1) {
+            [next[currentIndex + 1], next[currentIndex]] = [next[currentIndex], next[currentIndex + 1]];
+          }
+          if (action === "remove" && next.length > 1) next.splice(currentIndex, 1);
+          state.llmDraft.default_chain = next;
+          setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
+          renderLlmRoutingSummary();
+        });
+      }
+      actions.append(up, down, remove);
+      item.append(position, copy, actions);
+      list.append(item);
+    });
+
+    picker.replaceChildren();
+    const candidates = Object.entries(state.llmDraft.instances)
+      .filter(([instanceId, instance]) => instance.enabled !== false && !chain.includes(instanceId));
+    if (!candidates.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "没有可添加的实例";
+      picker.append(option);
+    } else {
+      for (const [instanceId, instance] of candidates) {
+        const option = document.createElement("option");
+        option.value = instanceId;
+        option.textContent = `${instance.name || instanceId} · ${instance.model || "未填写模型"}`;
+        picker.append(option);
+      }
+    }
+    picker.disabled = candidates.length === 0;
+    if (addButton instanceof HTMLButtonElement) addButton.disabled = candidates.length === 0;
+  }
+
+  function renderLlmModuleSummary() {
+    const container = document.getElementById("cfgLlmModuleSummary");
+    if (!(container instanceof HTMLElement) || !state.llmDraft) return;
+    container.replaceChildren();
+    for (const [moduleName, label] of Object.entries(LLM_MODULE_LABELS)) {
+      const route = state.llmDraft.routes[moduleName];
+      const row = document.createElement("div");
+      row.className = "settings-llm-module-row";
+      const name = document.createElement("strong");
+      name.textContent = label;
+      const detail = document.createElement("span");
+      if (route?.inherit !== false) {
+        detail.textContent = "继承默认调用链";
+      } else {
+        const chainNames = route.chain
+          .map((instanceId) => state.llmDraft.instances[instanceId]?.name || instanceId)
+          .filter(Boolean);
+        detail.textContent = chainNames.join(" → ") || "自定义链尚未配置";
+      }
+      row.append(name, detail);
+      container.append(row);
+    }
+  }
+
+  function renderLlmRoutingSummary(llm = null) {
+    const root = document.getElementById("cfgLlmRoutingSummary");
+    if (!(root instanceof HTMLElement)) return;
+    if (llm && typeof llm === "object") state.llmDraft = normalizeLlmDraft(llm);
+    if (!state.llmDraft) state.llmDraft = normalizeLlmDraft({});
+    renderLlmInstances();
+    renderLlmDefaultChain();
+    renderLlmModuleSummary();
+  }
+
+  function addLlmDefaultChainItem() {
+    if (!state.llmDraft) return;
+    const picker = document.getElementById("cfgLlmDefaultChainPicker");
+    const instanceId = picker instanceof HTMLSelectElement ? picker.value : "";
+    if (!instanceId || state.llmDraft.default_chain.includes(instanceId)) return;
+    state.llmDraft.default_chain.push(instanceId);
+    setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
+    renderLlmRoutingSummary();
+  }
+
+  function renderLlmDatalist(id, values, currentValue = "") {
+    const list = document.getElementById(id);
+    if (!(list instanceof HTMLDataListElement)) return;
+    const normalized = [...new Set(
+      [...(Array.isArray(values) ? values : []), currentValue]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    )];
+    list.replaceChildren(...normalized.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    }));
+  }
+
+  function setLlmModelDiscoveryStatus(tone, text) {
+    const status = document.getElementById("cfgLlmInstanceModelDiscoveryStatus");
+    if (!(status instanceof HTMLElement)) return;
+    status.dataset.tone = tone || "neutral";
+    status.textContent = text;
+  }
+
+  function resetLlmModelDiscovery() {
+    renderLlmDatalist("cfgLlmInstanceModelOptions", []);
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType);
+    const button = document.getElementById("cfgRefreshLlmInstanceModels");
+    if (button instanceof HTMLButtonElement) {
+      button.hidden = !supported;
+      button.disabled = false;
+      button.textContent = "获取模型";
+    }
+    setLlmModelDiscoveryStatus(
+      "neutral",
+      supported
+        ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+        : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。",
+    );
+  }
+
+  function buildLlmModelDiscoveryRequest() {
+    if (!state.llmDraft) return null;
+    const existingId = state.llmEditingInstanceId;
+    const instanceId = String(
+      existingId || getVal("cfgLlmInstanceId") || "model-discovery-draft"
+    ).trim().toLowerCase();
+    const current = state.llmDraft.instances[existingId] || {};
+    const providerType = getVal("cfgLlmInstanceProviderType").trim();
+    const typedKey = getVal("cfgLlmInstanceApiKey");
+    const apiKey = checked("cfgLlmInstanceClearApiKey")
+      ? ""
+      : typedKey || current.api_key || "";
+    const instance = {
+      ...current,
+      name: getVal("cfgLlmInstanceName").trim() || current.name || instanceId,
+      provider_type: providerType,
+      enabled: true,
+      api_key: apiKey,
+      model: getVal("cfgLlmInstanceModel").trim(),
+      base_url: getVal("cfgLlmInstanceBaseUrl").trim(),
+      auth_mode: providerType === "openai"
+        ? getVal("cfgLlmInstanceAuthMode") || "api_key"
+        : "",
+      api_flavor: ["openai", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceApiFlavor")
+        : "",
+      http_referer: providerType === "openrouter"
+        ? getVal("cfgLlmInstanceReferer").trim()
+        : "",
+      x_title: providerType === "openrouter"
+        ? getVal("cfgLlmInstanceTitle").trim()
+        : "",
+      reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceReasoning").trim()
+        : "",
+      num_ctx: providerType === "ollama"
+        ? Math.max(0, getInt("cfgLlmInstanceNumCtx", 0))
+        : 0,
+    };
+    return {
+      instanceId,
+      config: {
+        llm: {
+          routing_version: 2,
+          instances: {
+            ...clonePlain(state.llmDraft.instances),
+            [instanceId]: instance,
+          },
+          default_chain: [...state.llmDraft.default_chain],
+          routes: clonePlain(state.llmDraft.routes),
+        },
+      },
+    };
+  }
+
+  async function discoverLlmInstanceModels() {
+    const request = buildLlmModelDiscoveryRequest();
+    const button = document.getElementById("cfgRefreshLlmInstanceModels");
+    if (!request || !(button instanceof HTMLButtonElement) || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "获取中…";
+    setLlmModelDiscoveryStatus("pending", "正在向当前端点请求 /models…");
+    try {
+      const result = await discoverConfigModels(request.config, request.instanceId);
+      if (Array.isArray(result?.reasoning_efforts) && result.reasoning_efforts.length) {
+        renderLlmDatalist(
+          "cfgLlmInstanceReasoningOptions",
+          result.reasoning_efforts,
+          getVal("cfgLlmInstanceReasoning"),
+        );
+      }
+      if (!result?.ok) {
+        throw new Error(result?.error || "端点没有返回模型列表");
+      }
+      const models = Array.isArray(result.models) ? result.models : [];
+      renderLlmDatalist(
+        "cfgLlmInstanceModelOptions",
+        models,
+        getVal("cfgLlmInstanceModel"),
+      );
+      setLlmModelDiscoveryStatus(
+        "success",
+        models.length
+          ? `已获取 ${models.length} 个模型；可从下拉选择，也可继续手填。`
+          : "接口返回了空列表；保留当前手填值。",
+      );
+    } catch (error) {
+      setLlmModelDiscoveryStatus(
+        "error",
+        `获取失败：${error?.message || "未知错误"}；当前输入未改动，仍可手填。`,
+      );
+    } finally {
+      button.disabled = false;
+      button.textContent = "获取模型";
+    }
+  }
+
+  function syncLlmInstanceConditionalFields() {
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement)) return;
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    dialog.querySelectorAll("[data-llm-instance-field]").forEach((field) => {
+      const kind = field.dataset.llmInstanceField;
+      const visible =
+        (kind === "openai-auth" && providerType === "openai")
+        || (kind === "openai-protocol" && ["openai", "openai_compatible"].includes(providerType))
+        || (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType))
+        || (kind === "ollama" && providerType === "ollama")
+        || (kind === "openrouter" && providerType === "openrouter");
+      field.hidden = !visible;
+    });
+    resetLlmModelDiscovery();
+  }
+
+  function applyLlmProviderDefaults() {
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    const defaults = LLM_PROVIDER_DEFAULTS[providerType] || {};
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    const previousType = String(dialog?.dataset.providerType || "");
+    const previousDefaults = LLM_PROVIDER_DEFAULTS[previousType] || {};
+    const isNew = !state.llmEditingInstanceId;
+    const model = getVal("cfgLlmInstanceModel");
+    const baseUrl = getVal("cfgLlmInstanceBaseUrl");
+    if (!model || (isNew && model === (previousDefaults.model || ""))) {
+      setVal("cfgLlmInstanceModel", defaults.model || "");
+    }
+    if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
+      setVal("cfgLlmInstanceBaseUrl", defaults.base_url || "");
+    }
+    const previousBaseId = previousType.replace(/_/g, "-");
+    const currentId = getVal("cfgLlmInstanceId");
+    if (!currentId || (isNew && currentId === previousBaseId)) {
+      let candidate = providerType.replace(/_/g, "-");
+      let suffix = 2;
+      while (state.llmDraft?.instances[candidate]) {
+        candidate = `${providerType.replace(/_/g, "-")}-${suffix++}`;
+      }
+      setVal("cfgLlmInstanceId", candidate);
+    }
+    const previousLabel = LLM_PROVIDER_LABELS[previousType] || previousType;
+    const currentName = getVal("cfgLlmInstanceName");
+    if (!currentName || (isNew && currentName === previousLabel)) {
+      setVal("cfgLlmInstanceName", LLM_PROVIDER_LABELS[providerType] || providerType);
+    }
+    if (dialog instanceof HTMLElement) dialog.dataset.providerType = providerType;
+    syncLlmInstanceConditionalFields();
+  }
+
+  function openLlmInstanceDialog(instanceId = "") {
+    if (!state.llmDraft) return;
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement)) return;
+    const instance = instanceId ? state.llmDraft.instances[instanceId] : null;
+    state.llmEditingInstanceId = instanceId;
+    llmDialogReturnFocus = document.activeElement;
+    dialog.dataset.providerType = instance?.provider_type || "";
+    const title = document.getElementById("cfgLlmInstanceDialogTitle");
+    if (title) title.textContent = instance ? "编辑 LLM 实例" : "新建 LLM 实例";
+    setVal("cfgLlmInstanceName", instance?.name || "");
+    setVal("cfgLlmInstanceId", instanceId);
+    const idInput = document.getElementById("cfgLlmInstanceId");
+    if (idInput instanceof HTMLInputElement) idInput.disabled = Boolean(instance);
+    setVal("cfgLlmInstanceProviderType", instance?.provider_type || "openai");
+    setVal("cfgLlmInstanceEnabled", instance?.enabled === false ? "off" : "on");
+    setVal("cfgLlmInstanceModel", instance?.model || "");
+    setVal("cfgLlmInstanceBaseUrl", instance?.base_url || "");
+    setVal("cfgLlmInstanceApiKey", "");
+    const keyInput = document.getElementById("cfgLlmInstanceApiKey");
+    if (keyInput instanceof HTMLInputElement) {
+      keyInput.disabled = false;
+      keyInput.placeholder = instance?.api_key ? "已配置；留空保留原密钥" : "输入 API Key";
+    }
+    const clearKey = document.getElementById("cfgLlmInstanceClearApiKey");
+    if (clearKey instanceof HTMLInputElement) clearKey.checked = false;
+    const clearKeyField = document.getElementById("cfgLlmInstanceClearApiKeyField");
+    if (clearKeyField instanceof HTMLElement) clearKeyField.hidden = !instance?.api_key;
+    setVal("cfgLlmInstanceAuthMode", instance?.auth_mode || "api_key");
+    setVal("cfgLlmInstanceApiFlavor", instance?.api_flavor || "");
+    setVal("cfgLlmInstanceReasoning", instance?.reasoning_effort || "");
+    setVal("cfgLlmInstanceNumCtx", instance?.num_ctx || 0);
+    setVal("cfgLlmInstanceReferer", instance?.http_referer || "");
+    setVal("cfgLlmInstanceTitle", instance?.x_title || "");
+    const error = document.getElementById("cfgLlmInstanceFormError");
+    if (error) error.textContent = "";
+    renderLlmDatalist(
+      "cfgLlmInstanceReasoningOptions",
+      ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+      instance?.reasoning_effort || "",
+    );
+    if (instance) syncLlmInstanceConditionalFields();
+    else applyLlmProviderDefaults();
+    dialog.hidden = false;
+    overlay.classList.add("has-instance-dialog");
+    window.setTimeout(() => document.getElementById("cfgLlmInstanceName")?.focus(), 0);
+  }
+
+  function closeLlmInstanceDialog() {
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement) || dialog.hidden) return;
+    dialog.hidden = true;
+    overlay.classList.remove("has-instance-dialog");
+    state.llmEditingInstanceId = "";
+    if (llmDialogReturnFocus?.focus) llmDialogReturnFocus.focus();
+    llmDialogReturnFocus = null;
+  }
+
+  function saveLlmInstanceDraft() {
+    if (!state.llmDraft) return;
+    const existingId = state.llmEditingInstanceId;
+    const instanceId = String(existingId || getVal("cfgLlmInstanceId")).trim().toLowerCase();
+    const name = getVal("cfgLlmInstanceName").trim();
+    const providerType = getVal("cfgLlmInstanceProviderType").trim();
+    const enabled = getVal("cfgLlmInstanceEnabled") !== "off";
+    const model = getVal("cfgLlmInstanceModel").trim();
+    const baseUrl = getVal("cfgLlmInstanceBaseUrl").trim();
+    const error = document.getElementById("cfgLlmInstanceFormError");
+    const fail = (message, focusId = "") => {
+      if (error) error.textContent = message;
+      if (focusId) document.getElementById(focusId)?.focus();
+    };
+    if (!LLM_INSTANCE_ID_PATTERN.test(instanceId)) {
+      fail("实例 ID 只能使用小写字母、数字、下划线和连字符，且最长 64 个字符。", "cfgLlmInstanceId");
+      return;
+    }
+    if (!existingId && state.llmDraft.instances[instanceId]) {
+      fail("这个实例 ID 已经存在。", "cfgLlmInstanceId");
+      return;
+    }
+    if (!name) {
+      fail("请填写实例名称。", "cfgLlmInstanceName");
+      return;
+    }
+    if (enabled && !model) {
+      fail("启用的实例必须明确填写模型。", "cfgLlmInstanceModel");
+      return;
+    }
+    if (enabled && providerType === "openai_compatible" && !baseUrl) {
+      fail("OpenAI-compatible 实例必须填写 Base URL。", "cfgLlmInstanceBaseUrl");
+      return;
+    }
+    const current = state.llmDraft.instances[existingId] || {};
+    const typedKey = getVal("cfgLlmInstanceApiKey");
+    const authMode = providerType === "openai"
+      ? getVal("cfgLlmInstanceAuthMode") || "api_key"
+      : "";
+    const effectiveKey = checked("cfgLlmInstanceClearApiKey")
+      ? ""
+      : typedKey || current.api_key || "";
+    const keyOptional = ["ollama", "gemini"].includes(providerType)
+      || (providerType === "openai" && authMode === "codex_oauth");
+    if (enabled && !keyOptional && !effectiveKey) {
+      fail("启用的远端实例需要 API Key。", "cfgLlmInstanceApiKey");
+      return;
+    }
+    const references = existingId ? llmInstanceReferences(existingId) : [];
+    if (!enabled && references.length) {
+      fail(`请先从这些调用链移除实例：${references.join("、")}。`);
+      return;
+    }
+    state.llmDraft.instances[instanceId] = {
+      name,
+      provider_type: providerType,
+      enabled,
+      api_key: effectiveKey,
+      model,
+      base_url: baseUrl,
+      auth_mode: authMode,
+      api_flavor: ["openai", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceApiFlavor")
+        : "",
+      http_referer: providerType === "openrouter" ? getVal("cfgLlmInstanceReferer").trim() : "",
+      x_title: providerType === "openrouter" ? getVal("cfgLlmInstanceTitle").trim() : "",
+      reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceReasoning")
+        : "",
+      num_ctx: providerType === "ollama" ? Math.max(0, getInt("cfgLlmInstanceNumCtx", 0)) : 0,
+    };
+    if (enabled && !state.llmDraft.default_chain.length) {
+      state.llmDraft.default_chain.push(instanceId);
+    }
+    state.llmProbeResults.delete(instanceId);
+    closeLlmInstanceDialog();
+    renderLlmRoutingSummary();
+    showToast("实例草稿已更新；点击底部“保存配置”后生效。", "success");
+  }
+
+  function deleteLlmInstance(instanceId) {
+    if (!state.llmDraft?.instances[instanceId]) return;
+    const references = llmInstanceReferences(instanceId);
+    if (references.length) {
+      showToast(`无法删除：仍被 ${references.join("、")} 引用。`, "error");
+      return;
+    }
+    const name = state.llmDraft.instances[instanceId].name || instanceId;
+    if (!window.confirm(`删除 LLM 实例「${name}」？`)) return;
+    delete state.llmDraft.instances[instanceId];
+    state.llmProbeResults.delete(instanceId);
+    renderLlmRoutingSummary();
+    showToast("实例已从草稿删除；保存配置后生效。", "success");
+  }
+
+  async function runLlmInstanceProbe(instanceId) {
+    if (!state.llmDraft?.instances[instanceId]) return;
+    state.llmProbeResults.set(instanceId, { pending: true });
+    renderLlmInstances();
+    try {
+      const result = await probeConfigService("llm_instance", collectForm(), instanceId);
+      state.llmProbeResults.set(instanceId, result);
+    } catch (err) {
+      state.llmProbeResults.set(instanceId, {
+        ok: false,
+        error: err?.details?.message || err?.message || "实例探测失败",
+      });
+    }
+    renderLlmInstances();
+  }
+
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);
     // LLM
@@ -7367,6 +8068,10 @@ function bindSettings() {
     showProviderFields(providerSelect.value);
     setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 4);
+    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 300);
+    state.llmProbeResults.clear();
+    renderLlmRoutingSummary(cfg.llm || {});
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
     syncLlmFallbackSameState();
 
@@ -7592,55 +8297,28 @@ function bindSettings() {
 
   function collectForm() {
     const logPath = splitLogPath(getVal("cfgLogPath"), state.runtimeConfig?.logging);
-    const llmFallbackProvider = getVal("cfgLlmFallbackProvider");
     const embeddingFallbackProvider = getVal("cfgEmbeddingFallbackProvider");
+    const llmDraft = state.llmDraft || normalizeLlmDraft(state.runtimeConfig?.llm || {});
     return {
       language: getVal("cfgLanguage"),
       data_dir: getVal("cfgDataDir"),
       llm: {
-        default_provider: providerSelect.value,
-        concurrency: getInt("cfgLlmConcurrency", 4),
-        timeout: getInt("cfgLlmTimeout", 300),
-        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
-        // （老后端会忽略未知字段，新后端不再回显它）。
-        fallback_provider: llmFallbackProvider,
-        openai: {
-          auth_mode: getVal("cfgOpenaiAuthMode") || "api_key",
-          api_key: getVal("cfgOpenaiKey"),
-          model: getVal("cfgOpenaiModel"),
-          base_url: getVal("cfgOpenaiBaseUrl"),
-        },
-        claude: {
-          api_key: getVal("cfgClaudeKey"),
-          model: getVal("cfgClaudeModel"),
-        },
-        gemini: {
-          api_key: getVal("cfgGeminiKey"),
-          model: getVal("cfgGeminiModel"),
-        },
-        deepseek: {
-          api_key: getVal("cfgDeepseekKey"),
-          model: getVal("cfgDeepseekModel"),
-          base_url: getVal("cfgDeepseekBaseUrl"),
-          reasoning_effort: getVal("cfgDeepseekReasoning"),
-        },
-        ollama: {
-          model: getVal("cfgOllamaModel"),
-          base_url: getVal("cfgOllamaBaseUrl"),
-        },
-        openrouter: {
-          api_key: getVal("cfgOpenrouterKey"),
-          model: getVal("cfgOpenrouterModel"),
-          base_url: getVal("cfgOpenrouterBaseUrl"),
-          http_referer: getVal("cfgOpenrouterReferer"),
-          x_title: getVal("cfgOpenrouterTitle"),
-        },
-        openai_compatible: {
-          api_key: getVal("cfgOpenaiCompatibleKey"),
-          model: getVal("cfgOpenaiCompatibleModel"),
-          base_url: getVal("cfgOpenaiCompatibleBaseUrl"),
-        },
+        routing_version: 2,
+        instances: clonePlain(llmDraft.instances),
+        default_chain: [...llmDraft.default_chain],
+        routes: Object.fromEntries(
+          Object.entries(llmDraft.routes).map(([moduleName, route]) => [
+            moduleName,
+            {
+              inherit: route.inherit !== false,
+              chain: route.inherit !== false ? [] : [...route.chain],
+            },
+          ]),
+        ),
+        concurrency: getInt("cfgLlmConcurrencyV2", 4),
+        timeout: getInt("cfgLlmTimeoutV2", 300),
         embedding: {
+          ...(state.runtimeConfig?.llm?.embedding || {}),
           provider: getVal("cfgEmbeddingProvider"),
           api_key: getVal("cfgEmbeddingApiKey"),
           base_url: getVal("cfgEmbeddingBaseUrl"),
@@ -7649,22 +8327,6 @@ function bindSettings() {
           fallback_enabled: Boolean(embeddingFallbackProvider),
           fallback_provider: embeddingFallbackProvider,
           multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
-        },
-        soul: {
-          provider: getVal("cfgModuleSoulProvider"),
-          model: getVal("cfgModuleSoulModel"),
-        },
-        discovery: {
-          provider: getVal("cfgModuleDiscoveryProvider"),
-          model: getVal("cfgModuleDiscoveryModel"),
-        },
-        recommendation: {
-          provider: getVal("cfgModuleRecommendationProvider"),
-          model: getVal("cfgModuleRecommendationModel"),
-        },
-        evaluation: {
-          provider: getVal("cfgModuleEvaluationProvider"),
-          model: getVal("cfgModuleEvaluationModel"),
         },
       },
       bilibili: {
@@ -7847,20 +8509,21 @@ function bindSettings() {
     statusEl.textContent = text;
   }
 
-  function renderProbeResult(statusEl, result) {
-    if (!statusEl) return;
+  function formatConfigProbeResult(result) {
     const ok = Boolean(result?.ok);
+    const instance = result?.instance_id ? ` ${result.instance_id}` : "";
     const provider = result?.provider ? ` ${result.provider}` : "";
     const model = result?.model ? ` / ${result.model}` : "";
     const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
       ? ` (${Math.round(Number(result.latency_ms))}ms)`
       : "";
     const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-    setProbeStatus(
-      statusEl,
-      ok ? "success" : "error",
-      `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`,
-    );
+    return `${ok ? "可用" : "不可用"}${instance}${provider}${model}${latency}: ${detail}`;
+  }
+
+  function renderProbeResult(statusEl, result) {
+    if (!statusEl) return;
+    setProbeStatus(statusEl, result?.ok ? "success" : "error", formatConfigProbeResult(result));
   }
 
   function renderProbePending(statusEl, label) {
@@ -7949,6 +8612,106 @@ function bindSettings() {
   if (probeLlmBtn instanceof HTMLButtonElement) {
     probeLlmBtn.addEventListener("click", () => {
       void runLlmConfigProbe(probeLlmBtn, probeLlmStatus);
+    });
+  }
+
+  const addLlmInstanceBtn = document.getElementById("cfgAddLlmInstance");
+  if (addLlmInstanceBtn instanceof HTMLButtonElement) {
+    addLlmInstanceBtn.addEventListener("click", () => openLlmInstanceDialog());
+  }
+  const addLlmDefaultChainBtn = document.getElementById("cfgAddLlmDefaultChainItem");
+  if (addLlmDefaultChainBtn instanceof HTMLButtonElement) {
+    addLlmDefaultChainBtn.addEventListener("click", addLlmDefaultChainItem);
+  }
+  const llmInstanceProviderType = document.getElementById("cfgLlmInstanceProviderType");
+  if (llmInstanceProviderType instanceof HTMLSelectElement) {
+    llmInstanceProviderType.addEventListener("change", applyLlmProviderDefaults);
+  }
+  const refreshLlmInstanceModelsBtn = document.getElementById("cfgRefreshLlmInstanceModels");
+  if (refreshLlmInstanceModelsBtn instanceof HTMLButtonElement) {
+    refreshLlmInstanceModelsBtn.addEventListener("click", () => {
+      void discoverLlmInstanceModels();
+    });
+  }
+  for (const [id, eventName] of [
+    ["cfgLlmInstanceBaseUrl", "input"],
+    ["cfgLlmInstanceApiKey", "input"],
+    ["cfgLlmInstanceAuthMode", "change"],
+  ]) {
+    document.getElementById(id)?.addEventListener(eventName, resetLlmModelDiscovery);
+  }
+  const saveLlmInstanceBtn = document.getElementById("cfgSaveLlmInstance");
+  if (saveLlmInstanceBtn instanceof HTMLButtonElement) {
+    saveLlmInstanceBtn.addEventListener("click", saveLlmInstanceDraft);
+  }
+  const llmInstanceDialog = document.getElementById("cfgLlmInstanceDialog");
+  const closeLlmDialogBtn = document.getElementById("cfgCloseLlmInstanceDialog");
+  const cancelLlmDialogBtn = document.getElementById("cfgCancelLlmInstance");
+  closeLlmDialogBtn?.addEventListener("click", closeLlmInstanceDialog);
+  cancelLlmDialogBtn?.addEventListener("click", closeLlmInstanceDialog);
+  llmInstanceDialog?.querySelector("[data-close-llm-instance-dialog]")
+    ?.addEventListener("click", closeLlmInstanceDialog);
+  llmInstanceDialog?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeLlmInstanceDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(llmInstanceDialog.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex="0"]',
+    )).filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  const clearLlmInstanceKey = document.getElementById("cfgLlmInstanceClearApiKey");
+  if (clearLlmInstanceKey instanceof HTMLInputElement) {
+    clearLlmInstanceKey.addEventListener("change", () => {
+      const keyInput = document.getElementById("cfgLlmInstanceApiKey");
+      if (!(keyInput instanceof HTMLInputElement)) return;
+      if (clearLlmInstanceKey.checked) keyInput.value = "";
+      keyInput.disabled = clearLlmInstanceKey.checked;
+    });
+  }
+
+  const openDesktopModelsBtn = document.getElementById("cfgOpenDesktopModels");
+  if (openDesktopModelsBtn instanceof HTMLButtonElement) {
+    openDesktopModelsBtn.addEventListener("click", async () => {
+      openDesktopModelsBtn.disabled = true;
+      try {
+        const origin = await getBackendOrigin();
+        openMobileWebUrl(`${origin}/web?settings=models`);
+      } finally {
+        openDesktopModelsBtn.disabled = false;
+      }
+    });
+  }
+
+  const probeLlmChainBtn = document.getElementById("cfgProbeLlmChain");
+  const probeLlmChainStatus = document.getElementById("cfgProbeLlmChainStatus");
+  if (probeLlmChainBtn instanceof HTMLButtonElement) {
+    probeLlmChainBtn.addEventListener("click", async () => {
+      probeLlmChainBtn.disabled = true;
+      renderProbePending(probeLlmChainStatus, "默认调用链");
+      try {
+        const result = await probeConfigService("llm_chain", collectForm());
+        renderProbeResult(probeLlmChainStatus, result);
+      } catch (err) {
+        renderProbeResult(probeLlmChainStatus, {
+          ok: false,
+          error: err?.message || "默认调用链探测失败",
+        });
+      } finally {
+        probeLlmChainBtn.disabled = false;
+      }
     });
   }
 
@@ -8072,6 +8835,7 @@ function bindSettings() {
   document.getElementById("emptyAction")?.addEventListener("click", () => gearBtn.click());
 
   gearBtn.addEventListener("click", async () => {
+    closeLlmInstanceDialog();
     overlay.hidden = false;
     toast.hidden = true;
     issuesContainer.innerHTML = "";
@@ -8111,6 +8875,7 @@ function bindSettings() {
   });
 
   backBtn.addEventListener("click", () => {
+    closeLlmInstanceDialog();
     overlay.hidden = true;
   });
 
@@ -8196,9 +8961,7 @@ function bindSettings() {
       try {
         const result = await updateConfig(data);
         if (result.config) {
-          applyRuntimeConfig(result.config);
-          renderIssues(result.config.issues);
-          renderDegradedBanner(result.config);
+          populateForm(result.config);
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);

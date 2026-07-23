@@ -357,6 +357,10 @@ class LLMResponse:
 
     content: str = ""
     model: str = ""
+    # Stable configured endpoint identity. ``provider`` remains the adapter /
+    # pricing type (openai, deepseek, ...), while instance_id distinguishes two
+    # accounts or gateways that use the same adapter.
+    instance_id: str = ""
     provider: str = ""
     usage: dict[str, int] | None = None  # token counts
     raw: Any = None  # Raw provider response
@@ -464,12 +468,16 @@ class LLMRegistry:
 
     def __init__(self) -> None:
         self._providers: dict[str, LLMProvider] = {}
+        self._provider_types: dict[str, str] = {}
         self._default: str = ""
         self._rate_limited_until: dict[str, float] = {}
         # A non-empty fallback_provider IS the enable switch — there is no
         # separate boolean (the legacy [llm].fallback_enabled flag was never
         # consulted and has been removed; empty provider = fallback off).
         self.fallback_provider: str = ""
+        # v2 ordered route. When non-empty it is authoritative and may contain
+        # any number of configured endpoint instances.
+        self.fallback_chain: list[str] = []
         # Names of providers that should NOT appear in the chat-completion
         # fallback chain — for example a legacy/injected Ollama instance
         # registered solely for embedding diagnostics.
@@ -479,6 +487,8 @@ class LLMRegistry:
         self,
         provider: LLMProvider,
         *,
+        name: str | None = None,
+        provider_type: str | None = None,
         default: bool = False,
         chat_capable: bool = True,
     ) -> None:
@@ -496,19 +506,38 @@ class LLMRegistry:
                 or injected non-chat providers: a local ``bge-m3`` instance
                 must never receive ``/api/chat`` fallback requests.
         """
-        self._providers[provider.name] = provider
+        registry_name = str(name or provider.name).strip().lower()
+        adapter_name = str(provider_type or provider.name).strip().lower()
+        self._providers[registry_name] = provider
+        self._provider_types[registry_name] = adapter_name
         if not chat_capable:
-            self._chat_disabled.add(provider.name)
+            self._chat_disabled.add(registry_name)
         else:
-            self._chat_disabled.discard(provider.name)
+            self._chat_disabled.discard(registry_name)
         if default or not self._default:
-            self._default = provider.name
+            self._default = registry_name
         logger.info(
-            "Registered LLM provider: %s%s%s",
-            provider.name,
+            "Registered LLM instance: %s (provider_type=%s)%s%s",
+            registry_name,
+            adapter_name,
             " (default)" if default else "",
             "" if chat_capable else " [embedding-only]",
         )
+
+    def configure_chain(self, instance_ids: list[str]) -> None:
+        """Set the ordered global route without silently adding providers."""
+        seen: set[str] = set()
+        chain: list[str] = []
+        for raw_name in instance_ids:
+            name = str(raw_name or "").strip().lower()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            chain.append(name)
+        self.fallback_chain = chain
+        if chain and chain[0] in self._providers:
+            self._default = chain[0]
+        self.fallback_provider = chain[1] if len(chain) > 1 else ""
 
     def get(self, name: str | None = None) -> LLMProvider:
         """Get a provider by name, or the default.
@@ -538,6 +567,11 @@ class LLMRegistry:
         """Name of the default provider."""
         return self._default
 
+    def provider_type(self, name: str | None = None) -> str:
+        """Return the adapter/pricing type for an instance."""
+        target = str(name or self._default).strip().lower()
+        return self._provider_types.get(target, "")
+
     def is_chat_capable(self, name: str) -> bool:
         """Return whether *name* is registered for chat completions."""
         target = name.strip().lower()
@@ -553,9 +587,36 @@ class LLMRegistry:
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Execute a completion request with sequential provider fallback."""
+        return await self.complete_chain(
+            self._fallback_order(),
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+            reasoning_effort=reasoning_effort,
+        )
+
+    async def complete_chain(
+        self,
+        instance_ids: list[str] | tuple[str, ...],
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        json_mode: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Execute one explicit ordered instance chain."""
         last_error: Exception | None = None
         attempted: list[str] = []
-        order = self._fallback_order()
+        seen: set[str] = set()
+        order: list[str] = []
+        for raw_name in instance_ids:
+            instance_id = str(raw_name or "").strip().lower()
+            if not instance_id or instance_id in seen or not self.is_chat_capable(instance_id):
+                continue
+            seen.add(instance_id)
+            order.append(instance_id)
 
         for position, provider_name in enumerate(order):
             has_next = position + 1 < len(order)
@@ -576,6 +637,7 @@ class LLMRegistry:
                     reasoning_effort=reasoning_effort,
                 )
                 self._rate_limited_until.pop(provider_name, None)
+                response.instance_id = provider_name
                 return response
             except LLMRateLimitError as exc:
                 last_error = exc
@@ -643,6 +705,7 @@ class LLMRegistry:
                 model=model,
             )
             self._rate_limited_until.pop(target, None)
+            response.instance_id = target
             return response
         except LLMRateLimitError:
             self._mark_rate_limited(target)
@@ -690,6 +753,8 @@ class LLMRegistry:
             # will raise LLMFallbackError("No provider was available
             # to process the request.").
             return []
+        if self.fallback_chain:
+            return [name for name in self.fallback_chain if name in chat_pool]
         if self._default and self._default in chat_pool:
             ordered = [
                 self._default,

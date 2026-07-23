@@ -35,8 +35,9 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
         for line in config_example.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    assert 'default_provider = "deepseek"' in config_lines
-    assert 'default_provider = "openai"' not in config_lines
+    assert "routing_version = 2" in config_lines
+    assert 'default_chain = ["deepseek"]' in config_lines
+    assert 'default_chain = ["openai"]' not in config_lines
 
 
 def test_install_sh_uses_interactive_auto_init_contract() -> None:
@@ -124,7 +125,7 @@ def test_install_contract_blocks_init_when_ai_service_checks_fail() -> None:
     assert "AI service check failed before init" in install_sh
     assert "AI service check failed before init" in install_ps1
     assert "status=service_check_failed" in agent_doc
-    assert "default LLM provider or embedding service failed" in agent_doc
+    assert "global LLM instance chain or embedding service failed" in agent_doc
     assert "service_check_failed" in docker_doc
     assert "service_check_failed" in cli_doc
 

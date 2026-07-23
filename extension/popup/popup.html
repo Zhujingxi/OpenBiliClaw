@@ -4228,6 +4228,476 @@
       gap: 12px;
     }
 
+    .settings-section[hidden] {
+      display: none;
+    }
+
+    .settings-routing-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .settings-section-head,
+    .settings-llm-chain-head,
+    .settings-llm-instance-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .settings-section-head h3,
+    .settings-llm-chain-head h4 {
+      margin: 0;
+    }
+
+    .settings-llm-chain-head h4 {
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .settings-llm-chain-head p {
+      margin: 3px 0 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .settings-llm-instance-list,
+    .settings-llm-chain-list,
+    .settings-llm-module-summary {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .settings-llm-instance-card {
+      display: grid;
+      gap: 9px;
+      min-width: 0;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.7);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .settings-llm-instance-card:hover {
+      border-color: rgba(90, 169, 255, 0.58);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .settings-llm-instance-card[data-enabled="false"] {
+      background: rgba(244, 247, 252, 0.72);
+      opacity: 0.78;
+    }
+
+    .settings-llm-instance-title {
+      min-width: 0;
+    }
+
+    .settings-llm-instance-title strong,
+    .settings-llm-instance-title code {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-llm-instance-title strong {
+      color: var(--text-main);
+      font-size: 13px;
+    }
+
+    .settings-llm-instance-title code {
+      margin-top: 2px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+    }
+
+    .settings-llm-badges,
+    .settings-llm-instance-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .settings-llm-instance-actions .settings-secondary-btn {
+      min-height: 34px;
+      padding-inline: 11px;
+    }
+
+    .settings-llm-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      font-weight: 750;
+    }
+
+    .settings-llm-badge[data-tone="success"] {
+      border-color: rgba(26, 122, 74, 0.25);
+      background: var(--lime-soft);
+      color: #1a7a4a;
+    }
+
+    .settings-llm-instance-meta,
+    .settings-llm-instance-probe {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .settings-llm-instance-meta {
+      display: grid;
+      gap: 2px;
+    }
+
+    .settings-llm-instance-probe[data-tone="success"] { color: #1a7a4a; }
+    .settings-llm-instance-probe[data-tone="error"] { color: #c0404e; }
+    .settings-llm-instance-probe[data-tone="pending"] { color: #2f6fb8; }
+
+    .settings-llm-empty {
+      margin: 0;
+      padding: 14px 12px;
+      border: 1px dashed var(--line);
+      border-radius: 11px;
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      line-height: 1.5;
+      text-align: center;
+    }
+
+    .settings-llm-chain-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .settings-llm-chain-item {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255, 255, 255, 0.52);
+    }
+
+    .settings-llm-chain-position {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .settings-llm-chain-copy {
+      min-width: 0;
+    }
+
+    .settings-llm-chain-copy strong,
+    .settings-llm-chain-copy small {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-llm-chain-copy strong {
+      color: var(--text-main);
+      font-size: 12px;
+    }
+
+    .settings-llm-chain-copy small {
+      margin-top: 2px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+    }
+
+    .settings-llm-chain-actions {
+      display: flex;
+      gap: 3px;
+    }
+
+    .settings-llm-icon-btn,
+    .settings-instance-dialog-close {
+      display: inline-grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .settings-llm-icon-btn:hover,
+    .settings-instance-dialog-close:hover {
+      border-color: var(--line);
+      background: var(--surface-soft);
+      color: var(--text-main);
+    }
+
+    .settings-llm-icon-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .settings-llm-icon-btn svg,
+    .settings-instance-dialog-close svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .settings-llm-chain-add {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .settings-llm-chain-add select {
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 12px;
+    }
+
+    .settings-routing-modules {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .settings-llm-module-row {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 9px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-llm-module-row strong {
+      color: var(--text-main);
+      font-size: 11px;
+    }
+
+    .settings-instance-dialog {
+      position: fixed;
+      inset: 0;
+      z-index: 140;
+      display: grid;
+      align-items: end;
+    }
+
+    .settings-instance-dialog[hidden] {
+      display: none;
+    }
+
+    .settings-instance-dialog-backdrop {
+      position: absolute;
+      inset: 0;
+      border: 0;
+      background: rgba(28, 39, 58, 0.42);
+      backdrop-filter: blur(4px);
+    }
+
+    .settings-instance-dialog-panel {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+      width: 100%;
+      max-height: 94vh;
+      overflow-y: auto;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      border-radius: 20px 20px 0 0;
+      background: var(--surface-strong);
+      box-shadow: 0 -16px 40px rgba(28, 39, 58, 0.18);
+    }
+
+    .settings-instance-dialog-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .settings-instance-dialog-kicker {
+      margin: 0 0 3px;
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .settings-instance-dialog-head h3 {
+      margin: 0;
+      color: var(--text-main);
+      font-size: 16px;
+    }
+
+    .settings-instance-dialog-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .settings-instance-dialog-form .is-full {
+      grid-column: 1 / -1;
+    }
+
+    .settings-instance-dialog-form .settings-field > span {
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .settings-model-discovery-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: stretch;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .settings-model-discovery-btn {
+      min-height: 40px;
+      padding-inline: 12px;
+      white-space: nowrap;
+    }
+
+    .settings-model-discovery-btn:disabled {
+      opacity: 0.58;
+      cursor: wait;
+    }
+
+    .settings-model-discovery-status {
+      min-height: 15px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-model-discovery-status[data-tone="success"] {
+      color: #1a7a4a;
+    }
+
+    .settings-model-discovery-status[data-tone="error"] {
+      color: #c0404e;
+    }
+
+    .settings-model-discovery-status[data-tone="pending"] {
+      color: #2f6fb8;
+    }
+
+    .settings-instance-dialog-form .settings-field-row > span {
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .settings-instance-dialog-form .settings-field-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--brand);
+    }
+
+    .settings-instance-dialog-form [hidden] {
+      display: none;
+    }
+
+    .settings-instance-id-hint,
+    .settings-instance-form-error {
+      grid-column: 1 / -1;
+      margin: -4px 0 0;
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-instance-id-hint {
+      color: var(--text-secondary);
+    }
+
+    .settings-instance-form-error {
+      min-height: 16px;
+      margin: 0;
+      color: #c0404e;
+    }
+
+    .settings-instance-dialog-actions {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 8px;
+    }
+
+    .settings-instance-dialog-actions .settings-secondary-btn,
+    .settings-instance-dialog-actions .settings-save {
+      min-height: 42px;
+    }
+
+    .settings-overlay.has-instance-dialog {
+      overflow: hidden;
+    }
+
+    @media (max-width: 430px) {
+      .settings-model-discovery-control {
+        grid-template-columns: 1fr;
+      }
+
+      .settings-model-discovery-btn {
+        width: 100%;
+      }
+    }
+
+    .settings-secondary-btn:focus-visible,
+    .settings-llm-icon-btn:focus-visible,
+    .settings-instance-dialog-close:focus-visible,
+    .settings-llm-chain-add select:focus-visible,
+    .settings-save:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .settings-source-card {
       border-radius: 18px;
     }
@@ -5131,8 +5601,56 @@
       </div>
 
       <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
-      <!-- LLM Provider -->
       <div class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h3>LLM 实例与调用链</h3>
+          </div>
+          <button id="cfgAddLlmInstance" class="settings-secondary-btn" type="button">新建实例</button>
+        </div>
+        <p class="settings-hint">每个实例独立保存 Provider 类型、模型、Base URL 与凭据；同一种 Provider 也可以创建多个渠道。插件内可维护默认 fallback 链，模块自定义链继续在 PC Web 配置。</p>
+        <div id="cfgLlmRoutingSummary" class="settings-routing-summary">
+          <div id="cfgLlmInstanceList" class="settings-llm-instance-list" aria-live="polite"></div>
+
+          <div class="settings-llm-chain-head">
+            <div>
+              <h4>默认调用链</h4>
+              <p>按顺序请求；失败、超时或限流时自动尝试下一项。</p>
+            </div>
+            <button id="cfgProbeLlmChain" class="settings-secondary-btn" type="button">测试整链</button>
+          </div>
+          <ol id="cfgLlmDefaultChain" class="settings-llm-chain-list" aria-live="polite"></ol>
+          <div class="settings-llm-chain-add">
+            <select id="cfgLlmDefaultChainPicker" aria-label="选择要加入默认调用链的实例"></select>
+            <button id="cfgAddLlmDefaultChainItem" class="settings-secondary-btn" type="button">加入末尾</button>
+          </div>
+          <span id="cfgProbeLlmChainStatus" class="settings-probe-status" aria-live="polite"></span>
+
+          <div>
+            <div class="settings-llm-chain-head">
+              <div>
+                <h4>模块路由</h4>
+                <p>继承默认链，或在 PC Web 设置独立 fallback 顺序。</p>
+              </div>
+            </div>
+            <div id="cfgLlmModuleSummary" class="settings-llm-module-summary"></div>
+          </div>
+        </div>
+        <div class="settings-field">
+          <label for="cfgLlmConcurrencyV2">LLM 并发数</label>
+          <input id="cfgLlmConcurrencyV2" type="number" min="1" max="16" step="1" placeholder="4">
+        </div>
+        <div class="settings-field">
+          <label for="cfgLlmTimeoutV2">单实例超时（秒）</label>
+          <input id="cfgLlmTimeoutV2" type="number" min="10" max="600" step="10" placeholder="300">
+        </div>
+        <div class="settings-probe-row">
+          <button id="cfgOpenDesktopModels" class="settings-secondary-btn" type="button">打开桌面配置页</button>
+        </div>
+      </div>
+
+      <!-- LLM Provider -->
+      <div class="settings-section" hidden aria-hidden="true">
         <h3><span class="section-icon">&#x1F916;</span> LLM 模型</h3>
         <div class="settings-field">
           <label for="cfgLlmProvider">默认 Provider</label>
@@ -5355,7 +5873,7 @@
       </div>
 
       <!-- Module LLM Overrides -->
-      <div class="settings-section">
+      <div class="settings-section" hidden aria-hidden="true">
         <h3><span class="section-icon">&#x1F9E0;</span> 模块模型覆盖</h3>
         <p class="settings-hint">
           留空时继承默认 Provider；只在需要给画像、发现、推荐表达或评估单独指定模型时填写。
@@ -6154,6 +6672,117 @@
 
       <div class="settings-actions">
         <button id="settingsSave" class="settings-save" type="button">保存配置</button>
+      </div>
+
+      <div id="cfgLlmInstanceDialog" class="settings-instance-dialog" role="dialog" aria-modal="true" aria-labelledby="cfgLlmInstanceDialogTitle" hidden>
+        <button class="settings-instance-dialog-backdrop" type="button" tabindex="-1" data-close-llm-instance-dialog aria-label="关闭实例编辑器"></button>
+        <section class="settings-instance-dialog-panel" tabindex="-1">
+          <div class="settings-instance-dialog-head">
+            <div>
+              <p class="settings-instance-dialog-kicker">LLM endpoint</p>
+              <h3 id="cfgLlmInstanceDialogTitle">新建 LLM 实例</h3>
+            </div>
+            <button id="cfgCloseLlmInstanceDialog" class="settings-instance-dialog-close" type="button" aria-label="关闭实例编辑器">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+            </button>
+          </div>
+          <div class="settings-instance-dialog-form">
+            <label class="settings-field">
+              <span>实例名称</span>
+              <input id="cfgLlmInstanceName" autocomplete="off" placeholder="例如：DeepSeek 官方">
+            </label>
+            <label class="settings-field">
+              <span>实例 ID</span>
+              <input id="cfgLlmInstanceId" autocomplete="off" spellcheck="false" placeholder="deepseek-main" aria-describedby="cfgLlmInstanceIdHint">
+            </label>
+            <p id="cfgLlmInstanceIdHint" class="settings-instance-id-hint">保存实例后 ID 不可修改；调用链通过它稳定引用实例。</p>
+            <label class="settings-field">
+              <span>Provider 类型</span>
+              <select id="cfgLlmInstanceProviderType" translate="no">
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="ollama">Ollama</option>
+                <option value="openai_compatible">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>状态</span>
+              <select id="cfgLlmInstanceEnabled">
+                <option value="on">启用</option>
+                <option value="off">停用</option>
+              </select>
+            </label>
+            <label class="settings-field is-full">
+              <span>模型</span>
+              <div class="settings-model-discovery-control">
+                <input id="cfgLlmInstanceModel" list="cfgLlmInstanceModelOptions" autocomplete="off" spellcheck="false" placeholder="选择接口返回的模型，或直接手填" aria-describedby="cfgLlmInstanceModelDiscoveryStatus">
+                <button id="cfgRefreshLlmInstanceModels" class="settings-secondary-btn settings-model-discovery-btn" type="button">获取模型</button>
+              </div>
+              <datalist id="cfgLlmInstanceModelOptions"></datalist>
+              <small id="cfgLlmInstanceModelDiscoveryStatus" class="settings-model-discovery-status" aria-live="polite">OpenAI 兼容端点可从 /models 获取；接口不支持时仍可手填。</small>
+            </label>
+            <label class="settings-field is-full">
+              <span>Base URL</span>
+              <input id="cfgLlmInstanceBaseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="官方渠道可留空；兼容网关必须填写">
+            </label>
+            <label class="settings-field is-full">
+              <span>API Key</span>
+              <input id="cfgLlmInstanceApiKey" type="password" autocomplete="new-password" placeholder="输入 API Key">
+            </label>
+            <label id="cfgLlmInstanceClearApiKeyField" class="settings-field-row is-full" hidden>
+              <input id="cfgLlmInstanceClearApiKey" type="checkbox">
+              <span>清除已保存的 API Key</span>
+            </label>
+            <label class="settings-field" data-llm-instance-field="openai-auth">
+              <span>OpenAI 认证方式</span>
+              <select id="cfgLlmInstanceAuthMode">
+                <option value="api_key">API Key</option>
+                <option value="codex_oauth">Codex OAuth</option>
+              </select>
+            </label>
+            <label class="settings-field" data-llm-instance-field="openai-protocol">
+              <span>API 协议</span>
+              <select id="cfgLlmInstanceApiFlavor">
+                <option value="">chat/completions（默认）</option>
+                <option value="responses">responses</option>
+              </select>
+            </label>
+            <label class="settings-field" data-llm-instance-field="reasoning">
+              <span>Reasoning effort</span>
+              <input id="cfgLlmInstanceReasoning" list="cfgLlmInstanceReasoningOptions" autocomplete="off" spellcheck="false" placeholder="Auto（留空不显式指定）" aria-describedby="cfgLlmInstanceReasoningHint">
+              <datalist id="cfgLlmInstanceReasoningOptions">
+                <option value="none"></option>
+                <option value="minimal"></option>
+                <option value="low"></option>
+                <option value="medium"></option>
+                <option value="high"></option>
+                <option value="xhigh"></option>
+                <option value="max"></option>
+              </datalist>
+              <small id="cfgLlmInstanceReasoningHint" class="settings-model-discovery-status">协议没有 Effort 枚举接口；这里是本地建议，也支持手填。</small>
+            </label>
+            <label class="settings-field" data-llm-instance-field="ollama">
+              <span>Ollama 上下文窗口</span>
+              <input id="cfgLlmInstanceNumCtx" type="number" min="0" inputmode="numeric" placeholder="0（服务默认）">
+            </label>
+            <label class="settings-field is-full" data-llm-instance-field="openrouter">
+              <span>HTTP Referer</span>
+              <input id="cfgLlmInstanceReferer" type="url" autocomplete="off" placeholder="https://example.com">
+            </label>
+            <label class="settings-field is-full" data-llm-instance-field="openrouter">
+              <span>X-Title</span>
+              <input id="cfgLlmInstanceTitle" autocomplete="off" placeholder="OpenBiliClaw">
+            </label>
+          </div>
+          <p id="cfgLlmInstanceFormError" class="settings-instance-form-error" role="alert" aria-live="assertive"></p>
+          <div class="settings-instance-dialog-actions">
+            <button id="cfgCancelLlmInstance" class="settings-secondary-btn" type="button">取消</button>
+            <button id="cfgSaveLlmInstance" class="settings-save" type="button">保存实例</button>
+          </div>
+        </section>
       </div>
     </div>
 

@@ -11,7 +11,19 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgBackendPort",
     "cfgExtDeviceKey",
     "cfgDataDir",
-    "cfgLlmFallbackProvider",
+    "cfgLlmRoutingSummary",
+    "cfgAddLlmInstance",
+    "cfgLlmInstanceList",
+    "cfgLlmDefaultChain",
+    "cfgLlmDefaultChainPicker",
+    "cfgAddLlmDefaultChainItem",
+    "cfgLlmModuleSummary",
+    "cfgLlmInstanceDialog",
+    "cfgSaveLlmInstance",
+    "cfgLlmConcurrencyV2",
+    "cfgLlmTimeoutV2",
+    "cfgOpenDesktopModels",
+    "cfgProbeLlmChain",
     "cfgEmbeddingFallbackProvider",
     "cfgEmbeddingMultimodalEnabled",
     "cfgOpenaiAuthMode",
@@ -476,8 +488,8 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
   );
-  assert.match(popupJs, /setVal\("cfgLlmConcurrency", cfg\.llm\?\.concurrency \?\? 4\)/);
-  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrency", 4\)/);
+  assert.match(popupJs, /setVal\("cfgLlmConcurrencyV2", cfg\.llm\?\.concurrency \?\? 4\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrencyV2", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
@@ -544,9 +556,13 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   );
 });
 
-test("settings page round-trips OpenAI auth mode", () => {
+test("settings page keeps the legacy OpenAI editor read-only under instance routing", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const collectFormSource = popupJs.slice(
+    popupJs.indexOf("function collectForm()"),
+    popupJs.indexOf("function showToast(", popupJs.indexOf("function collectForm()")),
+  );
 
   assert.match(popupHtml, /id="cfgOpenaiAuthMode"/);
   assert.match(popupHtml, /<option value="api_key">API Key<\/option>/);
@@ -555,24 +571,54 @@ test("settings page round-trips OpenAI auth mode", () => {
     popupJs,
     /setVal\("cfgOpenaiAuthMode", cfg\.llm\?\.openai\?\.auth_mode \|\| "api_key"\)/,
   );
-  assert.match(popupJs, /auth_mode: getVal\("cfgOpenaiAuthMode"\) \|\| "api_key"/);
+  assert.doesNotMatch(collectFormSource, /cfgOpenaiAuthMode|auth_mode:/);
 });
 
-test("settings page round-trips explicit LLM and embedding fallback providers", () => {
+test("settings page edits native LLM instances and round-trips every route", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const collectFormSource = popupJs.slice(
+    popupJs.indexOf("function collectForm()"),
+    popupJs.indexOf("function showToast(", popupJs.indexOf("function collectForm()")),
+  );
 
-  assert.match(popupHtml, /id="cfgLlmFallbackProvider"/);
+  assert.match(popupHtml, /id="cfgLlmRoutingSummary"/);
+  assert.match(popupHtml, /id="cfgAddLlmInstance"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceList"/);
+  assert.match(popupHtml, /id="cfgLlmDefaultChain"/);
+  assert.match(popupHtml, /id="cfgLlmDefaultChainPicker"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceDialog"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceApiKey" type="password"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceModel" list="cfgLlmInstanceModelOptions"/);
+  assert.match(popupHtml, /id="cfgRefreshLlmInstanceModels"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceReasoning" list="cfgLlmInstanceReasoningOptions"/);
+  assert.match(popupHtml, /id="cfgOpenDesktopModels"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChain"/);
   assert.match(popupHtml, /id="cfgEmbeddingFallbackProvider"/);
-  assert.doesNotMatch(popupHtml, /id="cfgLlmFallbackEnabled"/);
   assert.doesNotMatch(popupHtml, /id="cfgEmbeddingFallbackEnabled"/);
-  assert.match(popupJs, /setVal\("cfgLlmFallbackProvider", cfg\.llm\?\.fallback_provider\)/);
+  assert.match(popupJs, /function normalizeLlmDraft\(llm\)/);
+  assert.match(popupJs, /function renderLlmRoutingSummary\(llm = null\)/);
+  assert.match(popupJs, /Array\.isArray\(llm\?\.default_chain\)/);
+  assert.match(popupJs, /const rawRoute = llm\?\.routes\?\.\[moduleName\]/);
+  assert.match(popupJs, /function saveLlmInstanceDraft\(\)/);
+  assert.match(popupJs, /function discoverLlmInstanceModels\(\)/);
+  assert.match(popupJs, /discoverConfigModels\(request\.config, request\.instanceId\)/);
+  assert.match(popupJs, /当前输入未改动，仍可手填/);
+  assert.match(popupJs, /function deleteLlmInstance\(instanceId\)/);
+  assert.match(popupJs, /openMobileWebUrl\(`\$\{origin\}\/web\?settings=models`\)/);
+  assert.doesNotMatch(
+    collectFormSource,
+    /cfgLlmFallbackProvider|llmFallbackProvider|default_provider:|fallback_provider: llmFallbackProvider/,
+  );
+  assert.match(collectFormSource, /routing_version: 2/);
+  assert.match(collectFormSource, /instances: clonePlain\(llmDraft\.instances\)/);
+  assert.match(collectFormSource, /default_chain: \[\.\.\.llmDraft\.default_chain\]/);
+  assert.match(collectFormSource, /routes: Object\.fromEntries\(/);
+  assert.match(collectFormSource, /chain: route\.inherit !== false \? \[\] : \[\.\.\.route\.chain\]/);
   assert.match(
     popupJs,
     /setVal\("cfgEmbeddingFallbackProvider", cfg\.llm\?\.embedding\?\.fallback_provider\)/,
   );
-  assert.match(popupJs, /const llmFallbackProvider = getVal\("cfgLlmFallbackProvider"\)/);
-  assert.match(popupJs, /fallback_provider: llmFallbackProvider/);
   assert.match(
     popupJs,
     /const embeddingFallbackProvider = getVal\("cfgEmbeddingFallbackProvider"\)/,
@@ -583,19 +629,17 @@ test("settings page round-trips explicit LLM and embedding fallback providers", 
   );
 });
 
-test("settings page exposes and wires LLM and embedding probe buttons", () => {
+test("settings page exposes and wires routed LLM and embedding probe buttons", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.match(popupHtml, /id="cfgProbeLlm"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChain"/);
   assert.match(popupHtml, /id="cfgProbeEmbedding"/);
-  assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChainStatus"/);
   assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
-  assert.match(popupHtml, /id="cfgProbeLlmFallback"/);
-  assert.match(popupHtml, /id="cfgProbeLlmFallbackStatus"/);
-  assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
+  assert.match(popupJs, /probeConfigService\("llm_instance", collectForm\(\), instanceId\)/);
+  assert.match(popupJs, /probeConfigService\("llm_chain", collectForm\(\)\)/);
   assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
-  assert.match(popupJs, /probeConfigService\("llm_fallback", collectForm\(\)\)/);
   assert.match(popupJs, /function renderProbeResult/);
 });
 
@@ -621,18 +665,19 @@ test("settings general tab exposes and wires the network proxy field (aligned wi
   assert.match(popupJs, /function runNetworkProxyConfigProbe/);
 });
 
-test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+test("settings page renders editable instance cards, ordered default chain, and module summary", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  // Inline warning for legacy same-name configs (data is never silently reset).
-  assert.match(popupHtml, /id="cfgLlmFallbackSameWarning"/);
-  assert.match(popupHtml, /备选与默认 Provider 相同时永远不会生效/);
-  // The sync disables the same-name option and runs on hydration + both selects.
-  assert.match(popupJs, /function syncLlmFallbackSameState/);
-  assert.match(popupJs, /option\.value === mainValue/);
-  const syncCalls = popupJs.match(/syncLlmFallbackSameState\(\)/g) ?? [];
-  assert.ok(syncCalls.length >= 2, "sync must run from hydration and the provider change handler");
+  assert.match(popupJs, /function renderLlmInstances\(\)/);
+  assert.match(popupJs, /button\.dataset\.llmInstanceAction = action/);
+  assert.match(popupJs, /function renderLlmDefaultChain\(\)/);
+  assert.match(popupJs, /createLlmChainAction\("up"/);
+  assert.match(popupJs, /createLlmChainAction\("down"/);
+  assert.match(popupJs, /createLlmChainAction\("remove"/);
+  assert.match(popupJs, /function renderLlmModuleSummary\(\)/);
+  assert.match(popupJs, /detail\.textContent = "继承默认调用链"/);
+  assert.match(popupJs, /chainNames\.join\(" → "\)/);
+  assert.match(popupJs, /if \(enabled && !state\.llmDraft\.default_chain\.length\)/);
 });
 
 test("settings page placeholders match config example defaults", () => {

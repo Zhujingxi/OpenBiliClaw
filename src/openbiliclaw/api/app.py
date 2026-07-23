@@ -46,6 +46,8 @@ from openbiliclaw.api.models import (
     CognitionUpdateSeenResponse,
     CognitionUpdateSummary,
     ConfigIssueOut,
+    ConfigModelDiscoveryIn,
+    ConfigModelDiscoveryResponse,
     ConfigResponse,
     ConfigServiceProbeIn,
     ConfigServiceProbeResponse,
@@ -85,6 +87,7 @@ from openbiliclaw.api.models import (
     InsightFeedbackIn,
     InsightFeedbackResponse,
     LLMConfigOut,
+    LLMInstanceConfigOut,
     LLMProviderConfigOut,
     LoggingConfigOut,
     ModuleLLMConfigOut,
@@ -10982,6 +10985,11 @@ def create_app(
         from openbiliclaw.config import (
             _normalize_pool_source_shares as _normalized_config_pool_source_shares,
         )
+        from openbiliclaw.config import (
+            effective_llm_default_chain,
+            effective_llm_instances,
+            effective_llm_routes,
+        )
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
 
         dy_cookie = ""
@@ -11007,7 +11015,68 @@ def create_app(
                 http_referer=getattr(p, "http_referer", ""),
                 x_title=getattr(p, "x_title", ""),
                 reasoning_effort=getattr(p, "reasoning_effort", ""),
+                num_ctx=int(getattr(p, "num_ctx", 0) or 0),
             )
+
+        instances = effective_llm_instances(cfg.llm)
+        default_chain = effective_llm_default_chain(cfg.llm)
+        routes = effective_llm_routes(cfg.llm)
+
+        def _instance_out(instance: Any) -> LLMInstanceConfigOut:
+            return LLMInstanceConfigOut(
+                **_provider_out(instance).model_dump(),
+                name=str(getattr(instance, "name", "") or ""),
+                provider_type=str(getattr(instance, "provider_type", "") or ""),
+                enabled=bool(getattr(instance, "enabled", True)),
+            )
+
+        def _legacy_provider_projection(provider_type: str) -> Any:
+            ordered_ids = [
+                *default_chain,
+                *[instance_id for instance_id in instances if instance_id not in default_chain],
+            ]
+            for instance_id in ordered_ids:
+                instance = instances.get(instance_id)
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == provider_type
+                ):
+                    return instance
+            return getattr(cfg.llm, provider_type)
+
+        def _legacy_module_out(bucket: str) -> ModuleLLMConfigOut:
+            route = routes[bucket]
+            provider = str(getattr(route, "provider", "") or "")
+            model = str(getattr(route, "model", "") or "")
+            if (
+                bool(getattr(cfg.llm, "instance_routing", False))
+                and not route.inherit
+                and route.chain
+            ):
+                instance = instances.get(str(route.chain[0]).strip().lower())
+                if instance is not None:
+                    provider = str(getattr(instance, "provider_type", "") or "")
+                    model = str(getattr(instance, "model", "") or "")
+            return ModuleLLMConfigOut(
+                provider=provider,
+                model=model,
+                inherit=bool(route.inherit),
+                chain=list(route.chain),
+            )
+
+        first_instance = instances.get(default_chain[0]) if default_chain else None
+        second_instance = instances.get(default_chain[1]) if len(default_chain) > 1 else None
+        legacy_default_provider = (
+            str(getattr(first_instance, "provider_type", "") or "")
+            if first_instance is not None
+            else str(cfg.llm.default_provider)
+        )
+        legacy_fallback_provider = (
+            str(getattr(second_instance, "provider_type", "") or "")
+            if second_instance is not None
+            else str(cfg.llm.fallback_provider)
+        )
 
         issue_list = [
             ConfigIssueOut(
@@ -11024,17 +11093,27 @@ def create_app(
             degraded=degraded,
             degraded_reason=degraded_reason,
             llm=LLMConfigOut(
-                default_provider=cfg.llm.default_provider,
+                routing_version=2,
+                instances={
+                    instance_id: _instance_out(instance)
+                    for instance_id, instance in instances.items()
+                },
+                default_chain=default_chain,
+                routes={
+                    bucket: _legacy_module_out(bucket)
+                    for bucket in ("soul", "discovery", "recommendation", "evaluation")
+                },
+                default_provider=legacy_default_provider,
                 concurrency=int(getattr(cfg.llm, "concurrency", 4)),
                 timeout=int(getattr(cfg.llm, "timeout", 300)),
-                fallback_provider=cfg.llm.fallback_provider,
-                openai=_provider_out(cfg.llm.openai),
-                claude=_provider_out(cfg.llm.claude),
-                gemini=_provider_out(cfg.llm.gemini),
-                deepseek=_provider_out(cfg.llm.deepseek),
-                ollama=_provider_out(cfg.llm.ollama),
-                openrouter=_provider_out(cfg.llm.openrouter),
-                openai_compatible=_provider_out(cfg.llm.openai_compatible),
+                fallback_provider=legacy_fallback_provider,
+                openai=_provider_out(_legacy_provider_projection("openai")),
+                claude=_provider_out(_legacy_provider_projection("claude")),
+                gemini=_provider_out(_legacy_provider_projection("gemini")),
+                deepseek=_provider_out(_legacy_provider_projection("deepseek")),
+                ollama=_provider_out(_legacy_provider_projection("ollama")),
+                openrouter=_provider_out(_legacy_provider_projection("openrouter")),
+                openai_compatible=_provider_out(_legacy_provider_projection("openai_compatible")),
                 embedding=EmbeddingConfigOut(
                     provider=cfg.llm.embedding.provider,
                     model=cfg.llm.embedding.model,
@@ -11046,22 +11125,10 @@ def create_app(
                     fallback_provider=cfg.llm.embedding.fallback_provider,
                     multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
                 ),
-                soul=ModuleLLMConfigOut(
-                    provider=cfg.llm.soul.provider,
-                    model=cfg.llm.soul.model,
-                ),
-                discovery=ModuleLLMConfigOut(
-                    provider=cfg.llm.discovery.provider,
-                    model=cfg.llm.discovery.model,
-                ),
-                recommendation=ModuleLLMConfigOut(
-                    provider=cfg.llm.recommendation.provider,
-                    model=cfg.llm.recommendation.model,
-                ),
-                evaluation=ModuleLLMConfigOut(
-                    provider=cfg.llm.evaluation.provider,
-                    model=cfg.llm.evaluation.model,
-                ),
+                soul=_legacy_module_out("soul"),
+                discovery=_legacy_module_out("discovery"),
+                recommendation=_legacy_module_out("recommendation"),
+                evaluation=_legacy_module_out("evaluation"),
             ),
             bilibili=BilibiliConfigOut(
                 auth_method=cfg.bilibili.auth_method,
@@ -11280,9 +11347,223 @@ def create_app(
         """Apply the LLM subset of a config update to an in-memory config."""
         if not isinstance(llm_data, dict):
             return
-        from openbiliclaw.config import _normalize_llm_concurrency, _normalize_llm_timeout
+        from openbiliclaw.config import (
+            _LLM_PROVIDER_DISPLAY_NAMES,
+            LLMInstanceConfig,
+            _normalize_llm_concurrency,
+            _normalize_llm_timeout,
+            effective_llm_instances,
+            effective_llm_routes,
+        )
 
-        if "default_provider" in llm_data:
+        native_payload = any(
+            key in llm_data for key in ("instances", "default_chain", "routes", "routing_version")
+        )
+        if native_payload:
+            current_instances = effective_llm_instances(cfg.llm)
+            current_routes = effective_llm_routes(cfg.llm)
+            was_native = bool(getattr(cfg.llm, "instance_routing", False))
+            cfg.llm.instance_routing = True
+            if not was_native:
+                for module_name, route in current_routes.items():
+                    setattr(cfg.llm, module_name, route)
+            if "instances" in llm_data:
+                raw_instances = llm_data["instances"]
+                if not isinstance(raw_instances, dict):
+                    raise HTTPException(status_code=400, detail="llm.instances must be an object")
+                replacement: dict[str, LLMInstanceConfig] = {}
+                for raw_instance_id, raw_instance in raw_instances.items():
+                    if not isinstance(raw_instance, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"llm.instances.{raw_instance_id} must be an object",
+                        )
+                    instance_id = str(raw_instance_id).strip().lower()
+                    if not instance_id:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="llm instance IDs cannot be empty",
+                        )
+                    if instance_id in replacement:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"duplicate normalized LLM instance ID: {instance_id}",
+                        )
+                    existing = current_instances.get(instance_id)
+                    target = (
+                        LLMInstanceConfig(
+                            **{
+                                field_name: getattr(existing, field_name)
+                                for field_name in (
+                                    "api_key",
+                                    "model",
+                                    "base_url",
+                                    "auth_mode",
+                                    "api_flavor",
+                                    "http_referer",
+                                    "x_title",
+                                    "reasoning_effort",
+                                    "num_ctx",
+                                    "name",
+                                    "provider_type",
+                                    "enabled",
+                                )
+                            }
+                        )
+                        if existing is not None
+                        else LLMInstanceConfig(name=instance_id)
+                    )
+                    for field_name in (
+                        "name",
+                        "provider_type",
+                        "api_key",
+                        "model",
+                        "base_url",
+                        "auth_mode",
+                        "api_flavor",
+                        "http_referer",
+                        "x_title",
+                        "reasoning_effort",
+                    ):
+                        if field_name not in raw_instance:
+                            continue
+                        new_value = str(raw_instance[field_name])
+                        if field_name == "api_key" and "*" in new_value:
+                            continue
+                        if field_name in {"provider_type", "auth_mode", "api_flavor"}:
+                            new_value = new_value.strip().lower()
+                        setattr(target, field_name, new_value)
+                    if "enabled" in raw_instance:
+                        target.enabled = _as_bool(raw_instance["enabled"])
+                    if "num_ctx" in raw_instance:
+                        try:
+                            target.num_ctx = int(raw_instance["num_ctx"] or 0)
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"llm.instances.{instance_id}.num_ctx must be an integer",
+                            ) from exc
+                    if (
+                        existing is None
+                        and "reasoning_effort" not in raw_instance
+                        and target.provider_type == "openai_compatible"
+                    ):
+                        # The compatible adapter ignored its inherited
+                        # "medium" default before explicit pass-through was
+                        # supported. New clients send this field; old clients
+                        # must retain the historical omit-on-wire behavior.
+                        target.reasoning_effort = ""
+                    replacement[instance_id] = target
+                cfg.llm.instances = replacement
+            if "default_chain" in llm_data:
+                raw_chain = llm_data["default_chain"]
+                if not isinstance(raw_chain, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="llm.default_chain must be an array",
+                    )
+                cfg.llm.default_chain = [
+                    str(item).strip().lower() for item in raw_chain if str(item).strip()
+                ]
+            if "routes" in llm_data:
+                raw_routes = llm_data["routes"]
+                if not isinstance(raw_routes, dict):
+                    raise HTTPException(status_code=400, detail="llm.routes must be an object")
+                for module_name in ("soul", "discovery", "recommendation", "evaluation"):
+                    if module_name not in raw_routes:
+                        continue
+                    route_data = raw_routes[module_name]
+                    if not isinstance(route_data, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"llm.routes.{module_name} must be an object",
+                        )
+                    route = getattr(cfg.llm, module_name)
+                    if "inherit" in route_data:
+                        route.inherit = _as_bool(route_data["inherit"])
+                    if "chain" in route_data:
+                        raw_route_chain = route_data["chain"]
+                        if not isinstance(raw_route_chain, list):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"llm.routes.{module_name}.chain must be an array",
+                            )
+                        route.chain = [
+                            str(item).strip().lower()
+                            for item in raw_route_chain
+                            if str(item).strip()
+                        ]
+                    route.provider = ""
+                    route.model = ""
+
+        def _native_instance_for_provider(
+            provider_type: str,
+            *,
+            create: bool = False,
+        ) -> tuple[str, Any] | tuple[str, None]:
+            normalized_type = provider_type.strip().lower()
+            ordered_ids = [
+                *getattr(cfg.llm, "default_chain", []),
+                *[
+                    instance_id
+                    for instance_id in getattr(cfg.llm, "instances", {})
+                    if instance_id not in getattr(cfg.llm, "default_chain", [])
+                ],
+            ]
+            for instance_id in ordered_ids:
+                instance = cfg.llm.instances.get(instance_id)
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == normalized_type
+                ):
+                    return instance_id, instance
+            if not create or normalized_type not in {
+                "openai",
+                "claude",
+                "gemini",
+                "deepseek",
+                "ollama",
+                "openrouter",
+                "openai_compatible",
+            }:
+                return "", None
+            instance_id = normalized_type.replace("_", "-")
+            suffix = 2
+            while instance_id in cfg.llm.instances:
+                instance_id = f"{normalized_type.replace('_', '-')}-{suffix}"
+                suffix += 1
+            legacy = getattr(cfg.llm, normalized_type)
+            instance = LLMInstanceConfig(
+                api_key=legacy.api_key,
+                model=legacy.model,
+                base_url=legacy.base_url,
+                auth_mode=legacy.auth_mode,
+                api_flavor=legacy.api_flavor,
+                http_referer=legacy.http_referer,
+                x_title=legacy.x_title,
+                reasoning_effort=legacy.reasoning_effort,
+                num_ctx=legacy.num_ctx,
+                name=_LLM_PROVIDER_DISPLAY_NAMES.get(normalized_type, normalized_type),
+                provider_type=normalized_type,
+                enabled=True,
+            )
+            cfg.llm.instances[instance_id] = instance
+            return instance_id, instance
+
+        if (
+            bool(getattr(cfg.llm, "instance_routing", False))
+            and not native_payload
+            and "default_provider" in llm_data
+        ):
+            requested_type = str(llm_data["default_provider"]).strip().lower()
+            instance_id, _instance = _native_instance_for_provider(requested_type, create=True)
+            if instance_id:
+                cfg.llm.default_chain = [
+                    instance_id,
+                    *[item for item in cfg.llm.default_chain if item != instance_id],
+                ]
+        elif "default_provider" in llm_data and not native_payload:
             cfg.llm.default_provider = str(llm_data["default_provider"])
         if "concurrency" in llm_data:
             cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
@@ -11291,7 +11572,27 @@ def create_app(
         # Legacy clients (older extension popups) still send
         # "fallback_enabled" — deliberately ignored: a non-empty
         # fallback_provider is the only enable switch.
-        if "fallback_provider" in llm_data:
+        if (
+            bool(getattr(cfg.llm, "instance_routing", False))
+            and not native_payload
+            and "fallback_provider" in llm_data
+        ):
+            requested_type = str(llm_data["fallback_provider"]).strip().lower()
+            primary = cfg.llm.default_chain[:1]
+            remainder = cfg.llm.default_chain[1:]
+            if requested_type:
+                fallback_id, _instance = _native_instance_for_provider(
+                    requested_type,
+                    create=True,
+                )
+                remainder = [
+                    fallback_id,
+                    *[item for item in remainder if item != fallback_id],
+                ]
+            else:
+                remainder = []
+            cfg.llm.default_chain = [*primary, *remainder]
+        elif "fallback_provider" in llm_data and not native_payload:
             cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
         for provider_name in (
             "openai",
@@ -11303,7 +11604,15 @@ def create_app(
             "openai_compatible",
         ):
             if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
-                provider_cfg = getattr(cfg.llm, provider_name)
+                if bool(getattr(cfg.llm, "instance_routing", False)) and not native_payload:
+                    _instance_id, provider_cfg = _native_instance_for_provider(
+                        provider_name,
+                        create=True,
+                    )
+                else:
+                    provider_cfg = getattr(cfg.llm, provider_name)
+                if provider_cfg is None:
+                    continue
                 pdata = llm_data[provider_name]
                 skipped_fields: list[str] = []
                 for field_name in (
@@ -11321,14 +11630,14 @@ def create_app(
                         if field_name == "api_key" and "*" in new_value:
                             skipped_fields.append(f"{field_name}=masked")
                             continue
-                        existing = getattr(provider_cfg, field_name, "")
+                        existing_value: object = getattr(provider_cfg, field_name, "")
                         if (
                             # These accept an explicit empty value ("" = back
                             # to default); the others treat empty as "keep".
                             field_name not in {"auth_mode", "reasoning_effort", "api_flavor"}
                             and not new_value.strip()
-                            and isinstance(existing, str)
-                            and existing.strip()
+                            and isinstance(existing_value, str)
+                            and existing_value.strip()
                         ):
                             skipped_fields.append(f"{field_name}=empty_skip")
                             continue
@@ -11380,77 +11689,311 @@ def create_app(
             if module_name in llm_data and isinstance(llm_data[module_name], dict):
                 mod_cfg = getattr(cfg.llm, module_name)
                 mdata = llm_data[module_name]
+                if bool(getattr(cfg.llm, "instance_routing", False)) and not native_payload:
+                    provider_type = str(mdata.get("provider", "") or "").strip().lower()
+                    model = str(mdata.get("model", "") or "").strip()
+                    if not provider_type and not model:
+                        mod_cfg.inherit = True
+                        mod_cfg.chain = []
+                        mod_cfg.provider = ""
+                        mod_cfg.model = ""
+                        continue
+                    if not provider_type:
+                        primary_id = cfg.llm.default_chain[0] if cfg.llm.default_chain else ""
+                        primary = cfg.llm.instances.get(primary_id)
+                        provider_type = (
+                            str(getattr(primary, "provider_type", "") or "").strip().lower()
+                        )
+                    instance_id, instance = _native_instance_for_provider(
+                        provider_type,
+                        create=True,
+                    )
+                    if instance is None:
+                        continue
+                    if model and str(getattr(instance, "model", "") or "").strip() != model:
+                        derived_id = f"legacy-{module_name}"
+                        instance = LLMInstanceConfig(
+                            api_key=instance.api_key,
+                            model=model,
+                            base_url=instance.base_url,
+                            auth_mode=instance.auth_mode,
+                            api_flavor=instance.api_flavor,
+                            http_referer=instance.http_referer,
+                            x_title=instance.x_title,
+                            reasoning_effort=instance.reasoning_effort,
+                            num_ctx=instance.num_ctx,
+                            name=f"{module_name} · {instance.name}",
+                            provider_type=instance.provider_type,
+                            enabled=instance.enabled,
+                        )
+                        cfg.llm.instances[derived_id] = instance
+                        instance_id = derived_id
+                    mod_cfg.inherit = False
+                    mod_cfg.chain = [instance_id]
+                    mod_cfg.provider = ""
+                    mod_cfg.model = ""
+                    continue
                 if "provider" in mdata:
                     mod_cfg.provider = str(mdata["provider"])
                 if "model" in mdata:
                     mod_cfg.model = str(mdata["model"])
 
+    def _reasoning_effort_advisory(provider: str, model: str) -> list[str]:
+        """Return local UI suggestions without claiming protocol discovery.
+
+        OpenAI-compatible ``GET /models`` standardizes identity metadata only;
+        it has no portable endpoint for enumerating reasoning-effort values.
+        Keep this ladder deliberately advisory and let the instance probe be
+        the authority for a particular endpoint/model combination.
+        """
+
+        normalized_provider = provider.strip().lower()
+        normalized_model = model.strip().lower()
+        if normalized_provider == "openai":
+            if normalized_model and not (
+                normalized_model.startswith("gpt-5")
+                or (
+                    len(normalized_model) > 1
+                    and normalized_model[0] == "o"
+                    and normalized_model[1].isdigit()
+                )
+            ):
+                return []
+            return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if normalized_provider in {"openai_compatible", "openrouter"}:
+            return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if normalized_provider == "deepseek":
+            return ["none", "high", "max"]
+        if normalized_provider == "claude":
+            return ["low", "medium", "high"]
+        if normalized_provider == "gemini":
+            return ["none", "minimal", "low", "medium", "high"]
+        return []
+
+    def _safe_model_discovery_error(exc: Exception, api_key: str) -> str:
+        """Render a compact provider error without reflecting submitted keys."""
+
+        message = " ".join(str(exc).split()) or type(exc).__name__
+        secret = api_key.strip()
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+        return message[:1000] + ("..." if len(message) > 1000 else "")
+
+    async def _discover_llm_models(
+        cfg: Any,
+        *,
+        instance_id: str,
+    ) -> ConfigModelDiscoveryResponse:
+        from openbiliclaw.config import effective_llm_instances
+        from openbiliclaw.llm.openai_provider import OpenAIProvider
+        from openbiliclaw.llm.registry import _build_instance_provider
+
+        started = time.perf_counter()
+        target_instance_id = str(instance_id or "").strip().lower()
+        instances = effective_llm_instances(cfg.llm)
+        instance = instances.get(target_instance_id)
+        if not target_instance_id or instance is None:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                error="LLM instance was not found in the submitted configuration.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        provider = str(getattr(instance, "provider_type", "") or "").strip().lower()
+        model = str(getattr(instance, "model", "") or "").strip()
+        api_key = str(getattr(instance, "api_key", "") or "")
+        efforts = _reasoning_effort_advisory(provider, model)
+        effort_source: Literal["local_advisory", "not_available"] = (
+            "local_advisory" if efforts else "not_available"
+        )
+        if provider not in {
+            "openai",
+            "deepseek",
+            "openrouter",
+            "ollama",
+            "openai_compatible",
+        }:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                provider=provider,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                error=(
+                    f"{provider or 'This provider'} does not expose the OpenAI-compatible "
+                    "GET /models contract; keep or enter the model name manually."
+                ),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        try:
+            if provider == "ollama":
+                base_url = (
+                    str(getattr(instance, "base_url", "") or "").strip()
+                    or "http://127.0.0.1:11434/v1"
+                )
+                if not base_url.rstrip("/").endswith("/v1"):
+                    base_url = base_url.rstrip("/") + "/v1"
+                provider_obj: Any = OpenAIProvider(
+                    api_key=api_key or "ollama",
+                    model=model or "__model_discovery__",
+                    base_url=base_url,
+                    provider_name="ollama",
+                    timeout=20.0,
+                    trust_env=False,
+                )
+            else:
+                provider_obj = _build_instance_provider(cfg, provider, instance)
+            list_models = getattr(provider_obj, "list_models", None)
+            if not callable(list_models):
+                raise RuntimeError(
+                    "The submitted endpoint could not be constructed for model discovery."
+                )
+            models = await asyncio.wait_for(list_models(), timeout=20.0)
+            return ConfigModelDiscoveryResponse(
+                ok=True,
+                instance_id=target_instance_id,
+                provider=provider,
+                models=models,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                message=(
+                    f"GET /models returned {len(models)} model(s); manual entry remains available."
+                    if models
+                    else "GET /models returned no models; manual entry remains available."
+                ),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                provider=provider,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                error=_safe_model_discovery_error(exc, api_key),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
     async def _probe_llm_config(
         cfg: Any,
         *,
-        kind: Literal["llm", "llm_fallback"] = "llm",
+        kind: Literal["llm", "llm_instance", "llm_chain", "llm_fallback"] = "llm",
+        instance_id: str = "",
     ) -> ConfigServiceProbeResponse:
+        from openbiliclaw.config import effective_llm_default_chain
         from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS
         from openbiliclaw.llm.registry import build_llm_registry
 
         started = time.perf_counter()
         is_fallback = kind == "llm_fallback"
-        default_provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
-        provider = (
-            str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
-            if is_fallback
-            else default_provider
-        )
-        model = ""
+        is_chain = kind == "llm_chain"
+        is_instance = kind == "llm_instance"
+        target_instance = str(instance_id or "").strip().lower()
+        configured_chain = effective_llm_default_chain(cfg.llm)
         if is_fallback:
-            # Refuse cleanly (ok=false, not a 500) for the two dead states
-            # the registry would otherwise silently drop.
-            if not provider:
+            legacy_routing = not bool(getattr(cfg.llm, "instance_routing", False))
+            legacy_default = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+            legacy_fallback = str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
+            target_instance = (
+                legacy_fallback
+                if legacy_routing
+                else configured_chain[1]
+                if len(configured_chain) > 1
+                else ""
+            )
+            if not target_instance:
                 return ConfigServiceProbeResponse(
                     ok=False,
                     kind=kind,
-                    provider="",
-                    model="",
                     error="Fallback LLM provider is not configured.",
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
-            if provider == default_provider:
+            if target_instance == (
+                legacy_default
+                if legacy_routing
+                else configured_chain[0]
+                if configured_chain
+                else ""
+            ):
                 return ConfigServiceProbeResponse(
                     ok=False,
                     kind=kind,
-                    provider=provider,
-                    model="",
+                    instance_id=target_instance,
+                    provider=target_instance,
                     error=(
-                        f"Fallback provider {provider!r} is the same as the default "
-                        "provider — it would never be used."
+                        f"Fallback provider {target_instance!r} is the same as the "
+                        "default provider — it would never be used."
                     ),
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
+        elif not is_chain and not is_instance:
+            target_instance = (
+                configured_chain[0]
+                if configured_chain
+                else str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+            )
+        provider = ""
+        model = ""
         try:
             registry = build_llm_registry(cfg)
-            if not is_fallback:
-                provider = provider or str(getattr(registry, "default_provider", "") or "")
-            provider_cfg = getattr(cfg.llm, provider, None)
-            model = str(getattr(provider_cfg, "model", "") or "").strip()
-            if not registry.is_chat_capable(provider):
+            if not is_chain and not is_instance and not is_fallback and not target_instance:
+                target_instance = str(getattr(registry, "default_provider", "") or "")
+            if is_instance and not target_instance:
                 return ConfigServiceProbeResponse(
                     ok=False,
                     kind=kind,
-                    provider=provider,
-                    model=model,
-                    error=f"LLM provider {provider!r} is not registered or not chat-capable.",
+                    error="LLM instance_id is required.",
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
+            if not is_chain:
+                if not registry.is_chat_capable(target_instance):
+                    return ConfigServiceProbeResponse(
+                        ok=False,
+                        kind=kind,
+                        instance_id=target_instance,
+                        provider=target_instance,
+                        model=model,
+                        error=(
+                            f"LLM instance {target_instance!r} is not registered "
+                            "or not chat-capable."
+                        ),
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                    )
+                provider_type_fn = getattr(registry, "provider_type", None)
+                provider = (
+                    str(provider_type_fn(target_instance) or "")
+                    if callable(provider_type_fn)
+                    else target_instance
+                )
+                provider_obj: Any = None
+                get_provider = getattr(registry, "get", None)
+                if callable(get_provider):
+                    with suppress(Exception):
+                        provider_obj = get_provider(target_instance)
+                provider_cfg = getattr(cfg.llm, provider, None)
+                model = str(
+                    getattr(provider_obj, "_model", "") or getattr(provider_cfg, "model", "") or ""
+                ).strip()
             timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
 
             async def _complete_probe() -> Any:
                 async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
+                    messages = [
+                        {"role": "system", "content": "Reply with only OK."},
+                        {"role": "user", "content": "OpenBiliClaw connectivity probe."},
+                    ]
+                    if is_chain:
+                        return await registry.complete(
+                            messages,
+                            temperature=0,
+                            max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                            reasoning_effort="",
+                        )
                     return await registry.complete_provider(
-                        provider,
-                        [
-                            {"role": "system", "content": "Reply with only OK."},
-                            {"role": "user", "content": "OpenBiliClaw connectivity probe."},
-                        ],
+                        target_instance,
+                        messages,
                         temperature=0,
                         max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
                         reasoning_effort="",
@@ -11462,11 +12005,25 @@ def create_app(
                 timeout=timeout_s,
             )
             ok = bool(str(getattr(response, "content", "") or "").strip())
+            target_instance = str(getattr(response, "instance_id", "") or target_instance).strip()
+            provider_type = getattr(registry, "provider_type", None)
+            provider = str(
+                getattr(response, "provider", "")
+                or (provider_type(target_instance) if callable(provider_type) else "")
+                or provider
+            )
             response_model = str(getattr(response, "model", "") or model)
-            label = "Fallback LLM provider" if is_fallback else "LLM provider"
+            label = (
+                "LLM chain"
+                if is_chain
+                else "Fallback LLM instance"
+                if is_fallback
+                else "LLM instance"
+            )
             return ConfigServiceProbeResponse(
                 ok=ok,
                 kind=kind,
+                instance_id=target_instance,
                 provider=provider,
                 model=response_model,
                 message=f"{label} is available." if ok else "",
@@ -11477,6 +12034,7 @@ def create_app(
             return ConfigServiceProbeResponse(
                 ok=False,
                 kind=kind,
+                instance_id=target_instance,
                 provider=provider,
                 model=model,
                 error=str(exc),
@@ -11637,7 +12195,27 @@ def create_app(
             _apply_llm_update(cfg, llm_data)
         if payload.kind == "embedding":
             return await _probe_embedding_config(cfg)
-        return await _probe_llm_config(cfg, kind=payload.kind)
+        return await _probe_llm_config(
+            cfg,
+            kind=payload.kind,
+            instance_id=payload.instance_id,
+        )
+
+    @app.post("/api/config/discover-models", response_model=ConfigModelDiscoveryResponse)
+    async def discover_config_models(
+        payload: ConfigModelDiscoveryIn,
+    ) -> ConfigModelDiscoveryResponse:
+        """List models for one submitted instance without saving config.toml."""
+        from copy import deepcopy
+
+        from openbiliclaw.config import load_config
+
+        cfg = deepcopy(load_config())
+        update = payload.config if isinstance(payload.config, dict) else {}
+        llm_data = update.get("llm")
+        if isinstance(llm_data, dict):
+            _apply_llm_update(cfg, llm_data)
+        return await _discover_llm_models(cfg, instance_id=payload.instance_id)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
     async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:

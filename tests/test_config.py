@@ -524,6 +524,49 @@ def test_build_config_supports_openai_compatible_provider() -> None:
     assert config.llm.openai.api_key == "real-openai-key"
 
 
+def test_openai_compatible_legacy_config_does_not_opt_into_reasoning_field() -> None:
+    config = _build_config(
+        {
+            "llm": {
+                "default_provider": "openai_compatible",
+                "openai_compatible": {
+                    "api_key": "sk-relay",
+                    "model": "relay-model",
+                    "base_url": "https://relay.example/v1",
+                    # Older save_config versions materialized this inherited
+                    # default even though the adapter ignored it.
+                    "reasoning_effort": "medium",
+                },
+            }
+        }
+    )
+
+    assert config.llm.openai_compatible.reasoning_effort == ""
+
+
+def test_openai_compatible_native_instance_explicit_reasoning_effort_is_preserved() -> None:
+    config = _build_config(
+        {
+            "llm": {
+                "routing_version": 2,
+                "default_chain": ["relay-main"],
+                "instances": {
+                    "relay-main": {
+                        "name": "Relay",
+                        "provider_type": "openai_compatible",
+                        "api_key": "sk-relay",
+                        "model": "relay-model",
+                        "base_url": "https://relay.example/v1",
+                        "reasoning_effort": "medium",
+                    }
+                },
+            }
+        }
+    )
+
+    assert config.llm.instances["relay-main"].reasoning_effort == "medium"
+
+
 def test_save_config_round_trips_openai_compatible(tmp_path: Path) -> None:
     """[llm.openai_compatible] must survive a save/load cycle so popup
     edits don't get silently dropped on backend restart."""

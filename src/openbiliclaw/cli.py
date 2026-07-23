@@ -447,6 +447,18 @@ _CODEX_LOGIN_LOGOUT_OPTION = typer.Option(
     "--logout",
     help="删除 OpenBiliClaw 本地 Codex 凭据。",
 )
+_CONFIG_EXPORT_LEGACY_OUTPUT_OPTION = typer.Option(
+    None,
+    "--output",
+    "-o",
+    dir_okay=False,
+    help="旧格式输出路径（默认：当前配置旁的 config.legacy.toml）",
+)
+_CONFIG_EXPORT_LEGACY_FORCE_OPTION = typer.Option(
+    False,
+    "--force",
+    help="覆盖已存在的输出文件",
+)
 
 
 def _bootstrap_container_runtime() -> None:
@@ -1384,27 +1396,73 @@ def _save_runtime_provider_config(
     base_url: str = "",
     model: str = "",
 ) -> None:
-    """Persist the selected provider's full config triple to ``config.toml``.
-
-    Writes ``default_provider`` plus the per-provider ``[llm.<name>]``
-    block. ``api_key`` / ``base_url`` / ``model`` are only written when
-    non-empty (so existing saved values aren't blown away when the
-    wizard's user accepts a default by leaving the prompt blank).
-    """
-    from openbiliclaw.config import load_config_with_diagnostics, save_config
+    """Persist one complete provider instance and make it the global primary."""
+    from openbiliclaw.config import (
+        LLMInstanceConfig,
+        effective_llm_default_chain,
+        effective_llm_instances,
+        effective_llm_routes,
+        load_config_with_diagnostics,
+        save_config,
+    )
 
     config, diagnostics = load_config_with_diagnostics()
-    config.llm.default_provider = provider
+    provider = provider.strip().lower()
     provider_config = getattr(config.llm, provider, None)
     if provider_config is None:
         save_config(config, diagnostics.config_path)
         return
-    if api_key and hasattr(provider_config, "api_key"):
-        provider_config.api_key = api_key.strip()
-    if base_url and hasattr(provider_config, "base_url"):
-        provider_config.base_url = base_url.strip()
-    if model and hasattr(provider_config, "model"):
-        provider_config.model = model.strip()
+
+    instances = effective_llm_instances(config.llm)
+    chain = effective_llm_default_chain(config.llm)
+    routes = effective_llm_routes(config.llm)
+    instance_id = next(
+        (
+            candidate
+            for candidate in [*chain, *instances]
+            if candidate in instances
+            and instances[candidate].provider_type.strip().lower() == provider
+        ),
+        "",
+    )
+    if not instance_id:
+        instance_id = f"{provider.replace('_', '-')}-main"
+        suffix = 2
+        while instance_id in instances:
+            instance_id = f"{provider.replace('_', '-')}-{suffix}"
+            suffix += 1
+        instance = LLMInstanceConfig(
+            api_key=provider_config.api_key,
+            model=provider_config.model,
+            base_url=provider_config.base_url,
+            auth_mode=provider_config.auth_mode,
+            api_flavor=provider_config.api_flavor,
+            http_referer=provider_config.http_referer,
+            x_title=provider_config.x_title,
+            reasoning_effort=provider_config.reasoning_effort,
+            num_ctx=provider_config.num_ctx,
+            name=provider,
+            provider_type=provider,
+            enabled=True,
+        )
+        instances[instance_id] = instance
+    instance = instances[instance_id]
+    instance.enabled = True
+    if api_key:
+        instance.api_key = api_key.strip()
+    if base_url:
+        instance.base_url = base_url.strip()
+    if model:
+        instance.model = model.strip()
+
+    config.llm.instance_routing = True
+    config.llm.instances = instances
+    config.llm.default_chain = [
+        instance_id,
+        *[candidate for candidate in chain if candidate != instance_id],
+    ]
+    for module_name, route in routes.items():
+        setattr(config.llm, module_name, route)
     save_config(config, diagnostics.config_path)
 
 
@@ -1866,24 +1924,78 @@ def _save_embedding_config(
 
 
 def _save_module_overrides(overrides: dict[str, dict[str, str]]) -> None:
-    """Persist per-module LLM overrides to config.toml.
-
-    ``overrides`` maps module name (``soul`` / ``discovery`` /
-    ``recommendation`` / ``evaluation``) to a dict with optional
-    ``provider`` and ``model`` keys. Empty values are written as empty
-    strings, which the loader treats as "use global default".
-    """
-    from openbiliclaw.config import load_config_with_diagnostics, save_config
+    """Persist per-module overrides as complete custom instance chains."""
+    from openbiliclaw.config import (
+        LLMInstanceConfig,
+        ModuleLLMConfig,
+        effective_llm_default_chain,
+        effective_llm_instances,
+        effective_llm_routes,
+        load_config_with_diagnostics,
+        save_config,
+    )
 
     config, diagnostics = load_config_with_diagnostics()
+    instances = effective_llm_instances(config.llm)
+    default_chain = effective_llm_default_chain(config.llm)
+    routes = effective_llm_routes(config.llm)
     for module, payload in overrides.items():
-        module_config = getattr(config.llm, module, None)
-        if module_config is None:
+        if module not in routes:
             continue
-        if "provider" in payload:
-            module_config.provider = payload["provider"].strip()
-        if "model" in payload:
-            module_config.model = payload["model"].strip()
+        provider_type = payload.get("provider", "").strip().lower()
+        model = payload.get("model", "").strip()
+        if not provider_type and not model:
+            routes[module] = ModuleLLMConfig(inherit=True)
+            continue
+        primary = instances.get(default_chain[0]) if default_chain else None
+        if not provider_type and primary is not None:
+            provider_type = primary.provider_type.strip().lower()
+        instance_id = next(
+            (
+                candidate
+                for candidate, instance in instances.items()
+                if instance.provider_type.strip().lower() == provider_type
+                and (not model or instance.model.strip() == model)
+            ),
+            "",
+        )
+        if not instance_id:
+            base = next(
+                (
+                    instance
+                    for instance in instances.values()
+                    if instance.provider_type.strip().lower() == provider_type
+                ),
+                None,
+            )
+            if base is None:
+                continue
+            base_instance_id = f"{module}-{provider_type.replace('_', '-')}"
+            instance_id = base_instance_id
+            suffix = 2
+            while instance_id in instances:
+                instance_id = f"{base_instance_id}-{suffix}"
+                suffix += 1
+            instances[instance_id] = LLMInstanceConfig(
+                api_key=base.api_key,
+                model=model or base.model,
+                base_url=base.base_url,
+                auth_mode=base.auth_mode,
+                api_flavor=base.api_flavor,
+                http_referer=base.http_referer,
+                x_title=base.x_title,
+                reasoning_effort=base.reasoning_effort,
+                num_ctx=base.num_ctx,
+                name=f"{module} · {base.name}",
+                provider_type=base.provider_type,
+                enabled=base.enabled,
+            )
+        routes[module] = ModuleLLMConfig(inherit=False, chain=[instance_id])
+    config.llm.instance_routing = True
+    config.llm.instances = instances
+    config.llm.default_chain = default_chain
+    for module, route in routes.items():
+        setattr(config.llm, module, route)
     save_config(config, diagnostics.config_path)
 
 
@@ -11561,14 +11673,18 @@ def probe() -> None:
 @app.command()
 def config_show() -> None:
     """显示当前配置."""
-    from openbiliclaw.config import load_config_with_diagnostics
+    from openbiliclaw.config import effective_llm_default_chain, load_config_with_diagnostics
     from openbiliclaw.llm import RegistryBuildError, summarize_registry
 
     cfg, diagnostics = load_config_with_diagnostics()
+    instance_routing = bool(getattr(cfg.llm, "instance_routing", False))
+    default_chain = effective_llm_default_chain(cfg.llm)
+    llm_label = "LLM 默认调用链" if instance_routing else "LLM"
+    llm_value = " → ".join(default_chain) if instance_routing else cfg.llm.default_provider
     _print_page_title("当前配置概览", "运行时配置")
     rows = [
         ("语言", cfg.language),
-        ("LLM", cfg.llm.default_provider),
+        (llm_label, llm_value or "未配置"),
         ("LLM 并发", str(cfg.llm.concurrency)),
         ("B站认证", cfg.bilibili.auth_method),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
@@ -11598,11 +11714,13 @@ def config_show() -> None:
     try:
         registry = _build_registry()
         summary = summarize_registry(cfg, registry)
+        provider_label = "已注册 Provider 实例" if instance_routing else "已注册 Provider"
+        default_label = "最终默认 Provider 实例" if instance_routing else "最终默认 Provider"
         _print_key_value_table(
             "Provider 概览",
             [
-                ("已注册 Provider", ", ".join(summary.registered_providers)),
-                ("最终默认 Provider", summary.effective_default),
+                (provider_label, ", ".join(summary.registered_providers)),
+                (default_label, summary.effective_default),
             ],
         )
     except RegistryBuildError as exc:
@@ -11618,6 +11736,98 @@ def config_show() -> None:
         f"{issue.field}: {issue.message}" for issue in diagnostics.issues
     ]
     _print_config_guidance(hints)
+
+
+@app.command("config-export-legacy")
+def config_export_legacy(
+    output: Path | None = _CONFIG_EXPORT_LEGACY_OUTPUT_OPTION,
+    force: bool = _CONFIG_EXPORT_LEGACY_FORCE_OPTION,
+) -> None:
+    """导出可供旧版 OpenBiliClaw 读取的配置副本."""
+    import tempfile
+
+    from openbiliclaw.config import (
+        load_config_with_diagnostics,
+        project_config_to_legacy,
+        save_config,
+    )
+
+    temp_path: Path | None = None
+    try:
+        cfg, diagnostics = load_config_with_diagnostics()
+        source_path = diagnostics.config_path
+        if source_path is None:
+            raise ValueError("无法确定当前 config.toml 的路径。")
+        target = (
+            output.expanduser()
+            if output is not None
+            else source_path.with_name(f"{source_path.stem}.legacy{source_path.suffix}")
+        )
+        if target.resolve() == source_path.resolve():
+            raise ValueError("旧格式必须导出到另一个文件，不能直接覆盖当前配置。")
+        if target.exists() and not force:
+            raise ValueError(f"输出文件已存在：{target}；确认后可加 --force 覆盖。")
+
+        projected, report = project_config_to_legacy(cfg)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+
+        save_config(projected, temp_path)
+        verified, _ = load_config_with_diagnostics(
+            temp_path,
+            ensure_default_file=False,
+        )
+        if (
+            verified.llm.instance_routing
+            or verified.llm.default_provider != projected.llm.default_provider
+            or verified.llm.fallback_provider != projected.llm.fallback_provider
+        ):
+            raise ValueError("旧格式导出后的回读校验失败，未替换目标文件。")
+        temp_path.chmod(0o600)
+        if target.exists() and not force:
+            raise ValueError(f"输出文件已存在：{target}；确认后可加 --force 覆盖。")
+        os.replace(temp_path, target)
+        temp_path = None
+    except (OSError, ValueError) as exc:
+        _print_status_panel("error", "旧版配置导出失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+    _print_page_title("旧版配置已导出", "当前 v2 配置保持不变")
+    _print_key_value_table(
+        "导出结果",
+        [
+            ("源配置", str(source_path)),
+            ("旧版副本", str(target)),
+            ("主实例", report.primary_instance_id or "沿用旧格式"),
+            ("备选实例", report.fallback_instance_id or "无"),
+        ],
+    )
+    if report.issues:
+        _print_status_panel(
+            "warning",
+            "降级兼容告警",
+            "\n".join(f"• ({issue.code}) {issue.message}" for issue in report.issues),
+        )
+    else:
+        _print_status_panel("success", "降级兼容", "旧格式可完整表达当前 LLM 路由。")
+    permission_note = (
+        "权限已设为仅当前用户可读写（0600）。"
+        if os.name != "nt"
+        else "Windows 会继承目标目录 ACL，请把它放在仅当前账户可访问的目录。"
+    )
+    console.print(
+        "[bold yellow]安全提示：导出文件包含模型 API Key 等明文凭据，"
+        f"{permission_note}[/bold yellow]"
+    )
 
 
 @auth_app.command("login")

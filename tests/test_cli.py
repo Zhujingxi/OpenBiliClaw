@@ -391,6 +391,102 @@ def test_config_show_generates_template_and_prints_guidance(
     assert "llm.openai.api_key" in result.stdout
 
 
+def test_config_export_legacy_writes_verified_private_copy_with_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config(
+        llm=config_module.LLMConfig(
+            instance_routing=True,
+            instances={
+                "primary": config_module.LLMInstanceConfig(
+                    name="主渠道",
+                    provider_type="openai_compatible",
+                    api_key="sk-primary",
+                    model="model-a",
+                    base_url="https://primary.example/v1",
+                ),
+                "same-type-backup": config_module.LLMInstanceConfig(
+                    name="同类型备选",
+                    provider_type="openai_compatible",
+                    api_key="sk-backup",
+                    model="model-b",
+                    base_url="https://backup.example/v1",
+                ),
+                "deepseek-backup": config_module.LLMInstanceConfig(
+                    name="跨类型备选",
+                    provider_type="deepseek",
+                    api_key="sk-deepseek",
+                    model="deepseek-chat",
+                ),
+            },
+            default_chain=["primary", "same-type-backup", "deepseek-backup"],
+        )
+    )
+    config_path = tmp_path / "config.toml"
+    config_module.save_config(cfg, config_path)
+    original = config_path.read_bytes()
+    monkeypatch.setattr(config_module, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-export-legacy"])
+
+    export_path = tmp_path / "config.legacy.toml"
+    assert result.exit_code == 0, result.output
+    assert config_path.read_bytes() == original
+    assert export_path.exists()
+    assert export_path.stat().st_mode & 0o777 == 0o600
+    assert config_module.load_config(export_path).llm.instance_routing is False
+    text = export_path.read_text(encoding="utf-8")
+    assert "routing_version" not in text
+    assert "[llm.openai_compatible]" in text
+    assert "sk-primary" in text
+    assert "旧版配置已导出" in result.output
+    assert "旧格式每种 Provider" in result.output
+    assert "只能保留一个端点" in result.output
+    assert "全局链最多只有" in result.output
+    assert "一个不同类型备选" in result.output
+    assert "明文凭据" in result.output
+
+
+def test_config_export_legacy_refuses_overwrite_without_force_and_active_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_module.save_config(
+        config_module.Config(
+            llm=config_module.LLMConfig(
+                default_provider="ollama",
+                ollama=config_module.LLMProviderConfig(model="qwen2.5:7b"),
+            )
+        ),
+        config_path,
+    )
+    export_path = tmp_path / "config.legacy.toml"
+    export_path.write_text("do not overwrite", encoding="utf-8")
+    monkeypatch.setattr(config_module, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    existing = runner.invoke(app, ["config-export-legacy"])
+    same_path = runner.invoke(
+        app,
+        ["config-export-legacy", "--output", str(config_path), "--force"],
+    )
+
+    assert existing.exit_code == 1
+    assert "--force" in existing.output
+    assert export_path.read_text(encoding="utf-8") == "do not overwrite"
+    assert same_path.exit_code == 1
+    assert "不能直接覆盖当前配置" in same_path.output
+
+    forced = runner.invoke(app, ["config-export-legacy", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "do not overwrite" not in export_path.read_text(encoding="utf-8")
+
+
 def test_recommend_reports_clear_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -4815,12 +4911,42 @@ def test_save_module_overrides_writes_per_module_blocks(
     from openbiliclaw.config import (
         Config,
         LLMConfig,
+        LLMInstanceConfig,
         load_config_with_diagnostics,
         save_config,
     )
 
     config_path = tmp_path / "config.toml"
-    save_config(Config(llm=LLMConfig(default_provider="openai")), config_path)
+    save_config(
+        Config(
+            llm=LLMConfig(
+                instance_routing=True,
+                instances={
+                    "openai-main": LLMInstanceConfig(
+                        name="OpenAI",
+                        provider_type="openai",
+                        api_key="sk-openai",
+                        model="gpt-main",
+                    ),
+                    "deepseek-fast": LLMInstanceConfig(
+                        name="DeepSeek",
+                        provider_type="deepseek",
+                        api_key="sk-deepseek",
+                        model="deepseek-chat",
+                        base_url="https://api.deepseek.com",
+                    ),
+                    "claude-quality": LLMInstanceConfig(
+                        name="Claude",
+                        provider_type="claude",
+                        api_key="sk-claude",
+                        model="claude-sonnet-4-5-20250929",
+                    ),
+                },
+                default_chain=["openai-main"],
+            )
+        ),
+        config_path,
+    )
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
@@ -4833,12 +4959,13 @@ def test_save_module_overrides_writes_per_module_blocks(
     )
 
     reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.discovery.provider == "deepseek"
-    assert reloaded.llm.discovery.model == "deepseek-chat"
-    assert reloaded.llm.soul.provider == "claude"
-    assert reloaded.llm.soul.model == "claude-sonnet-4-5-20250929"
-    assert reloaded.llm.evaluation.provider == ""
-    assert reloaded.llm.evaluation.model == ""
+    assert reloaded.llm.instance_routing is True
+    assert reloaded.llm.discovery.inherit is False
+    assert reloaded.llm.discovery.chain == ["deepseek-fast"]
+    assert reloaded.llm.soul.inherit is False
+    assert reloaded.llm.soul.chain == ["claude-quality"]
+    assert reloaded.llm.evaluation.inherit is True
+    assert reloaded.llm.evaluation.chain == []
 
 
 def test_build_recommendation_engine_wires_module_overrides(

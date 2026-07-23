@@ -1763,6 +1763,15 @@ class LLMProviderConfigOut(BaseModel):
     http_referer: str = ""
     x_title: str = ""
     reasoning_effort: str = "medium"
+    num_ctx: int = 0
+
+
+class LLMInstanceConfigOut(LLMProviderConfigOut):
+    """One independently addressable chat endpoint."""
+
+    name: str = ""
+    provider_type: str = ""
+    enabled: bool = True
 
 
 class EmbeddingConfigOut(BaseModel):
@@ -1783,9 +1792,15 @@ class EmbeddingConfigOut(BaseModel):
 class ModuleLLMConfigOut(BaseModel):
     provider: str = ""
     model: str = ""
+    inherit: bool = True
+    chain: list[str] = Field(default_factory=list)
 
 
 class LLMConfigOut(BaseModel):
+    routing_version: int = 2
+    instances: dict[str, LLMInstanceConfigOut] = Field(default_factory=dict)
+    default_chain: list[str] = Field(default_factory=list)
+    routes: dict[str, ModuleLLMConfigOut] = Field(default_factory=dict)
     default_provider: str = "deepseek"
     concurrency: int = 4
     timeout: int = 300
@@ -2133,11 +2148,21 @@ class ConfigUpdateIn(BaseModel):
 class ConfigServiceProbeIn(BaseModel):
     """No-write request to probe the submitted LLM or embedding config.
 
-    ``llm_fallback`` probes ``[llm].fallback_provider`` (that exact
-    provider, no fallback chain) instead of the default provider.
+    ``llm_instance`` probes one exact endpoint instance. ``llm_chain``
+    exercises the submitted global route, including sequential fallback.
+    ``llm_fallback`` remains for legacy clients and probes the second route
+    entry (or legacy ``fallback_provider``) exactly.
     """
 
-    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
+    kind: Literal[
+        "llm",
+        "llm_instance",
+        "llm_chain",
+        "embedding",
+        "llm_fallback",
+        "network_proxy",
+    ]
+    instance_id: str = ""
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -2145,9 +2170,44 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
+    kind: Literal[
+        "llm",
+        "llm_instance",
+        "llm_chain",
+        "embedding",
+        "llm_fallback",
+        "network_proxy",
+    ]
+    instance_id: str = ""
     provider: str = ""
     model: str = ""
+    message: str = ""
+    error: str = ""
+    latency_ms: int = 0
+
+
+class ConfigModelDiscoveryIn(BaseModel):
+    """No-write request to list models for one submitted LLM instance."""
+
+    instance_id: str
+    config: dict[str, object] = Field(default_factory=dict)
+
+
+class ConfigModelDiscoveryResponse(BaseModel):
+    """Models advertised by an endpoint plus local effort guidance.
+
+    The OpenAI-compatible ``GET /models`` response does not standardize
+    reasoning-effort capabilities. ``reasoning_efforts`` is therefore an
+    explicitly labelled local advisory, never presented as provider-discovered
+    metadata.
+    """
+
+    ok: bool
+    instance_id: str = ""
+    provider: str = ""
+    models: list[str] = Field(default_factory=list)
+    reasoning_efforts: list[str] = Field(default_factory=list)
+    reasoning_efforts_source: Literal["local_advisory", "not_available"] = "not_available"
     message: str = ""
     error: str = ""
     latency_ms: int = 0

@@ -99,51 +99,106 @@ auto_sync_enabled = false
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `default_provider` | string | `"deepseek"` | 默认聊天 Provider：`deepseek` / `openai` / `claude` / `gemini` / `openrouter` / `openai_compatible`。`ollama` 仍被接受（后端注册表 / 设置页保留支持），但仅面向自备本地 chat 模型的进阶用户，其默认角色是 embedding；图形向导 / `init` / bootstrap 的交互菜单已不再把它当聊天默认提供（v0.3.176+） |
-| `concurrency` | int | `4` | 单 runtime 的 LLM provider 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。API/OpenClaw/CLI composition 内所有服务共享同一 gate；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16`，显式正数旧值不会被覆盖 |
-| `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider。（v0.3.156+ 移除了从未被读取的 `fallback_enabled` 布尔开关：非空 provider 即启用；存量 config.toml 里的旧 key 会被忽略） |
+| `routing_version` | int | `2` | LLM 实例路由配置版本。新配置固定为 `2` |
+| `default_chain` | list[string] | `["deepseek"]` | 全局有序实例链。每一项引用一个 `[llm.instances.<id>]`；请求按从左到右的顺序尝试 |
+| `concurrency` | int | `4` | 单 runtime 的 LLM 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。合法范围 `1..16` |
+| `timeout` | int | `300` | 每个实例请求的超时秒数，合法范围 `10..600` |
 
-> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 缺 `[llm.ollama].model`。Ollama 的 `base_url` 只能定位服务，不能替代模型名；系统不会再隐式补 `llama3`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
+`default_chain` 里的元素是**实例 ID**，不是 Provider 类型。一个实例是一套完整、可独立调用的端点配置，因此可以同时存在两个 `provider_type = "openai_compatible"` 的中转渠道、两个 OpenAI 账号，或同一网关上的不同模型：
 
-### `[llm.openai]`
+```toml
+[llm]
+routing_version = 2
+default_chain = ["relay-primary", "relay-backup", "deepseek"]
+concurrency = 4
+timeout = 300
+
+[llm.instances.relay-primary]
+name = "主中转"
+provider_type = "openai_compatible"
+enabled = true
+api_key = "sk-..."
+model = "gpt-5-nano"
+base_url = "https://primary.example.com/v1"
+
+[llm.instances.relay-backup]
+name = "备用中转"
+provider_type = "openai_compatible"
+enabled = true
+api_key = "sk-..."
+model = "gpt-5-nano"
+base_url = "https://backup.example.com/v1"
+
+[llm.instances.deepseek]
+name = "DeepSeek 官方"
+provider_type = "deepseek"
+enabled = true
+api_key = "sk-..."
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+```
+
+链只在当前实例出现 Provider 级失败、超时、限流或无有效内容时继续；限流冷却按**实例 ID**隔离，同类型的健康备用渠道不会被一起冷却。保存时会阻止空链、重复引用、不存在或停用的实例，以及缺少必要凭据的启用实例。`PUT /api/config` 遇到 blocking issue 返回 400，并保持磁盘和运行时原状。
+
+### `[llm.instances.<instance_id>]`
+
+实例 ID 必须以小写字母或数字开头，后续只允许小写字母、数字、`_`、`-`，最长 64 个字符；它必须唯一且保存后应保持稳定，调用统计、失败日志、路由和冷却都用它区分具体渠道。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `api_key` | string | `""` | API Key（default_provider=openai 时必填，OpenAI 兼容服务也填这里） |
+| `name` | string | 实例 ID | 设置页显示名称，可重复 |
+| `provider_type` | string | `""` | 适配器类型：`openai` / `claude` / `gemini` / `deepseek` / `ollama` / `openrouter` / `openai_compatible` |
+| `enabled` | bool | `true` | 是否允许注册和引用；停用实例不能留在任何链里 |
+| `api_key` | string | `""` | 此实例自己的凭据；API 默认只回显掩码 |
+| `model` | string | `""` | 此实例固定使用的聊天模型 |
+| `base_url` | string | `""` | 此实例的服务地址；留空时按适配器默认值 |
+| `auth_mode` | string | `""` | OpenAI 的 `api_key` / `codex_oauth` 认证模式 |
+| `api_flavor` | string | `""` | OpenAI / OpenAI-compatible 的 `chat_completions` / `responses` 协议选择 |
+| `http_referer` / `x_title` | string | `""` | OpenRouter 可选归属请求头 |
+| `reasoning_effort` | string | `"medium"` | 支持该能力的适配器默认推理档位；空字符串表示不请求通用 effort（DeepSeek 例外：显式关闭 thinking） |
+| `num_ctx` | int | `0` | 仅 Ollama 使用；`0` 采用服务端默认上下文 |
+
+以下小节说明各 `provider_type` 的专属语义。
+
+#### OpenAI（`provider_type = "openai"`）
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `api_key` | string | `""` | API Key；启用并进入任意调用链时必填（`codex_oauth` 除外） |
 | `model` | string | `"gpt-5-nano"` | 模型名称（按 `base_url` 后端实际部署的模型填，例如 vLLM 上是 `meta-llama/Llama-3.1-70B-Instruct`） |
 | `base_url` | string | `""` | 留空使用 OpenAI 官方 `https://api.openai.com/v1`；指向任何 OpenAI 兼容服务的 `/v1` 端点：Azure OpenAI / vLLM / LMStudio / OneAPI / Cloudflare AI Gateway / 自建 LLM 网关 |
 | `auth_mode` | string | `""` | 认证模式：`""` / `"api_key"` 使用 `api_key`；`"codex_oauth"` 使用 `openbiliclaw login codex` 导入的 Codex CLI ChatGPT OAuth 凭据 |
 | `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点。非法值会被 `_collect_config_issues` 以 blocking 级拦下 |
-| `reasoning_effort` | string | `"medium"` | 仅 OpenAI 官方 endpoint 的 GPT-5 / o-series 生效；Chat Completions 映射到 `reasoning_effort`，Responses 映射到 `reasoning.effort`。普通 GPT-4、自定义 Base URL 与泛兼容网关不发送，避免未知后端 400 |
+| `reasoning_effort` | string | `"medium"` | OpenAI 官方 GPT-5 / o-series 生效；Chat Completions 映射到 `reasoning_effort`，Responses 映射到 `reasoning.effort`。空字符串省略该字段，明确填写的 `none/minimal/low/medium/high/xhigh/max` 原样交给官方接口按具体模型校验；普通 GPT-4 不发送 |
 
-> **「openai」是协议家族，不是厂商。** v0.3.5 起 `init` 向导会显式说明这一点。任何兼容 `POST /v1/chat/completions` 的服务都填到这一段，区别只在 `base_url`。
+> `openai` 实例默认指 OpenAI 官方，也能通过 `base_url` 指向兼容服务；需要同时管理多个兼容渠道时，优先使用多个 `openai_compatible` 实例，身份和用量归属更清晰。
 > 例如：
 > - Azure OpenAI → `base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"`
 > - 本地 vLLM → `base_url = "http://localhost:8000/v1"`，`api_key` 任填或留空
 > - OneAPI 网关 → `base_url = "https://your-oneapi.example.com/v1"`
 
-> `auth_mode = "codex_oauth"` 是实验性 / 非官方路径：OpenAI 官方 API 认证仍以 Platform API key 为稳定入口。启用前先运行 `openbiliclaw login codex`，OpenBiliClaw 会从官方 Codex CLI 登录态导入 token 到 `~/.openbiliclaw/codex_auth.json`。该模式下 `api_key` 会被忽略，并且 `base_url` 只能留空或指向 `https://api.openai.com`，避免把 ChatGPT OAuth token 发给第三方 OpenAI-compatible 代理。自定义代理仍请使用 `api_key` 模式或 `[llm.openai_compatible]`。
+> `auth_mode = "codex_oauth"` 是实验性 / 非官方路径：OpenAI 官方 API 认证仍以 Platform API key 为稳定入口。启用前先运行 `openbiliclaw login codex`，OpenBiliClaw 会从官方 Codex CLI 登录态导入 token 到 `~/.openbiliclaw/codex_auth.json`。该模式下 `api_key` 会被忽略，并且 `base_url` 只能留空或指向 `https://api.openai.com`，避免把 ChatGPT OAuth token 发给第三方代理。
 
-### `[llm.claude]`
+#### Claude（`provider_type = "claude"`）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `api_key` | string | `""` | Anthropic API Key（default_provider=claude 时必填） |
+| `api_key` | string | `""` | Anthropic API Key |
 | `model` | string | `"claude-sonnet-4-6"` | 模型名称 |
 | `base_url` | string | `""` | 留空 = Anthropic 官方 `https://api.anthropic.com`；使用第三方中转 / 网关时填其地址（需实现 Anthropic 协议 `/v1/messages`，issue #72） |
 | `reasoning_effort` | string | `"medium"` | Claude Sonnet 4.6+、Opus 4.5+ 等已确认型号映射到 `output_config.effort`；旧型号不发送。空渠道调用在支持型号上映射为最低安全档 `low` |
 
-### `[llm.gemini]`
+#### Gemini（`provider_type = "gemini"`）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `api_key` | string | `""` | Gemini API Key（default_provider=gemini 时，若未填写则回退读取 `GOOGLE_API_KEY` / `GEMINI_API_KEY`） |
+| `api_key` | string | `""` | Gemini API Key；未填写时可读取 `GOOGLE_API_KEY` / `GEMINI_API_KEY` |
 | `model` | string | `"gemini-2.5-flash"` | Gemini 模型名称 |
 | `reasoning_effort` | string | `"medium"` | Gemini 3 映射 `thinkingLevel`；Gemini 2.5 以当前输出上限的 50% budget 近似中档。空渠道调用在 2.5 Flash 关闭 thinking，在不能关闭的 2.5 Pro / Gemini 3 降到最低合法档 |
 
 > Gemini provider 按官方 quickstart 走 `google-genai` SDK 的 Gemini Developer API，不是 Vertex AI。
 
-### `[llm.deepseek]`
+#### DeepSeek（`provider_type = "deepseek"`）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -152,7 +207,7 @@ auto_sync_enabled = false
 | `base_url` | string | `"https://api.deepseek.com"` | API 地址；可填 DeepSeek-compatible 中转 / 私有网关，registry 会把该值实际传给 SDK，并按这个 endpoint 决定直连或使用 `[network]` 代理 |
 | `reasoning_effort` | string | `"medium"` | 深度任务默认均衡档；DeepSeek 官方会把 portable `low/medium` 映射为 native `high`，`xhigh/max` 映射为 `max`。渠道型 discovery / recommendation / sources 调用仍按单次 `""` 真正关闭 thinking；手动设 `""` 可全局关闭 |
 
-### `[llm.ollama]`
+#### Ollama（`provider_type = "ollama"`）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -162,15 +217,15 @@ auto_sync_enabled = false
 
 > Ollama 不需要 API Key，适合本地开发测试。
 
-> **聊天模型必须明确填写：** `model` 为空时 Ollama 不会进入 chat registry，即使 `base_url` 非空、`default_provider/fallback_provider = "ollama"` 也不会猜模型或回退到 `llama3`。只使用 Ollama `bge-m3` 做 embedding 时保持 chat `model` 为空即可；embedding 会走独立 provider，不会触发聊天探针。
+> **聊天模型必须明确填写：** `model` 为空时 Ollama 不会进入 chat registry，即使实例已启用也不会猜模型或回退到 `llama3`。只使用 Ollama `bge-m3` 做 embedding 时无需创建聊天实例；embedding 会走独立配置，不会触发聊天探针。
 >
 > **`num_ctx` 为何重要：** Ollama 的 OpenAI 兼容 `/v1` 端点不接受 `num_ctx`，模型按服务端默认上下文（多为 4096）加载。发现循环里 discovery 批量评估 / 推荐文案批量生成等 prompt 很容易超 4096，被静默截断后小模型（如 `qwen:7b`）就会吐出非法 JSON、或为整批视频生成同一句重复文案。设 `num_ctx = 8192` 后，OpenBiliClaw 改用原生 `/api/chat` 端点（已实测 `context_length` 真正变为 8192）即可规避。
 
-### `[llm.openrouter]`
+#### OpenRouter（`provider_type = "openrouter"`）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `api_key` | string | `""` | OpenRouter API Key（default_provider=openrouter 时必填） |
+| `api_key` | string | `""` | OpenRouter API Key |
 | `model` | string | `"openai/gpt-5-nano"` | OpenRouter 模型名称 |
 | `base_url` | string | `"https://openrouter.ai/api/v1"` | OpenRouter API 地址 |
 | `http_referer` | string | `""` | 可选的 `HTTP-Referer` 请求头 |
@@ -179,16 +234,17 @@ auto_sync_enabled = false
 
 > `http_referer` 和 `x_title` 都是可选项；留空时不会阻止请求发送。
 
-### `[llm.openai_compatible]` (v0.3.32+)
+#### OpenAI-compatible（`provider_type = "openai_compatible"`）
 
-通用 OpenAI 协议兼容 provider，用于接入 Groq / Together / Azure OpenAI / vLLM / 自建等任何兼容 `/v1/chat/completions` 的服务。**与 `[llm.openai]` 完全独立**：cost 统计、retry 计数、provider 名都各自一份，可以同时在一个 backend 里跑两套（例：chat 走真 OpenAI 跑 `gpt-5-nano`，draft 任务挂 Groq 跑 Llama 加速）。
+通用 OpenAI 协议兼容适配器，用于接入 Groq / Together / Azure OpenAI / vLLM / 自建等任何兼容端点。每个 `[llm.instances.<id>]` 都是独立身份，可以同时配置任意数量的账号、网关与模型；cost、retry、限流冷却和探测结果不会互相混淆。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `api_key` | string | `""` | 上游服务的 API Key（default_provider=openai_compatible 时必填） |
+| `api_key` | string | `""` | 上游服务的 API Key |
 | `model` | string | `""` | 上游服务的模型名（如 `llama-3.1-70b-versatile`、`Qwen/Qwen2.5-72B-Instruct-Turbo`、Azure 部署名等） |
-| `base_url` | string | `""` | **必填**。上游服务的 OpenAI 协议端点（缺失时 `_collect_config_issues` 会报 `llm.openai_compatible.base_url`，registry 拒绝注册） |
+| `base_url` | string | `""` | **必填**。上游服务的 OpenAI 协议端点；缺失时配置校验会指向具体实例并拒绝保存 |
 | `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点 |
+| `reasoning_effort` | string | `""`（新实例） | 空值不发送；明确填写非空值时分别透传到 Chat `reasoning_effort` 或 Responses `reasoning.effort`。兼容协议没有统一能力声明，目标网关是否接受由其自身校验 |
 
 常见示例：
 
@@ -205,17 +261,17 @@ auto_sync_enabled = false
 
 Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、recommendation 跨主题去重、PoolCurator 反馈相似度判定、interest / avoidance probe 主题归类。
 
-**v0.3.32+ 起，本段拥有独立的 `api_key` / `base_url`，与 `[llm].default_provider` 完全解耦。** 不再被迫为「embedding 用 OpenAI 但 chat 用 DeepSeek」这种场景在两处填同一组凭据。
+**本段拥有独立的 `api_key` / `base_url`，与聊天实例和 `[llm].default_chain` 完全解耦。** 不再被迫为「embedding 用 OpenAI 但 chat 用 DeepSeek」这种场景在两处填同一组凭据。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随 `[llm].default_provider`。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"` / **`"dashscope"`**（阿里百炼多模态向量）。Claude / DeepSeek 没有 embedding 接口；OpenRouter 走 per-route 路由，必须显式配 `model`（如 `google/gemini-embedding-2-preview`） |
+| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随聊天调用链。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"` / **`"dashscope"`**（阿里百炼多模态向量）。Claude / DeepSeek 没有 embedding 接口；OpenRouter 必须显式配 `model` |
 | `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3` / **`dashscope → qwen3-vl-embedding`**。`openrouter` / `openai_compatible` 无安全默认，需要显式指定 |
 | `api_key` | string | `""` | v0.3.32+ embedding 专属 API Key。默认不会借用 `[llm.<provider>].api_key`；只有 `fallback_enabled=true` 时才允许旧配置借用 chat-side 凭据并打一条 WARNING。Ollama 不需要 |
 | `base_url` | string | `""` | v0.3.32+ embedding 专属 base URL。留空使用 provider 默认值（OpenAI → `api.openai.com/v1`、Ollama → `localhost:11434/v1`、Gemini → 官方 API）；Gemini 可填代理地址 |
 | `output_dimensionality` | int | `1024` | embedding 目标向量维度。默认 1024，与本地 Ollama `bge-m3` 对齐；Gemini 会传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时会传 `dimensions`。Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传参数，也不会把 cache 标成伪维度。设为 `0` 表示使用 provider 原生默认维度 |
 | `similarity_threshold` | float | `0.82` | 余弦相似度阈值，超过即视为"同主题" |
-| `fallback_enabled` | bool | `false` | 旧兼容开关；插件设置页选择 `fallback_provider` 时会同步写成 `true`，用于允许借用对应 chat provider 凭据 |
+| `fallback_enabled` | bool | `false` | 旧兼容开关；允许备选类型借用第一个同类型、已启用聊天实例的凭据 |
 | `fallback_provider` | string | `""` | 第二个 embedding 备选 Provider。留空 = 不 fallback；可填 `openai` / `gemini` / `ollama` / `openai_compatible`，不会再自动走 `ollama → gemini → openai` 链 |
 | `multimodal_enabled` | bool | `false` | 是否启用**封面图单独** embedding（image-only 向量，与文本同一模型空间），供 recommendation `precompute_delight_scores` 的封面视觉加成消费。默认关闭。开启后仍需当前 `model` 支持图像（如 `gemini-embedding-2`，或 `dashscope` + `qwen3-vl-embedding`）；本地 `ollama` + `bge-m3` 等纯文本模型会自动跳过，不报错。与 `[discovery].multimodal_evaluation_enabled`（vision LLM 评估）相互独立。**插件设置页与桌面 Web 设置的 Embedding 段均可直接勾选**（`dashscope` 也已加入 provider 下拉），无需手改 TOML |
 
@@ -232,37 +288,53 @@ similarity_threshold = 0.82
 multimodal_enabled = true   # 封面 image-only 向量；与文本同一空间
 ```
 
-说明：DashScope 多模态向量走**原生** `.../multimodal-embedding/multimodal-embedding` 接口，**不是** `compatible-mode/v1/embeddings`。聊天若要用通义，继续用 `[llm.openai_compatible]` + `compatible-mode/v1`；embedding 与 chat 凭据可共用同一把 `sk-` Key，但配置段彼此独立。
+说明：DashScope 多模态向量走**原生** `.../multimodal-embedding/multimodal-embedding` 接口，**不是** `compatible-mode/v1/embeddings`。聊天若要用通义，新建 `provider_type = "openai_compatible"` 的聊天实例并指向 `compatible-mode/v1`；embedding 与 chat 凭据可共用同一把 `sk-` Key，但配置段彼此独立。
 
 #### 配置页服务探测 API（v0.3.114+）
 
-插件 side panel 设置页和桌面 Web `/web` 设置页都可在「模型」tab 直接测试当前表单草稿里的 LLM / embedding 是否连通。该探测走一个**无写入**接口，不会保存 `config.toml`，也不会触发运行时热重载。
+桌面 Web `/web` 与插件 side panel 都可测试单个聊天实例、整条默认链和 embedding。插件可直接新建、编辑、删除实例并调整全局 `default_chain`；模块自定义链在插件中只读展示，需进入 PC Web 编辑。探测走一个**无写入**接口，不会保存 `config.toml`，也不会触发运行时热重载。
 
 ```http
 POST /api/config/probe-service
 Content-Type: application/json
 
 {
-  "kind": "llm",
+  "kind": "llm_chain",
   "config": {
     "llm": {
-      "default_provider": "openai_compatible",
-      "openai_compatible": {
-        "api_key": "sk-...",
-        "model": "llama-3.1-70b-versatile",
-        "base_url": "https://api.groq.com/openai/v1"
+      "routing_version": 2,
+      "default_chain": ["relay-primary", "relay-backup"],
+      "instances": {
+        "relay-primary": {
+          "name": "主中转",
+          "provider_type": "openai_compatible",
+          "enabled": true,
+          "api_key": "sk-...",
+          "model": "gpt-5-nano",
+          "base_url": "https://primary.example.com/v1"
+        },
+        "relay-backup": {
+          "name": "备用中转",
+          "provider_type": "openai_compatible",
+          "enabled": true,
+          "api_key": "sk-...",
+          "model": "gpt-5-nano",
+          "base_url": "https://backup.example.com/v1"
+        }
       }
     }
   }
 }
 ```
 
-`kind` 可为 `"llm"`、`"llm_fallback"` 或 `"embedding"`。后端会先读取当前 `load_config()`，再把请求里的 `config.llm` 按 `PUT /api/config` 的同一套规则合并到内存副本上，然后：
+后端先读取当前 `load_config()`，再把请求里的 `config.llm` 按 `PUT /api/config` 的同一套规则合并到内存副本上：
 
 | kind | 行为 | 成功条件 |
 |------|------|----------|
-| `llm` | 构建临时 `LLMRegistry`，对当前 `default_provider` 发送一条 `max_tokens=4096` 的最小 chat completion 请求 | provider 已注册、chat-capable，并返回非空最终 `content`；只返回 reasoning / thinking 时会显示明确失败诊断 |
-| `llm_fallback` | （v0.3.155+）同 `llm`，但目标是 `[llm].fallback_provider` 这一个精确 provider（不走 fallback 链）。备选未配置或与 `default_provider` 同名时以 `ok=false` + 明确说明拒绝，不是 500 | fallback provider 非空、与默认不同名、已注册且 chat-capable，并返回非空最终 `content` |
+| `llm_instance` | 通过请求体 `instance_id` 精确探测一个实例，不走 fallback | 实例已启用、可注册、chat-capable，并返回非空 `content` |
+| `llm_chain` | 从 `default_chain[0]` 开始真实执行整条顺序链 | 任一实例成功；响应的 `instance_id` 表明最终由谁处理 |
+| `llm` | 旧客户端兼容入口，精确探测全局首实例 | 首实例返回非空 `content` |
+| `llm_fallback` | 旧客户端兼容入口，精确探测链中第二项 | 第二实例存在且返回非空 `content` |
 | `embedding` | 构建临时 `EmbeddingService`，调用 `EmbeddingService.probe()` 绕过缓存真实取一次向量 | provider 已配置，并返回非空向量 |
 
 响应统一为：
@@ -270,10 +342,11 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "kind": "llm",
+  "kind": "llm_chain",
+  "instance_id": "relay-backup",
   "provider": "openai_compatible",
-  "model": "llama-3.1-70b-versatile",
-  "message": "LLM provider responded.",
+  "model": "gpt-5-nano",
+  "message": "LLM chain is available.",
   "error": "",
   "latency_ms": 428
 }
@@ -311,45 +384,45 @@ model = "bge-m3"
 
 CPU 即可跑（~100-200ms/次），跨 Mac / Win / Linux 一致。
 
-### `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]`
+### `[llm.routes.soul]` / `discovery` / `recommendation` / `evaluation`
 
-可选的 **per-module** LLM 覆盖（v0.3.5 起 `init` 向导 Phase 4 会问；也可以手填或通过 `agent_bootstrap.py --module-override` 传入）。每段同结构，留空 = 跟随 `[llm].default_provider`：
+每个模块默认继承全局 `default_chain`；需要隔离成本、速度、地区或模型能力时，可以改为自己的有序实例链。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `provider` | string | `""` | 留空跟随 `default_provider`；填 `openai` / `claude` / `gemini` / `deepseek` / `ollama` / `openrouter` / `openai_compatible` |
-| `model` | string | `""` | 留空跟随 `[llm.<provider>].model`；填具体模型名覆盖 |
+| `inherit` | bool | `true` | `true` 使用全局链，忽略本段 `chain` |
+| `chain` | list[string] | `[]` | `inherit = false` 时使用的实例 ID 顺序；至少一项 |
 
 四个模块在管线里的位置：
 
 | 段 | 用途 | 典型选型 |
 |---|---|---|
-| `[llm.soul]` | 灵魂画像生成（5 层 Event → Soul），稳定性优先 | 高质量模型，例如 Claude Sonnet / GPT-4o / Gemini 2.5 Pro |
-| `[llm.discovery]` | 关键词生成、候选评估，调用频次最高 | 廉价模型，例如 DeepSeek Chat / GPT-4o-mini / Gemini Flash |
-| `[llm.recommendation]` | 朋友式解释生成，影响最终用户体感 | 平衡型，例如 Claude Haiku / GPT-4o-mini |
-| `[llm.evaluation]` | 池子打分、相关度评估，高频后台调用 | 廉价模型 |
+| `[llm.routes.soul]` | 灵魂画像生成（5 层 Event → Soul），稳定性优先 | 高质量实例，例如 Claude Sonnet / GPT / Gemini Pro |
+| `[llm.routes.discovery]` | 关键词生成与来源抽取，调用频次高 | 低成本、低延迟实例 |
+| `[llm.routes.recommendation]` | 朋友式解释生成，影响最终用户体感 | 平衡型实例 |
+| `[llm.routes.evaluation]` | 池子打分、相关度评估，高频后台调用 | 低成本实例 |
 
 运行时路由（v0.3.75+）：
 
 - `LLMService` 不再用 caller 第一段朴素判断模块，而是内置 caller bucket。例：`soul.*` → soul，`discovery.keyword*`、`discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` → discovery，`recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` → evaluation，其他 `recommendation.*` → recommendation。
-- `provider` 非空时走 `LLMRegistry.complete_provider(provider, ...)` 精确调用该 provider，不走 fallback 链；调用仍以 `api.config_probe` maintenance 流量进入当前 runtime 的共享 total/background gate。该 provider 被 rate-limit 或返回错误时会直接报错，避免用户指定贵模型给画像却被静默改用默认便宜模型。
-- `model` 非空时作为单次调用的 `model=` 参数传给 provider，不会修改 provider 实例的默认模型；`provider` 留空但 `model` 非空时，使用当前 default provider + 该 per-call model。
-- `provider` 拼错或目标 provider 不是 chat-capable（例如 embedding-only Ollama）时，不会让保存配置失败；运行时会按模块 + provider 只 INFO 一次，然后降级到默认 provider 链。
+- `inherit = true` 时调用 `LLMRegistry.complete()`，完整继承全局链。
+- `inherit = false` 时调用 `LLMRegistry.complete_chain(route.chain, ...)`，只在该模块链内顺序降级；即使链在运行时全部不可用，也**不会越界回落到全局链**。
+- 保存时会阻止不存在、停用、重复或空的自定义链引用。
 
-例：发现/评估走 DeepSeek，画像走 Claude：
+例：发现/评估优先走低成本中转，画像优先走 Claude：
 
 ```toml
-[llm.soul]
-provider = "claude"
-model    = "claude-sonnet-4-5-20250929"
+[llm.routes.soul]
+inherit = false
+chain = ["claude-quality", "relay-backup"]
 
-[llm.discovery]
-provider = "deepseek"
-model    = "deepseek-v4-flash"
+[llm.routes.discovery]
+inherit = false
+chain = ["relay-cheap", "deepseek"]
 
-[llm.evaluation]
-provider = "deepseek"
-model    = "deepseek-v4-flash"
+[llm.routes.evaluation]
+inherit = false
+chain = ["relay-cheap", "deepseek"]
 ```
 
 > 通过 `agent_bootstrap.py` 的命令行写入：
@@ -359,6 +432,35 @@ model    = "deepseek-v4-flash"
 >   --module-override discovery=deepseek:deepseek-v4-flash \
 >   --module-override evaluation=deepseek:deepseek-v4-flash
 > ```
+
+bootstrap 会复用类型和模型都匹配的已有实例；只有模型不同才创建一个完整的派生实例并把模块链指向它。
+
+### 旧配置兼容与迁移
+
+旧的 `default_provider` / `fallback_provider`、`[llm.<provider>]` 和 `[llm.<module>] provider/model` 仍可直接加载和运行。读取旧文件不会自动改盘；`GET /api/config` 会返回等价的实例/调用链投影，用户在新版桌面设置页保存后才写成 v2。迁移规则会保留凭据、Base URL、模型和模块模型覆盖；同类型主备不再因为 Provider 名相同而折叠。旧样例曾为所有远程 Provider 预填默认模型，因此迁移时只投影被路由引用、带真实凭据或可免密运行的端点，不会把只有模板默认值的未启用远程分段变成实例并触发伪缺密钥错误。
+
+首次把一个已有旧格式文件保存成 v2 时，`save_config` 会先在同目录创建逐字节副本
+`config.toml.pre-llm-routing.bak`，权限沿用原文件。该备份只创建一次，之后即使再次迁移也绝不覆盖；
+新建 v2 文件、只读旧配置、旧格式保存和后续 v2 保存都不会额外生成备份。若备份已经存在，系统把它
+视为用户的永久恢复点。
+
+新二进制直接读取旧配置属于向前兼容；旧二进制则不认识 `instances`、`default_chain` 和
+`routes`，**不能直接拿 v2 的 `config.toml` 启动**。需要回退程序版本时，先在新版本运行：
+
+```bash
+openbiliclaw config-export-legacy
+# 默认输出 config.legacy.toml；不会覆盖当前 config.toml
+```
+
+导出采用旧格式能表达的确定性子集：保留全局第一项作为主 Provider，再保留后续第一个不同
+Provider 类型作为唯一 fallback；每种 Provider 类型只保留一个端点；模块只保留链首的
+Provider + model。多个同类型 Base URL / Token、全局第三项及之后、模块 fallback 无法写入旧
+schema，命令会逐项告警，不会静默宣称无损。Embedding 的独立配置原样保留。确认告警后应先停止
+daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出副本换成旧版本使用的
+`config.toml`。导出文件含明文凭据：POSIX 权限会收紧为 `0600`；Windows 上应放在仅当前账户
+可访问的目录。完整参数与操作示例见 [CLI 文档](cli.md#openbiliclaw-config-export-legacy)。
+
+旧版扩展仍可写固定 Provider 字段：后端只更新同类型的第一个匹配实例，不会删除、合并或重排其它同类型实例。新版扩展直接读写 v2 `instances` / `default_chain` / `routes`：可维护端点身份和全局链，保存时会完整回传模块路由，因而不会把 PC Web 配置的模块链压回旧格式；模块链本身仍由 PC Web 编辑。
 
 ### `[bilibili]`
 
@@ -632,7 +734,7 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 
 ### `[discovery]`
 
-**统一关键词规划器 / Discover 背压 / 评估输入**（`DiscoveryConfig`）。把"每平台各自定时调 LLM 生成搜索词"换成**缺口拉动的双缓冲背压模型**：一个关键词存储（cache + 历史 + 产出）夹在「生成」与「抓取」之间，生成只在缓存见底且池子有真实缺口时触发（一次合并 LLM 调用覆盖所有缺货平台，带历史去重 + 池子分布避让）。B 站 explore 方向也复用这条关键词存储：到达 `[scheduler].explore_refresh_hours` 的 refresh plan 窗口且 B 站有补货空间时，planner 会把 `explore_domains` 合并进同一次关键词生成，而不是新增配置项或单独 caller。同一段也承载 discovery evaluator 的可选封面图输入开关。本段**与 `[llm.discovery]` 是两个独立的表**——后者是 discovery 模块的 per-module LLM provider 覆盖，本段是规划器 / 背压 / 评估输入调参。完整设计见 [`docs/plans/2026-06-14-discover-backpressure-refactor-design.md`](../plans/2026-06-14-discover-backpressure-refactor-design.md) §6 参数表。
+**统一关键词规划器 / Discover 背压 / 评估输入**（`DiscoveryConfig`）。把"每平台各自定时调 LLM 生成搜索词"换成**缺口拉动的双缓冲背压模型**：一个关键词存储（cache + 历史 + 产出）夹在「生成」与「抓取」之间，生成只在缓存见底且池子有真实缺口时触发（一次合并 LLM 调用覆盖所有缺货平台，带历史去重 + 池子分布避让）。B 站 explore 方向也复用这条关键词存储：到达 `[scheduler].explore_refresh_hours` 的 refresh plan 窗口且 B 站有补货空间时，planner 会把 `explore_domains` 合并进同一次关键词生成，而不是新增配置项或单独 caller。同一段也承载 discovery evaluator 的可选封面图输入开关。本段**与 `[llm.routes.discovery]` 是两个独立的表**——后者选择 discovery 模块使用的 Provider 实例链，本段是规划器 / 背压 / 评估输入调参。完整设计见 [`docs/plans/2026-06-14-discover-backpressure-refactor-design.md`](../plans/2026-06-14-discover-backpressure-refactor-design.md) §6 参数表。
 
 > ✅ `unified_keyword_planner_enabled` **v0.3.124 起默认 `true`**：搜索词走统一规划器 + 关键词存储，本段其余字段随之生效。设为 `false` 可逐字回退到旧的逐平台搜索词生成路径（旧路径保留、回退无副作用）。
 
@@ -754,7 +856,7 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 浏览器插件的设置页通过后端 `/api/config` 读取和保存配置。当前 UI 已覆盖常用和高风险易漏项：
 
 - 基础：`language`、`data_dir`、`storage.db_path`
-- LLM：默认 provider、全局并发数、显式备选 provider、各 provider 的 key/model/base_url、DeepSeek `reasoning_effort`、OpenRouter headers、四个 per-module override
+- LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`
 - 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、八个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
@@ -768,11 +870,18 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 - masked key（例如 `sk-****abcd`）不会写回 `config.toml`，避免把真实密钥覆盖成星号。
 - 已有非空的 `model`、`base_url`、OpenRouter headers 和 embedding `model/base_url/api_key` 不会被空字符串覆盖；空值只在旧值本来为空时写入。
 - DeepSeek `reasoning_effort` 是例外：空字符串是有效配置值，表示关闭 thinking，会被 `/api/config` 保存并热重载。
+- 旧 schema 的 `openai_compatible.reasoning_effort` 即使被旧保存器物化为默认 `"medium"`，读取为 v2 投影时仍归一为空字符串，因为旧 adapter 实际从未发送它；原生 v2 实例中用户明确填写的值则完整保留。
 - `saved_sync.auto_sync_enabled` 只接受 JSON 布尔值；省略整个段表示“不更新”，但段或字段显式传 `null`、字符串或数字等非布尔输入都由 Pydantic 返回 422，不做 truthy / null 转换。
-- 需要真正清空 API Key 时，调用方必须传 `reset_fields`。当前允许值为 `llm.openai.api_key`、`llm.claude.api_key`、`llm.gemini.api_key`、`llm.deepseek.api_key`、`llm.openrouter.api_key`、`llm.openai_compatible.api_key`、`llm.embedding.api_key`；未知字段返回 400。
+- v2 实例编辑器只有在用户显式勾选“清除已保存密钥”时才会给该实例发送空 `api_key`；留空会保留现有密钥，masked echo 也不会被写盘。`reset_fields` 继续服务旧 Provider 分段和独立 embedding 配置；未知字段返回 400。
 - 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后，guided init 先严格生成完整画像和首轮可用推荐，init 终态后恢复后台循环并调度兴趣 / 避雷探针。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。
+
+## 模型列表发现（不写配置）
+
+`POST /api/config/discover-models` 接收 `instance_id` 和当前页面的 `config.llm` 草稿，在内存副本中精确构建该实例，并调用其 OpenAI-compatible `GET /models`。它不会调用 `save_config()`、不会创建迁移备份，也不会改变默认链；masked API Key 继续复用已保存密钥。PC Web、插件和 `/setup/` 都把结果填入可编辑的模型下拉框，失败时保留用户手填值。
+
+OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；接口返回的 Effort 候选是按 Provider / 模型生成的 `local_advisory`。用户可以继续手填，最终是否接受由具体服务在真实请求时决定。
 
 `PUT /api/config` 返回 `ConfigUpdateResponse`：
 
@@ -793,7 +902,7 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 |------|------|
 | `OPENBILICLAW_BILIBILI_COOKIE` | 集成测试用 B 站 Cookie |
 | `GOOGLE_API_KEY` | Gemini 官方推荐 API Key 环境变量，优先级高于 `GEMINI_API_KEY` |
-| `GEMINI_API_KEY` | Gemini 官方兼容环境变量，`default_provider=gemini` 时可替代 `llm.gemini.api_key` |
+| `GEMINI_API_KEY` | Gemini 官方兼容环境变量；启用的 Gemini 实例未显式配置密钥时可作为凭据来源 |
 | `OPENBILICLAW_PROXY_HOST` | Docker 运行时可选宿主机代理地址，默认 `host.docker.internal` |
 | `OPENBILICLAW_PROXY_PORT` | Docker 运行时可选宿主机代理端口，默认 `7897` |
 | `OPENBILICLAW_PROXY_TIMEOUT` | Docker 运行时代理探测超时（秒），默认 `1.0` |
@@ -848,11 +957,16 @@ language = "zh"
 data_dir = "data"
 
 [llm]
-default_provider = "deepseek"
+routing_version = 2
+default_chain = ["deepseek"]
 
-[llm.deepseek]
+[llm.instances.deepseek]
+name = "DeepSeek"
+provider_type = "deepseek"
+enabled = true
 api_key = "sk-..."
 model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com/v1"
 
 [bilibili]
 auth_method = "cookie"

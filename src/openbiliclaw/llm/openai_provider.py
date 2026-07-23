@@ -587,6 +587,24 @@ class OpenAIProvider(LLMProvider):
             )
             return []
 
+    async def list_models(self) -> list[str]:
+        """List model IDs advertised by the OpenAI-compatible endpoint.
+
+        ``GET /models`` is part of the OpenAI wire protocol, but it only
+        standardizes basic model metadata. Callers must not infer chat,
+        embedding, or reasoning capabilities from presence in this list.
+        """
+
+        page = await self._send_with_retry(self._create_model_list)
+        identifiers = {
+            str(getattr(item, "id", "") or "").strip()
+            for item in (getattr(page, "data", None) or [])
+        }
+        return sorted((identifier for identifier in identifiers if identifier), key=str.casefold)
+
+    async def _create_model_list(self) -> Any:
+        return await self._client.models.list()
+
     def _supports_embedding_dimensions(self, model: str) -> bool:
         if not model.startswith("text-embedding-3-"):
             return False
@@ -602,23 +620,24 @@ class OpenAIProvider(LLMProvider):
         return self._reasoning_effort if requested is None else requested.strip()
 
     def _openai_reasoning_effort(self, model: str, effort: str) -> str | None:
-        """Map the portable effort to an official OpenAI reasoning request.
+        """Return an explicit OpenAI-wire effort when the route can honor it.
 
-        Only api.openai.com gets this native field.  Generic compatible
-        gateways, Azure deployment aliases, Ollama, and ordinary GPT-4 models
-        may reject it even though they share the OpenAI wire format.
+        Official OpenAI reasoning models receive documented values verbatim.
+        A generic ``openai_compatible`` endpoint receives a non-empty,
+        user-selected value as an advisory pass-through; unknown gateways can
+        reject it, which is why the settings UI keeps the field optional and
+        pairs it with a real connection probe. Other adapters use their own
+        provider-specific mapping.
         """
 
+        normalized = effort.strip().lower()
+        if not normalized:
+            return None
+        if self._provider_name == "openai_compatible":
+            return normalized
         if not self._is_official_openai_endpoint() or not self._is_openai_reasoning_model(model):
             return None
-        normalized = effort.strip().lower()
-        # ``low`` is the broadest portable low-cost level across GPT-5 and the
-        # o-series.  Some generations reject ``none`` / ``minimal`` / ``xhigh``.
-        if normalized in {"", "none", "minimal"}:
-            return "low"
-        if normalized in {"max", "xhigh"}:
-            return "high"
-        if normalized in {"low", "medium", "high"}:
+        if normalized in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
             return normalized
         return DEFAULT_REASONING_EFFORT
 

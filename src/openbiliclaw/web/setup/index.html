@@ -45,6 +45,14 @@
     .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
     .hint a { color: var(--accent); text-decoration: none; }
     .hint a:hover { text-decoration: underline; }
+    .model-discovery-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; }
+    .model-discovery-row button { min-width: 96px; padding-inline: 14px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+    .model-discovery-row button:hover { border-color: var(--accent); color: var(--accent); }
+    .model-discovery-row button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .model-discovery-row button:disabled { opacity: .55; cursor: wait; }
+    .model-discovery-status[data-tone="success"] { color: var(--ok); }
+    .model-discovery-status[data-tone="error"] { color: var(--err); }
+    .model-discovery-status[data-tone="pending"] { color: var(--accent); }
     .row-actions { display: flex; gap: 10px; justify-content: space-between; margin-top: 26px; }
     button {
       appearance: none; border: 0; border-radius: 11px; padding: 12px 20px; font-size: 14px; font-weight: 700;
@@ -106,6 +114,10 @@
     @media (prefers-reduced-motion: reduce) {
       .progress-fill.indeterminate { animation: none; }
     }
+    @media (max-width: 480px) {
+      .model-discovery-row { grid-template-columns: 1fr; }
+      .model-discovery-row button { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -156,8 +168,26 @@
         </div>
 
         <label for="model">模型名</label>
-        <input id="model" type="text" placeholder="填写模型 ID，例如 deepseek-v4-flash">
+        <div class="model-discovery-row">
+          <input id="model" list="modelOptions" type="text" autocomplete="off" spellcheck="false" placeholder="选择接口返回的模型，或直接手填" aria-describedby="modelHint modelDiscoveryStatus">
+          <button id="refreshModels" type="button">获取模型</button>
+        </div>
+        <datalist id="modelOptions"></datalist>
         <div class="hint" id="modelHint"></div>
+        <div class="hint model-discovery-status" id="modelDiscoveryStatus" aria-live="polite">OpenAI 兼容端点可从 /models 获取；接口不支持时仍可手填。</div>
+
+        <label for="reasoningEffort">Reasoning effort</label>
+        <input id="reasoningEffort" list="reasoningEffortOptions" type="text" autocomplete="off" spellcheck="false" placeholder="Auto（留空不显式指定）" aria-describedby="reasoningEffortHint">
+        <datalist id="reasoningEffortOptions">
+          <option value="none"></option>
+          <option value="minimal"></option>
+          <option value="low"></option>
+          <option value="medium"></option>
+          <option value="high"></option>
+          <option value="xhigh"></option>
+          <option value="max"></option>
+        </datalist>
+        <div class="hint" id="reasoningEffortHint">协议没有 Effort 枚举接口；这里是本地建议，也支持手填，保存后会做真实连接测试。</div>
 
         <div class="msg" id="msg0"></div>
         <div class="row-actions">
@@ -259,6 +289,13 @@
       openrouter: "openai/gpt-5-nano",
       openai_compatible: "",
     };
+    const MODEL_DISCOVERY_PROVIDERS = new Set([
+      "openai",
+      "deepseek",
+      "openrouter",
+      "ollama",
+      "openai_compatible",
+    ]);
     // Platform roster and source-auth interpretation come from the module the
     // desktop page and the extension side panel also load, so this wizard can
     // never disagree with them about which sources exist or what counts as
@@ -320,6 +357,9 @@
     // valid saved configuration failed its very first real setup probe.
     const savedProviderConfigs = new Map();
     const providerDrafts = new Map();
+    let savedLlmInstances = {};
+    let savedLlmDefaultChain = [];
+    let savedLlmRoutes = {};
     let activeProvider = "";
 
     function setStep(n) {
@@ -343,6 +383,7 @@
         model: $("#model").value.trim(),
         base_url: $("#baseUrl").value.trim(),
         api_flavor: $("#apiFlavor").value,
+        reasoning_effort: $("#reasoningEffort").value.trim(),
       };
     }
 
@@ -361,6 +402,7 @@
       $("#model").value = String(cfg.model || DEFAULT_MODELS[next] || "");
       $("#baseUrl").value = String(cfg.base_url || "");
       $("#apiFlavor").value = cfg.api_flavor === "responses" ? "responses" : "";
+      $("#reasoningEffort").value = String(cfg.reasoning_effort || "");
       activeProvider = next;
       clearMsg("#msg0");
       renderProvider();
@@ -386,6 +428,140 @@
       $("#modelHint").textContent = defaultModel
         ? "已填入推荐默认模型，可按你的服务商实际模型名修改。"
         : "OpenAI 兼容接口通常需要填写你的部署名或第三方模型 ID。";
+      resetModelDiscovery();
+    }
+
+    function renderDatalist(id, values, currentValue = "") {
+      const list = $(id);
+      if (!(list instanceof HTMLDataListElement)) return;
+      const normalized = [...new Set(
+        [...(Array.isArray(values) ? values : []), currentValue]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      )];
+      list.replaceChildren(...normalized.map((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        return option;
+      }));
+    }
+
+    function setModelDiscoveryStatus(tone, text) {
+      const status = $("#modelDiscoveryStatus");
+      status.dataset.tone = tone || "neutral";
+      status.textContent = text;
+    }
+
+    function resetModelDiscovery() {
+      renderDatalist("#modelOptions", []);
+      const provider = $("#provider").value;
+      const supported = MODEL_DISCOVERY_PROVIDERS.has(provider);
+      const button = $("#refreshModels");
+      button.hidden = !supported;
+      button.disabled = false;
+      button.textContent = "获取模型";
+      setModelDiscoveryStatus(
+        "neutral",
+        supported
+          ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+          : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。",
+      );
+    }
+
+    function providerInstanceId(provider) {
+      let instanceId = savedLlmDefaultChain.find(
+        (id) => savedLlmInstances[id]?.provider_type === provider,
+      ) || Object.keys(savedLlmInstances).find(
+        (id) => savedLlmInstances[id]?.provider_type === provider,
+      ) || "";
+      if (instanceId) return instanceId;
+      const baseId = `${provider.replaceAll("_", "-")}-main`;
+      instanceId = baseId;
+      let suffix = 2;
+      while (savedLlmInstances[instanceId]) instanceId = `${baseId}-${suffix++}`;
+      return instanceId;
+    }
+
+    function buildSetupModelDiscoveryRequest() {
+      const provider = $("#provider").value;
+      const instanceId = providerInstanceId(provider);
+      const existing = savedLlmInstances[instanceId] || {};
+      const typedKey = $("#apiKey").value.trim();
+      const instance = {
+        ...existing,
+        name: existing.name || provider,
+        provider_type: provider,
+        enabled: true,
+        api_key: typedKey || existing.api_key || "",
+        model: $("#model").value.trim(),
+        base_url: $("#baseUrl").value.trim(),
+        api_flavor: provider === "openai_compatible" ? $("#apiFlavor").value : "",
+        reasoning_effort: $("#reasoningEffort").value.trim(),
+      };
+      return {
+        instanceId,
+        config: {
+          llm: {
+            routing_version: 2,
+            instances: { ...savedLlmInstances, [instanceId]: instance },
+            default_chain: [...savedLlmDefaultChain],
+            routes: savedLlmRoutes,
+          },
+        },
+      };
+    }
+
+    async function discoverSetupModels() {
+      const button = $("#refreshModels");
+      if (button.disabled) return;
+      const request = buildSetupModelDiscoveryRequest();
+      button.disabled = true;
+      button.textContent = "获取中…";
+      setModelDiscoveryStatus("pending", "正在向当前端点请求 /models…");
+      try {
+        const response = await fetchWithTimeout(
+          "/api/config/discover-models",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              instance_id: request.instanceId,
+              config: request.config,
+            }),
+          },
+          25000,
+        );
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(result?.detail || `HTTP ${response.status}`);
+        }
+        if (Array.isArray(result?.reasoning_efforts) && result.reasoning_efforts.length) {
+          renderDatalist(
+            "#reasoningEffortOptions",
+            result.reasoning_efforts,
+            $("#reasoningEffort").value,
+          );
+        }
+        if (!result?.ok) {
+          throw new Error(result?.error || "端点没有返回模型列表");
+        }
+        const models = Array.isArray(result.models) ? result.models : [];
+        renderDatalist("#modelOptions", models, $("#model").value);
+        setModelDiscoveryStatus(
+          "success",
+          models.length
+            ? `已获取 ${models.length} 个模型；可从下拉选择，也可继续手填。`
+            : "接口返回了空列表；保留当前手填值。",
+        );
+      } catch (error) {
+        setModelDiscoveryStatus(
+          "error",
+          `获取失败：${error?.message || "未知错误"}；当前输入未改动，仍可手填。`,
+        );
+      } finally {
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
     }
 
     function showMsg(id, text, kind) {
@@ -410,9 +586,28 @@
       if (baseUrl && (provider === "openai_compatible" || provider === "claude")) pcfg.base_url = baseUrl;
       if (provider === "openai_compatible") pcfg.api_flavor = $("#apiFlavor").value;
       pcfg.model = model;
+      pcfg.reasoning_effort = $("#reasoningEffort").value.trim();
+      const instanceId = providerInstanceId(provider);
+      const existingInstance = savedLlmInstances[instanceId] || {};
+      const instance = {
+        ...existingInstance,
+        name: existingInstance.name || provider,
+        provider_type: provider,
+        enabled: true,
+        ...pcfg,
+      };
+      if (apiKey) instance.api_key = apiKey;
       const payload = {
         suppress_background_llm_work: true,
-        llm: { default_provider: provider, [provider]: pcfg },
+        llm: {
+          routing_version: 2,
+          instances: { ...savedLlmInstances, [instanceId]: instance },
+          default_chain: [
+            instanceId,
+            ...savedLlmDefaultChain.filter((id) => id !== instanceId),
+          ],
+          routes: savedLlmRoutes,
+        },
       };
 
       const btn = $("#saveLlm");
@@ -433,6 +628,11 @@
         const savedFields = currentProviderFields();
         providerDrafts.set(provider, savedFields);
         savedProviderConfigs.set(provider, savedFields);
+        savedLlmInstances = { ...savedLlmInstances, [instanceId]: instance };
+        savedLlmDefaultChain = [
+          instanceId,
+          ...savedLlmDefaultChain.filter((id) => id !== instanceId),
+        ];
         if (apiKey) savedKeyProviders.add(provider);
         $("#doneLlm").textContent = "已连接 · " + provider;
         setStep(1);
@@ -1284,6 +1484,9 @@
         if (r.ok) {
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
+          savedLlmInstances = { ...(llm.instances || {}) };
+          savedLlmDefaultChain = [...(llm.default_chain || [])];
+          savedLlmRoutes = { ...(llm.routes || {}) };
           const bangumiUsername = (data.config || data)?.sources?.bangumi?.username || "";
           if (!initBangumiUsernameTouched) {
             initBangumiUsername = String(bangumiUsername);
@@ -1341,6 +1544,9 @@
     })();
 
     $("#provider").addEventListener("change", switchProvider);
+    $("#refreshModels").addEventListener("click", () => { void discoverSetupModels(); });
+    $("#baseUrl").addEventListener("input", resetModelDiscovery);
+    $("#apiKey").addEventListener("input", resetModelDiscovery);
     $("#saveLlm").addEventListener("click", saveLlm);
     $("#back1").addEventListener("click", () => setStep(0));
     $("#next1").addEventListener("click", () => setStep(2));

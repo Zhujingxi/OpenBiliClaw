@@ -312,7 +312,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证 LLM provider 和 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X、知乎和 Reddit 数据只有你明确同意才会进入初始画像。Bangumi discovery 无需登录；只有你填写公开用户名时，公开收藏才会参与初始化画像。
+AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X、知乎和 Reddit 数据只有你明确同意才会进入初始画像。Bangumi discovery 无需登录；只有你填写公开用户名时，公开收藏才会参与初始化画像。
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
@@ -352,7 +352,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集 LLM provider、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证 LLM provider 和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Bangumi 可在启动后的 `/setup/` 或设置页显式开启；Bangumi 无需登录，公开收藏初始化需填写公开用户名。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Bangumi 可在启动后的 `/setup/` 或设置页显式开启；Bangumi 无需登录，公开收藏初始化需填写公开用户名。不确定的选项直接回车或选默认。
 
 </details>
 
@@ -576,13 +576,13 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🔬 **自动化评测优化** — 5 个模块各带 LLM-as-judge 自优化循环，prompt 质量随轮次自动提升
 - 🔒 **完全私有** — 所有数据本地 SQLite，LLM 用你自己的 Key，每个实例只为你一个人构建
 - 🔌 **本地 embedding** — 可选 Ollama + bge-m3，CPU 即可，无需额外 API Key
-- 🔧 **完全可控** — 按模块换 LLM、直接编辑画像、写自定义 Skill 扩展发现策略
+- 🔧 **完全可控** — 同类型 LLM 可配置多个独立渠道，拖拽全局 / 模块故障切换链；也可直接编辑画像、写自定义 Skill
 
 ## 🏛️ 架构概览
 
 ```text
 interactive（对话 / 配置探测）───────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ 有序实例链 ─ Provider 适配
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  ├─ 低库存 supply 含探索词 / 来源抽取
@@ -593,6 +593,9 @@ background ─ background admission (default 3) ──────┘
 
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
+
+配置草稿 → /api/config/discover-models → 精确实例 GET /models（不写配置）
+         → 可编辑模型下拉 + 本地 Effort 建议（协议不提供能力枚举）
 ```
 
 ```
@@ -612,7 +615,8 @@ background ─ background admission (default 3) ──────┘
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
-│   LLM 适配层 · 多平台源适配（SourceAdapter）        │
+│   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
+│   配置草稿 → 精确实例 /models → 可编辑选择（不写盘）      │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
@@ -716,7 +720,7 @@ OpenBiliClaw/
 |------|------|
 | 后端 | Python 3.11+ |
 | 浏览器插件 | TypeScript + Chrome Extension (Manifest V3) |
-| LLM | 内置 Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama；支持任何兼容 OpenAI 协议的服务；OpenAI provider 可实验性复用 Codex CLI OAuth |
+| LLM | 同一 Provider 类型可建多个独立 Base URL / token / model 实例，并配置全局及模块有序降级链；首次迁移自动保留旧配置备份，`config-export-legacy` 可生成旧版副本；内置 Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama，兼容任意 OpenAI 协议服务；OpenAI 可实验性复用 Codex CLI OAuth |
 | B 站交互 | 自研 API 客户端 (WBI 签名 · v_voucher 自动恢复 · 速率控制) |
 | 小红书交互 | 扩展 DOM/state 元数据提取 + 插件任务调度；滚动型初始化会前台打开 `/explore` 并点击页面 profile 入口（零后端爬取） |
 | 抖音交互 | 扩展 DOM + MAIN-world 被动 fetch tap + 插件任务调度；初始化导入发布 / 收藏 / 点赞 / 关注信号，search / hot / feed discovery 从抖音首页模拟 DOM 操作触发加载，search/feed 被动收集页面响应 / 渲染结果，hot 可用热榜 `group_id` seed 走已登录页面 related fallback（零后端代登录） |

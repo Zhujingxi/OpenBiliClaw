@@ -308,7 +308,7 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that both the configured LLM provider and embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -348,7 +348,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, then asks for the LLM provider, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the LLM and embedding services, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, and Bangumi can be enabled explicitly afterward in `/setup/` or settings; Bangumi needs no login, while public-collection init requires a public username. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for the preferred LLM instance, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the global LLM instance chain and embedding service, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, and Bangumi can be enabled explicitly afterward in `/setup/` or settings; Bangumi needs no login, while public-collection init requires a public username. If unsure, press Enter or choose the default.
 
 </details>
 
@@ -572,13 +572,13 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
-- 🔧 **Fully Controllable** — swap LLMs per module, edit your profile directly, write custom Skills to extend discovery
+- 🔧 **Fully Controllable** — create multiple independent channels of the same LLM type and drag global or per-module failover chains; edit your profile or add custom Skills
 
 ## 🏛️ Architecture Overview
 
 ```text
 interactive (dialogue / config probe) ──────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  ├─ low-stock supply includes explore queries / source extraction
@@ -589,6 +589,9 @@ background ─ background admission (default 3) ──────┘
 
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
+
+config draft → /api/config/discover-models → exact instance GET /models (no write)
+             → editable model combobox + local effort advisory (not a protocol capability)
 ```
 
 ```
@@ -609,7 +612,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│   LLM adapters · Source adapters (SourceAdapter) │
+│ Module route → LLM instance chain → adapter · SourceAdapter │
+│ Config draft → exact-instance /models → editable selection (no write) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │
 │ Bangumi public API → search/ranked/date producer → shared eval │
@@ -703,7 +707,7 @@ OpenBiliClaw/
 |--------|-----------|
 | Backend | Python 3.11+ |
 | Browser Extension | TypeScript + Chrome Extension (Manifest V3) |
-| LLM | Built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama; any OpenAI-compatible endpoint works via custom base_url; OpenAI can experimentally reuse Codex CLI OAuth |
+| LLM | Multiple independent Base URL / token / model instances per provider type, with ordered global and per-module failover chains; first migration keeps a permanent legacy backup and `config-export-legacy` creates an old-version copy; built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama; any OpenAI-compatible endpoint works; OpenAI can experimentally reuse Codex CLI OAuth |
 | Bilibili API | Custom client (WBI signing · v_voucher auto-recovery · rate control) |
 | Xiaohongshu | Extension DOM/state extraction + task dispatch; scrolling init imports open `/explore` in the foreground, click the page's profile entry, then use bounded scrolling and partial batches; no backend crawling |
 | Douyin | Extension DOM + MAIN-world passive fetch tap + task dispatch; init imports post / favorite / like / follow signals; search / hot / feed discovery starts from the Douyin home page and uses DOM interactions to trigger loading; search/feed passively collect page responses / rendered results, and hot can use a hot-board `group_id` seed as a logged-in related fallback; no backend login crawling |

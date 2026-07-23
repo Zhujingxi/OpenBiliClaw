@@ -120,7 +120,7 @@ $env:MODE="docker"; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliCl
 3. `docker compose up -d --build` 启动后端和 Ollama embedding sidecar。
 4. 把确认后的 `config.toml` / Cookie 文件同步到容器 `/app/runtime`。
 5. 等浏览器扩展把 B 站 Cookie 推到 `http://127.0.0.1:8420/api/bilibili/cookie`。
-6. 在容器运行时里检查默认 LLM provider 和 embedding 服务。
+6. 在容器运行时里按顺序检查全局 LLM 实例链，并单独检查 embedding 服务。
 7. 检查通过后自动运行 `openbiliclaw init`。
 
 缺 LLM Key、缺 Cookie、缺来源确认时，bootstrap 会停在明确的 `needs_secrets` / `needs_decisions` 状态并打印继续命令；这不是最终成功状态。凭据和选择齐全后，bootstrap 会先做真实服务检查。如果返回 `service_check_failed`，说明 init 尚未运行，先修 API key / base_url / model / Ollama 后再重跑同一条安装或 bootstrap 命令。
@@ -179,7 +179,29 @@ docker exec -it openbiliclaw-backend vi /app/runtime/config.toml
 
 ### LLM 配置
 
-安装脚本 / bootstrap 会按你选的 provider 自动写好 `[llm.<provider>]` 段。如果你想手动改，下面是对照表（按推荐顺序排列）：
+安装脚本 / bootstrap 会创建或复用一个 `[llm.instances.<id>]` 端点实例，并把它提升到 `default_chain` 首位；已有实例和后续故障切换顺序不会被删除。每个实例都独立保存 `provider_type`、Base URL、token 与 model，同一种类型可以配置多个渠道。如果你想手动改，下面是对照表（按推荐顺序排列）：
+
+```toml
+[llm]
+routing_version = 2
+default_chain = ["deepseek-official", "relay-backup"]
+
+[llm.instances.deepseek-official]
+name = "DeepSeek 官方"
+provider_type = "deepseek"
+enabled = true
+api_key = "sk-..."
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com/v1"
+
+[llm.instances.relay-backup]
+name = "备用中转"
+provider_type = "openai_compatible"
+enabled = true
+api_key = "relay-..."
+model = "deepseek-v4-flash"
+base_url = "https://relay.example.com/v1"
+```
 
 | Provider | 是否要 Key | 适合谁 | 备注 |
 |---|---|---|---|
@@ -188,14 +210,14 @@ docker exec -it openbiliclaw-backend vi /app/runtime/config.toml
 | `openai` | ✅ | 已有 OpenAI 账户 | base_url 留空 = `https://api.openai.com/v1`；自带 embedding endpoint |
 | `claude` | ✅ | Anthropic 账户 | 高质量推理；无 embedding 接口，需独立配置 `[llm.embedding]` |
 | `openrouter` | ✅ | 想一个 Key 跑多家模型 | 按调用计费；embedding 不可靠，建议独立配置 Ollama / Gemini / OpenAI embedding |
-| `ollama` | ❌ | 完全离线 / 不要 Key / 16GB+ 内存 | CPU 推理首次响应慢（10-60s）。Docker 里 `[llm.ollama] base_url` 必须设成 `http://host.docker.internal:11434/v1` 才能从容器访问宿主机的 Ollama |
-| OpenAI 协议兼容自建网关（高级） | ✅ 通常需要 | 自己有 vLLM / LMStudio / Azure / OneAPI / 团队 LLM 网关 | 写到 `[llm.openai_compatible]` 段，关键是显式 `base_url` 字段。**普通用户不要选这个** |
+| `ollama` | ❌ | 完全离线 / 不要 Key / 16GB+ 内存 | CPU 推理首次响应慢（10-60s）。Docker 里的 Ollama chat 实例必须把 `base_url` 设成 `http://host.docker.internal:11434/v1` 才能访问宿主机 |
+| OpenAI 协议兼容自建网关（高级） | ✅ 通常需要 | 自己有 vLLM / LMStudio / Azure / OneAPI / 团队 LLM 网关 | 使用 `provider_type="openai_compatible"`，必须显式配置 `base_url`。**普通用户不要选这个** |
 
-> 「OpenAI 官方」 ≠ 「OpenAI 协议兼容自建网关」：向导把这两个拆成独立菜单项，OpenAI 官方写 `[llm.openai]`，协议兼容网关写 `[llm.openai_compatible]`。
+> 「OpenAI 官方」 ≠ 「OpenAI 协议兼容自建网关」：向导把这两个拆成独立菜单项，并创建不同 `provider_type` 的实例；它们可以同时保留在 registry 和调用链中。
 >
-> v0.3.20+：当 `--provider openai` 显式给出但 `--llm-base-url` 未给（或选了官方），bootstrap 会自动清空 `[llm.openai] base_url`，让 SDK 回到 `https://api.openai.com/v1`——之前从自建网关切回 OpenAI 官方时 base_url 残留导致继续打老网关的 bug 已修。
+> 当 `--provider openai` 显式给出但 `--llm-base-url` 未给（或选了官方），bootstrap 会清空它选中的 OpenAI 实例的旧 gateway URL，让 SDK 回到 `https://api.openai.com/v1`；其他实例和链顺序不受影响。旧配置文件仍按 `[llm.openai]` 兼容处理。
 
-**Per-module 覆盖（可选）**：在 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 段单独指定 `provider` + `model`。典型用法：发现 / 评估走便宜模型，灵魂画像走高质量模型。详见 [docs/modules/config.md](modules/config.md)。
+**分模块链（可选）**：`[llm.routes.soul/discovery/recommendation/evaluation]` 默认 `inherit=true`；也可设 `inherit=false` 并提供有序 `chain`。典型用法是发现 / 评估优先便宜渠道，Soul 优先高质量渠道；自定义链耗尽后不会越界回到全局链。详见 [docs/modules/config.md](modules/config.md)。
 
 ## 日常命令
 
@@ -305,9 +327,12 @@ docker compose up -d --build
 如使用宿主机上的 Ollama，需确保 Ollama 监听 `0.0.0.0`，并在配置中设置：
 
 ```toml
-[llm.ollama]
+[llm.instances.ollama-host]
+name = "宿主机 Ollama"
+provider_type = "ollama"
+enabled = true
 model = "llama3"
-base_url = "http://host.docker.internal:11434"
+base_url = "http://host.docker.internal:11434/v1"
 ```
 
 ### 本地 embedding provider（Ollama + bge-m3）
@@ -331,7 +356,7 @@ model = "bge-m3"
 base_url = "http://host.docker.internal:11434/v1"
 ```
 
-注意：容器需要能访问宿主机的 Ollama；embedding 现在读取 `[llm.embedding].base_url`，不会自动复用 `[llm.ollama].base_url`。
+注意：容器需要能访问宿主机的 Ollama；embedding 读取自己的 `[llm.embedding].base_url`，默认不会自动复用 chat 实例地址。只有显式开启 embedding 兼容 fallback 时，才可能借用首个启用的同类型 chat 实例。
 
 ## 常见问题
 

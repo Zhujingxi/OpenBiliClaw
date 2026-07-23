@@ -1099,6 +1099,83 @@
     .source-verify-btn:disabled:hover { background: var(--surface); color: var(--fg-2); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
     .settings-section-title { grid-column: 1 / -1; margin: var(--space-2) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-soft); color: var(--fg); font-weight: 750; }
     .settings-panel .settings-section-title:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+    .llm-routing-section { grid-column: 1 / -1; display: grid; gap: var(--space-4); min-width: 0; padding: clamp(16px, 2vw, 24px); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 24%); box-shadow: var(--elev-ring); }
+    .llm-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); min-width: 0; }
+    .llm-section-head h3, .llm-module-head h4 { margin: 0; color: var(--fg); }
+    .settings-section-kicker { margin: 0 0 4px; color: var(--accent); font-family: var(--font-mono); font-size: 11px; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
+    .llm-section-head .settings-note-inline { margin: 6px 0 0; }
+    .llm-add-instance { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; cursor: pointer; }
+    .llm-add-instance svg, .llm-instance-dialog-head svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+    .llm-instance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); min-width: 0; }
+    .llm-instance-card { display: grid; gap: var(--space-3); min-width: 0; padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
+    .llm-instance-card:hover { border-color: color-mix(in oklab, var(--accent), var(--border-soft) 58%); box-shadow: var(--elev-raised); }
+    .llm-instance-card[data-enabled="false"] { background: color-mix(in oklab, var(--surface), var(--bg) 46%); opacity: .78; }
+    .llm-instance-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+    .llm-instance-card-title { min-width: 0; }
+    .llm-instance-card-title strong { display: block; overflow: hidden; color: var(--fg); font-size: var(--text-base); text-overflow: ellipsis; white-space: nowrap; }
+    .llm-instance-card-title code { display: block; margin-top: 3px; overflow: hidden; color: var(--muted); font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .llm-instance-badges, .llm-reference-list { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+    .llm-instance-badge { display: inline-flex; align-items: center; min-height: 23px; padding: 2px 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), var(--bg) 35%); color: var(--fg-2); font-size: 11px; font-weight: 700; }
+    .llm-instance-badge[data-tone="success"] { border-color: color-mix(in oklab, var(--success), var(--border-soft) 55%); color: var(--success); }
+    .llm-instance-badge[data-tone="muted"] { color: var(--muted); }
+    .llm-instance-meta { display: grid; gap: 5px; min-width: 0; margin: 0; color: var(--muted); font-size: var(--text-sm); }
+    .llm-instance-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .llm-instance-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+    .llm-instance-actions .pill-btn { min-height: 30px; padding: 0 var(--space-3); font-size: 12px; cursor: pointer; }
+    .llm-instance-probe { min-height: 20px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+    .llm-instance-probe[data-tone="success"] { color: var(--success); }
+    .llm-instance-probe[data-tone="error"] { color: var(--danger); }
+    .llm-empty-state { grid-column: 1 / -1; display: grid; place-items: center; min-height: 120px; padding: var(--space-5); border: 1px dashed var(--border-soft); border-radius: var(--radius-md); color: var(--muted); text-align: center; }
+    .llm-runtime-tuning { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: var(--space-3); }
+    .llm-chain-list { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; list-style: none; }
+    .llm-chain-item { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; padding: 10px var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); cursor: grab; transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard); }
+    .llm-chain-item:active { cursor: grabbing; }
+    .llm-chain-item.is-dragging { opacity: .45; }
+    .llm-chain-item.is-drop-target { border-color: var(--accent); background: var(--accent-subtle); }
+    .llm-chain-position { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 50%); color: var(--muted); font-family: var(--font-mono); font-size: 12px; font-weight: 750; }
+    .llm-chain-copy { min-width: 0; }
+    .llm-chain-copy strong, .llm-chain-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .llm-chain-copy strong { color: var(--fg); font-size: var(--text-sm); }
+    .llm-chain-copy small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .llm-chain-actions { display: inline-flex; align-items: center; gap: 4px; }
+    .llm-chain-action { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--muted); cursor: pointer; transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
+    .llm-chain-action:hover { border-color: var(--border-soft); background: color-mix(in oklab, var(--surface), var(--bg) 42%); color: var(--fg); }
+    .llm-chain-action:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .llm-chain-action:disabled { opacity: .3; cursor: default; }
+    .llm-chain-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .llm-chain-add-row { display: flex; align-items: end; gap: var(--space-2); min-width: 0; }
+    .llm-chain-add-row select { min-width: 0; min-height: 38px; flex: 1; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); padding: 8px var(--space-3); cursor: pointer; }
+    .llm-chain-picker { flex: 1; min-width: 0; }
+    .llm-chain-add-row .pill-btn { flex: 0 0 auto; cursor: pointer; }
+    .llm-module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); min-width: 0; }
+    .llm-module-card { display: grid; align-content: start; gap: var(--space-3); min-width: 0; padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
+    .llm-module-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+    .llm-module-head p { margin: 4px 0 0; color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+    .settings-field.compact { min-width: 132px; }
+    .settings-field.compact span { font-size: 11px; color: var(--muted); }
+    .settings-field.compact select { padding-block: 7px; }
+    .llm-module-custom { display: grid; gap: var(--space-2); min-width: 0; padding-top: var(--space-2); border-top: 1px solid var(--border-soft); }
+    .llm-chain-list.compact .llm-chain-item { grid-template-columns: 28px minmax(0, 1fr) auto; gap: var(--space-2); padding: 8px; }
+    .llm-chain-list.compact .llm-chain-position { width: 26px; height: 26px; }
+    .llm-instance-dialog { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: var(--space-4); }
+    .llm-instance-dialog[hidden] { display: none; }
+    .llm-instance-dialog-backdrop { position: absolute; inset: 0; background: color-mix(in oklab, var(--bg), transparent 22%); backdrop-filter: blur(5px); }
+    .llm-instance-dialog-panel { position: relative; z-index: 1; display: grid; gap: var(--space-4); width: min(720px, 100%); max-height: min(88vh, 860px); overflow: auto; padding: clamp(18px, 3vw, 28px); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--elev-raised); }
+    .llm-instance-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+    .llm-instance-dialog-head h3 { margin: 0; }
+    .llm-instance-dialog-head .icon-btn { cursor: pointer; }
+    .llm-instance-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+    .llm-instance-id-hint { margin: -5px 0 0; }
+    .llm-discovery-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: var(--space-2); min-width: 0; }
+    .llm-discovery-control .llm-discovery-button { min-height: 40px; padding-inline: var(--space-3); white-space: nowrap; font-size: var(--text-sm); }
+    .llm-discovery-control .llm-discovery-button:disabled { opacity: 0.58; cursor: wait; }
+    .llm-field-help { min-height: 18px; color: var(--muted); font-size: var(--text-xs); line-height: 1.45; }
+    .llm-field-help[data-tone="success"] { color: var(--success); }
+    .llm-field-help[data-tone="error"] { color: var(--danger); }
+    .llm-field-help[data-tone="pending"] { color: var(--accent); }
+    .llm-instance-form-error { min-height: 20px; margin: 0; color: var(--danger); font-size: var(--text-sm); }
+    .llm-instance-form [hidden] { display: none; }
+    body.llm-dialog-open { overflow: hidden; }
     .settings-switch-field { align-items: start; grid-template-columns: minmax(180px, 1fr) auto; gap: var(--space-2) var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 42%); }
     .settings-switch-field > span:first-child { color: var(--fg); font-weight: 700; }
     .settings-switch-copy { color: var(--muted); font-size: var(--text-sm); line-height: 1.45; }
@@ -1281,6 +1358,9 @@
       .delight-main-actions { flex-basis: 212px; grid-template-columns: 116px 88px; }
       .delight-feedback-actions { width: 128px; }
       .settings-grid, .settings-panel, .settings-subpanel, .inline-row { grid-template-columns: 1fr; }
+      .llm-instance-grid, .llm-module-grid { grid-template-columns: 1fr; }
+      .llm-instance-dialog { padding: 0; }
+      .llm-instance-dialog-panel { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; }
       .source-status-list { grid-template-columns: 1fr; }
       .source-status-head { grid-template-columns: 1fr; }
       .source-status-badges { justify-content: flex-start; }
@@ -1348,6 +1428,15 @@
       .delight-main-actions.is-composing .chat-action { grid-column: 3; grid-row: 1; width: 38px; min-width: 38px; align-self: center; }
       .delight-main-actions.is-composing .small-btn { width: auto; min-height: 38px; }
       .metric-row { grid-template-columns: 1fr; }
+      .llm-section-head, .llm-module-head { align-items: stretch; flex-direction: column; }
+      .llm-add-instance, .llm-section-head > .pill-btn { width: 100%; justify-content: center; }
+      .llm-runtime-tuning, .llm-instance-form { grid-template-columns: 1fr; }
+      .llm-discovery-control { grid-template-columns: 1fr; }
+      .llm-discovery-control .llm-discovery-button { width: 100%; }
+      .llm-chain-item { grid-template-columns: 30px minmax(0, 1fr); }
+      .llm-chain-actions { grid-column: 1 / -1; justify-content: flex-end; border-top: 1px solid var(--border-soft); padding-top: 6px; }
+      .llm-chain-add-row { align-items: stretch; flex-direction: column; }
+      .llm-chain-add-row .pill-btn { width: 100%; }
       .video-card .card-actions.is-composing { grid-template-columns: minmax(0, 1fr) 38px 38px; gap: var(--space-2); }
       .video-card .card-actions.is-composing .composer-cancel { display: inline-flex; grid-column: 2; grid-row: 1; width: 38px; min-width: 38px; padding: 0; background: var(--surface); border-color: var(--border-soft); color: var(--fg-2); font-size: 22px; line-height: 1; }
       .video-card .card-actions.is-composing .composer-cancel:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-on); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }

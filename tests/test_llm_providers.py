@@ -65,7 +65,7 @@ async def test_openai_provider_normalizes_response(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_openai_reasoning_model_defaults_to_medium_and_channel_empty_maps_low(
+async def test_openai_reasoning_model_defaults_to_medium_and_channel_empty_omits_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OpenAIProvider(api_key="test-key", model="gpt-5.5")
@@ -84,15 +84,36 @@ async def test_openai_reasoning_model_defaults_to_medium_and_channel_empty_maps_
     )
 
     assert calls[0]["reasoning_effort"] == "medium"
-    assert calls[1]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_reasoning_model_preserves_explicit_documented_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", model="gpt-5.5")
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete(
+        [{"role": "user", "content": "deep"}],
+        reasoning_effort="xhigh",
+    )
+
+    assert captured["reasoning_effort"] == "xhigh"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model", "base_url", "provider_name"),
+    ("model", "base_url", "provider_name", "reasoning_effort"),
     [
-        ("gpt-4o", "", "openai"),
-        ("gpt-5.5", "https://relay.example.com/v1", "openai_compatible"),
+        ("gpt-4o", "", "openai", "medium"),
+        ("gpt-5.5", "https://relay.example.com/v1", "openai_compatible", ""),
     ],
 )
 async def test_openai_does_not_send_effort_to_nonreasoning_or_compatible_routes(
@@ -100,12 +121,14 @@ async def test_openai_does_not_send_effort_to_nonreasoning_or_compatible_routes(
     model: str,
     base_url: str,
     provider_name: str,
+    reasoning_effort: str,
 ) -> None:
     provider = OpenAIProvider(
         api_key="test-key",
         model=model,
         base_url=base_url,
         provider_name=provider_name,
+        reasoning_effort=reasoning_effort,
     )
     captured: dict[str, object] = {}
 
@@ -118,6 +141,75 @@ async def test_openai_does_not_send_effort_to_nonreasoning_or_compatible_routes(
     await provider.complete([{"role": "user", "content": "hi"}])
 
     assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_passes_through_explicit_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="vendor-reasoning-model",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        reasoning_effort="high",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert captured["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_empty_reasoning_effort_stays_wire_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="vendor-model",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        reasoning_effort="",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_lists_sorted_unique_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+
+    async def fake_list() -> SimpleNamespace:
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(id="z-model"),
+                SimpleNamespace(id="a-model"),
+                SimpleNamespace(id="z-model"),
+                SimpleNamespace(id=""),
+            ]
+        )
+
+    monkeypatch.setattr(provider, "_create_model_list", fake_list)
+
+    assert await provider.list_models() == ["a-model", "z-model"]
 
 
 @pytest.mark.asyncio

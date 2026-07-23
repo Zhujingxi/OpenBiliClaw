@@ -28,11 +28,12 @@
       sourceShareSuggestion: "/config/source-share-suggestion",
       sourceCredentials: "/sources/credentials?reveal_keys=true",
       configProbe: "/config/probe-service",
+      configModelDiscovery: "/config/discover-models",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
       embeddingRepair: "/embedding/repair",
-      config: "/config?reveal_keys=true",
+      config: "/config",
       watchLater: "/watch-later",
       favorites: "/favorites",
       profileEdit: "/profile/edit",
@@ -65,6 +66,9 @@
       delight: null,
       degraded: false,
       config: null,
+      llmDraft: null,
+      llmProbeResults: new Map(),
+      llmEditingInstanceId: "",
       sourceStatus: null,
       sourceCredentials: null,
       runtimeStatus: null,
@@ -6265,20 +6269,588 @@ ${cardFeedbackBarHtml()}`;
       return { reload: load };
     }
 
-    // 主/备选 Provider 同名保护：同名 fallback 永远不会触发（registry 会静默丢弃），
-    // 后端保存也会以 blocking issue 拒绝。这里 (1) 禁用备选下拉里与主 Provider 同名
-    // 的选项（主 Provider 变化时恢复其它选项），(2) 对已经处于同名状态的旧配置只
-    // 显示警告、不自动清空选择，避免悄悄改动用户数据。
-    function syncLlmFallbackSameState() {
-      const providerSelect = $("#llmProvider");
-      const fallbackSelect = $("#llmFallbackProvider");
-      if (!providerSelect || !fallbackSelect) return;
-      const provider = providerSelect.value || "";
-      Array.from(fallbackSelect.options).forEach((option) => {
-        option.disabled = Boolean(option.value) && option.value === provider;
+    const LLM_PROVIDER_LABELS = {
+      openai: "OpenAI",
+      claude: "Claude",
+      gemini: "Gemini",
+      deepseek: "DeepSeek",
+      openrouter: "OpenRouter",
+      ollama: "Ollama",
+      openai_compatible: "OpenAI-compatible"
+    };
+    const LLM_PROVIDER_DEFAULTS = {
+      openai: { model: "gpt-5-nano", base_url: "" },
+      claude: { model: "claude-sonnet-4-20250514", base_url: "" },
+      gemini: { model: "gemini-2.5-flash", base_url: "" },
+      deepseek: { model: "deepseek-v4-flash", base_url: "https://api.deepseek.com" },
+      openrouter: { model: "openai/gpt-4o-mini", base_url: "https://openrouter.ai/api/v1" },
+      ollama: { model: "qwen2.5:7b", base_url: "http://127.0.0.1:11434/v1" },
+      openai_compatible: { model: "", base_url: "" }
+    };
+    const LLM_MODEL_DISCOVERY_PROVIDERS = new Set([
+      "openai",
+      "deepseek",
+      "openrouter",
+      "ollama",
+      "openai_compatible"
+    ]);
+    const LLM_MODULE_UI = {
+      soul: { mode: "moduleSoulMode", custom: "moduleSoulCustom", list: "moduleSoulChain", picker: "moduleSoulPicker", add: "moduleSoulAdd", label: "画像理解" },
+      discovery: { mode: "moduleDiscoveryMode", custom: "moduleDiscoveryCustom", list: "moduleDiscoveryChain", picker: "moduleDiscoveryPicker", add: "moduleDiscoveryAdd", label: "内容发现" },
+      recommendation: { mode: "moduleRecommendationMode", custom: "moduleRecommendationCustom", list: "moduleRecommendationChain", picker: "moduleRecommendationPicker", add: "moduleRecommendationAdd", label: "推荐表达" },
+      evaluation: { mode: "moduleEvaluationMode", custom: "moduleEvaluationCustom", list: "moduleEvaluationChain", picker: "moduleEvaluationPicker", add: "moduleEvaluationAdd", label: "内容评估" }
+    };
+    const LLM_INSTANCE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+    let llmDialogReturnFocus = null;
+    let llmDraggedRoute = null;
+
+    function clonePlain(value) {
+      return JSON.parse(JSON.stringify(value ?? null));
+    }
+
+    function normalizeLlmDraft(llm) {
+      const instances = {};
+      for (const [rawId, rawInstance] of Object.entries(llm?.instances || {})) {
+        const id = String(rawId || "").trim().toLowerCase();
+        if (!id || !rawInstance || typeof rawInstance !== "object") continue;
+        instances[id] = {
+          name: String(rawInstance.name || id),
+          provider_type: String(rawInstance.provider_type || ""),
+          enabled: rawInstance.enabled !== false,
+          api_key: String(rawInstance.api_key || ""),
+          model: String(rawInstance.model || ""),
+          base_url: String(rawInstance.base_url || ""),
+          auth_mode: String(rawInstance.auth_mode || ""),
+          api_flavor: String(rawInstance.api_flavor || ""),
+          http_referer: String(rawInstance.http_referer || ""),
+          x_title: String(rawInstance.x_title || ""),
+          reasoning_effort: String(rawInstance.reasoning_effort || ""),
+          num_ctx: Number.parseInt(rawInstance.num_ctx, 10) || 0
+        };
+      }
+      const defaultChain = Array.from(new Set((llm?.default_chain || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)));
+      const routes = {};
+      for (const moduleName of Object.keys(LLM_MODULE_UI)) {
+        const rawRoute = llm?.routes?.[moduleName] || llm?.[moduleName] || {};
+        routes[moduleName] = {
+          inherit: rawRoute.inherit !== false,
+          chain: Array.from(new Set((rawRoute.chain || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)))
+        };
+      }
+      return { instances, default_chain: defaultChain, routes };
+    }
+
+    function llmInstanceReferences(instanceId) {
+      const draft = state.llmDraft;
+      if (!draft) return [];
+      const references = [];
+      if (draft.default_chain.includes(instanceId)) references.push("默认链");
+      for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+        const route = draft.routes[moduleName];
+        if (route && !route.inherit && route.chain.includes(instanceId)) references.push(ui.label);
+      }
+      return references;
+    }
+
+    function llmEndpointSummary(instance) {
+      const raw = String(instance?.base_url || "").trim();
+      if (!raw) return "官方默认地址";
+      try {
+        const url = new URL(raw);
+        return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+      } catch {
+        return raw;
+      }
+    }
+
+    function llmActionIcon(action) {
+      if (action === "up") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>';
+      if (action === "down") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+    }
+
+    function llmRouteChain(scope) {
+      if (!state.llmDraft) return [];
+      return scope === "default"
+        ? state.llmDraft.default_chain
+        : state.llmDraft.routes[scope]?.chain || [];
+    }
+
+    function setLlmRouteChain(scope, chain) {
+      if (!state.llmDraft) return;
+      if (scope === "default") state.llmDraft.default_chain = chain;
+      else state.llmDraft.routes[scope].chain = chain;
+    }
+
+    function renderLlmChain(scope, listId, pickerId) {
+      const list = document.getElementById(listId);
+      const picker = document.getElementById(pickerId);
+      if (!list || !picker || !state.llmDraft) return;
+      const chain = llmRouteChain(scope);
+      const instances = state.llmDraft.instances;
+      if (!chain.length) {
+        list.innerHTML = '<li class="llm-empty-state">还没有实例。请从下方加入一个端点。</li>';
+      } else {
+        list.innerHTML = chain.map((instanceId, index) => {
+          const instance = instances[instanceId];
+          const name = instance?.name || instanceId;
+          const detail = instance
+            ? `${LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type} · ${instance.model || "未填写模型"}`
+            : "实例不存在";
+          const removeDisabled = scope === "default" && chain.length <= 1;
+          return `<li class="llm-chain-item" draggable="true" data-route-scope="${escapeHtml(scope)}" data-instance-id="${escapeHtml(instanceId)}">
+            <span class="llm-chain-position" aria-label="优先级 ${index + 1}">${index + 1}</span>
+            <span class="llm-chain-copy"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(detail)}</small></span>
+            <span class="llm-chain-actions">
+              <button class="llm-chain-action" type="button" data-chain-action="up" aria-label="上移 ${escapeHtml(name)}" ${index === 0 ? "disabled" : ""}>${llmActionIcon("up")}</button>
+              <button class="llm-chain-action" type="button" data-chain-action="down" aria-label="下移 ${escapeHtml(name)}" ${index === chain.length - 1 ? "disabled" : ""}>${llmActionIcon("down")}</button>
+              <button class="llm-chain-action" type="button" data-chain-action="remove" aria-label="从调用链移除 ${escapeHtml(name)}" ${removeDisabled ? "disabled" : ""}>${llmActionIcon("remove")}</button>
+            </span>
+          </li>`;
+        }).join("");
+      }
+      const candidates = Object.entries(instances).filter(([instanceId, instance]) => instance.enabled !== false && !chain.includes(instanceId));
+      picker.innerHTML = candidates.length
+        ? candidates.map(([instanceId, instance]) => `<option value="${escapeHtml(instanceId)}">${escapeHtml(instance.name || instanceId)} · ${escapeHtml(instance.model || "未填写模型")}</option>`).join("")
+        : '<option value="">没有可添加的实例</option>';
+      picker.disabled = candidates.length === 0;
+      const addButton = scope === "default"
+        ? $("#addLlmDefaultChainItem")
+        : document.getElementById(LLM_MODULE_UI[scope]?.add || "");
+      if (addButton) addButton.disabled = candidates.length === 0;
+
+      list.querySelectorAll(".llm-chain-item").forEach((item) => {
+        item.addEventListener("dragstart", (event) => {
+          llmDraggedRoute = { scope, instanceId: item.dataset.instanceId };
+          item.classList.add("is-dragging");
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", item.dataset.instanceId || "");
+        });
+        item.addEventListener("dragend", () => {
+          llmDraggedRoute = null;
+          list.querySelectorAll(".llm-chain-item").forEach((row) => row.classList.remove("is-dragging", "is-drop-target"));
+        });
+        item.addEventListener("dragover", (event) => {
+          if (!llmDraggedRoute || llmDraggedRoute.scope !== scope) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          item.classList.add("is-drop-target");
+        });
+        item.addEventListener("dragleave", () => item.classList.remove("is-drop-target"));
+        item.addEventListener("drop", (event) => {
+          event.preventDefault();
+          const sourceId = llmDraggedRoute?.instanceId;
+          const targetId = item.dataset.instanceId;
+          if (!sourceId || !targetId || sourceId === targetId) return;
+          const next = [...llmRouteChain(scope)];
+          const sourceIndex = next.indexOf(sourceId);
+          const targetIndex = next.indexOf(targetId);
+          if (sourceIndex < 0 || targetIndex < 0) return;
+          next.splice(sourceIndex, 1);
+          next.splice(targetIndex, 0, sourceId);
+          setLlmRouteChain(scope, next);
+          renderLlmRouting();
+        });
       });
-      const warning = $("#llmFallbackSameWarning");
-      if (warning) warning.hidden = !(fallbackSelect.value && fallbackSelect.value === provider);
+      list.querySelectorAll("[data-chain-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const row = button.closest(".llm-chain-item");
+          const instanceId = row?.dataset.instanceId || "";
+          const action = button.dataset.chainAction;
+          const next = [...llmRouteChain(scope)];
+          const index = next.indexOf(instanceId);
+          if (index < 0) return;
+          if (action === "up" && index > 0) [next[index - 1], next[index]] = [next[index], next[index - 1]];
+          if (action === "down" && index < next.length - 1) [next[index + 1], next[index]] = [next[index], next[index + 1]];
+          if (action === "remove") next.splice(index, 1);
+          setLlmRouteChain(scope, next);
+          renderLlmRouting();
+        });
+      });
+    }
+
+    function renderLlmInstances() {
+      const container = $("#llmInstanceList");
+      if (!container || !state.llmDraft) return;
+      const entries = Object.entries(state.llmDraft.instances);
+      if (!entries.length) {
+        container.innerHTML = '<div class="llm-empty-state">尚未配置 LLM 实例。新建一个端点后即可组成调用链。</div>';
+        return;
+      }
+      container.innerHTML = entries.map(([instanceId, instance]) => {
+        const references = llmInstanceReferences(instanceId);
+        const probe = state.llmProbeResults.get(instanceId);
+        const probeText = probe?.pending
+          ? "正在探测…"
+          : probe
+          ? formatProbeResult(probe)
+          : "尚未测试";
+        const probeTone = probe?.pending ? "pending" : probe?.ok === true ? "success" : probe ? "error" : "";
+        return `<article class="llm-instance-card" data-enabled="${instance.enabled !== false}" data-instance-card="${escapeHtml(instanceId)}">
+          <div class="llm-instance-card-head">
+            <div class="llm-instance-card-title"><strong>${escapeHtml(instance.name || instanceId)}</strong><code>${escapeHtml(instanceId)}</code></div>
+            <span class="llm-instance-badge" data-tone="${instance.enabled !== false ? "success" : "muted"}">${instance.enabled !== false ? "已启用" : "已停用"}</span>
+          </div>
+          <div class="llm-instance-badges"><span class="llm-instance-badge">${escapeHtml(LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type)}</span>${references.map((reference) => `<span class="llm-instance-badge" data-tone="muted">${escapeHtml(reference)}</span>`).join("")}</div>
+          <p class="llm-instance-meta"><span>模型：${escapeHtml(instance.model || "未填写")}</span><span>地址：${escapeHtml(llmEndpointSummary(instance))}</span></p>
+          <p class="llm-instance-probe" data-tone="${probeTone}" aria-live="polite">${escapeHtml(probeText)}</p>
+          <div class="llm-instance-actions">
+            <button class="pill-btn" type="button" data-instance-action="probe" data-instance-id="${escapeHtml(instanceId)}">测试</button>
+            <button class="pill-btn" type="button" data-instance-action="edit" data-instance-id="${escapeHtml(instanceId)}">编辑</button>
+            <button class="pill-btn" type="button" data-instance-action="delete" data-instance-id="${escapeHtml(instanceId)}">删除</button>
+          </div>
+        </article>`;
+      }).join("");
+      container.querySelectorAll("[data-instance-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const instanceId = button.dataset.instanceId || "";
+          if (button.dataset.instanceAction === "probe") void runLlmInstanceProbe(instanceId);
+          if (button.dataset.instanceAction === "edit") openLlmInstanceDialog(instanceId);
+          if (button.dataset.instanceAction === "delete") deleteLlmInstance(instanceId);
+        });
+      });
+    }
+
+    function renderLlmRouting() {
+      if (!state.llmDraft) return;
+      renderLlmInstances();
+      renderLlmChain("default", "llmDefaultChain", "llmDefaultChainPicker");
+      for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+        const route = state.llmDraft.routes[moduleName];
+        setSelect(ui.mode, route.inherit ? "inherit" : "custom");
+        const custom = document.getElementById(ui.custom);
+        if (custom) custom.hidden = route.inherit;
+        renderLlmChain(moduleName, ui.list, ui.picker);
+      }
+    }
+
+    function addLlmChainItem(scope) {
+      const picker = scope === "default"
+        ? $("#llmDefaultChainPicker")
+        : document.getElementById(LLM_MODULE_UI[scope]?.picker || "");
+      const instanceId = String(picker?.value || "").trim();
+      if (!instanceId) return;
+      const chain = llmRouteChain(scope);
+      if (!chain.includes(instanceId)) setLlmRouteChain(scope, [...chain, instanceId]);
+      renderLlmRouting();
+    }
+
+    function renderLlmDatalist(id, values, currentValue = "") {
+      const list = document.getElementById(id);
+      if (!(list instanceof HTMLDataListElement)) return;
+      const normalized = [...new Set(
+        [...(Array.isArray(values) ? values : []), currentValue]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      )];
+      list.replaceChildren(...normalized.map((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        return option;
+      }));
+    }
+
+    function setLlmModelDiscoveryStatus(tone, text) {
+      const status = $("#llmInstanceModelDiscoveryStatus");
+      if (!status) return;
+      status.dataset.tone = tone || "neutral";
+      status.textContent = text;
+    }
+
+    function resetLlmModelDiscovery() {
+      renderLlmDatalist("llmInstanceModelOptions", []);
+      const providerType = getInput("llmInstanceProviderType");
+      const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType);
+      const button = $("#refreshLlmInstanceModels");
+      if (button) {
+        button.hidden = !supported;
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
+      setLlmModelDiscoveryStatus(
+        "neutral",
+        supported
+          ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+          : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。"
+      );
+    }
+
+    function buildLlmModelDiscoveryRequest() {
+      if (!state.llmDraft) return null;
+      const existingId = state.llmEditingInstanceId;
+      const instanceId = String(
+        existingId || getInput("llmInstanceId") || "model-discovery-draft"
+      ).trim().toLowerCase();
+      const current = state.llmDraft.instances[existingId] || {};
+      const providerType = getInput("llmInstanceProviderType").trim();
+      const typedKey = getInput("llmInstanceApiKey");
+      const apiKey = $("#llmInstanceClearApiKey")?.checked
+        ? ""
+        : typedKey || current.api_key || "";
+      const instance = {
+        ...current,
+        name: getInput("llmInstanceName").trim() || current.name || instanceId,
+        provider_type: providerType,
+        enabled: true,
+        api_key: apiKey,
+        model: getInput("llmInstanceModel").trim(),
+        base_url: getInput("llmInstanceBaseUrl").trim(),
+        auth_mode: providerType === "openai"
+          ? getInput("llmInstanceAuthMode") || "api_key"
+          : "",
+        api_flavor: ["openai", "openai_compatible"].includes(providerType)
+          ? getInput("llmInstanceApiFlavor")
+          : "",
+        http_referer: providerType === "openrouter"
+          ? getInput("llmInstanceReferer").trim()
+          : "",
+        x_title: providerType === "openrouter"
+          ? getInput("llmInstanceTitle").trim()
+          : "",
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+          ? getInput("llmInstanceReasoning").trim()
+          : "",
+        num_ctx: providerType === "ollama"
+          ? Math.max(0, getIntInput("llmInstanceNumCtx", 0))
+          : 0
+      };
+      return {
+        instanceId,
+        config: {
+          llm: {
+            routing_version: 2,
+            instances: {
+              ...clonePlain(state.llmDraft.instances),
+              [instanceId]: instance
+            },
+            default_chain: [...state.llmDraft.default_chain],
+            routes: clonePlain(state.llmDraft.routes)
+          }
+        }
+      };
+    }
+
+    async function discoverLlmInstanceModels() {
+      const request = buildLlmModelDiscoveryRequest();
+      const button = $("#refreshLlmInstanceModels");
+      if (!request || !button || button.disabled) return;
+      button.disabled = true;
+      button.textContent = "获取中…";
+      setLlmModelDiscoveryStatus("pending", "正在向当前端点请求 /models…");
+      try {
+        const result = await requestJsonStrict(ENDPOINTS.configModelDiscovery, {
+          method: "POST",
+          timeoutMs: 25000,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instance_id: request.instanceId,
+            config: request.config
+          })
+        });
+        if (Array.isArray(result?.reasoning_efforts) && result.reasoning_efforts.length) {
+          renderLlmDatalist(
+            "llmInstanceReasoningOptions",
+            result.reasoning_efforts,
+            getInput("llmInstanceReasoning")
+          );
+        }
+        if (!result?.ok) {
+          throw new Error(result?.error || "端点没有返回模型列表");
+        }
+        const models = Array.isArray(result.models) ? result.models : [];
+        renderLlmDatalist("llmInstanceModelOptions", models, getInput("llmInstanceModel"));
+        setLlmModelDiscoveryStatus(
+          "success",
+          models.length
+            ? `已获取 ${models.length} 个模型；可从下拉选择，也可继续手填。`
+            : "接口返回了空列表；保留当前手填值。"
+        );
+      } catch (error) {
+        setLlmModelDiscoveryStatus(
+          "error",
+          `获取失败：${error?.message || "未知错误"}；当前输入未改动，仍可手填。`
+        );
+      } finally {
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
+    }
+
+    function syncLlmInstanceConditionalFields() {
+      const providerType = getInput("llmInstanceProviderType");
+      document.querySelectorAll("[data-instance-field]").forEach((field) => {
+        const kind = field.dataset.instanceField;
+        const visible =
+          (kind === "openai-auth" && providerType === "openai") ||
+          (kind === "openai-protocol" && ["openai", "openai_compatible"].includes(providerType)) ||
+          (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)) ||
+          (kind === "ollama" && providerType === "ollama") ||
+          (kind === "openrouter" && providerType === "openrouter");
+        field.hidden = !visible;
+      });
+      resetLlmModelDiscovery();
+    }
+
+    function openLlmInstanceDialog(instanceId = "") {
+      if (!state.llmDraft) return;
+      const dialog = $("#llmInstanceDialog");
+      const instance = instanceId ? state.llmDraft.instances[instanceId] : null;
+      state.llmEditingInstanceId = instanceId;
+      llmDialogReturnFocus = document.activeElement;
+      dialog.dataset.providerType = instance?.provider_type || "";
+      $("#llmInstanceDialogTitle").textContent = instance ? "编辑 LLM 实例" : "新建 LLM 实例";
+      setInput("llmInstanceName", instance?.name || "");
+      setInput("llmInstanceId", instanceId);
+      $("#llmInstanceId").disabled = Boolean(instance);
+      setSelect("llmInstanceProviderType", instance?.provider_type || "openai");
+      setSelect("llmInstanceEnabled", instance?.enabled === false ? "off" : "on");
+      setInput("llmInstanceModel", instance?.model || "");
+      setInput("llmInstanceBaseUrl", instance?.base_url || "");
+      setInput("llmInstanceApiKey", "");
+      $("#llmInstanceApiKey").placeholder = instance?.api_key ? "已配置；留空保留原密钥" : "输入 API Key";
+      $("#llmInstanceClearApiKey").checked = false;
+      $("#llmInstanceClearApiKeyField").hidden = !instance?.api_key;
+      setSelect("llmInstanceAuthMode", instance?.auth_mode || "api_key");
+      setSelect("llmInstanceApiFlavor", instance?.api_flavor || "");
+      setInput("llmInstanceReasoning", instance?.reasoning_effort || "");
+      setInput("llmInstanceNumCtx", instance?.num_ctx || 0);
+      setInput("llmInstanceReferer", instance?.http_referer || "");
+      setInput("llmInstanceTitle", instance?.x_title || "");
+      $("#llmInstanceFormError").textContent = "";
+      renderLlmDatalist(
+        "llmInstanceReasoningOptions",
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        instance?.reasoning_effort || ""
+      );
+      syncLlmInstanceConditionalFields();
+      if (!instance) applyLlmProviderDefaults();
+      dialog.hidden = false;
+      document.body.classList.add("llm-dialog-open");
+      window.setTimeout(() => (instance ? $("#llmInstanceName") : $("#llmInstanceName"))?.focus(), 0);
+    }
+
+    function closeLlmInstanceDialog() {
+      const dialog = $("#llmInstanceDialog");
+      if (!dialog || dialog.hidden) return;
+      dialog.hidden = true;
+      document.body.classList.remove("llm-dialog-open");
+      state.llmEditingInstanceId = "";
+      if (llmDialogReturnFocus?.focus) llmDialogReturnFocus.focus();
+      llmDialogReturnFocus = null;
+    }
+
+    function saveLlmInstanceDraft() {
+      if (!state.llmDraft) return;
+      const existingId = state.llmEditingInstanceId;
+      const instanceId = String(existingId || getInput("llmInstanceId")).trim().toLowerCase();
+      const name = getInput("llmInstanceName").trim();
+      const providerType = getInput("llmInstanceProviderType").trim();
+      const enabled = getInput("llmInstanceEnabled") !== "off";
+      const model = getInput("llmInstanceModel").trim();
+      const baseUrl = getInput("llmInstanceBaseUrl").trim();
+      const error = $("#llmInstanceFormError");
+      if (!LLM_INSTANCE_ID_PATTERN.test(instanceId)) {
+        error.textContent = "实例 ID 只能使用小写字母、数字、下划线和连字符，且最长 64 个字符。";
+        $("#llmInstanceId")?.focus();
+        return;
+      }
+      if (!existingId && state.llmDraft.instances[instanceId]) {
+        error.textContent = "这个实例 ID 已经存在。";
+        $("#llmInstanceId")?.focus();
+        return;
+      }
+      if (!name) {
+        error.textContent = "请填写实例名称。";
+        $("#llmInstanceName")?.focus();
+        return;
+      }
+      if (enabled && !model) {
+        error.textContent = "启用的实例必须明确填写模型。";
+        $("#llmInstanceModel")?.focus();
+        return;
+      }
+      if (enabled && providerType === "openai_compatible" && !baseUrl) {
+        error.textContent = "OpenAI-compatible 实例必须填写 Base URL。";
+        $("#llmInstanceBaseUrl")?.focus();
+        return;
+      }
+      const current = state.llmDraft.instances[existingId] || {};
+      const typedKey = getInput("llmInstanceApiKey");
+      const authMode = providerType === "openai" ? getInput("llmInstanceAuthMode") || "api_key" : "";
+      const effectiveKey = $("#llmInstanceClearApiKey")?.checked
+        ? ""
+        : typedKey || current.api_key || "";
+      if (enabled && !["ollama", "gemini"].includes(providerType) && !(providerType === "openai" && authMode === "codex_oauth") && !effectiveKey) {
+        error.textContent = "启用的远端实例需要 API Key。";
+        $("#llmInstanceApiKey")?.focus();
+        return;
+      }
+      if (!enabled && llmInstanceReferences(existingId).length) {
+        error.textContent = `请先从这些调用链移除实例：${llmInstanceReferences(existingId).join("、")}。`;
+        return;
+      }
+      state.llmDraft.instances[instanceId] = {
+        name,
+        provider_type: providerType,
+        enabled,
+        api_key: effectiveKey,
+        model,
+        base_url: baseUrl,
+        auth_mode: authMode,
+        api_flavor: ["openai", "openai_compatible"].includes(providerType) ? getInput("llmInstanceApiFlavor") : "",
+        http_referer: providerType === "openrouter" ? getInput("llmInstanceReferer").trim() : "",
+        x_title: providerType === "openrouter" ? getInput("llmInstanceTitle").trim() : "",
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType) ? getInput("llmInstanceReasoning") : "",
+        num_ctx: providerType === "ollama" ? Math.max(0, getIntInput("llmInstanceNumCtx", 0)) : 0
+      };
+      closeLlmInstanceDialog();
+      renderLlmRouting();
+    }
+
+    function deleteLlmInstance(instanceId) {
+      if (!state.llmDraft?.instances[instanceId]) return;
+      const references = llmInstanceReferences(instanceId);
+      if (references.length) {
+        showToast(`无法删除：仍被 ${references.join("、")} 引用`);
+        return;
+      }
+      const name = state.llmDraft.instances[instanceId].name || instanceId;
+      if (!window.confirm(`删除 LLM 实例「${name}」？`)) return;
+      delete state.llmDraft.instances[instanceId];
+      state.llmProbeResults.delete(instanceId);
+      renderLlmRouting();
+    }
+
+    function applyLlmProviderDefaults() {
+      const providerType = getInput("llmInstanceProviderType");
+      const defaults = LLM_PROVIDER_DEFAULTS[providerType] || {};
+      const dialog = $("#llmInstanceDialog");
+      const previousType = String(dialog?.dataset.providerType || "");
+      const previousDefaults = LLM_PROVIDER_DEFAULTS[previousType] || {};
+      const isNew = !state.llmEditingInstanceId;
+      const model = getInput("llmInstanceModel");
+      const baseUrl = getInput("llmInstanceBaseUrl");
+      if (!model || (isNew && model === (previousDefaults.model || ""))) {
+        setInput("llmInstanceModel", defaults.model || "");
+      }
+      if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
+        setInput("llmInstanceBaseUrl", defaults.base_url || "");
+      }
+      const previousBaseId = previousType.replace(/_/g, "-");
+      const currentId = getInput("llmInstanceId");
+      if (!currentId || (isNew && currentId === previousBaseId)) {
+        let candidate = providerType.replace(/_/g, "-");
+        let suffix = 2;
+        while (state.llmDraft?.instances[candidate]) candidate = `${providerType.replace(/_/g, "-")}-${suffix++}`;
+        setInput("llmInstanceId", candidate);
+      }
+      const previousLabel = LLM_PROVIDER_LABELS[previousType] || previousType;
+      const currentName = getInput("llmInstanceName");
+      if (!currentName || (isNew && currentName === previousLabel)) {
+        setInput("llmInstanceName", LLM_PROVIDER_LABELS[providerType] || providerType);
+      }
+      if (dialog) dialog.dataset.providerType = providerType;
+      syncLlmInstanceConditionalFields();
     }
 
     function applyConfig(config) {
@@ -6342,38 +6914,11 @@ ${cardFeedbackBarHtml()}`;
       if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
 
       const llm = config.llm || {};
-      const provider = llm.default_provider || llm.provider;
-      setSelect("llmProvider", provider);
-      const fallbackProvider = llm.fallback_provider || "";
-      setSelect("llmFallbackProvider", fallbackProvider);
       setInput("llmConcurrency", llm.concurrency ?? 4);
       setInput("llmTimeout", llm.timeout);
-      setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
-      if (provider) {
-        setInput("llmModel", llm[provider]?.model);
-        setInput("llmApiKey", llm[provider]?.api_key);
-        setInput("llmBaseUrl", llm[provider]?.base_url);
-        setSelect("llmApiFlavor", llm[provider]?.api_flavor || "");
-      } else {
-        setSelect("llmApiFlavor", "");
-      }
-      if (fallbackProvider) {
-        setSelect("llmFallbackAuthMode", llm[fallbackProvider]?.auth_mode || "api_key");
-        setInput("llmFallbackModel", llm[fallbackProvider]?.model);
-        setInput("llmFallbackApiKey", llm[fallbackProvider]?.api_key);
-        setInput("llmFallbackBaseUrl", llm[fallbackProvider]?.base_url);
-        setSelect("llmFallbackApiFlavor", llm[fallbackProvider]?.api_flavor || "");
-      } else {
-        setSelect("llmFallbackAuthMode", "api_key");
-        setInput("llmFallbackModel", "");
-        setInput("llmFallbackApiKey", "");
-        setInput("llmFallbackBaseUrl", "");
-        setSelect("llmFallbackApiFlavor", "");
-      }
-      syncLlmFallbackSameState();
-      setInput("openrouterReferer", llm.openrouter?.http_referer);
-      setInput("openrouterTitle", llm.openrouter?.x_title);
-      setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
+      state.llmDraft = normalizeLlmDraft(llm);
+      state.llmProbeResults.clear();
+      renderLlmRouting();
       setSelect("embeddingProvider", llm.embedding?.provider || "");
       const embeddingFallbackProvider = llm.embedding?.fallback_provider || "";
       setSelect("embeddingFallbackProvider", embeddingFallbackProvider);
@@ -6383,24 +6928,6 @@ ${cardFeedbackBarHtml()}`;
       setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
       setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
       setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
-      if (embeddingFallbackProvider) {
-        setInput("embeddingFallbackModel", llm[embeddingFallbackProvider]?.model);
-        setInput("embeddingFallbackApiKey", llm[embeddingFallbackProvider]?.api_key);
-        setInput("embeddingFallbackBaseUrl", llm[embeddingFallbackProvider]?.base_url);
-      } else {
-        setInput("embeddingFallbackModel", "");
-        setInput("embeddingFallbackApiKey", "");
-        setInput("embeddingFallbackBaseUrl", "");
-      }
-      setSelect("moduleSoulProvider", llm.soul?.provider || "");
-      setInput("moduleSoulModel", llm.soul?.model);
-      setSelect("moduleDiscoveryProvider", llm.discovery?.provider || "");
-      setInput("moduleDiscoveryModel", llm.discovery?.model);
-      setSelect("moduleRecommendationProvider", llm.recommendation?.provider || "");
-      setInput("moduleRecommendationModel", llm.recommendation?.model);
-      setSelect("moduleEvaluationProvider", llm.evaluation?.provider || "");
-      setInput("moduleEvaluationModel", llm.evaluation?.model);
-
       setSelect("biliAuth", config.bilibili?.auth_method || "cookie");
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
@@ -7364,24 +7891,8 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function buildConfigUpdate() {
-      const provider = $("#llmProvider").value;
-      const fallbackProvider = getInput("llmFallbackProvider");
-      const llmProviderConfig = { model: getInput("llmModel") };
-      if (provider === "openai") llmProviderConfig.auth_mode = getInput("llmAuthMode") || "api_key";
-      // api_flavor 仅对 OpenAI 协议家族有意义;空值表示回到 chat/completions 默认
-      if (provider === "openai" || provider === "openai_compatible") llmProviderConfig.api_flavor = getInput("llmApiFlavor");
-      if (getInput("llmApiKey")) llmProviderConfig.api_key = getInput("llmApiKey");
-      if (getInput("llmBaseUrl")) llmProviderConfig.base_url = getInput("llmBaseUrl");
-      const llmFallbackConfig = { model: getInput("llmFallbackModel") };
-      if (fallbackProvider === "openai") llmFallbackConfig.auth_mode = getInput("llmFallbackAuthMode") || "api_key";
-      if (fallbackProvider === "openai" || fallbackProvider === "openai_compatible") llmFallbackConfig.api_flavor = getInput("llmFallbackApiFlavor");
-      if (getInput("llmFallbackApiKey")) llmFallbackConfig.api_key = getInput("llmFallbackApiKey");
-      if (getInput("llmFallbackBaseUrl")) llmFallbackConfig.base_url = getInput("llmFallbackBaseUrl");
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);
       const embeddingFallbackProvider = getInput("embeddingFallbackProvider");
-      const embeddingFallbackConfig = { model: getInput("embeddingFallbackModel") };
-      if (getInput("embeddingFallbackApiKey")) embeddingFallbackConfig.api_key = getInput("embeddingFallbackApiKey");
-      if (getInput("embeddingFallbackBaseUrl")) embeddingFallbackConfig.base_url = getInput("embeddingFallbackBaseUrl");
       const embedding = {
         provider: $("#embeddingProvider").value,
         fallback_enabled: Boolean(embeddingFallbackProvider),
@@ -7397,43 +7908,23 @@ ${cardFeedbackBarHtml()}`;
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
       const redditCookie = getInput("redditCookie");
+      const llmDraft = state.llmDraft || normalizeLlmDraft(state.config?.llm || {});
       const llm = {
-        ...(state.config?.llm || {}),
-        default_provider: provider,
-        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
-        fallback_provider: fallbackProvider,
+        routing_version: 2,
+        instances: clonePlain(llmDraft.instances),
+        default_chain: [...llmDraft.default_chain],
+        routes: Object.fromEntries(
+          Object.entries(llmDraft.routes).map(([moduleName, route]) => [
+            moduleName,
+            {
+              inherit: route.inherit !== false,
+              chain: route.inherit !== false ? [] : [...route.chain]
+            }
+          ])
+        ),
         concurrency: getIntInput("llmConcurrency", 4),
-        timeout: getIntInput("llmTimeout", 60),
-        [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
-        embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
-        soul: { ...(state.config?.llm?.soul || {}), provider: getInput("moduleSoulProvider"), model: getInput("moduleSoulModel") },
-        discovery: { ...(state.config?.llm?.discovery || {}), provider: getInput("moduleDiscoveryProvider"), model: getInput("moduleDiscoveryModel") },
-        recommendation: { ...(state.config?.llm?.recommendation || {}), provider: getInput("moduleRecommendationProvider"), model: getInput("moduleRecommendationModel") },
-        evaluation: { ...(state.config?.llm?.evaluation || {}), provider: getInput("moduleEvaluationProvider"), model: getInput("moduleEvaluationModel") }
-      };
-      if (fallbackProvider && fallbackProvider !== provider) {
-        llm[fallbackProvider] = {
-          ...(state.config?.llm?.[fallbackProvider] || {}),
-          ...llmFallbackConfig
-        };
-      }
-      if (embeddingFallbackProvider) {
-        llm[embeddingFallbackProvider] = {
-          ...(llm[embeddingFallbackProvider] || state.config?.llm?.[embeddingFallbackProvider] || {}),
-          ...embeddingFallbackConfig
-        };
-      }
-      if (getInput("openrouterReferer") || getInput("openrouterTitle")) {
-        llm.openrouter = {
-          ...(llm.openrouter || {}),
-          http_referer: getInput("openrouterReferer"),
-          x_title: getInput("openrouterTitle")
-        };
-      }
-      const deepseekReasoning = getInput("deepseekReasoning");
-      llm.deepseek = {
-        ...(llm.deepseek || state.config?.llm?.deepseek || {}),
-        reasoning_effort: deepseekReasoning
+        timeout: getIntInput("llmTimeout", 300),
+        embedding: { ...(state.config?.llm?.embedding || {}), ...embedding }
       };
       return {
         language: getInput("language") || "zh",
@@ -7863,21 +8354,22 @@ ${cardFeedbackBarHtml()}`;
 
     function formatProbeResult(result) {
       const ok = Boolean(result?.ok);
-      const provider = result?.provider ? ` ${result.provider}` : "";
+      const instance = result?.instance_id ? ` ${result.instance_id}` : "";
+      const provider = result?.provider ? ` · ${result.provider}` : "";
       const model = result?.model ? ` / ${result.model}` : "";
       const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
         ? ` (${Math.round(Number(result.latency_ms))}ms)`
         : "";
       const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-      return `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+      return `${ok ? "可用" : "不可用"}${instance}${provider}${model}${latency}: ${detail}`;
     }
 
-    async function probeConfigService(kind, config) {
+    async function probeConfigService(kind, config, instanceId = "") {
       return await requestJsonStrict(ENDPOINTS.configProbe, {
         method: "POST",
         timeoutMs: 35000,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, config })
+        body: JSON.stringify({ kind, instance_id: String(instanceId || ""), config })
       });
     }
 
@@ -7903,36 +8395,34 @@ ${cardFeedbackBarHtml()}`;
       setProbeStatus(statusEl, "pending", `${label} 探测中…`);
     }
 
-    async function runLlmConfigProbe() {
-      const button = $("#probeLlm");
-      const statusEl = $("#probeLlmStatus");
-      if (button) button.disabled = true;
-      renderProbePending(statusEl, "LLM");
+    async function runLlmInstanceProbe(instanceId) {
+      if (!state.llmDraft?.instances[instanceId]) return;
+      state.llmProbeResults.set(instanceId, { pending: true });
+      renderLlmInstances();
       try {
-        const result = await probeConfigService("llm", buildConfigUpdate());
-        renderProbeResult(statusEl, result);
+        const result = await probeConfigService("llm_instance", buildConfigUpdate(), instanceId);
+        state.llmProbeResults.set(instanceId, result);
       } catch (error) {
-        renderProbeResult(statusEl, {
+        state.llmProbeResults.set(instanceId, {
           ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "LLM 探测失败"
+          error: configErrorMessage(error?.details) || error?.message || "实例探测失败"
         });
-      } finally {
-        if (button) button.disabled = false;
       }
+      renderLlmInstances();
     }
 
-    async function runLlmFallbackConfigProbe() {
-      const button = $("#probeLlmFallback");
-      const statusEl = $("#probeLlmFallbackStatus");
+    async function runLlmChainProbe() {
+      const button = $("#probeLlmChain");
+      const statusEl = $("#probeLlmChainStatus");
       if (button) button.disabled = true;
-      renderProbePending(statusEl, "备选 Provider");
+      renderProbePending(statusEl, "默认调用链");
       try {
-        const result = await probeConfigService("llm_fallback", buildConfigUpdate());
+        const result = await probeConfigService("llm_chain", buildConfigUpdate());
         renderProbeResult(statusEl, result);
       } catch (error) {
         renderProbeResult(statusEl, {
           ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "备选 Provider 探测失败"
+          error: configErrorMessage(error?.details) || error?.message || "调用链探测失败"
         });
       } finally {
         if (button) button.disabled = false;
@@ -8194,11 +8684,49 @@ ${cardFeedbackBarHtml()}`;
         subjectTitle: state.messageChatSubjectTitle
       });
     });
-    safeBind("#llmProvider", "change", () => { applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }); syncLlmFallbackSameState(); });
-    safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
-    safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
-    safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
-    safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
+    safeBind("#addLlmInstance", "click", () => openLlmInstanceDialog());
+    safeBind("#closeLlmInstanceDialog", "click", closeLlmInstanceDialog);
+    safeBind("#cancelLlmInstance", "click", closeLlmInstanceDialog);
+    safeBind("[data-close-llm-instance-dialog]", "click", closeLlmInstanceDialog);
+    safeBind("#saveLlmInstance", "click", saveLlmInstanceDraft);
+    safeBind("#llmInstanceProviderType", "change", applyLlmProviderDefaults);
+    safeBind("#refreshLlmInstanceModels", "click", () => { void discoverLlmInstanceModels(); });
+    safeBind("#llmInstanceBaseUrl", "input", resetLlmModelDiscovery);
+    safeBind("#llmInstanceApiKey", "input", resetLlmModelDiscovery);
+    safeBind("#llmInstanceAuthMode", "change", resetLlmModelDiscovery);
+    safeBind("#addLlmDefaultChainItem", "click", () => addLlmChainItem("default"));
+    safeBind("#probeLlmChain", "click", () => { void runLlmChainProbe(); });
+    for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+      safeBind(`#${ui.mode}`, "change", (event) => {
+        if (!state.llmDraft) return;
+        const route = state.llmDraft.routes[moduleName];
+        route.inherit = event.currentTarget.value !== "custom";
+        if (!route.inherit && !route.chain.length) route.chain = [...state.llmDraft.default_chain];
+        renderLlmRouting();
+      });
+      safeBind(`#${ui.add}`, "click", () => addLlmChainItem(moduleName));
+    }
+    document.addEventListener("keydown", (event) => {
+      const dialog = $("#llmInstanceDialog");
+      if (!dialog || dialog.hidden) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLlmInstanceDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex='0']")).filter((element) => !element.closest("[hidden]"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
     safeBind("#savedAutoSync", "change", (event) => {
@@ -8310,6 +8838,10 @@ ${cardFeedbackBarHtml()}`;
       console.error("首屏渲染失败", error);
       $("#statusLabel").textContent = "首屏渲染失败";
       $("#runtimeSummary").textContent = error?.message || "请检查后端返回的数据结构。";
+    }
+    const requestedSettingsPanel = new URLSearchParams(window.location.search).get("settings");
+    if (["models", "sources", "scheduler", "general", "frontend", "logging"].includes(requestedSettingsPanel)) {
+      openSettingsPage(requestedSettingsPanel);
     }
     ensureAuthenticated()
       .then(() => hydrateFromBackend())

@@ -6,7 +6,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
 interactive (dialogue / config probe) ──────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  ├─ supply includes explore queries / source extraction while low
@@ -19,6 +19,9 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
+config UI draft → /api/config/discover-models → exact instance GET /models
+                → editable model list + local effort advisory (no config write)
+
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
 background refresh → maintenance DB worker / isolated connection
@@ -28,11 +31,12 @@ background refresh → maintenance DB worker / isolated connection
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
-4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
-5. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
-6. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
+4. **LLM 实例路由层** — `config / Web UI -> [llm.instances.<id>] -> 全局或分模块有序实例链 -> LLMRegistry -> Provider adapter`。实例 ID 是路由、健康与 cooldown 身份，adapter 类型只是协议实现，因此同类型的多个 Base URL / token / model 可以同时存在。模块默认继承全局链；自定义链只在链内降级，耗尽后不越界。配置界面的另一条只读支路是 `draft -> /api/config/discover-models -> exact instance GET /models`，只返回模型 ID 与本地 Effort 建议，不写盘、不改链。
+5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
+6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
+7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
-海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> LLM SDK / YouTube / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 注入 `trust_env=False`，`custom` 注入指定 URL；显式写过的 `mode` 一律照原意执行。B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
+海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> 每个 LLM 实例 endpoint / YouTube / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 注入 `trust_env=False`，`custom` 注入指定 URL；LLM 链中每个实例按自己的 Base URL 独立裁决国内直连或海外代理。B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
 
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
 
@@ -143,10 +147,10 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/ping`、`/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status`、`/api/runtime-stream`，并精确放行 `/`、`/web`、`/setup`、`/m` 静态恢复 surface 及其资源；`/api/ping` 仅在降级时附带 reason / issues，桌面 Web 以此先行识别恢复态、停止业务 hydration，再读取配置并自动打开模型设置，展示修复与重启指引。其他业务 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
-- 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会从 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 注入同一份 module override；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
+- 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会注入同一份 `[llm.instances]`、`default_chain` 与 `[llm.routes.*]`；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
 - `runtime.autostart` — 当前用户作用域开机自启动 manager：macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart；API / CLI / 插件设置页通过 `GET /api/autostart-status` 与 `POST /api/autostart/apply` 管理，带 env-managed / `config.local.toml` shadow guard，并用开启「先写 config 后注册 OS」、关闭「先注销 OS 后写 config」的方向化事务避免崩溃残留
-- `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从 chat / embedding / fallback 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
+- `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从所有启用的 chat 实例和独立 embedding 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
 - `ContinuousRefreshController` — 管理补货、来源 producer 与 API daemon 的 `CandidateEvalCoordinator` 子任务；幂等 `run_startup_maintenance()` 是 host 暴露服务前的统一零 LLM 库存恢复边界。API daemon 的 `run_forever()` 先调用它再启动 delight/candidate/background loops，pipeline 的单次 enqueue callback 是 coordinator 唯一即时唤醒；OpenClaw direct bootstrap 不运行该 loop，因此不 attach dormant candidate / expression coordinator，而将 `recommend(refresh_if_needed=True)` 的首轮 source/evaluation 限为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），在 commit 后同步 drain ≤4 expression copy、禁用本次 split retry。库存维护使用独立单线程 worker/连接，每事务最多 50 行、每 tick 最多 8 批，批间释放 SQLite 写锁并让出 event loop；75ms 锁冲突直接延后。fresh history 为空时该 operation 直接 serve 首 batch 已复制的 canonical subset；其 one-shot callback 不创建 prewarm/provider background task，剩余 pending 由后续请求续补。热重载的新 controller 也先恢复；同一 controller 后续进入 loop 不重复维护。
 - `FeedbackBatchScheduler` — API 侧推荐反馈合并器；`/api/feedback` 只标记 dirty 并启动一次 debounce 后台任务，burst 内多条反馈 coalesce 成一次 feedback batch，批处理中又收到新反馈时补跑下一轮。Soul 层 single-flight 负责兜底其它入口的并发保护。
 - `/api/runtime-status` / `runtime-stream` — 对插件、移动 Web 和桌面 Web 发布同一套候选池库存口径：`pool_available_count` 只表示当前可立即被 `serve()` 消费的内容，`pool_raw_count` 表示基础 fresh 素材加待评估 raw candidates，`pool_pending_count` 表示已有素材但仍缺评估、文案、分类、可跳转链接或仍在近期已看窗口内。`pool_pending_eval_count` / `pool_evaluated_pending_count` 分别拆出待 LLM 评估和已评估待 admission 的数量；`pending_signal_events` 只表示 discovery refresh 游标后的新动作数量，用于下一次统一补货判断，不会由事件入口直接执行 refresh。前端只把 available 显示为“可换”，pending 显示为“正在整理”；后台补池的 source deficit 也使用 available-by-source，而 raw trim / headroom 使用 all-raw-material by-source。推荐读取、换一批和续页消费候选池后会立即广播新的 `refresh.pool_updated` 快照，使其它已打开客户端收敛到扣减后的库存，而不重载推荐列表。
@@ -219,10 +223,12 @@ X 是第六个内容源，分两条独立通路：
 
 ### LLM Providers (`llm/`)
 - 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）
-- `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入和刷新；`[llm.openai].auth_mode="codex_oauth"` 时仍注册为 `openai` provider，只替换认证来源，并限制 `base_url` 为 OpenAI 官方 API 域名
-- Provider 注册和切换；chat registry 的有效默认项与健康检查只面向 chat-capable provider。Ollama chat 必须有显式 `[llm.ollama].model`，仅有服务地址或独立 `bge-m3` embedding 不会注册 chat、更不会猜 `llama3`；`LLMRegistry.complete()` 保留默认 fallback 链，`complete_provider()` 用于 per-module override 的精确 provider 调用，不会在指定 provider 错误时静默 spill 到 default
-- DeepSeek 的连通性探针显式关闭 thinking；普通请求的 reasoning effort 是 request-local 参数，不修改共享 provider 状态。`[llm.deepseek].base_url` 直接进入 SDK 和 endpoint 代理裁决，留空才使用官方地址
-- `LLMService` 通过内置 caller bucket 路由 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]`，覆盖 `discovery.evaluate*`、`recommendation.evaluate_batch`、`eval.*`、`sources.xhs.*` 等实际 caller；Delight runtime 的 `precompute_delight_scores()` 已直接复用 Evo 结果，不再保留单独的 Delight LLM scorer caller；`model` 覆盖作为 per-call 参数传给 provider，不修改 provider 默认模型
+- `[llm.instances.<id>]` 为每个端点保存独立 `provider_type` / Base URL / token / model；registry 以实例 ID 注册，同一个 adapter 可实例化多次。`default_chain` 可包含任意数量实例，失败与限流 cooldown 都只影响当前实例
+- `LLMService` 通过 caller bucket 选择 `[llm.routes.soul/discovery/recommendation/evaluation]`：默认继承全局链，`inherit=false` 时执行模块自己的完整链并严格禁止 spill 到全局链。旧 provider/model override 会投影为等价实例或派生实例
+- `LLMRegistry.complete_chain()` 执行有序链，`complete_provider()` 精确探测一个实例；响应携带最终 `instance_id`。Ollama chat 实例必须显式配置 model，仅有服务地址或独立 `bge-m3` embedding 不会注册 chat、更不会猜 `llama3`
+- `/api/config/discover-models` 在配置内存副本上构建精确实例并调用 OpenAI-compatible `GET /models`，供 PC Web、插件与 setup 的可编辑模型下拉使用；该支路不保存配置。协议没有 Effort capability 枚举，返回的 Effort 仅是本地 advisory
+- `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入和刷新；OpenAI 实例设置 `auth_mode="codex_oauth"` 时只替换认证来源，并限制 `base_url` 为 OpenAI 官方 API 域名
+- DeepSeek 的连通性探针显式关闭 thinking；普通请求的 reasoning effort 是 request-local 参数，不修改共享 adapter 状态。每个 DeepSeek 实例的 `base_url` 分别进入 SDK 和 endpoint 代理裁决
 - 结构化输出共享解析：`llm/json_utils.py` 为 discovery eval-batch、recommendation copy/classify、soul awareness/insight/profile/speculator 提供统一 JSON 容错，兼容 MiMo / OpenAI-compatible wrapper、fenced JSON、JSONL、schema echo 和 malformed `{ [ ... ] }`
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；`embedding.provider="ollama"` 且 embedding 凭据为空时直接使用本地 Ollama 默认地址，不再产生向后兼容 warning

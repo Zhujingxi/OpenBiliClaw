@@ -211,7 +211,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ```text
 interactive (dialogue / config probe) ──────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  ├─ supply includes explore queries / source extraction while low
@@ -223,6 +223,9 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
+
+config UI draft → /api/config/discover-models → exact instance GET /models
+                → editable model list + local effort advisory (no config write)
 
 degraded registry → provider-free ping(degraded) → static /web | /setup | /m
                   ├─ GET/PUT config → restart runtime
@@ -400,14 +403,15 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│         LLM 适配层 + Embedding 服务（双层缓存）                 │
+│      模块路由 → LLM 实例链 → Provider 适配 + Embedding（独立双层缓存） │
+│  配置草稿 → discover-models → 精确实例 GET /models（不写盘；Effort 本地建议）│
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
 │  │ OpenAI / Claude / Gemini │  │ EmbeddingService       │   │
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
 │  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
-│  LLMService caller bucket → per-module provider/model override │
+│  LLMService caller bucket → inherit global chain / custom chain │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │

@@ -87,14 +87,14 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
     valueless = re.findall(r"<option(?:\s+selected=\"\")?>[^<]*</option>", html)
     assert valueless == [], f"value-less <option> elements: {valueless}"
     for select_id in (
-        "llmProvider",
-        "llmFallbackProvider",
+        "llmInstanceProviderType",
+        "llmDefaultChainPicker",
         "embeddingProvider",
         "embeddingFallbackProvider",
-        "moduleSoulProvider",
-        "moduleDiscoveryProvider",
-        "moduleRecommendationProvider",
-        "moduleEvaluationProvider",
+        "moduleSoulPicker",
+        "moduleDiscoveryPicker",
+        "moduleRecommendationPicker",
+        "moduleEvaluationPicker",
         "logLevel",
         "logFileLevel",
     ):
@@ -103,11 +103,10 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
         assert 'translate="no"' in m.group(0), f"{select_id} missing translate=no"
 
 
-def test_desktop_settings_warns_on_same_name_llm_fallback() -> None:
-    """A fallback provider equal to the default would never fire (the
-    registry drops it silently; the backend now rejects the save with a
-    blocking issue). The settings page must carry an inline warning element
-    and disable the same-name option via syncLlmFallbackSameState."""
-    assert 'id="llmFallbackSameWarning"' in _INDEX
-    assert "function syncLlmFallbackSameState()" in _APP_JS
-    assert "syncLlmFallbackSameState();" in _APP_JS
+def test_desktop_settings_routes_by_instance_not_provider_type() -> None:
+    """Two endpoints may share one adapter type; only the stable instance ID
+    must be unique within an ordered chain."""
+    assert 'id="llmFallbackSameWarning"' not in _INDEX
+    assert 'id="llmInstanceId"' in _INDEX
+    assert "LLM_INSTANCE_ID_PATTERN" in _APP_JS
+    assert "if (!chain.includes(instanceId))" in _APP_JS

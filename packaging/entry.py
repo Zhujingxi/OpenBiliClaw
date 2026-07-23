@@ -396,19 +396,17 @@ def _enable_ollama_embedding_default(config_path: Path) -> None:
 
 
 def _default_ollama_to_embedding_only(config_path: Path) -> None:
-    """Blank a preset ``[llm.ollama] model`` so local Ollama is embedding-only.
+    """Blank the legacy preset ``[llm.ollama] model`` for packaged upgrades.
 
-    config.example.toml ships ``[llm.ollama] model = "qwen2.5:7b"``. Per
-    ``registry._ollama_is_chat_capable``, a non-empty model marks Ollama
-    chat-capable, so the chat chain probes qwen2.5:7b — which the packaged user
-    hasn't pulled — flooding the console with ``ollama request failed: 404``.
-    The packaged app defaults chat to a cloud provider and only wants Ollama for
-    bge-m3 embedding, so clear the chat model. Skipped when the user actually
-    defaulted chat to ollama; the wizard sets the model back if they pick it.
+    The v2 template marks its Ollama chat instance disabled, so it needs no
+    mutation. This path remains only for an older copied config where a
+    non-empty ``[llm.ollama].model`` implicitly made Ollama chat-capable.
     """
     try:
         text = config_path.read_text(encoding="utf-8")
     except OSError:
+        return
+    if "[llm.instances." in text:
         return
     provider = re.search(r'(?m)^\s*default_provider\s*=\s*"([^"]*)"', text)
     if provider and provider.group(1).strip().lower() == "ollama":

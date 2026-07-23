@@ -341,14 +341,14 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
     assert 'provider === "openai_compatible" || provider === "claude"' in setup_html
     assert 'pcfg.api_flavor = $("#apiFlavor").value' in setup_html
 
-    # Desktop settings: flavor select for both the default and the fallback
-    # provider panels, wired into load + save paths.
-    assert 'id="llmApiFlavor"' in desktop_html
-    assert 'id="llmFallbackApiFlavor"' in desktop_html
-    assert "llmProviderConfig.api_flavor" in app_js
-    assert "llmFallbackConfig.api_flavor" in app_js
-    assert 'setSelect("llmApiFlavor"' in app_js
-    assert 'setSelect("llmFallbackApiFlavor"' in app_js
+    # Desktop settings: every endpoint instance owns its own Base URL and
+    # OpenAI-protocol flavor, so two gateways of the same adapter type remain
+    # independently configurable.
+    assert 'id="llmInstanceBaseUrl"' in desktop_html
+    assert 'id="llmInstanceApiFlavor"' in desktop_html
+    assert 'setSelect("llmInstanceApiFlavor"' in app_js
+    assert 'api_flavor: ["openai", "openai_compatible"].includes(providerType)' in app_js
+    assert "base_url: baseUrl" in app_js
 
 
 def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> None:

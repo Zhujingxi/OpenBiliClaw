@@ -662,14 +662,32 @@ export async function fetchSourceShareSuggestion(overrides = null) {
   return requestJson("/config/source-share-suggestion", { method: "GET" });
 }
 
-export async function probeConfigService(kind, config) {
+export async function probeConfigService(kind, config, instanceId = "") {
   return requestJson("/config/probe-service", {
     method: "POST",
     timeoutMs: 35_000,
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ kind, config }),
+    body: JSON.stringify({
+      kind,
+      config,
+      ...(instanceId ? { instance_id: instanceId } : {}),
+    }),
+  });
+}
+
+export async function discoverConfigModels(config, instanceId) {
+  return requestJson("/config/discover-models", {
+    method: "POST",
+    timeoutMs: 25_000,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      instance_id: String(instanceId || ""),
+      config,
+    }),
   });
 }
 

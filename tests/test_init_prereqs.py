@@ -168,6 +168,30 @@ async def test_chat_ready_false_when_default_and_fallback_are_both_down() -> Non
     assert fallback.calls == 1
 
 
+async def test_chat_ready_walks_entire_v2_instance_chain() -> None:
+    primary = _Provider(ok=False)
+    second = _Provider(ok=False)
+    third = _Provider(ok=True)
+    providers = {
+        "gateway-a": primary,
+        "gateway-b": second,
+        "gateway-c": third,
+    }
+    ctx = _ctx(provider=primary)
+    ctx.llm_registry = SimpleNamespace(
+        get=lambda name="gateway-a": providers[name],
+        default_provider="gateway-a",
+        fallback_provider="gateway-b",
+        fallback_chain=["gateway-a", "gateway-b", "gateway-c"],
+        is_chat_capable=lambda name: name in providers,
+    )
+
+    assert await InitPrereqs(ctx).chat_ready() is True
+    assert primary.calls == 1
+    assert second.calls == 1
+    assert third.calls == 1
+
+
 async def test_chat_ready_skips_fallback_probe_when_same_as_default() -> None:
     """A same-name fallback is dead config (the chain drops it) — probing it
     again would just double the cost of a failing default probe."""

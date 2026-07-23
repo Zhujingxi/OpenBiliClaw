@@ -18,7 +18,8 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 
 | 命令 | 说明 | 状态 |
 |------|------|------|
-| `config-show` | 显示当前配置和可用 Provider | ✅ |
+| `config-show` | 显示当前配置、LLM 实例、全局调用链和最终默认实例 | ✅ |
+| `config-export-legacy` | 导出可供旧二进制读取的固定 Provider 配置副本 | ✅ |
 | `health-check` | 检查 LLM Provider 可用性 | ✅ |
 | `auth login` | 设置并验证 B 站 Cookie | ✅ |
 | `auth status` | 查看认证状态 | ✅ |
@@ -80,7 +81,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 
 ### `openbiliclaw config-show`
 
-显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
+显示当前加载的配置、已注册的 LLM 端点实例、全局调用链和最终生效的默认实例。旧格式仍显示等价结果；v2 会额外区分实例 ID 与 Provider 类型，因此两个同类型渠道不会被合并。
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
 ```bash
@@ -89,20 +90,60 @@ $ openbiliclaw config-show
 配置项
   收藏自动同步  关闭
 Provider 概览
+  LLM 默认调用链      deepseek-cn → relay-hk
+  已注册 Provider 实例  deepseek-cn (deepseek), relay-hk (openai_compatible)
+  最终默认 Provider 实例 deepseek-cn
 ```
 
 `config-show` 只读取并展示配置，不创建保存任务，也不会执行平台账号写入。当前没有默认执行
 原生保存写入的 CLI smoke；Bilibili `favorite` / `watch_later` 的真实 E2E 通过平台中立
 `/api/saved/*` 明确选择命名 BV ID，并且必须先取得当次用户授权或使用测试账号。
 
+### `openbiliclaw config-export-legacy`
+
+把当前有效配置投影为上一代固定 Provider schema，默认写到当前配置旁的
+`config.legacy.toml`。源 `config.toml` 始终保持不变，也不允许把 `--output` 指向源文件；
+目标已存在时默认拒绝，只有显式 `--force` 才覆盖。
+
+```bash
+# 默认输出 config.legacy.toml
+openbiliclaw config-export-legacy
+
+# 指定路径；确认覆盖已有的导出副本
+openbiliclaw config-export-legacy \
+  --output ./rollback/config.toml \
+  --force
+```
+
+命令会写临时文件、用当前解析器按旧 schema 回读验证，成功后才替换目标。导出规则及告警如下：
+
+- 全局链保留首个可用实例，并选后续第一个不同 Provider 类型作为唯一 fallback。
+- 同一种 Provider 类型只能保留一个 Base URL / Token 端点；同类型主备会折叠并告警。
+- 每个模块只保留链首 Provider 和 model；模块自己的后续 fallback 会截断并告警。
+- 如果模块链首与该类型被保留的代表端点不同，只能保留模块 model；Base URL、Token 和协议参数会改用代表端点并告警。
+- `[llm.embedding]` 独立配置保持不变。
+- 全局链没有任何可用实例时拒绝导出，不产生目标文件。
+
+建议的真实降级顺序：
+
+1. 在仍运行新版本时执行导出，阅读全部兼容告警。
+2. 停止 daemon；保留 v2 `config.toml` 和自动生成的
+   `config.toml.pre-llm-routing.bak`。
+3. 由操作者显式把 `config.legacy.toml` 放到旧版本读取的 `config.toml` 位置。
+4. 启动旧版本并运行 `openbiliclaw config-show` / `health-check` 验证实际端点。
+
+导出副本包含 API Key 等明文凭据。POSIX 下命令把权限设为 `0600`；Windows 下文件继承目标
+目录 ACL，应选仅当前账户可访问的目录。自动迁移备份、表达能力边界与前后端版本搭配说明见
+[配置文档](config.md#旧配置兼容与迁移)。
+
 ### `openbiliclaw health-check`
 
-逐个检查已注册 Provider 的连通性。
+逐个检查已注册 chat 实例的连通性；输出名称是实例 ID，不是 adapter 类型。
 
 ```bash
 $ openbiliclaw health-check
 Provider 健康检查
-  openai (default): 可用
+  openai-official (default): 可用
   deepseek: 可用
   ollama: 不可用
     原因: connection refused
@@ -170,7 +211,7 @@ $ openbiliclaw keyword-inspiration-report --window-days 14
 
 ### `openbiliclaw login codex`
 
-管理实验性的 Codex OAuth 凭据。该命令不自建 OAuth 流程，而是复用官方 Codex CLI 的登录态：默认读取 `~/.codex/auth.json`，导入到 `~/.openbiliclaw/codex_auth.json`，供 `[llm.openai].auth_mode="codex_oauth"` 使用。
+管理实验性的 Codex OAuth 凭据。该命令不自建 OAuth 流程，而是复用官方 Codex CLI 的登录态：默认读取 `~/.codex/auth.json`，导入到 `~/.openbiliclaw/codex_auth.json`，供 `provider_type="openai"` 且 `auth_mode="codex_oauth"` 的实例使用。
 
 ```bash
 # 默认：先尝试导入 ~/.codex/auth.json；没有时调用官方 `codex login` 后再导入
@@ -192,10 +233,14 @@ $ openbiliclaw login codex --logout
 启用方式：
 
 ```toml
-[llm.openai]
+[llm.instances.openai-codex]
+name = "OpenAI Codex OAuth"
+provider_type = "openai"
+enabled = true
 auth_mode = "codex_oauth"
 api_key = ""
 base_url = ""
+model = "gpt-5-nano"
 ```
 
 这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向 OpenAI 官方 API 域名，避免把 ChatGPT OAuth token 发给第三方代理。
@@ -629,8 +674,8 @@ Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0
 #
 # 注意（v0.3.176+）：本地 Ollama 已不再出现在聊天 provider 菜单里——随装的
 # Ollama 只带 embedding 模型（bge-m3），小体积本地聊天模型达不到内容管线质量线。
-# 后端注册表 / 桌面设置页仍支持 ollama 聊天；`ollama` 作为来自既有配置或
-# 显式 flag 的 default_provider 依然被接受，只是不再交互式「提供」它。
+# 后端注册表 / 桌面设置页仍支持 ollama 聊天；既有配置或显式 flag 选择
+# `ollama` 依然被接受，只是不再交互式「提供」它。
 
 Embedding(向量化)服务
 把视频标题/简介压成向量,跨视频做相似度对比 —— 决定"这条和你之前喜欢的那条是不是同一类"。和聊天 LLM 是分开的。
@@ -646,7 +691,7 @@ Embedding(向量化)服务
 Tip:不确定就选 1。日常推荐质量已经够用且不消耗主 LLM 配额。想再准一点选 2(Gemini),需要去 https://aistudio.google.com/apikey 拿 Key。
 请选择 embedding 方案 [1]:
 
-最后是 Per-module 覆盖（高级，默认可跳过）
+最后是分模块实例链（高级，默认继承全局链）
 （高级，可跳过）是否为单个模块单独指定 provider/model？[y/N]:
 
 初始化前认证引导 · 补齐 B 站认证
@@ -670,11 +715,13 @@ Cookie 只存在你本机 data/bilibili_cookie.json，不会上传任何地方�
 
 交互式 `init` 在询问「是否允许局域网设备访问」之后，**仅当启用了局域网访问时**会追加一次「是否为局域网访问设置密码」（默认 `No`）。选 `Yes` 即走与 `set-password` 相同的交互设置流程，写入 `[api.auth]`；选 `No` 可随后再用 `openbiliclaw set-password` 设置。
 
-> **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义），按所选 preset 写入 `[llm.openai]` 段。两者底层走的是同一个 OpenAI 协议家族，但用户视角分得很清楚。
+> **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义）。向导会复用同类型且配置一致的现有实例，否则创建新的 `[llm.instances.<id>]`，并把它提升到 `default_chain` 首位；不会删除用户已经配置的其他渠道。
 >
 > **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。
 >
-> **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 ollama 聊天，供进阶用户使用；来自既有 `config.toml` 或显式 flag 的 `default_provider = "ollama"` 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。
+> **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 Ollama chat 实例，供进阶用户使用；旧 `default_provider = "ollama"` 或显式 flag 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。
+
+Provider 选择只决定本次创建或提升哪个全局实例，不会把 `default_chain` 压缩成单项。高级的模块 `provider/model` 问答会写成 `inherit=false` 的模块实例链；若模型不同于现有实例，会创建一个派生实例来保留覆盖，而不会修改共享实例。
 
 首次 `init` 的 discover 阶段可能持续几分钟，因为它会真实访问 B 站接口并调用当前 provider 进行候选打分与表达生成。
 当前实现已经对首轮 discover 做了保守受控并发优化，但默认并发上限仍偏保守，优先减少 B 站和 LLM 限流风险。

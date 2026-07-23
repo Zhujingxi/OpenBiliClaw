@@ -153,6 +153,7 @@ def test_build_llm_registry_registers_openai_compatible() -> None:
                 api_key="gsk-groq-test",
                 model="llama-3.1-70b-versatile",
                 base_url="https://api.groq.com/openai/v1",
+                reasoning_effort="high",
             ),
         )
     )
@@ -172,6 +173,7 @@ def test_build_llm_registry_registers_openai_compatible() -> None:
     assert compat.name == "openai_compatible"
     assert openai is not compat
     assert compat.base_url == "https://api.groq.com/openai/v1"
+    assert compat._reasoning_effort == "high"
 
 
 def test_build_llm_registry_refuses_openai_compatible_without_base_url() -> None:
