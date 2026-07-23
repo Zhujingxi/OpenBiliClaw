@@ -189,12 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.182 (2026-07-21)**
+📌 Latest: **v0.3.183 (2026-07-23)**
 
-- **Sync errors now name the step and the cause** — the home page splits "account sync" from "source access" and points at the exact platform and reason instead of a bare "sync failed".
-- **An X rate limit only skips X** — it is no longer reported as a whole-account sync failure, and no longer bypasses the cooldown to keep requesting.
-- **"Shuffle" is a pure dedupe action again** — all three surfaces exclude the current cards instead of firing batch "dislike" events into your profile.
-- **Windows / macOS desktop upgrades really switch to the new build** — macOS ships an in-DMG installer that verifies signature and version, then swaps atomically and relaunches.
+- **Create multiple independent instances of the same model channel** — each keeps its own Base URL, token, model, and protocol, then joins an ordered global or per-module failover chain.
+- **Model selection no longer depends on typing everything** — desktop web, the extension, and Setup can fetch real models from the current OpenAI-compatible endpoint, while Effort suggestions remain editable.
+- **Legacy upgrades stay recoverable and reversible** — old provider settings project losslessly, the first migration keeps a permanent backup, and an old-version-compatible config can be exported.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

@@ -4,7 +4,7 @@
 
 ---
 
-## v0.3.182：账号同步、换批去重与桌面升级交接（2026-07-21）
+## v0.3.183：多实例模型路由与真实模型发现（2026-07-23）
 
 - **模型配置从“Provider 名 + 一个迷惑的备选项”升级为可编排的端点实例路由**：新增 `[llm.instances.<id>]`，每个实例独立保存 Provider 类型、Base URL、token、模型与协议选项，同类型渠道可同时存在；`default_chain` 支持任意长度、可拖拽排序的全局故障切换，Soul / Discovery / Recommendation / Evaluation 默认继承，也能各自配置严格不越界的实例链。Registry 改为实例 ID 注册与实例级 cooldown，响应和探针返回实际命中的 `instance_id`，初始化前置检查会沿完整链寻找可用端点。桌面设置页提供实例卡片、编辑器、链条排序与逐实例 / 整链真实测试；插件也可新建、编辑、删除和逐实例测试，使用窄屏友好的上移 / 下移维护全局默认链，并完整回传 PC Web 创建的模块链（模块链编辑仍留在 PC Web）。两端保存其他设置都不会再把新路由压回旧格式，密钥输入留空时保留已保存值。旧 `default_provider` / `fallback_provider`、Provider 分段和模块 model override 会无损投影，只有新版 UI 保存时才迁移；仅含样例默认模型、没有凭据且未被引用的远程模板分段不会误迁移成实例。安装器、CLI、setup、Docker 模板与配置 API 均保留全部实例和顺序。Embedding 本轮仍保持独立配置，避免 chat 切换时悄悄改变向量空间。
 
@@ -12,7 +12,10 @@
 
 - **模型路由迁移可以真实回退旧版本**：首次把已有旧 `config.toml` 写成 v2 前，中心保存层会创建逐字节、同权限且永不覆盖的 `config.toml.pre-llm-routing.bak`；只读、旧格式保存、新建 v2 和后续 v2 保存均不误建备份。新增 `openbiliclaw config-export-legacy [--output PATH] [--force]`，在不改当前配置的前提下生成 `0600` 的旧 schema 副本，并用回读校验后才原子替换目标；输出逐项披露旧格式无法表达的同类型端点折叠、全局长链截断、模块 fallback 截断和端点重绑定，Embedding 保持独立不变。自动测试冻结上一代解析契约；本次验收另用真实上一版源码解析导出文件，避免“当前版本自己能读”冒充降级兼容。
 
-- **用户社区入口改为 Discord，下掉已失效的微信群码**：README CN/EN 里的微信二维码标注「7 天内有效」，但实际停留在 6 月 8 日生成的那张（6 月 15 日即过期），用户扫到的是死码；现把该位置换成永久有效的 Discord 邀请徽章（链接可直接点击，比二维码更贴合 Discord 的桌面端使用习惯），并删除不再被引用的 `docs/images/wechat-user-community-qrcode.jpg`。QQ 群入口不变。
+---
+
+## v0.3.182：账号同步、换批去重与桌面升级交接（2026-07-21）
+
 - **移动端惊喜卡恢复整卡点击打开（issue #126）**：用户反馈手机上「惊喜推荐一定要点『看看』才能跳转，下面的内容却是整卡点一下就进去」，问这是防误触还是别的设计原因。查下来两者都不是——这是实现不一致而非有意为之：移动 Web 的普通卡片在 `renderCard()` 里绑了整卡 click（动作行 `stopPropagation` 排除按钮），而惊喜卡的 `.delight-tray` 上只有左右滑动切卡的 pointer handler，位移不足 50px 时松手什么也不做，于是卡体在视觉上像可点、实际是死区。现在死区内松手（位移 <10px，`DELIGHT_DRAG_DEAD_ZONE`，与桌面端 `_DELIGHT_DRAG_DEAD_ZONE` 同值）等同点击「看看」：走同一个 `handleDelightAction(d, "view")`，因此已读标记、`POST /api/delight/respond` 与打开链接的语义和按钮完全一致，不是另一条旁路。10px–50px 之间仍然刻意不触发任何动作，手指轻微拖动不会误开内容；≥50px 继续是切卡。反馈按钮、聊天输入框等交互元素本就在 `pointerdown` 阶段 `stopPropagation`，天然不会被整卡点击吸收；已反馈完成（`show_actions=false`）、聊天 composer 展开中、或拿不到内容 URL 时不接管点击，避免抢走「点空白处收起输入框」的预期。**四端范围**：桌面 Web 的普通推荐卡本来就只有动作按钮、没有整卡点击，惊喜卡另有封面点击区 + 「去看看」按钮，自身已经自洽，本次不动以免改变桌面既有手感；插件 popup / side panel 没有惊喜卡（delight 只走 background 通知），CLI 无此交互。新增三个 Playwright 真机级 E2E：点击卡体打开内容并只上报一次 `view`、拖动 30px 不打开也不上报、点「喜欢」不会连带打开内容。
 
 - **八平台真实只读 E2E 暴露的五处边界问题已修复**：在隔离数据目录中使用真实登录态验证 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 的鉴权与只读取数后，修复了：(1) 并发 `/api/sources/status` 在共享 SQLite connection 上重复执行 X 健康表 DDL/SELECT 导致偶发 500，现改为首建单飞 + 每次操作独立短连接，429 读改写在同一 `BEGIN IMMEDIATE` 事务内；(2) 活体探针把 60 秒“可复用窗口”误当成用户可见验证期限，现显式验证 60 秒后仍会重新出网，但上次成功在 6 小时内继续诚实显示“已验证”；(3) 小红书多页 partial 每页都上报 5 时 `scope_counts` 错取最大值 5，现以合并后的 scope-aware canonical 条目数作下限；(4) 抖音 MAIN-world fetch tap 在两种 unpacked 目录布局间只尝试一个资源路径，现依次尝试 `dist/main/...` 与 `main/...`，background/content 两条重注入路径一致；(5) `fetch-douyin` / `fetch-xhs` / `fetch-youtube` 等到 `timeout` / `failed` 后不再以退出码 0 冒充 smoke 成功。修后真实复测：活体成功 61 秒后 B 站/抖音/Bangumi 仍为 `verified`；`/api/sources/status` 40 并发下 120/120 为 200 且契约有效，推荐接口 60/60 为 200，日志零 SQLite 错误/500/Traceback；小红书多页真实返回 saved 197 + liked 231，`scope_counts` 与 428 条 canonical signal 逐项相等；B 站历史 3/3、抖音 direct feed 2/2、X likes/bookmarks 1+1、Reddit 搜索 3/3、知乎 300+423+16、YouTube 3+5+0 均跑通。Bangumi `/v0/me` 首次成功，随后 collection 在用户当前 `network.mode=direct` 下两次按预期报海外直连 timeout（错误文案已明确建议 system/custom），未伪装成登录失效。Chrome 当时仍运行未重载的旧 bundle，所以抖音扩展 smoke 仍记录旧单路径错误并以新退出码 1 诚实失败；新双路径 bundle 已经 Chrome/Firefox build + 单测验证，但真实已登录浏览器的该分支必须在扩展重载后再验，不能冒充真机成功。全程未执行点赞、收藏、关注等平台写操作；两轮隔离凭据目录与测试服务均已清理。
