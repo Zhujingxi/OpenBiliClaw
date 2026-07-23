@@ -20,6 +20,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
+| 对话结算单队列生命周期（Wave 1） | 🚧 | 每个 API runtime generation 只安装一个 `dialogue_settlement_queue` 与一个 typed dispatcher；`SocraticDialogue(mode=queued)` 当前只提交 `learn`，其余 10 个 kind 在 Wave 3 生产入口 cutover 前显式 fail closed。队列 self-owned、不进入 `BackgroundTaskRegistry`；`create_app()` 注入真实 queued dialogue 时会采用其同一个 queue，不另建 owner。热重载按 pause/drain old → exact revoke old permit → start/register new → publish new → shutdown old；构造/注册失败只在 permit 单槽为空时用 fresh nonce 恢复 old。CLI/OpenClaw 不属于该 runtime，显式使用 `legacy_direct`，不享受 queue/guard 保证。 |
 | 桌面安装包升级进程交接 | ✅ | Windows Inno Setup 在覆盖文件前通过 Restart Manager + `taskkill /T /F` 结束旧版进程树，安装成功后 `[Run]` 无条件从 `{app}\OpenBiliClaw.exe` 启动刚写入的新版本，交互与静默升级一致。macOS DMG 因系统模型没有安装完成回调，根目录提供显式 `安装并启动 Install OpenBiliClaw.command`：先用 `ditto` 完整暂存并校验 bundle version + code signature，再发起有界的优雅退出请求（连 `osascript` 等待本身也受窗口约束；超时 TERM/KILL，且只清理由旧 OpenBiliClaw.app 拉起的内置 Ollama）、同卷备份后原子替换 `/Applications/OpenBiliClaw.app`，二次校验失败或中断会恢复旧 app，成功后 `open -n` 精确启动安装路径并确认进程出现。助手不自动删除 quarantine；Gatekeeper 决策仍由 macOS 和用户完成。传统拖拽保持兼容，但需手动退出、替换、重开。macOS-only E2E 使用两个 ad-hoc 签名最小 app 和真实只读挂载 DMG，覆盖旧 PID 退出、版本/签名更新、新 PID 启动与暂存清理。 |
 | 扩展原生保存共享 runtime | ✅（6/6 executor + 真实账号验证） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner，并统一经过共享 MV3 recovery barrier。一般 runner 与 legacy dispatcher 共用 `globalThis` mutex 保护 tab 创建/加载，加载完成即释放；XHS 手动 native-save 使用 exact tokenized route + identity/control fence，可在没有精确复用页时越过后台 discovery mutex，且 alarm/runtime wake poll single-flight。执行中的任务按 task/tab 独立分桶，仍各自在单一绝对 deadline 内严格校验 final tab 与 sender URL、tab/ID/item/platform。`chrome.storage.session` 可同时记录多个 runner-owned tab，MV3 recovery 只关闭这些 ID；content 用 256 项 bounded outcome-promise cache。YouTube duplicate exact playlist 优先 checked proof，否则稳定复用一个；知乎 typed `question/answer/article` identity 适配 current `Favlists-item`；小红书适配 current `noteContainer/collect-wrapper`。2026-07-14 六个平台 favorite 与 watch-later/fallback 真实终态均为 `synced/already_synced`。 |
 | 扩展原生保存 broker 与 adapter 注册 | ✅（6/6 executor + 真实账号验证） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。broker poll/lease、native task/item heartbeat 与 terminal persistence 使用线程卸载的独立短连接并有界重试 SQLite lock；durable terminal state 在 heartbeat completion race 中优先。开发用 `/api/extension/reload` 返回 `delivered`，可确认至少一个 runtime-stream 订阅者收到热重载事件。 |
@@ -523,7 +524,14 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 热重载取消边界：`BackgroundTaskRegistry.cancel_all()/cancel()` 与 `restart_background_tasks()` 都用 `asyncio.wait(..., timeout=1.5)`，而不是会继续等待 coroutine 真正结束的 `wait_for(gather(...))`。第三方 provider / loop 若吞掉 `CancelledError`，配置保存仍在 deadline 内返回；未退出任务继续留在 registry 和 `app.state` 中供后续关闭重试，并且不会启动同名 refresh / account-sync / auto-update loop，避免旧新 runtime 同时写库。正常协作取消的任务仍在新组件发布前完成清理。
 
-对话学习 worker 不在上述 registry 内，由 `RuntimeContext.rebuild_from_config()` 先 pause-drain。30 秒 drain 超时不再被吞掉：队列抛出 `TimeoutError`，runtime 恢复仍在位的旧队列接单并把异常交给配置事务回滚，且不会调用 `cancel_all`、构造或安装新 runtime；只有 drain 成功后才继续 swap，因此不存在新旧学习 worker 并发。进程 shutdown 的同类超时仍会在 `finally` 强制取消旧 worker。
+对话结算 worker 不在上述 registry 内，由 `RuntimeContext.rebuild_from_config()`
+先 pause/drain old；30 秒 drain 超时不再被吞掉：runtime 恢复仍在位且尚未撤权
+的 old queue 接单，把异常交给配置事务回滚，且不会调用 `cancel_all`、构造或安装
+new runtime。drain 成功后依次 exact revoke old `(task, nonce)`、取消 registry
+任务、构造并启动 new queue、等待 new permit 已注册，再发布 new generation 并
+shutdown old。new 构造/注册失败时，old 只能用 fresh nonce 重新授权后 resume；
+old 的迟到 `finally` compare-and-clear 旧 tuple，不能清除 new permit。进程
+shutdown 的同类超时仍会在 `finally` 强制取消 worker。
 
 配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
 

@@ -1526,3 +1526,188 @@ async def test_queue_reload_handoff_old_finally_cannot_clear_new_permit() -> Non
 
     assert mutations == ["old", "new-before-finally", "new-after-finally"]
     assert guard.registered_permit is None
+
+
+async def test_queue_reload_start_registers_actual_worker_permit_before_publish() -> None:
+    """R2-3: start returns only after the created Task owns the single permit."""
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    guard = DialogueSettlementGuard()
+
+    async def dispatcher(_job: DialogueJob) -> DialogueJobResult:
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher, guard=guard)
+    queue.start()
+
+    permit = queue.worker_permit
+    assert permit is not None
+    assert queue.worker_task is permit.worker_task
+    assert guard.is_current(permit)
+
+    await queue.shutdown()
+
+
+def test_runtime_uses_one_settlement_queue_and_two_legacy_direct_callsites() -> None:
+    """F5/R2-3: runtime naming is singular and production direct mode is allowlisted."""
+    import ast
+    import inspect
+
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.soul import dialogue
+
+    fields = RuntimeContext.__dataclass_fields__
+    assert "dialogue_settlement_queue" in fields
+    assert "dialogue_learn_queue" not in fields
+
+    root = Path(__file__).parents[1]
+    production_sources = {
+        path: path.read_text(encoding="utf-8")
+        for path in (
+            root / "src/openbiliclaw/api/runtime_context.py",
+            root / "src/openbiliclaw/cli.py",
+            root / "src/openbiliclaw/integrations/openclaw/operations.py",
+        )
+    }
+    direct_token = "DialogueLearningMode.LEGACY_DIRECT"
+    assert sum(source.count(direct_token) for source in production_sources.values()) == 2
+    assert direct_token not in production_sources[root / "src/openbiliclaw/api/runtime_context.py"]
+    legacy_direct_callsites: list[str] = []
+    for path, source in production_sources.items():
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                value = keyword.value
+                if (
+                    keyword.arg == "learning_mode"
+                    and isinstance(value, ast.Attribute)
+                    and value.attr == "LEGACY_DIRECT"
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id == "DialogueLearningMode"
+                ):
+                    legacy_direct_callsites.append(path.relative_to(root).as_posix())
+    assert sorted(legacy_direct_callsites) == [
+        "src/openbiliclaw/cli.py",
+        "src/openbiliclaw/integrations/openclaw/operations.py",
+    ]
+    retired_class_name = "Dialogue" + "LearnQueue"
+    assert retired_class_name not in "\n".join(production_sources.values())
+    assert "if self._learn_queue is not None" not in inspect.getsource(
+        dialogue.SocraticDialogue.respond
+    )
+
+
+async def test_runtime_reload_handoff_repeats_with_one_authorized_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-3: ten reloads register new only after exact old revocation."""
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    for iteration in range(10):
+        guard = DialogueSettlementGuard()
+        mutations: list[str] = []
+
+        async def dispatcher(
+            job: DialogueJob,
+            guard: DialogueSettlementGuard = guard,
+            mutations: list[str] = mutations,
+        ) -> DialogueJobResult:
+            guard.require_dialogue_settlement_worker()
+            mutations.append(str(job.payload["label"]))
+            return DialogueJobResult(outcome="completed")
+
+        old = DialogueSettlementQueue(
+            dispatcher,
+            guard=guard,
+            name=f"runtime-old-{iteration}",
+        )
+        old.start()
+        await old.submit_and_wait(DialogueJobKind.LEARN, {"label": "old"})
+        old_permit = old.worker_permit
+        assert old_permit is not None
+        ctx = RuntimeContext(dialogue_settlement_queue=old)
+        built: list[DialogueSettlementQueue] = []
+
+        def rebuild(
+            _config: object,
+            guard: DialogueSettlementGuard = guard,
+            iteration: int = iteration,
+            built: list[DialogueSettlementQueue] = built,
+            ctx: RuntimeContext = ctx,
+        ) -> None:
+            new = DialogueSettlementQueue(
+                dispatcher,
+                guard=guard,
+                name=f"runtime-new-{iteration}",
+            )
+            new.start()
+            built.append(new)
+            ctx.dialogue_settlement_queue = new
+
+        monkeypatch.setattr(ctx, "_rebuild_components", rebuild)
+        await ctx.rebuild_from_config(Config())
+
+        new = built[0]
+        new_permit = new.worker_permit
+        assert new_permit is not None
+        assert new_permit.lifecycle_nonce != old_permit.lifecycle_nonce
+        assert guard.is_current(new_permit)
+        assert old.worker_alive is False
+        await new.submit_and_wait(DialogueJobKind.LEARN, {"label": "new"})
+        await new.shutdown()
+        assert mutations == ["old", "new"]
+        assert guard.registered_permit is None
+
+
+async def test_runtime_reload_failure_restores_old_with_fresh_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-3: ten failed rebuilds reauthorize only the drained old Task."""
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    for iteration in range(10):
+        guard = DialogueSettlementGuard()
+        mutations: list[str] = []
+
+        async def dispatcher(
+            job: DialogueJob,
+            guard: DialogueSettlementGuard = guard,
+            mutations: list[str] = mutations,
+        ) -> DialogueJobResult:
+            guard.require_dialogue_settlement_worker()
+            mutations.append(str(job.payload["label"]))
+            return DialogueJobResult(outcome="completed")
+
+        old = DialogueSettlementQueue(
+            dispatcher,
+            guard=guard,
+            name=f"rollback-old-{iteration}",
+        )
+        old.start()
+        await old.submit_and_wait(DialogueJobKind.LEARN, {"label": "before"})
+        original_permit = old.worker_permit
+        assert original_permit is not None
+        ctx = RuntimeContext(dialogue_settlement_queue=old)
+
+        def fail_rebuild(_config: object) -> None:
+            raise RuntimeError("controlled rebuild failure")
+
+        monkeypatch.setattr(ctx, "_rebuild_components", fail_rebuild)
+        with pytest.raises(RuntimeError, match="controlled rebuild failure"):
+            await ctx.rebuild_from_config(Config())
+
+        restored_permit = old.worker_permit
+        assert ctx.dialogue_settlement_queue is old
+        assert restored_permit is not None
+        assert restored_permit.lifecycle_nonce != original_permit.lifecycle_nonce
+        assert guard.is_current(restored_permit)
+        await old.submit_and_wait(DialogueJobKind.LEARN, {"label": "after"})
+        await old.shutdown()
+        assert mutations == ["before", "after"]
+        assert guard.registered_permit is None

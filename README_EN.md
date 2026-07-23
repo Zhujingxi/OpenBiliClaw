@@ -591,7 +591,8 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-durable dialogue: fixed time/payload → confirmation entry (pending list/cards) → single learn queue → one anchor(ref+generation) → relation matrix
+durable reply: fixed time/payload → queued mode → typed settlement queue (currently learn) → one learning worker
+confirmation entry (pending list/cards) → one anchor(ref+generation) → relation matrix (other typed kinds await cutover)
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
                           ├→ card / legacy / anchor / unanchored settles share ref arbitration → claim guard → applied-only cross-session projection
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
@@ -638,11 +639,12 @@ durable dialogue: fixed time/payload → confirmation entry (pending list/cards)
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
-                                      │                      └new dislike: shared purge → content_cache
-                                      └failure/timeout: rollback provisional history → safe error / failed turn
-durable turn → fixed time/payload → confirmation entry (pending list/cards) → single learn queue → anchor(ref,generation) → relation matrix
-                                                  └→ card/legacy/anchor/unanchored settles share ref arbitration; confusion failure: FIFO≤5 → 12h recovery
+Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[learn] → one in-line-await worker
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
+learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
+failure/timeout → rollback provisional history → safe error / failed turn
+durable turn → fixed time/payload → confirmation entry (pending list/cards) → anchor(ref,generation) → relation matrix
+                                                  └→ card/legacy/anchor/unanchored settles share ref arbitration; other queue kinds await cutover
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

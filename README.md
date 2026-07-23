@@ -595,10 +595,11 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-持久对话：固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → 单锚(ref+generation) → 归属矩阵
-                           ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
-                           ├→ 卡片 / legacy / 锚 / 无锚 settles 共用 ref 仲裁 → claim guard → applied-only 跨 session 投影
-                           └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+持久对话回复：固定时间/payload → queued mode → typed 结算队列（当前 learn）→ 单 worker 学习
+确认入口（待聊列表/卡片）→ 单锚(ref+generation) → 归属矩阵（其余 typed kind 待 cutover）
+                       ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
+                       ├→ 卡片 / legacy / 锚 / 无锚 settles 共用 ref 仲裁 → claim guard → applied-only 跨 session 投影
+                       └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 ```
 
 ```
@@ -641,11 +642,12 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
-                                      │                      └新避雷：共享清池 → content_cache
-                                      └失败/超时：回滚临时历史 → 安全错因 / failed turn
-durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → 单学习队列 → anchor(ref,generation) → relation matrix
-                                                   └→ 卡片/legacy/锚/无锚 settles 共用 ref 仲裁；confusion 失败：FIFO≤5 → 12h 恢复
+Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[learn] → 单 worker 在线内学习
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
+学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
+失败/超时 → 回滚临时历史 → 安全错因 / failed turn
+durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → anchor(ref,generation) → relation matrix
+                                                   └→ 卡片/legacy/锚/无锚 settles 共用 ref 仲裁；其余 queue kind 待 cutover
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 

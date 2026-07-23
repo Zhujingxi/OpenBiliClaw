@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from openbiliclaw.api.models import ChatTurnOut
-from openbiliclaw.soul.dialogue import DIALOGUE_WINDOW_TURNS, DialogueTurn, SocraticDialogue
+from openbiliclaw.soul.dialogue import (
+    DIALOGUE_WINDOW_TURNS,
+    DialogueLearningMode,
+    DialogueTurn,
+    SocraticDialogue,
+)
 from openbiliclaw.soul.identity import build_hash8_map, insight_hash8
 from openbiliclaw.storage.database import Database
 
@@ -32,6 +37,7 @@ def _dialogue_with_history(exchanges: int) -> SocraticDialogue:
         soul_engine=object(),
         session="popup",
         local_timezone=_UTC_PLUS_8,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     for i in range(exchanges):
         dialogue._history.append(
@@ -100,6 +106,7 @@ def test_regurgitated_utc_timestamp_uses_injected_local_timezone(tmp_path: Path)
         session="popup",
         database=db,
         local_timezone=_UTC_PLUS_8,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._ensure_history_loaded()
     dialogue._history.append(DialogueTurn(role="user", content="当前轮"))
@@ -136,6 +143,7 @@ async def test_current_time_is_only_appended_to_user_prompt_tail() -> None:
         llm_service=service,
         local_timezone=_UTC_PLUS_8,
         now_provider=lambda: fixed_now,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._history.extend(
         [
@@ -184,6 +192,7 @@ def test_regurgitation_loads_completed_popup_chat_turns(tmp_path: Path) -> None:
         soul_engine=object(),
         session="popup",
         database=db,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._ensure_history_loaded()
     contents = [(t.role, t.content) for t in dialogue.history]
@@ -211,6 +220,7 @@ def test_regurgitation_excludes_pending_probe_and_cli(tmp_path: Path) -> None:
         soul_engine=object(),
         session="popup",
         database=db,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._ensure_history_loaded()
     assert [(t.role, t.content) for t in dialogue.history] == [
@@ -228,6 +238,7 @@ def test_regurgitation_skipped_for_cli_session(tmp_path: Path) -> None:
         soul_engine=object(),
         session="cli",
         database=db,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._ensure_history_loaded()
     assert dialogue.history == []
@@ -307,6 +318,7 @@ def test_regurgitation_is_one_history_across_sessions_and_confirmation_scopes(
         soul_engine=object(),
         session="popup",
         database=db,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._ensure_history_loaded()
 
@@ -336,6 +348,7 @@ async def test_durable_request_session_overrides_dialogue_default_for_learning()
         soul_engine=FakeSoul(),
         llm_service=FakeService(),
         session="popup",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     await dialogue.respond("来自桌面端", session="webui", turn_id="turn-web")

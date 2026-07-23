@@ -16,7 +16,11 @@ from openbiliclaw.llm.service import (
     LLMResponseContentError,
     ModuleOverride,
 )
-from openbiliclaw.soul.dialogue import DialogueTurn, SocraticDialogue
+from openbiliclaw.soul.dialogue import (
+    DialogueLearningMode,
+    DialogueTurn,
+    SocraticDialogue,
+)
 
 _CURRENT_TIME_SUFFIX = re.compile(r"\n\n当前时间:\d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}$")
 
@@ -79,6 +83,7 @@ async def test_dialogue_respond_appends_user_and_agent_turns() -> None:
         llm=None,
         soul_engine=soul_engine,
         llm_service=service,
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     reply = await dialogue.respond("我最近很喜欢看讲得很透的纪录片。")
@@ -121,6 +126,7 @@ async def test_dialogue_learning_bypasses_empty_inventory_background_admission()
         soul_engine=GateAwareSoulEngine(),  # type: ignore[arg-type]
         llm_service=service,
         session="popup",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     reply = await dialogue.respond("以后不要再推荐跑分视频。")
@@ -139,6 +145,7 @@ async def test_dialogue_respond_passes_prior_history_to_service() -> None:
         llm=None,
         soul_engine=soul_engine,
         llm_service=service,
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
     await dialogue.respond("我喜欢能讲清来龙去脉的视频。")
 
@@ -163,6 +170,7 @@ async def test_failed_dialogue_rolls_back_history_and_never_learns() -> None:
         soul_engine=soul_engine,
         llm_service=service,
         session="popup",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     with pytest.raises(LLMResponseContentError):
@@ -195,6 +203,7 @@ async def test_cancelled_dialogue_rolls_back_history_and_never_learns() -> None:
         soul_engine=soul_engine,
         llm_service=BlockingService(),
         session="popup",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     task = asyncio.create_task(dialogue.respond("取消也不能留下历史"))
@@ -236,6 +245,7 @@ async def test_concurrent_typed_failure_does_not_remove_successful_turn() -> Non
         llm=None,
         soul_engine=FakeSoulEngine(),
         llm_service=OverlappingService(),
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
     success_task = asyncio.create_task(dialogue.respond("成功消息"))
     await success_started.wait()
@@ -282,6 +292,7 @@ async def test_concurrent_cancellation_does_not_orphan_successful_tool_turn() ->
         llm_service=OverlappingToolService(),
         tools=[{"name": "noop"}],
         tool_dispatcher=object(),
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
     cancelled_task = asyncio.create_task(dialogue.respond("取消消息"))
     await cancelled_started.wait()
@@ -336,6 +347,7 @@ async def test_cancellation_while_waiting_does_not_start_or_mutate_turn() -> Non
         llm=None,
         soul_engine=FakeSoulEngine(),
         llm_service=service,
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
     success_task = asyncio.create_task(dialogue.respond("成功消息"))
     await started.wait()
@@ -361,6 +373,7 @@ def test_dialogue_clear_history_resets_turns() -> None:
         llm=None,
         soul_engine=FakeSoulEngine(),
         llm_service=FakeService(response="我们继续。"),
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     dialogue._history.extend(  # type: ignore[attr-defined]
         [
@@ -377,7 +390,11 @@ def test_dialogue_reuses_soul_engine_service_identity() -> None:
     shared_service = FakeService(response="共享")
     soul_engine = FakeSoulEngine()
     soul_engine._llm_service = shared_service  # type: ignore[attr-defined]
-    dialogue = SocraticDialogue(llm=object(), soul_engine=soul_engine)
+    dialogue = SocraticDialogue(
+        llm=object(),
+        soul_engine=soul_engine,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
+    )
 
     assert dialogue._build_service() is shared_service
 
@@ -386,8 +403,97 @@ def test_dialogue_fallback_service_inherits_soul_engine_module_overrides() -> No
     overrides = {"soul": ModuleOverride(provider="claude", model="claude-sonnet")}
     registry = SimpleNamespace(default_provider="openai")
     soul_engine = SimpleNamespace(_memory=object(), _module_overrides=overrides)
-    dialogue = SocraticDialogue(llm=registry, soul_engine=soul_engine)  # type: ignore[arg-type]
+    dialogue = SocraticDialogue(
+        llm=registry,
+        soul_engine=soul_engine,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
+    )  # type: ignore[arg-type]
 
     service = dialogue._build_service()
 
     assert service.module_overrides == overrides
+
+
+@pytest.mark.asyncio
+async def test_queued_mode_submits_learn_without_direct_learning() -> None:
+    """F5: API queued mode admits learn once and never invokes the engine directly."""
+    from openbiliclaw.soul.dialogue import DialogueLearningMode
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+    service = FakeService(response="queued reply")
+    soul_engine = FakeSoulEngine()
+
+    class RecordingQueue:
+        def __init__(self) -> None:
+            self.calls: list[tuple[DialogueJobKind, dict[str, object]]] = []
+
+        def submit(
+            self,
+            kind: DialogueJobKind,
+            payload: dict[str, object],
+        ) -> object:
+            self.calls.append((kind, dict(payload)))
+            return object()
+
+    queue = RecordingQueue()
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=service,
+        learning_mode=DialogueLearningMode.QUEUED,
+        settlement_queue=queue,
+    )
+
+    assert await dialogue.respond("排队学习", scope="chat", turn_id="turn-q") == "queued reply"
+    assert soul_engine.learn_calls == []
+    assert queue.calls == [
+        (
+            DialogueJobKind.LEARN,
+            {
+                "user_message": "排队学习",
+                "assistant_reply": "queued reply",
+                "session": "cli",
+                "scope": "chat",
+                "turn_id": "turn-q",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_queued_mode_without_queue_raises_configuration_error() -> None:
+    """F5: API mode cannot silently fall back to detached direct learning."""
+    from openbiliclaw.soul.dialogue import (
+        DialogueLearningConfigurationError,
+        DialogueLearningMode,
+    )
+
+    soul_engine = FakeSoulEngine()
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=FakeService(response="reply before admission"),
+        learning_mode=DialogueLearningMode.QUEUED,
+    )
+
+    with pytest.raises(DialogueLearningConfigurationError):
+        await dialogue.respond("缺队列必须失败")
+    assert soul_engine.learn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reply_only_test_mode_explicitly_skips_learning() -> None:
+    """F5: no-learning doubles opt in explicitly instead of relying on None."""
+    from openbiliclaw.soul.dialogue import DialogueLearningMode
+
+    soul_engine = FakeSoulEngine()
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=FakeService(response="reply only"),
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
+    )
+
+    assert await dialogue.respond("只回复") == "reply only"
+    await asyncio.sleep(0)
+    assert soul_engine.learn_calls == []

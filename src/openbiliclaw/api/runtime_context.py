@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
-_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS = 30.0
+_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS = 30.0
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:
@@ -134,20 +134,50 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
-def _build_dialogue_learn_handler(soul_engine: Any) -> Any:
-    """Build the async handler the dialogue learn queue invokes per turn.
+def _build_dialogue_settlement_dispatcher(soul_engine: Any) -> Any:
+    """Build the one typed dispatcher installed by the API runtime.
 
-    Wraps ``learn_from_dialogue`` in the background-admission bypass so an
-    interactive correction still runs when background admission is parked.
+    Wave 1 admits only ``learn`` from production entry points.  Every later
+    cutover kind is nevertheless named explicitly and fails closed until its
+    Wave 3 handler is connected.
     """
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorPersisted,
+        DialogueJobKind,
+        DialogueJobResult,
+    )
 
-    async def _handler(**payload: Any) -> None:
-        from openbiliclaw.llm.service import _background_admission_bypass
+    async def _dispatch(job: Any) -> DialogueJobResult:
+        if job.kind is DialogueJobKind.LEARN:
+            from openbiliclaw.llm.service import _background_admission_bypass
 
-        with _background_admission_bypass():
-            await soul_engine.learn_from_dialogue(**payload)
+            payload = dict(job.payload)
+            snapshot = job.effective_anchor_snapshot
+            if isinstance(snapshot, AnchorPersisted):
+                payload["anchor_ref"] = snapshot.ref
+                payload["anchor_generation"] = snapshot.generation
+            else:
+                payload["anchor_ref"] = ""
+                payload["anchor_generation"] = 0
+            with _background_admission_bypass():
+                await soul_engine.learn_from_dialogue(**payload)
+            return DialogueJobResult(outcome="completed")
+        if job.kind in {
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            DialogueJobKind.SETTLE_CONFUSION,
+            DialogueJobKind.CARD_DEFER,
+            DialogueJobKind.CARD_DISCUSS,
+            DialogueJobKind.CARD_RECONCILE,
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            DialogueJobKind.PROBE_REPLY_APPLY,
+            DialogueJobKind.CONFUSION_REPLY_APPLY,
+            DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
+            DialogueJobKind.CONFUSION_OPEN_SYNC,
+        }:
+            raise RuntimeError(f"{job.kind.value} is reserved for the Wave 3 endpoint cutover")
+        raise AssertionError(f"Unhandled dialogue settlement kind: {job.kind!r}")
 
-    return _handler
+    return _dispatch
 
 
 def _build_account_sync_x_components(
@@ -345,10 +375,9 @@ class RuntimeContext:
     saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
-    # Phase 1: single-worker serial queue for dialogue learning. Self-owned
-    # lifecycle (NOT in the cancel_all registry). Rebuilt on hot-reload with
-    # pause-drain-before-cancel_all / resume-on-rollback semantics.
-    dialogue_learn_queue: Any = None
+    # Wave 1: the one self-owned typed dialogue settlement queue. It is not in
+    # cancel_all and uses pause/drain + exact permit handoff on hot reload.
+    dialogue_settlement_queue: Any = None
     discovery_engine: Any = None
     recommendation_engine: Any = None
     runtime_controller: Any = None
@@ -536,49 +565,61 @@ class RuntimeContext:
         so no endpoint handler can interleave during the attribute-
         assignment sweep.
         """
-        # Phase 1: pause-drain the OLD dialogue learn queue BEFORE cancel_all so
-        # no queued learn is lost and no in-flight learn is interrupted. The
-        # worker is self-owned (not in the registry), so cancel_all never
-        # touches it — on a construction failure below we ``resume`` it.
-        old_learn_queue = self.dialogue_learn_queue
-        if old_learn_queue is not None:
+        # Pause/drain the old self-owned queue, then revoke its exact permit
+        # before any new worker may register. Construction failure gives the
+        # drained old Task a fresh nonce before it resumes.
+        old_settlement_queue = self.dialogue_settlement_queue
+        old_permit_revoked = False
+        if old_settlement_queue is not None:
             try:
-                await old_learn_queue.pause_and_drain(timeout=_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS)
+                await old_settlement_queue.pause_and_drain(
+                    timeout=_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS
+                )
             except (Exception, asyncio.CancelledError):
-                # The old runtime is still installed.  Restore its ability to
-                # accept work and make the reload caller observe the failure;
-                # constructing a new queue here would create two live workers.
                 with suppress(Exception):
-                    old_learn_queue.resume()
+                    old_settlement_queue.resume()
                 logger.warning(
-                    "Hot-reload aborted: old dialogue learn queue did not drain",
+                    "Hot-reload aborted: old dialogue settlement queue did not drain",
                     exc_info=True,
                 )
                 raise
+            await old_settlement_queue.wait_until_started()
+            if not old_settlement_queue.revoke_worker_permit():
+                old_settlement_queue.resume()
+                raise RuntimeError("Failed to revoke old dialogue settlement worker permit")
+            old_permit_revoked = True
 
-        # Keep a running guided-init task alive across rebuild — config writes
-        # are gated during init, but this is the belt-and-suspenders exemption
-        # so an init in flight is never silently cancelled (gui-init spec §5c).
-        cancelled = await self.task_registry.cancel_all(exclude=frozenset({"guided_init"}))
-        if cancelled:
-            logger.info(
-                "Hot-reload: cancelled %d background task(s) before rebuild",
-                cancelled,
-            )
         try:
+            # Keep a running guided-init task alive across rebuild — config
+            # writes are gated during init, but this exemption prevents an
+            # in-flight init from being silently cancelled.
+            cancelled = await self.task_registry.cancel_all(exclude=frozenset({"guided_init"}))
+            if cancelled:
+                logger.info(
+                    "Hot-reload: cancelled %d background task(s) before rebuild",
+                    cancelled,
+                )
             self._rebuild_components(new_config)
-        except Exception:
-            # Rollback: the new runtime was not installed. Resume the old queue
-            # (its worker survived cancel_all) so learning keeps working.
-            if old_learn_queue is not None:
+            new_settlement_queue = self.dialogue_settlement_queue
+            if new_settlement_queue is not None:
+                await new_settlement_queue.wait_until_started()
+        except (Exception, asyncio.CancelledError):
+            # Atomic component construction leaves the old runtime installed.
+            # Its permit was revoked, so rollback must allocate a fresh nonce.
+            if old_settlement_queue is not None:
                 with suppress(Exception):
-                    old_learn_queue.resume()
+                    if old_permit_revoked:
+                        old_settlement_queue.reauthorize_worker()
+                    old_settlement_queue.resume()
             raise
         else:
-            # New queue is installed and started — stop the old one for good.
-            if old_learn_queue is not None:
+            # New permit is current. Old shutdown/finally can only compare and
+            # clear its revoked tuple, so it cannot revoke the new worker.
+            if old_settlement_queue is not None:
                 with suppress(Exception):
-                    await old_learn_queue.shutdown(timeout=_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS)
+                    await old_settlement_queue.shutdown(
+                        timeout=_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS
+                    )
 
     def _rebuild_components(self, new_config: Config) -> None:
         """Synchronous component construction shared by hot-reload and startup.
@@ -1284,15 +1325,16 @@ class RuntimeContext:
             x_health_store=account_sync_x_health,
         )
 
-        # 10. Dialogue (with source management tools) + serial learn queue
-        from openbiliclaw.soul.dialogue_learn_queue import DialogueLearnQueue
+        # 10. Dialogue (with source management tools) + one settlement queue
+        from openbiliclaw.soul.dialogue import DialogueLearningMode
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
         from openbiliclaw.sources.tools import SOURCE_TOOLS, SourceToolDispatcher
 
         source_tool_dispatcher = SourceToolDispatcher(self.database)
         anchor_manager = getattr(new_soul_engine, "_dialogue_anchor_manager", None)
         anchor_provider = getattr(anchor_manager, "snapshot", None)
-        new_learn_queue = DialogueLearnQueue(
-            _build_dialogue_learn_handler(new_soul_engine),
+        new_settlement_queue = DialogueSettlementQueue(
+            _build_dialogue_settlement_dispatcher(new_soul_engine),
             anchor_provider=anchor_provider if callable(anchor_provider) else None,
         )
         new_dialogue = SocraticDialogue(
@@ -1302,8 +1344,9 @@ class RuntimeContext:
             session="popup",
             tools=SOURCE_TOOLS,
             tool_dispatcher=source_tool_dispatcher,
-            learn_queue=new_learn_queue,
             database=self.database,
+            learning_mode=DialogueLearningMode.QUEUED,
+            settlement_queue=new_settlement_queue,
         )
 
         # 11. Auto-update service
@@ -1330,7 +1373,10 @@ class RuntimeContext:
                 new_auto_update.adopt_status_from(old_auto_update)
 
         # ── Atomic swap ─────────────────────────────────────────────
-        # All construction succeeded → assign attributes.
+        # All construction succeeded. In an active loop, start() creates the
+        # actual Task and synchronously registers its permit before any new
+        # runtime attribute is published.
+        new_settlement_queue.start()
         new_llm_gate.reconfigure(llm_concurrency)
         self.llm_concurrency_gate = new_llm_gate
         self.config = new_config
@@ -1342,9 +1388,7 @@ class RuntimeContext:
         self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
-        # Start the new queue's self-owned worker (not in cancel_all registry).
-        new_learn_queue.start()
-        self.dialogue_learn_queue = new_learn_queue
+        self.dialogue_settlement_queue = new_settlement_queue
         self.discovery_engine = new_discovery_engine
         self.recommendation_engine = new_recommendation_engine
         self.runtime_controller = new_runtime_controller

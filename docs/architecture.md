@@ -20,7 +20,8 @@ guided init: signals → preferences → full profile commit
                                   → terminal → runtime schedules optional probes
 
 durable dialogue → confirmation entry(pending list / cards)
-                 → chat_turn(payload + fixed turn time) → single learn queue
+                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → typed settlement queue[current production kind: learn] → one worker
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
@@ -29,8 +30,10 @@ durable dialogue → confirmation entry(pending list / cards)
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → event + object + rebuild-marker → applied-only cross-session projection
 
-config hot-reload → pause/drain old learn worker → success: swap + stop old
-                                           └─────→ timeout: resume old + abort swap
+config hot-reload → pause/drain old settlement worker → exact revoke old permit
+                  → start/register new → publish new → stop old
+                  └─ timeout before revoke: resume old + abort
+                     new start failure: fresh nonce reauthorize old + resume
 
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
@@ -95,20 +98,18 @@ background refresh → maintenance DB worker / isolated connection
 - `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
 - `InterestSpeculator` — 兴趣推测与投机性发现
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
-- 苏格拉底式用户对话；回复后的用户主动学习链用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
+- 苏格拉底式用户对话；API runtime 显式使用 `queued`，成功回复后同步提交 typed `learn` 到唯一 `DialogueSettlementQueue`，worker 在线内直接 await 学习；CLI/OpenClaw 两处显式使用 `legacy_direct`，保持既有 detached direct learning 且位于 queue/guard 外。两条学习链都用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
 
 对话链路的失败边界是端到端一致的：
 
 ```text
-Web / CLI / OpenClaw
-        │ dialogue request
-        ▼
-SocraticDialogue ── success ──> user+agent history ──> background learning
-                                      (bypass background admission; keep total gate)
-                                                       └─ new dislike ──> shared pool purge
-        │
-        └─ failure/timeout ──> rollback provisional history
-                              └─> boundary-safe error / failed durable turn
+Web/API durable → SocraticDialogue(queued) → user+agent history
+                  └─ sync submit learn → DialogueSettlementQueue → one worker → await learning
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history
+               └─ detached direct learning (outside queue/guard)
+learning → bypass background admission; keep total gate
+         └─ new dislike → shared pool purge
+failure/timeout → rollback provisional history → boundary-safe error / failed durable turn
 ```
 
 Web durable turn 只在成功回复后记录认知并发布成功事件；失败行的 `reply` 为空、`error` 为安全分类文案。桌面 Web 首屏的推荐读取、runtime 读取与 health/profile/activity/config 等次级 hydration 保持三个独立分支，任一慢请求不阻塞其余分支渲染。

@@ -1562,6 +1562,7 @@ def create_app(
             # core components were provided by the caller.
             soul_engine=soul_engine,
             dialogue=dialogue,
+            dialogue_settlement_queue=getattr(dialogue, "_settlement_queue", None),
             runtime_controller=runtime_controller,
             recommendation_engine=recommendation_engine,
             account_sync_service=account_sync_service,
@@ -1569,9 +1570,17 @@ def create_app(
             llm_concurrency_gate=injected_gate,
         )
         if ctx.dialogue is None:
-            from openbiliclaw.soul.dialogue import SocraticDialogue
+            from openbiliclaw.soul.dialogue import (
+                DialogueLearningMode,
+                SocraticDialogue,
+            )
 
-            ctx.dialogue = SocraticDialogue(llm=None, soul_engine=soul_engine, session="popup")
+            ctx.dialogue = SocraticDialogue(
+                llm=None,
+                soul_engine=soul_engine,
+                session="popup",
+                learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
+            )
         if ctx.auto_update_service is None:
             from openbiliclaw.runtime.updater import AutoUpdateService
 
@@ -5031,13 +5040,12 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
-        # Phase 1: drain the dialogue learn queue so in-flight / queued learns
-        # complete before the process exits (self-owned worker; not covered by
-        # the background-task cancellation above).
-        learn_queue = getattr(ctx, "dialogue_learn_queue", None)
-        if learn_queue is not None:
+        # Drain the self-owned dialogue settlement queue; it is not covered by
+        # the background-task cancellation above.
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        if settlement_queue is not None:
             with suppress(Exception):
-                await learn_queue.shutdown(timeout=30)
+                await settlement_queue.shutdown(timeout=30)
         bangumi_client = getattr(ctx, "bangumi_client", None)
         close_bangumi = getattr(bangumi_client, "aclose", None)
         if callable(close_bangumi):

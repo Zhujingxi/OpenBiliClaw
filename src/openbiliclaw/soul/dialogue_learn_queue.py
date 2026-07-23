@@ -1,9 +1,9 @@
 """Single-consumer in-memory queue for dialogue settlement jobs.
 
-The module keeps the historical filename while Wave 1 widens the old
-``DialogueLearnQueue`` into a typed queue.  Admission is synchronous: sequence
-allocation, anchor reservation/snapshot capture, and ``put_nowait`` happen in
-one event-loop turn.
+The module keeps the historical filename while Wave 1 widens the learn-only
+queue into a typed queue. Admission is synchronous: sequence allocation,
+anchor reservation/snapshot capture, and ``put_nowait`` happen in one
+event-loop turn.
 """
 
 from __future__ import annotations
@@ -734,6 +734,8 @@ class DialogueSettlementQueue:
         self._resume.set()
         self._closed = False
         self._next_sequence = 1
+        self._started = asyncio.Event()
+        self._startup_error: BaseException | None = None
 
     @property
     def registry(self) -> AnchorAdmissionRegistry:
@@ -756,7 +758,7 @@ class DialogueSettlementQueue:
         return self._queue.qsize()
 
     def start(self) -> None:
-        """Start lazily when called outside a running event loop."""
+        """Create and synchronously authorize the actual worker Task."""
         if self._closed:
             raise DialogueSettlementQueueClosedError("DialogueSettlementQueue is closed")
         if self.worker_alive:
@@ -766,7 +768,20 @@ class DialogueSettlementQueue:
         except RuntimeError:
             self._worker = None
             return
-        self._worker = asyncio.create_task(self._run(), name=self._name)
+        self._started = asyncio.Event()
+        self._startup_error = None
+        worker = asyncio.create_task(self._run(), name=self._name)
+        self._worker = worker
+        try:
+            permit = self._guard.register_worker(cast("asyncio.Task[object]", worker))
+        except BaseException as exc:
+            self._startup_error = exc
+            self._started.set()
+            worker.cancel()
+            self._worker = None
+            raise
+        self._worker_permit = permit
+        self._started.set()
 
     def submit(
         self,
@@ -786,7 +801,7 @@ class DialogueSettlementQueue:
             return None
         loop = asyncio.get_running_loop()
         if not self.worker_alive:
-            self._worker = asyncio.create_task(self._run(), name=self._name)
+            self.start()
 
         sequence = self._next_sequence
         self._next_sequence += 1
@@ -868,6 +883,18 @@ class DialogueSettlementQueue:
         self._resume.set()
         await self._join(timeout=timeout)
 
+    async def wait_until_started(self) -> None:
+        """Wait until the actual worker Task owns a permit or startup fails."""
+        if not self.worker_alive:
+            self.start()
+        await self._started.wait()
+        if self._startup_error is not None:
+            raise RuntimeError(
+                "Dialogue settlement worker failed to start"
+            ) from self._startup_error
+        if self._worker_permit is None:
+            raise RuntimeError("Dialogue settlement worker started without a permit")
+
     def revoke_worker_permit(self) -> bool:
         """Revoke this queue's exact lifecycle tuple before a reload handoff."""
         permit = self._worker_permit
@@ -915,8 +942,9 @@ class DialogueSettlementQueue:
         worker = asyncio.current_task()
         if worker is None:
             raise RuntimeError("Dialogue settlement worker requires an asyncio Task")
-        permit = self._guard.register_worker(cast("asyncio.Task[object]", worker))
-        self._worker_permit = permit
+        permit = self._worker_permit
+        if permit is None or permit.worker_task is not worker:
+            raise RuntimeError("Dialogue settlement worker started without its exact permit")
         try:
             while True:
                 job = await self._queue.get()
@@ -1067,62 +1095,3 @@ class DialogueSettlementQueue:
         completion = job.completion
         if completion is not None and not completion.done():
             completion.cancel()
-
-
-class DialogueLearnQueue:
-    """Temporary Wave 1 adapter for the pre-existing learn-only call sites.
-
-    Task 1.2 removes this compatibility name after runtime and dialogue callers
-    are migrated to ``DialogueSettlementQueue``.
-    """
-
-    def __init__(
-        self,
-        handler: Callable[..., Awaitable[object]],
-        *,
-        name: str = "dialogue_learn_worker",
-        anchor_provider: Callable[[], Mapping[str, object]] | None = None,
-    ) -> None:
-        async def _dispatch(job: DialogueJob) -> DialogueJobResult:
-            payload = dict(job.payload)
-            effective = job.effective_anchor_snapshot or job.anchor_snapshot
-            if isinstance(effective, AnchorPersisted):
-                payload["anchor_ref"] = effective.ref
-                payload["anchor_generation"] = effective.generation
-            else:
-                payload["anchor_ref"] = ""
-                payload["anchor_generation"] = 0
-            await handler(**payload)
-            return DialogueJobResult(outcome="completed")
-
-        self._queue = DialogueSettlementQueue(
-            _dispatch,
-            name=name,
-            anchor_provider=anchor_provider,
-        )
-
-    @property
-    def worker_alive(self) -> bool:
-        return self._queue.worker_alive
-
-    @property
-    def depth(self) -> int:
-        return self._queue.depth
-
-    def start(self) -> None:
-        self._queue.start()
-
-    def pause(self) -> None:
-        self._queue.pause()
-
-    def resume(self) -> None:
-        self._queue.resume()
-
-    async def pause_and_drain(self, *, timeout: float | None = None) -> None:
-        await self._queue.pause_and_drain(timeout=timeout)
-
-    async def shutdown(self, *, timeout: float | None = None) -> None:
-        await self._queue.shutdown(timeout=timeout)
-
-    async def submit(self, payload: Mapping[str, object]) -> bool:
-        return self._queue.submit(DialogueJobKind.LEARN, payload) is not None

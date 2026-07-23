@@ -7,11 +7,84 @@ Plan: docs/plans/2026-07-17-cognitive-profile-pipeline-plan.md Task 2.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.soul.dialogue_learn_queue import DialogueLearnQueue
+from openbiliclaw.soul.dialogue_learn_queue import (
+    AnchorPersisted,
+    DialogueJob,
+    DialogueJobKind,
+    DialogueJobResult,
+    DialogueSettlementQueue,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+
+class _LearnQueueHarness:
+    """Keep the historical lifecycle tests focused on typed queue behavior."""
+
+    def __init__(
+        self,
+        handler: Callable[..., Awaitable[object]],
+        *,
+        name: str = "dialogue-test-worker",
+        anchor_provider: Callable[[], Mapping[str, object]] | None = None,
+    ) -> None:
+        async def dispatch(job: DialogueJob) -> DialogueJobResult:
+            payload = dict(job.payload)
+            snapshot = job.effective_anchor_snapshot
+            if isinstance(snapshot, AnchorPersisted):
+                payload["anchor_ref"] = snapshot.ref
+                payload["anchor_generation"] = snapshot.generation
+            else:
+                payload["anchor_ref"] = ""
+                payload["anchor_generation"] = 0
+            await handler(**payload)
+            return DialogueJobResult(outcome="completed")
+
+        self.settlement_queue = DialogueSettlementQueue(
+            dispatch,
+            name=name,
+            anchor_provider=anchor_provider,
+        )
+
+    @property
+    def worker_alive(self) -> bool:
+        return self.settlement_queue.worker_alive
+
+    @property
+    def worker_permit(self) -> object | None:
+        return self.settlement_queue.worker_permit
+
+    def start(self) -> None:
+        self.settlement_queue.start()
+
+    def pause(self) -> None:
+        self.settlement_queue.pause()
+
+    def resume(self) -> None:
+        self.settlement_queue.resume()
+
+    async def wait_until_started(self) -> None:
+        await self.settlement_queue.wait_until_started()
+
+    def revoke_worker_permit(self) -> bool:
+        return self.settlement_queue.revoke_worker_permit()
+
+    def reauthorize_worker(self) -> object:
+        return self.settlement_queue.reauthorize_worker()
+
+    async def submit(self, payload: Mapping[str, object]) -> bool:
+        return self.settlement_queue.submit(DialogueJobKind.LEARN, payload) is not None
+
+    async def pause_and_drain(self, *, timeout: float | None = None) -> None:
+        await self.settlement_queue.pause_and_drain(timeout=timeout)
+
+    async def shutdown(self, *, timeout: float | None = None) -> None:
+        await self.settlement_queue.shutdown(timeout=timeout)
 
 
 @pytest.mark.asyncio
@@ -29,7 +102,7 @@ async def test_tasks_execute_strictly_serially() -> None:
         order.append(f"end-{tag}")
         active -= 1
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     # Submit 5 concurrently — must still run one at a time, in FIFO order.
     await asyncio.gather(*(queue.submit({"tag": str(i)}) for i in range(5)))
@@ -57,7 +130,7 @@ async def test_handler_receives_payload_kwargs() -> None:
     async def handler(**kwargs: Any) -> None:
         seen.append(kwargs)
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     await queue.submit(
         {
@@ -94,7 +167,7 @@ async def test_anchor_snapshot_is_captured_when_turn_is_submitted() -> None:
     async def handler(**kwargs: Any) -> None:
         seen.append(kwargs)
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(snapshot))
+    queue = _LearnQueueHarness(handler, anchor_provider=lambda: dict(snapshot))
     queue.start()
     await queue.submit({"tag": "turn"})
     snapshot.update(anchor_ref="replacement", anchor_generation=4)
@@ -118,7 +191,7 @@ async def test_handler_exception_does_not_kill_worker() -> None:
             raise ValueError("kaboom")
         processed.append(tag)
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     await queue.submit({"tag": "boom"})
     await queue.submit({"tag": "ok"})
@@ -134,7 +207,7 @@ async def test_submit_rejected_when_paused() -> None:
     async def handler(*, tag: str, **_: Any) -> None:
         processed.append(tag)
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     queue.pause()
     accepted = await queue.submit({"tag": "x"})
@@ -154,7 +227,7 @@ async def test_pause_and_drain_processes_backlog() -> None:
         await asyncio.sleep(0.005)
         processed.append(tag)
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     for i in range(3):
         await queue.submit({"tag": str(i)})
@@ -176,7 +249,7 @@ async def test_pause_and_drain_timeout_is_reported_and_queue_can_resume() -> Non
         await release.wait()
         processed.append(tag)
 
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
     await queue.submit({"tag": "blocked"})
     await asyncio.wait_for(entered.wait(), timeout=1)
@@ -203,7 +276,7 @@ async def test_worker_survives_registry_cancel_all() -> None:
         pass
 
     registry = BackgroundTaskRegistry()
-    queue = DialogueLearnQueue(handler)
+    queue = _LearnQueueHarness(handler)
     queue.start()
 
     # Register some other unrelated task.
@@ -233,15 +306,17 @@ async def test_reload_success_stop_old_start_new_no_interleave() -> None:
         await asyncio.sleep(0.005)
         log.append(f"new-{tag}")
 
-    old = DialogueLearnQueue(old_handler)
+    old = _LearnQueueHarness(old_handler)
     old.start()
     await old.submit({"tag": "1"})
 
-    # Hot reload: pause-drain old BEFORE building new.
+    # Hot reload: drain and revoke old before the new worker registers.
     await old.pause_and_drain()
-    new = DialogueLearnQueue(new_handler)
+    await old.wait_until_started()
+    assert old.revoke_worker_permit() is True
+    new = _LearnQueueHarness(new_handler)
     new.start()
-    # Build succeeded → stop old.
+    await new.wait_until_started()
     await old.shutdown()
     await new.submit({"tag": "2"})
     await new.shutdown()
@@ -253,7 +328,7 @@ async def test_reload_success_stop_old_start_new_no_interleave() -> None:
 @pytest.mark.asyncio
 async def test_dialogue_respond_threads_scope_and_turn_id_via_queue() -> None:
     from openbiliclaw.llm.base import LLMResponse
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
     captured: list[dict[str, Any]] = []
 
@@ -272,14 +347,15 @@ async def test_dialogue_respond_threads_scope_and_turn_id_via_queue() -> None:
     async def _handler(**payload: Any) -> None:
         await soul_engine.learn_from_dialogue(**payload)
 
-    queue = DialogueLearnQueue(_handler)
+    queue = _LearnQueueHarness(_handler)
     queue.start()
     dialogue = SocraticDialogue(
         llm=None,
         soul_engine=soul_engine,  # type: ignore[arg-type]
         llm_service=_StubService(),  # type: ignore[arg-type]
         session="popup",
-        learn_queue=queue,
+        learning_mode=DialogueLearningMode.QUEUED,
+        settlement_queue=queue.settlement_queue,
     )
     await dialogue.respond("先放着吧", scope="confusion", turn_id="conf-7")
     await queue.shutdown()
@@ -304,7 +380,7 @@ async def test_reload_failure_resumes_old_queue() -> None:
     async def handler(*, tag: str, **_: Any) -> None:
         processed.append(tag)
 
-    old = DialogueLearnQueue(handler)
+    old = _LearnQueueHarness(handler)
     old.start()
     await old.submit({"tag": "before"})
     await old.pause_and_drain()  # drained before cancel_all
@@ -336,11 +412,11 @@ async def test_runtime_reload_drain_timeout_keeps_old_runtime(
             await release.wait()
         processed.append(tag)
 
-    old = DialogueLearnQueue(handler)
+    old = _LearnQueueHarness(handler)
     old.start()
     await old.submit({"tag": "blocked"})
     await asyncio.wait_for(entered.wait(), timeout=1)
-    ctx = RuntimeContext(dialogue_learn_queue=old)
+    ctx = RuntimeContext(dialogue_settlement_queue=old)
     rebuild_calls: list[object] = []
     cancel_calls: list[object] = []
 
@@ -351,14 +427,18 @@ async def test_runtime_reload_drain_timeout_keeps_old_runtime(
         cancel_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr(runtime_context, "_DIALOGUE_LEARN_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        runtime_context,
+        "_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS",
+        0.01,
+    )
     monkeypatch.setattr(ctx, "_rebuild_components", fake_rebuild)
     monkeypatch.setattr(ctx.task_registry, "cancel_all", fake_cancel_all)
 
     try:
         with pytest.raises(TimeoutError):
             await ctx.rebuild_from_config(Config())
-        assert ctx.dialogue_learn_queue is old
+        assert ctx.dialogue_settlement_queue is old
         assert old.worker_alive is True
         assert rebuild_calls == []
         assert cancel_calls == []
@@ -375,7 +455,7 @@ async def test_runtime_reload_drain_timeout_keeps_old_runtime(
 def test_start_without_loop_emits_no_unawaited_coroutine_warning() -> None:
     """Synchronous ``start()`` (no running loop) must not build an orphaned coroutine.
 
-    Regression for the startup ``RuntimeWarning: coroutine 'DialogueLearnQueue._run'
+    Regression for the startup ``RuntimeWarning: coroutine 'DialogueSettlementQueue._run'
     was never awaited`` — ``start`` used to call ``self._run()`` before
     ``create_task`` raised, leaving the coroutine un-awaited.
     """
@@ -387,7 +467,7 @@ def test_start_without_loop_emits_no_unawaited_coroutine_warning() -> None:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        queue = DialogueLearnQueue(_handler)
+        queue = _LearnQueueHarness(_handler)
         queue.start()  # no running loop here (sync test)
         assert queue.worker_alive is False
         gc.collect()  # RuntimeWarning fires at coroutine GC time
@@ -407,7 +487,7 @@ async def test_start_without_loop_still_lazy_starts_on_first_submit() -> None:
     async def _handler(**kwargs: object) -> None:
         done.set()
 
-    queue = DialogueLearnQueue(_handler)
+    queue = _LearnQueueHarness(_handler)
     # Simulate the sync-startup state: no worker yet.
     assert queue.worker_alive is False
     await queue.submit({"user_message": "hi", "assistant_reply": "yo", "session": "s"})

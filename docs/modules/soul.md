@@ -60,8 +60,8 @@
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新。`SocraticDialogue` 派发这条用户主动学习链时使用 task-local background-admission bypass：空库存或后台 LLM 暂停不会把 `soul.dialogue_insight` 永久 park，但所有 provider 调用仍经过 total gate。若本轮真正新增 `disliked_topics`，偏好落盘后会立即按新旧差集调度共享 `purge_pool_for_new_dislikes`：精确清池先执行，embedding + LLM 精判与完整画像重建并行；行为与手动画像编辑、反馈批处理和避雷探针一致，且不阻塞对话回复。对话 prompt 会如实区分本地长期画像/推荐过滤与平台自身推荐算法 |
 | 画像更新台账（`soul/ledger.py`，v0.3.174+） | ✅ | `ProfileLedger` 是画像写点的**只追加审计观察者**：动作结束后一次 `INSERT` 到 `profile_update_ledger`，行含 `outcome(success\|failed)`、before/after 摘要、`diff`（top-level changed keys，≤2000 字符）、`source_refs`、`turn_id`（对话/结算幂等观察键），以及为后续 Wave 预留的 `gate_verdict`（Phase 3 shadow_*）/`held_id`（Phase 2）。台账为 **best-effort**：写失败只记 WARNING，绝不阻断底层画像写入。`action()` 上下文管理器包裹写入动作，正常出块记 success、异常记 failed 并**重新抛出**（不改变原控制流）。枚举写点见下「[画像写点台账挂钩清单](#画像写点台账挂钩清单)」。CLI 查询：`openbiliclaw ledger [--line] [--days] [--write-point]` |
 | 觉察证据链（`AwarenessNote.note_id / source_event_ids`，v0.3.174+） | ✅ | `AwarenessNote` 新增生成式 `note_id`（uuid hex 前 12）、`source_event_ids`（本轮 cursor 消费的事件 id）与 `source_event_ids_approximate`（归属为**按轮**非按 note——LLM 不把观察映射到具体事件，故整批挂到每条 note 并标注近似）。`analyze()` 新增可选 `source_event_ids`，觉察 prompt 一字不动（回放不变性）；`cognition_cycle` 传入每批事件 id。向后兼容:旧 note 缺字段默认空。是 Wave B 疑惑 evidence_refs 的前置 |
-| 对话结算 typed 单队列（`soul/dialogue_learn_queue.py`，Wave 1 Task 1.1） | 🚧 | 原学习队列骨架已泛化为 `DialogueSettlementQueue`：11 个 `DialogueJobKind` 共用一个无界 `asyncio.Queue[DialogueJob]` 和一个 consumer，admission 在同一无 `await` 临界段完成 sequence、payload 深拷贝、锚 transition 分类/预约、snapshot 与 `put_nowait`；fire-and-forget learn 和带 `Future` 的 request/response job 共线，异常只失败当前 completion，worker 继续。`AnchorAdmissionRegistry` 显式区分 `persisted/reserved/failed/absent/not_applicable`，同 ref builder 不 coalesce、各自绑定 `(job_id,sequence)` owner，只有 owner 可单次 resolve；failed head 同步折叠到 authoritative persisted/absent，旧依赖排空即 GC，retry 使用 fresh id。建锚 dispatcher 返回六类 typed terminal 后，queue 在下一次 await/effect 前同步转正；后续 follow-up 异常不回退。当前 runtime 仍经临时 `DialogueLearnQueue` adapter 保持原 learn-only 接线，统一 dispatcher 与命名迁移属于 Task 1.2；卡片/锚/疑惑生产入口仍待 Wave 3 cutover。 |
-| 对话结算 worker permit 护栏（`soul/dialogue_settlement_guard.py`，Wave 1 Task 1.1） | 🚧 | typed queue 的实际 worker 已在 `_run()` 登记 `asyncio.Task` + lifecycle nonce，并只在该 task 的 dispatch context 激活；worker 创建的 child 即使继承 `ContextVar` 也不能 mutation。队列暴露 exact revoke / fresh reauthorize，worker `finally` 只 `clear_if_current`，因此热交接先撤旧再注册新后，旧 cleanup 不会清掉新 permit。生产 mutator façade 尚不安装 guard；卡片、锚、疑惑等入口会随 Wave 3 cutover 一次接线，避免中间版本打断旧 direct 路径。 |
+| 对话结算 typed 单队列（`soul/dialogue_learn_queue.py`，Wave 1 Task 1.1–1.2） | 🚧 | 原学习队列骨架已泛化为 `DialogueSettlementQueue`：11 个 `DialogueJobKind` 共用一个无界 `asyncio.Queue[DialogueJob]` 和一个 consumer，admission 在同一无 `await` 临界段完成 sequence、payload 深拷贝、锚 transition 分类/预约、snapshot 与 `put_nowait`；fire-and-forget learn 和带 `Future` 的 request/response job 共线，异常只失败当前 completion，worker 继续。`AnchorAdmissionRegistry` 显式区分 `persisted/reserved/failed/absent/not_applicable`，同 ref builder 不 coalesce、各自绑定 `(job_id,sequence)` owner，只有 owner 可单次 resolve；failed head 同步折叠到 authoritative persisted/absent，旧依赖排空即 GC，retry 使用 fresh id。建锚 dispatcher 返回六类 typed terminal 后，queue 在下一次 await/effect 前同步转正；后续 follow-up 异常不回退。API runtime 现在只安装一个 typed dispatcher 与一个 `dialogue_settlement_queue`，生产入口当前仅提交 `learn`；其余 kind 显式 fail closed，卡片/锚/疑惑仍待 Wave 3 cutover。旧 `DialogueLearnQueue` 类型和 runtime alias 已删除。 |
+| 对话结算 worker permit 护栏（`soul/dialogue_settlement_guard.py`，Wave 1 Task 1.1–1.2） | 🚧 | typed queue 的实际 worker 已在 `_run()` 登记 `asyncio.Task` + lifecycle nonce，并只在该 task 的 dispatch context 激活；worker 创建的 child 即使继承 `ContextVar` 也不能 mutation。热重载严格按 pause/drain old → exact revoke old → start/register new → publish new 交接；失败回滚只会给已 drain 的 old worker 分配 fresh nonce，旧 `finally` 只能 `clear_if_current` 自己的旧 tuple。生产 mutator façade 尚不安装 guard；卡片、锚、疑惑等入口会随 Wave 3 cutover 一次接线，避免中间版本打断旧 direct 路径。 |
 | 对话确认入口与锚（Wave A–D，v0.3.182+） | ✅ | `DialogueAnchorManager` 持久化至多一个 `{kind,ref,generation,established_at,unrelated_streak,origin_turn_id,ambiguous_count}`，四种释放为结算、连续两轮 unrelated、2h TTL、replaced。card discuss 建锚前校验 durable payload 仍持有同一 `attempt_token`；读取校正清 token 后，停顿旧请求不能恢复建锚。学习任务入 LLM 前校验一次 ref+generation；LLM 返回后的首个持久副作用由 `note_relation(expected_generation=...)` 在同一状态锁内完成重读+CAS，engine 必须消费返回值，失配整批丢弃、WARNING 并写 `anchor_stale_generation_drop`。结算赢家 payload 固化 `anchor_generation`，applied 收据只能释放该代，同 ref 新锚不会被旧收据碰掉。待聊列表主动 open 以 `pending_open` 建锚且不受 12h/72h 时间 gate；系统疑惑提问也建锚，系统假设卡等待用户操作。Dialogue 回灌统一读取所有 session 的 completed `{chat,hypothesis,confusion}` scope（含 agent-only 疑惑 question，probe 仍排除），而 API turn 列表继续按 session 过滤；durable 请求把产生端 session 逐请求传给学习 payload。Wave D 后新客户端只在对话卡片主动结算假设，三处认知更新区与 CLI 列表均只读；deprecated legacy API 仅为旧客户端转发兼容。归属矩阵、ambiguous/Jaccard 防双计与 confusion FIFO 语义不变。 |
 | 对话窗口 + 时间事实（v0.3.182+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮。每个历史 turn 用创建时定死的本地绝对前缀 `[MM-DD HH:mm]`，SQLite 无时区 `created_at` 由公开 `format_dialogue_turn_timestamp(..., local_timezone=...)` 单点转本地；当前时间只追加在当轮 user prompt 尾部，不改写历史前缀。带数据库的非 CLI Dialogue 回灌所有 session 的 completed `chat/hypothesis/confusion`（probe 排除），API 可见列表仍按 session 过滤。 |
 | 对话结算 settles（v0.3.182+） | ✅ | `build_dialogue_insight_prompt(..., anchor=None)` 保持模块级静态 system + `sort_keys=True`，无锚输入/输出逐字节不变；非空 anchor 只在 user message 加契约。`learn_from_dialogue` 仅在**无活锚的 scope='chat'** 处理检索式 settles；锚定轮跳过检索式 settles，`support/contradict/revise/answer` 由锚处理器转入共同 ref 仲裁。普通 `speculation/insight/confusion` settles 也只能调用 `settle_speculation/settle_hypothesis/settle_confusion`，与卡片 action、legacy、锚共享赢家收据、claim 临界区、三段状态与 applied 投影，不得直调 speculator、`update_from_feedback` 或 `ConfusionManager.resolve`。白名单仍等于当轮 `active_list`，台账保留 `turn_id`；hash8=SHA-256(NFC+strip+空白折叠)hex 前 8，碰撞升 hex16。 |
@@ -867,7 +867,7 @@ updates = memory_manager.load_cognition_updates()
 ```python
 from zoneinfo import ZoneInfo
 
-from openbiliclaw.soul.dialogue import SocraticDialogue
+from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
 dialogue = SocraticDialogue(
     llm=None,
@@ -875,6 +875,8 @@ dialogue = SocraticDialogue(
     llm_service=service,
     session="cli",
     local_timezone=ZoneInfo("Asia/Shanghai"),
+    learning_mode=DialogueLearningMode.QUEUED,
+    settlement_queue=queue,
 )
 
 reply = await dialogue.respond(
@@ -887,7 +889,13 @@ print(dialogue.history)  # [DialogueTurn(role="user", ...), DialogueTurn(role="a
 dialogue.clear_history()
 ```
 
-`respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM 异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
+`respond()` 只在得到非空的真实回复后才追加 agent turn。学习所有权必须显式选择：
+API runtime 使用 `queued`，在同一事件循环 turn 同步提交 typed `learn`，缺少 queue
+会在调用 LLM 前报配置错误；`reply_only_test` 明确不学习；`legacy_direct` 只由
+CLI/OpenClaw 两个兼容构造点使用，保留既有 detached direct learning，不加入
+queue/guard。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，
+普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM
+异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
 
 `respond(..., session="")` 可逐请求覆盖 UI ownership 标签；认知 history 仍跨 session 共享。`local_timezone` 与测试用 `now_provider` 固定历史时间事实，公开 `format_dialogue_turn_timestamp(timestamp, local_timezone=...)` 将 SQLite 的无时区 UTC 或带 offset 时间统一渲染为 `[MM-DD HH:mm]`，不读取当前时钟。
 
@@ -971,7 +979,7 @@ with guard.dialogue_settlement_worker(worker_task):
     guard.require_dialogue_settlement_worker()  # 当前实际 worker 可写
 ```
 
-`register_worker()` 分配 fresh nonce；`revoke_worker()` 与 `clear_if_current()` 都要求 task identity + nonce 精确匹配。`activate_worker()` 只携带 nonce，真正的 `require_dialogue_settlement_worker()` 还会比较 `asyncio.current_task()`，因此 `create_task()` child 会抛 `DialogueSettlementMutationOutsideWorker`。Wave 1 Task 1.1 已把 primitive 接到 typed queue worker；现有 `SoulEngine`、anchor/confusion manager 与 API card façade 仍未安装生产 guard，不能把队列内部接线解读成入口已经完成 worker-only cutover。
+`register_worker()` 分配 fresh nonce；`revoke_worker()` 与 `clear_if_current()` 都要求 task identity + nonce 精确匹配。`activate_worker()` 只携带 nonce，真正的 `require_dialogue_settlement_worker()` 还会比较 `asyncio.current_task()`，因此 `create_task()` child 会抛 `DialogueSettlementMutationOutsideWorker`。Wave 1 Task 1.2 已把 runtime 热重载接到 exact revoke / fresh reauthorize；现有 `SoulEngine`、anchor/confusion manager 与 API card façade 仍未安装生产 guard，不能把队列内部接线解读成入口已经完成 worker-only cutover。
 
 ### PreferenceAnalyzer
 

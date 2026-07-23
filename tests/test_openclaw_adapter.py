@@ -319,6 +319,8 @@ class _FakeSoulEngine:
         self._speculator = _FakeSpeculator()
         self._avoidance_speculator = _FakeAvoidanceSpeculator()
         self._llm = None  # Socratic dialogue falls through to llm_service
+        self.dialogue_learn_calls: list[dict[str, object]] = []
+        self.dialogue_learned = asyncio.Event()
 
     async def get_profile(self) -> SoulProfile:
         return self.profile
@@ -329,8 +331,19 @@ class _FakeSoulEngine:
         user_message: str,
         assistant_reply: str,
         session: str,
+        scope: str = "chat",
+        turn_id: str = "",
     ) -> None:
-        pass  # no-op for tests
+        self.dialogue_learn_calls.append(
+            {
+                "user_message": user_message,
+                "assistant_reply": assistant_reply,
+                "session": session,
+                "scope": scope,
+                "turn_id": turn_id,
+            }
+        )
+        self.dialogue_learned.set()
 
     def record_immediate_feedback_cognition(
         self,
@@ -1656,14 +1669,17 @@ def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_delegates_to_socratic_dialogue() -> None:
+async def test_openclaw_chat_legacy_direct_mode_still_learns_without_queue() -> None:
     adapter, soul_engine, *_ = _build_adapter()
 
     result = await adapter.chat(ChatRequest(message="我最近对建筑很感兴趣", session="test"))
+    await asyncio.wait_for(soul_engine.dialogue_learned.wait(), timeout=1)
 
     assert isinstance(result, ChatResponse)
     assert "底层结构" in result.reply
     assert result.session == "test"
+    assert len(soul_engine.dialogue_learn_calls) == 1
+    assert soul_engine.dialogue_learn_calls[0]["session"] == "test"
 
 
 @pytest.mark.asyncio

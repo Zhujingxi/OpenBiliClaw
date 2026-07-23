@@ -966,9 +966,14 @@ def _build_recommendation_engine() -> Any:
 
 def _build_dialogue(soul_engine: Any) -> Any:
     """Build the Socratic dialogue helper for interactive chat."""
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
-    return SocraticDialogue(llm=_build_registry(), soul_engine=soul_engine, session="cli")
+    return SocraticDialogue(
+        llm=_build_registry(),
+        soul_engine=soul_engine,
+        session="cli",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
+    )
 
 
 def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:

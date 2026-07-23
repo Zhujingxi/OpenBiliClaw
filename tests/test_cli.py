@@ -1,5 +1,6 @@
 """CLI tests for configuration guidance behavior."""
 
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -2439,6 +2440,46 @@ def test_chat_prints_init_guidance_when_profile_missing(
     assert result.exit_code == 1
     assert "尚未初始化" in result.stdout
     assert "openbiliclaw init" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_dialogue_legacy_direct_mode_still_learns_without_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.soul.dialogue import DialogueLearningMode
+
+    learned = asyncio.Event()
+
+    class FakeService:
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str = "",
+        ) -> LLMResponse:
+            return LLMResponse(content="CLI reply", provider="test")
+
+    class FakeSoulEngine:
+        def __init__(self) -> None:
+            self._llm_service = FakeService()
+            self.learn_calls: list[dict[str, object]] = []
+
+        async def learn_from_dialogue(self, **payload: object) -> None:
+            self.learn_calls.append(dict(payload))
+            learned.set()
+
+    monkeypatch.setattr(cli_module, "_build_registry", object)
+    soul_engine = FakeSoulEngine()
+    dialogue = cli_module._build_dialogue(soul_engine)
+
+    assert dialogue.learning_mode is DialogueLearningMode.LEGACY_DIRECT
+    assert dialogue._settlement_queue is None
+    assert await dialogue.respond("CLI direct learning") == "CLI reply"
+    await asyncio.wait_for(learned.wait(), timeout=1)
+    assert len(soul_engine.learn_calls) == 1
+    assert soul_engine.learn_calls[0]["user_message"] == "CLI direct learning"
 
 
 def test_chat_runs_single_turn_and_prints_reply(

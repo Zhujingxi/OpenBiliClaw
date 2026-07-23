@@ -490,7 +490,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     first.llm.default_provider = "ollama"
     first.llm.ollama.model = "llama3"
     first.scheduler.pool_target_count = 30
-    ctx._rebuild_components(first)
+    await ctx.rebuild_from_config(first)
     old_engine = ctx.recommendation_engine
     old_callback = old_engine._pool_inventory_commit_callback
     assert old_callback is ctx.pool_inventory_commit_callback
@@ -500,7 +500,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     second.llm.default_provider = "ollama"
     second.llm.ollama.model = "llama3"
     second.scheduler.pool_target_count = 10
-    ctx._rebuild_components(second)
+    await ctx.rebuild_from_config(second)
     assert ctx.recommendation_engine._pool_inventory_commit_callback is old_callback
     assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
 
@@ -558,7 +558,7 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
     first.llm.default_provider = "ollama"
     first.llm.ollama.model = "llama3"
     first.scheduler.pool_target_count = 30
-    ctx._rebuild_components(first)
+    await ctx.rebuild_from_config(first)
     first_reloaded_engine = ctx.recommendation_engine
     first_callback = first_reloaded_engine._pool_inventory_commit_callback
 
@@ -566,7 +566,7 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
     second.llm.default_provider = "ollama"
     second.llm.ollama.model = "llama3"
     second.scheduler.pool_target_count = 10
-    ctx._rebuild_components(second)
+    await ctx.rebuild_from_config(second)
     current_callback = ctx.recommendation_engine._pool_inventory_commit_callback
     assert current_callback is first_callback
 
@@ -585,7 +585,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
     from openbiliclaw.config import Config
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
     from openbiliclaw.llm.service import LLMService
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
     config = Config(data_dir=str(tmp_path))
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
@@ -600,6 +600,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
         llm=None,
         soul_engine=soul,  # type: ignore[arg-type]
         llm_service=dialogue_service,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     controller = SimpleNamespace(llm_concurrency_gate=dialogue_gate, event_hub=None)
 
@@ -626,6 +627,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
         llm=None,
         soul_engine=gate_less_soul,
         llm_service=gate_less_dialogue_service,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     gate_less_app = create_app(
         memory_manager=SimpleNamespace(),
@@ -643,7 +645,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
 ) -> None:
     from openbiliclaw.config import Config
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
     config = Config(data_dir=str(tmp_path))
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
@@ -657,6 +659,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
         llm=None,
         soul_engine=soul,
         llm_service=dialogue_service,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
 
@@ -682,6 +685,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
                 llm_service=SimpleNamespace(  # type: ignore[arg-type]
                     concurrency_gate=LLMConcurrencyGate(2)
                 ),
+                learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
             ),
             runtime_controller=SimpleNamespace(event_hub=None),
         )
@@ -2114,15 +2118,17 @@ class TestBackendAPI:
                 session: str,
                 tools: object | None = None,
                 tool_dispatcher: object | None = None,
-                learn_queue: object | None = None,
                 database: object | None = None,
+                learning_mode: object,
+                settlement_queue: object | None = None,
             ) -> None:
                 self.llm = llm
                 self.soul_engine = soul_engine
                 self.llm_service = llm_service
                 self.session = session
-                self.learn_queue = learn_queue
                 self.database = database
+                self.learning_mode = learning_mode
+                self.settlement_queue = settlement_queue
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),

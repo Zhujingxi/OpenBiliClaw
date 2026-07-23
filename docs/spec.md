@@ -225,7 +225,8 @@ guided init: signals → preferences → full profile commit
                                   → terminal → runtime schedules optional probes
 
 durable dialogue → confirmation entry(pending list / cards)
-                 → chat_turn(payload + fixed turn time) → single learn queue
+                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → typed settlement queue[current production kind: learn] → one worker
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
                  → anchor snapshot(ref + generation) → existing insight extraction
@@ -251,7 +252,17 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
-下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；用户主动学习任务使用 task-local bypass 跳过 background admission、保留 total gate，避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享 dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
+下图的对话/反馈入口共享同一失败原子链路，但学习所有权显式分开：Web/API
+durable runtime 使用 `SocraticDialogue(queued)`，成功写入 user+agent 历史后同步
+提交 typed `learn`，由唯一 `DialogueSettlementQueue` worker 在线内 await
+`learn_from_dialogue`；CLI/OpenClaw 只在两个兼容构造点使用 `legacy_direct`，保持
+既有 detached direct learning，位于 queue/guard 外。当前其余 10 个 typed kind
+只保留穷尽 admission 契约，生产 dispatcher 在 Wave 3 cutover 前 fail closed。
+两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
+避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享
+dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时
+用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、
+runtime 与次级 hydration 是独立分支。
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
