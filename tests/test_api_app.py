@@ -12648,6 +12648,54 @@ class TestPendingDialogueConfirmations:
             ("rollback", True),
         ]
 
+    def test_restart_releases_clarifying_claim_without_corresponding_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """F4: a crash after durable claim cannot invisibly pin the unique slot."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        orphan_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="claim 后崩溃的疑惑",
+            observation="turn 尚未创建",
+            interpretation_confidence=0.84,
+        )
+        next_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="下一条疑惑",
+            observation="应能取得释放后的 slot",
+            interpretation_confidence=0.82,
+        )
+        assert memory._database.claim_confusion_clarifying(
+            orphan_id,
+            ask_turn_id="missing-after-crash",
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        assert memory._database.get_chat_turn("missing-after-crash") is None
+        client.close()
+        memory._database.close()
+
+        client2, memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        pending = client2.get("/api/chat/pending-confirmations")
+
+        assert pending.status_code == 200
+        orphan = memory2._database.get_confusion(orphan_id)
+        assert orphan is not None
+        assert orphan["status"] == "open"
+        assert orphan["ask_turn_id"] == ""
+        assert not orphan["asked_at"]
+        assert str(orphan_id) in {item["ref"] for item in pending.json()["items"]}
+
+        opened = client2.post(
+            f"/api/chat/pending-confirmations/{next_id}/open",
+            json={"session": "popup"},
+        )
+        assert opened.status_code == 200
+        claimed_next = memory2._database.get_confusion(next_id)
+        assert claimed_next is not None
+        assert claimed_next["status"] == "clarifying"
+        assert claimed_next["ask_turn_id"] == opened.json()["turn_id"]
+
     def test_system_throw_global_12h_survives_restart_and_same_turn_retry(
         self,
         tmp_path: Path,

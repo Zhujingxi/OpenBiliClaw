@@ -2928,6 +2928,34 @@ class Database:
             return False
         return cursor.rowcount > 0
 
+    def release_orphan_confusion_claim(
+        self,
+        confusion_id: int,
+        *,
+        expected_ask_turn_id: str,
+    ) -> bool:
+        """Release a clarifying slot only if its claimed turn still does not exist."""
+        normalized_turn_id = str(expected_ask_turn_id or "")
+        cursor = self._execute_write(
+            """
+            UPDATE confusions
+               SET status = 'open',
+                   ask_turn_id = '',
+                   asked_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?
+               AND status = 'clarifying'
+               AND ask_turn_id = ?
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM chat_turns
+                     WHERE turn_id = ?
+               )
+            """,
+            (int(confusion_id), normalized_turn_id, normalized_turn_id),
+        )
+        return cursor.rowcount > 0
+
     def update_confusion(self, confusion_id: int, **fields: Any) -> None:
         """Update mutable confusion columns (whitelist-guarded)."""
         allowed = {

@@ -2721,6 +2721,34 @@ def create_app(
     def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
         return _read_chat_turn_row(turn_id)
 
+    async def _reconcile_orphan_confusion_claims(*, limit: int = 200) -> int:
+        """Release crash-gap clarifying rows whose claimed turn was never created."""
+        list_confusions = getattr(ctx.database, "list_confusions", None)
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        if not callable(list_confusions) or not callable(
+            getattr(settlement_queue, "submit_and_wait", None)
+        ):
+            return 0
+        rows = list_confusions(statuses=["clarifying"], limit=max(1, int(limit)))
+        released = 0
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        for row in rows:
+            ask_turn_id = str(row.get("ask_turn_id", "")).strip()
+            if ask_turn_id and _read_chat_turn_row(ask_turn_id) is not None:
+                continue
+            completion = await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "reconcile_orphan",
+                    "confusion_id": int(row["id"]),
+                    "expected_ask_turn_id": ask_turn_id,
+                },
+            )
+            settlement = completion.settlement or {}
+            released += int(bool(settlement.get("released", False)))
+        return released
+
     def _submit_chat_card_reconcile(row: dict[str, Any]) -> None:
         raw_payload = row.get("payload", {})
         if isinstance(raw_payload, str):
@@ -5151,6 +5179,13 @@ def create_app(
                 logger.info("Reconciled %d stale guided-init run(s) on boot", reconciled)
         except Exception:
             logger.debug("Guided-init boot reconciliation failed", exc_info=True)
+
+        try:
+            released = await _reconcile_orphan_confusion_claims()
+            if released:
+                logger.info("Released %d orphan confusion claim(s) on boot", released)
+        except Exception:
+            logger.exception("Confusion claim boot reconciliation failed")
 
         if bool(getattr(ctx, "degraded", False)):
             return
@@ -8285,7 +8320,7 @@ def create_app(
 
         _require_dialogue_settlement_worker()
         operation = str(job.payload.get("operation", "")).strip().lower()
-        if operation not in {"schedule", "retarget", "rollback"}:
+        if operation not in {"schedule", "retarget", "rollback", "reconcile_orphan"}:
             raise ValueError(f"Unsupported confusion.open.sync operation: {operation!r}")
         try:
             confusion_id = int(str(job.payload.get("confusion_id", 0)))
@@ -8304,6 +8339,16 @@ def create_app(
                     ask_turn_id=str(job.payload.get("ask_turn_id", "")),
                     now=asked_at,
                     ignore_cooldown=bool(job.payload.get("ignore_cooldown", False)),
+                )
+            )
+        elif operation == "reconcile_orphan":
+            releaser = getattr(ctx.database, "release_orphan_confusion_claim", None)
+            if not callable(releaser):
+                raise RuntimeError("Confusion orphan recovery is not ready")
+            result["released"] = bool(
+                releaser(
+                    confusion_id,
+                    expected_ask_turn_id=str(job.payload.get("expected_ask_turn_id", "")).strip(),
                 )
             )
         else:
@@ -8670,6 +8715,7 @@ def create_app(
     async def list_pending_confirmations(
         count_only: bool = Query(default=False),
     ) -> dict[str, Any]:
+        await _reconcile_orphan_confusion_claims()
         items = _pending_confirmation_items(limit=_PENDING_CONFIRMATION_LIMIT)
         if count_only:
             return {"count": len(items)}
@@ -8680,6 +8726,7 @@ def create_app(
         ref: str,
         payload: Annotated[dict[str, object], Body()],
     ) -> ChatTurnOut:
+        await _reconcile_orphan_confusion_claims()
         item = _pending_confirmation_by_ref(ref)
         if item is None:
             raise HTTPException(status_code=404, detail="Pending confirmation not found.")
