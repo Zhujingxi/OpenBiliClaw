@@ -90,9 +90,20 @@ body {
 
 /* ── Status Bar ───────────────────────────────────────────── */
 .status-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 17px;
   font-weight: 700;
   color: var(--brand);
+}
+
+.status-brand-icon {
+  width: 28px;
+  height: 28px;
+  display: block;
+  border-radius: 8px;
+  object-fit: cover;
 }
 
 .status-right {

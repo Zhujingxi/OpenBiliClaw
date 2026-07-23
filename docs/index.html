@@ -33,6 +33,7 @@
   <link rel="alternate" hreflang="zh-CN" href="https://whiteguo233.github.io/OpenBiliClaw/" />
   <link rel="alternate" hreflang="en" href="https://whiteguo233.github.io/OpenBiliClaw/" />
   <link rel="alternate" hreflang="x-default" href="https://whiteguo233.github.io/OpenBiliClaw/" />
+  <link rel="icon" type="image/png" href="images/openbiliclaw-icon-512.png" />
 
   <link rel="preconnect" href="https://github.com" crossorigin />
   <link rel="dns-prefetch" href="https://raw.githubusercontent.com" />
@@ -214,36 +215,13 @@
     }
 
     .mark {
-      position: relative;
       width: 38px;
       height: 38px;
+      display: block;
       flex: 0 0 auto;
       border-radius: 8px;
-      background: linear-gradient(145deg, var(--pink), #ff9fb9);
+      object-fit: cover;
       box-shadow: 0 12px 28px rgba(251, 114, 153, 0.28);
-    }
-
-    .mark::before,
-    .mark::after {
-      content: "";
-      position: absolute;
-      border-radius: 999px;
-    }
-
-    .mark::before {
-      width: 16px;
-      height: 16px;
-      left: 9px;
-      top: 13px;
-      background: #fff;
-    }
-
-    .mark::after {
-      width: 8px;
-      height: 8px;
-      right: 8px;
-      top: 8px;
-      background: var(--cyan);
     }
 
     .brand strong,
@@ -1183,7 +1161,7 @@
   <header class="topbar">
     <div class="topbar-inner">
       <a class="brand" href="#top">
-        <span class="mark" aria-hidden="true"></span>
+        <img class="mark" src="images/openbiliclaw-icon-512.png" alt="" aria-hidden="true" />
         <span>
           <strong>OpenBiliClaw</strong>
           <span data-i18n="brandSubtitle">自进化内容发现 Agent</span>

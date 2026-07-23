@@ -758,17 +758,14 @@ def _try_single_instance_lock(project_root: Path) -> tuple[str, Any]:
 
 
 def _tray_icon_image() -> Any:
-    """Build a small in-memory tray icon (no bundled asset needed)."""
-    from PIL import Image, ImageDraw
+    """Load the canonical app icon for the Windows tray / macOS menu bar."""
+    from PIL import Image
 
-    size = 64
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    # Pink rounded square + a white ring + a blue dot — echoes the brand mark.
-    draw.rounded_rectangle([2, 2, size - 3, size - 3], radius=16, fill=(251, 114, 153, 255))
-    draw.ellipse([16, 18, 44, 46], outline=(255, 255, 255, 255), width=5)
-    draw.ellipse([40, 12, 54, 26], fill=(90, 169, 255, 255))
-    return image
+    from openbiliclaw import __file__ as package_init
+
+    icon_path = Path(package_init).resolve().parent / "web" / "icon-192.png"
+    with Image.open(icon_path) as source:
+        return source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
 
 
 def _should_use_tray() -> bool:

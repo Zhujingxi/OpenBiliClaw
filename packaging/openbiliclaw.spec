@@ -23,6 +23,13 @@ version_file = (
     if platform.system() == "Windows"
     else None
 )
+application_icon = (
+    project_root / "packaging" / "icon.ico"
+    if platform.system() == "Windows"
+    else project_root / "packaging" / "icon.icns"
+    if platform.system() == "Darwin"
+    else None
+)
 
 # --- X (Twitter) discovery dependency collection ---
 # packaging/build.py ensures twitter-cli is installed and sets OPENBILICLAW_BUNDLE_X=1 when
@@ -256,7 +263,7 @@ exe = EXE(
     # (packaging/entry.py); logs go to logs/desktop.log and are viewable from the
     # tray menu. macOS already runs windowed via the .app bundle below.
     console=False,
-    icon=None,  # TODO: add icon -- packaging/icon.ico (Windows) / packaging/icon.icns (macOS)
+    icon=str(application_icon) if application_icon is not None else None,
     version=version_file,
 )
 
@@ -278,7 +285,7 @@ if platform.system() == "Darwin":
     app = BUNDLE(
         coll,
         name="OpenBiliClaw.app",
-        icon=None,  # TODO: packaging/icon.icns
+        icon=str(project_root / "packaging" / "icon.icns"),
         bundle_identifier="com.openbiliclaw.desktop",
         info_plist={
             "CFBundleName": "OpenBiliClaw",

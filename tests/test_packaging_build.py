@@ -97,6 +97,17 @@ def test_pyinstaller_spec_uses_windows_version_file_env() -> None:
     assert "version=version_file" in spec
 
 
+def test_pyinstaller_spec_uses_platform_brand_icons() -> None:
+    root = Path(__file__).resolve().parent.parent
+    spec = (root / "packaging" / "openbiliclaw.spec").read_text(encoding="utf-8")
+
+    assert 'project_root / "packaging" / "icon.ico"' in spec
+    assert 'project_root / "packaging" / "icon.icns"' in spec
+    assert "icon=str(application_icon) if application_icon is not None else None" in spec
+    assert (root / "packaging" / "icon.ico").is_file()
+    assert (root / "packaging" / "icon.icns").is_file()
+
+
 def test_build_pyinstaller_install_command_falls_back_to_uv_when_pip_missing() -> None:
     assert build_module.build_pyinstaller_install_command(
         pip_available=False,

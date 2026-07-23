@@ -34,7 +34,7 @@ function renderStatusBar() {
 
   const title = document.createElement("span");
   title.className = "status-title";
-  title.textContent = "OpenBiliClaw";
+  title.innerHTML = '<img class="status-brand-icon" src="icon-192.png" alt="" aria-hidden="true"><span>OpenBiliClaw</span>';
 
   const right = document.createElement("div");
   right.className = "status-right";
