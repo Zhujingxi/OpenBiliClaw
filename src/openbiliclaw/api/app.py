@@ -227,6 +227,10 @@ _HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
 _PENDING_HYPOTHESIS_MIN_CONFIDENCE = 0.60
 _PENDING_CONFUSION_MIN_CONFIDENCE = 0.50
 _PENDING_CONFIRMATION_LIMIT = 3
+# First-round calibration (2026-07-24): confirmation turn creation is a local
+# SQLite effect budgeted at 1 second. A 30x fence distinguishes that live
+# claim→create window from a crashed creator before orphan recovery may run.
+_CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS = 30.0
 # First-round calibration (2026-07-22): at most two unsolicited entries per
 # day, while a particular object stays quiet for three days. Recalibrate from
 # observed defer rates after the first production month.
@@ -2743,6 +2747,7 @@ def create_app(
                     "operation": "reconcile_orphan",
                     "confusion_id": int(row["id"]),
                     "expected_ask_turn_id": ask_turn_id,
+                    "minimum_age_seconds": _CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS,
                 },
             )
             settlement = completion.settlement or {}
@@ -8349,6 +8354,15 @@ def create_app(
                 releaser(
                     confusion_id,
                     expected_ask_turn_id=str(job.payload.get("expected_ask_turn_id", "")).strip(),
+                    minimum_age_seconds=float(
+                        cast(
+                            "Any",
+                            job.payload.get(
+                                "minimum_age_seconds",
+                                _CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS,
+                            ),
+                        )
+                    ),
                 )
             )
         else:

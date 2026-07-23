@@ -2933,9 +2933,17 @@ class Database:
         confusion_id: int,
         *,
         expected_ask_turn_id: str,
+        minimum_age_seconds: float,
     ) -> bool:
-        """Release a clarifying slot only if its claimed turn still does not exist."""
+        """Release an aged clarifying claim only when its turn still does not exist."""
         normalized_turn_id = str(expected_ask_turn_id or "")
+        if (
+            isinstance(minimum_age_seconds, bool)
+            or not math.isfinite(minimum_age_seconds)
+            or minimum_age_seconds < 0
+        ):
+            raise ValueError("minimum_age_seconds must be finite and non-negative")
+        stale_modifier = f"-{minimum_age_seconds:.6f} seconds"
         cursor = self._execute_write(
             """
             UPDATE confusions
@@ -2946,13 +2954,19 @@ class Database:
              WHERE id = ?
                AND status = 'clarifying'
                AND ask_turn_id = ?
+               AND julianday(updated_at) <= julianday('now', ?)
                AND NOT EXISTS (
                     SELECT 1
                       FROM chat_turns
                      WHERE turn_id = ?
                )
             """,
-            (int(confusion_id), normalized_turn_id, normalized_turn_id),
+            (
+                int(confusion_id),
+                normalized_turn_id,
+                stale_modifier,
+                normalized_turn_id,
+            ),
         )
         return cursor.rowcount > 0
 

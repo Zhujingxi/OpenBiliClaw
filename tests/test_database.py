@@ -1113,6 +1113,119 @@ def test_claim_confusion_clarifying_cross_connection(tmp_path: Path) -> None:
     assert len(clarifying) == 1
 
 
+def test_orphan_recovery_does_not_release_active_claim_before_turn_creation(
+    tmp_path: Path,
+) -> None:
+    """F4: the age fence survives a two-connection claim→create interleave."""
+    path = tmp_path / "confusion_orphan_interleave.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="活跃创建窗口")
+    turn_id = "confirmation-active-window"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+
+        # Connection B runs recovery in the exact claim→create gap. The fresh
+        # claim is active, so it cannot report a release.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=turn_id,
+                minimum_age_seconds=30.0,
+            )
+            is False
+        )
+
+        row, created = creator.create_chat_confirmation_turn(
+            turn_id=turn_id,
+            session="popup",
+            scope="confusion",
+            ref=str(confusion_id),
+            title="活跃创建窗口",
+            message="",
+            reply="请告诉我实际情况",
+            payload={
+                "type": "question",
+                "kind": "confusion",
+                "ref": str(confusion_id),
+                "state": "clarifying",
+            },
+        )
+        assert created is True
+        assert row["turn_id"] == turn_id
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn_id
+        assert reconciler.get_chat_turn(turn_id) is not None
+    finally:
+        reconciler.close()
+        creator.close()
+
+
+def test_orphan_recovery_live_turn_fence_survives_zero_age_mutation_probe(
+    tmp_path: Path,
+) -> None:
+    """M3: an aggressive aged-claim recovery still cannot remove a live turn."""
+    path = tmp_path / "confusion_orphan_live_turn.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="已有提问")
+    turn_id = "confirmation-live-turn"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        row, created = creator.create_chat_confirmation_turn(
+            turn_id=turn_id,
+            session="popup",
+            scope="confusion",
+            ref=str(confusion_id),
+            title="已有提问",
+            message="",
+            reply="请告诉我实际情况",
+            payload={
+                "type": "question",
+                "kind": "confusion",
+                "ref": str(confusion_id),
+                "state": "clarifying",
+            },
+        )
+        assert created is True
+        assert row["turn_id"] == turn_id
+        # Zero age deliberately removes the grace-period reason for rejection:
+        # this assertion depends specifically on NOT EXISTS(chat_turns), so
+        # deleting the live-turn fence (M3) makes the official test fail.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=turn_id,
+                minimum_age_seconds=0.0,
+            )
+            is False
+        )
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn_id
+        assert reconciler.get_chat_turn(turn_id) is not None
+    finally:
+        reconciler.close()
+        creator.close()
+
+
 def test_update_confusion_rejects_unknown_column(tmp_path: Path) -> None:
     db = _db(tmp_path)
     cid = db.insert_confusion(topic="a")

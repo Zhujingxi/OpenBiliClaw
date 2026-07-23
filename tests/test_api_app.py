@@ -12671,6 +12671,15 @@ class TestPendingDialogueConfirmations:
             ask_turn_id="missing-after-crash",
             asked_at=datetime.now(UTC).isoformat(),
         )
+        memory._database.conn.execute(
+            """
+            UPDATE confusions
+               SET updated_at = datetime('now', '-31 seconds')
+             WHERE id = ?
+            """,
+            (orphan_id,),
+        )
+        memory._database.conn.commit()
         assert memory._database.get_chat_turn("missing-after-crash") is None
         client.close()
         memory._database.close()
