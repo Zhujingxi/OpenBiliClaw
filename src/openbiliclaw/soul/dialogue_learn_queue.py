@@ -595,6 +595,14 @@ class AnchorAdmissionRegistry:
         head = self._heads.get(key)
         if isinstance(head, AnchorReserved) and head.owner_sequence > completed_sequence:
             return
+        latest = (
+            self._heads.get(self._latest_head_key) if self._latest_head_key is not None else None
+        )
+        preserve_later_global_head = (
+            self._latest_head_key != key
+            and isinstance(latest, AnchorReserved)
+            and latest.owner_sequence > completed_sequence
+        )
         actual = self.actual_state(
             target_kind=target_kind,
             target_ref=target_ref,
@@ -609,7 +617,8 @@ class AnchorAdmissionRegistry:
         if isinstance(head, AnchorAbsent) and isinstance(actual, AnchorAbsent):
             return
         self._heads[key] = actual
-        self._latest_head_key = key
+        if not preserve_later_global_head:
+            self._latest_head_key = key
 
     def has_reservation(self, reservation_id: str) -> bool:
         return reservation_id in self._entries
