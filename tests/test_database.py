@@ -1226,6 +1226,48 @@ def test_orphan_recovery_live_turn_fence_survives_zero_age_mutation_probe(
         creator.close()
 
 
+def test_orphan_recovery_ask_turn_identity_survives_zero_age_mutation_probe(
+    tmp_path: Path,
+) -> None:
+    """F4: stale recovery ownership cannot release a newer ask-turn claim."""
+    path = tmp_path / "confusion_orphan_claim_identity.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="新旧提问身份")
+    current_turn_id = "confirmation-current-owner"
+    stale_turn_id = "confirmation-stale-owner"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=current_turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        # Zero age removes the grace-period reason for rejection and neither
+        # turn exists. Only expected_ask_turn_id identity may fence this stale
+        # recovery attempt, so deleting/corrupting that SQL condition turns
+        # this assertion red.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=stale_turn_id,
+                minimum_age_seconds=0.0,
+            )
+            is False
+        )
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == current_turn_id
+        assert reconciler.get_chat_turn(current_turn_id) is None
+        assert reconciler.get_chat_turn(stale_turn_id) is None
+    finally:
+        reconciler.close()
+        creator.close()
+
+
 def test_update_confusion_rejects_unknown_column(tmp_path: Path) -> None:
     db = _db(tmp_path)
     cid = db.insert_confusion(topic="a")

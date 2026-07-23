@@ -257,10 +257,11 @@ def test_worker_guard_has_no_inline_child_delegation_escape_hatch() -> None:
     assert "_submit_and_wait_inline" not in queue_source
 
 
-def test_orphan_claim_recovery_keeps_age_and_live_turn_fences() -> None:
-    """M3: recovery must retain both the age gate and atomic live-turn fence."""
+def test_orphan_claim_recovery_keeps_age_identity_and_live_turn_fences() -> None:
+    """F4/M3: recovery retains age, claim identity, and live-turn fences."""
     source = _production_symbol_source("Database.release_orphan_confusion_claim")
 
+    assert "AND ask_turn_id = ?" in source
     assert "julianday(updated_at) <= julianday('now', ?)" in source
     assert "NOT EXISTS (" in source
     assert "FROM chat_turns" in source
