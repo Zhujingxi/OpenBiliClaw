@@ -1142,31 +1142,28 @@ async def test_typed_envelope_deep_copies_payload_before_enqueue() -> None:
     assert observed == [{"value": ["before"]}]
 
 
-async def test_submit_and_wait_reentry_fails_fast_and_worker_continues() -> None:
-    """Q4: the worker never waits on a job queued behind itself."""
+async def test_submit_and_wait_reentry_dispatches_inline_and_worker_continues() -> None:
+    """Q4/F2: direct worker reentry runs inline instead of joining its own tail."""
     from openbiliclaw.soul.dialogue_learn_queue import (
         DialogueJobKind,
         DialogueJobResult,
         DialogueSettlementQueue,
-        DialogueSettlementReentryError,
     )
 
-    reentry_errors: list[str] = []
     observed: list[str] = []
     queue: DialogueSettlementQueue
 
     async def dispatcher(job: DialogueJob) -> DialogueJobResult:
         label = str(job.payload["label"])
         if label == "reenter":
-            with pytest.raises(DialogueSettlementReentryError):
-                await asyncio.wait_for(
-                    queue.submit_and_wait(
-                        DialogueJobKind.CARD_DEFER,
-                        {"label": "nested"},
-                    ),
-                    timeout=0.1,
-                )
-            reentry_errors.append(label)
+            nested = await asyncio.wait_for(
+                queue.submit_and_wait(
+                    DialogueJobKind.CARD_DEFER,
+                    {"label": "nested"},
+                ),
+                timeout=0.1,
+            )
+            assert nested.outcome == "completed"
         observed.append(label)
         return DialogueJobResult(outcome="completed")
 
@@ -1176,8 +1173,57 @@ async def test_submit_and_wait_reentry_fails_fast_and_worker_continues() -> None
     await queue.submit_and_wait(DialogueJobKind.LEARN, {"label": "after"})
     await queue.shutdown()
 
-    assert reentry_errors == ["reenter"]
-    assert observed == ["reenter", "after"]
+    assert observed == ["nested", "reenter", "after"]
+
+
+async def test_worker_child_submit_and_wait_dispatches_inline_without_deadlock() -> None:
+    """F2: a handler child task cannot enqueue behind and deadlock its parent."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    guard = DialogueSettlementGuard()
+    observed: list[str] = []
+    tasks: dict[str, asyncio.Task[object] | None] = {}
+    queue: DialogueSettlementQueue
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        queue.require_dialogue_settlement_worker()
+        label = str(job.payload["label"])
+        tasks[label] = asyncio.current_task()
+        if label == "parent":
+            child = asyncio.create_task(
+                queue.submit_and_wait(
+                    DialogueJobKind.CARD_DEFER,
+                    {"label": "child"},
+                )
+            )
+            nested = await child
+            assert nested.outcome == "completed"
+        observed.append(label)
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher, guard=guard)
+    queue.start()
+    worker_task = queue.worker_task
+    assert worker_task is not None
+    try:
+        result = await asyncio.wait_for(
+            queue.submit_and_wait(DialogueJobKind.LEARN, {"label": "parent"}),
+            timeout=0.5,
+        )
+        assert result.outcome == "completed"
+        await asyncio.wait_for(queue.pause_and_drain(timeout=0.5), timeout=1)
+    finally:
+        await queue.shutdown(timeout=0.5)
+
+    assert observed == ["child", "parent"]
+    assert tasks["parent"] is worker_task
+    assert tasks["child"] is not tasks["parent"]
+    assert queue.depth == 0
 
 
 async def test_typed_worker_permit_rejects_inherited_child_context() -> None:

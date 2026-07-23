@@ -955,8 +955,11 @@ await queue.shutdown()
 anchor transition、owner reservation、冻结 snapshot 与 `put_nowait` 之间没有
 `await`。owner resolve 只更新自己的 per-ref entry；较早 ref 的 builder 迟到完成
 不能把无 target 的全局 latest snapshot 从更晚受理的 reservation 拉回旧 ref。
-`submit_and_wait()` 只在调用 task 等 completion；worker 内重入会立即抛
-`DialogueSettlementReentryError`。`anchor.establish`、`card.discuss` 与
+`submit_and_wait()` 在 worker 外排队等 completion；活跃 handler 及其仍在该
+execution scope 内的 child task 重入时，会显式授权该 task 直接执行 nested handler，
+不把 job 排到父 worker 身后。普通 child 只继承 ContextVar 仍无写权限，父 handler
+退出后遗留的 detached child 也不再具有 inline reentry 身份。`anchor.establish`、
+`card.discuss` 与
 `confusion.attribution.replay(needs_anchor=true)` 是当前完整 builder 集合；新增
 builder kind 必须先扩 policy 与穷尽测试。进程退出会丢弃 registry，未执行 job 不做
 durable 恢复。
@@ -984,7 +987,7 @@ with guard.dialogue_settlement_worker(worker_task):
     guard.require_dialogue_settlement_worker()  # 当前实际 worker 可写
 ```
 
-`register_worker()` 分配 fresh nonce；`revoke_worker()` 与 `clear_if_current()` 都要求 task identity + nonce 精确匹配。`activate_worker()` 只携带 nonce，真正的 `require_dialogue_settlement_worker()` 还会比较 `asyncio.current_task()`，因此 `create_task()` child 会抛 `DialogueSettlementMutationOutsideWorker`。runtime 热重载已接到 exact revoke / fresh reauthorize；`SoulEngine._apply_*`、anchor/confusion manager 与 API card façade 的 production protected mutator 均安装 guard。Wave 3 wiring gate 逐项证明所有声明入口只能由 actual worker Task mutation，endpoint 与 child task 不能旁路。
+`register_worker()` 分配 fresh nonce；`revoke_worker()` 与 `clear_if_current()` 都要求 task identity + nonce 精确匹配。`activate_worker()` 只携带 nonce，普通 `create_task()` child 仍会因 task identity 不符而抛 `DialogueSettlementMutationOutsideWorker`；唯一例外是 queue 在活跃父 handler scope 内识别到 nested `submit_and_wait()` 后，用 `activate_inline_lineage_task()` 对该 child 的这一段真实 handler 调用做显式、限时授权。runtime 热重载已接到 exact revoke / fresh reauthorize；`SoulEngine._apply_*`、anchor/confusion manager 与 API card façade 的 production protected mutator 均安装 guard。Wave 3 wiring gate 逐项证明所有声明入口只能由 actual worker 或其显式 inline nested handler mutation，endpoint 与普通 child task 不能旁路。
 
 ### PreferenceAnalyzer
 

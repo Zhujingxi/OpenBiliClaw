@@ -2,8 +2,9 @@
 
 The private context nonce is necessary but never sufficient: authorization
 also requires identity equality with the one currently registered worker
-``asyncio.Task``.  A child task therefore cannot gain mutation authority by
-inheriting the worker's ``ContextVar`` value.
+``asyncio.Task`` or an explicit, queue-controlled inline delegation.  A child
+task therefore cannot gain mutation authority merely by inheriting the
+worker's ``ContextVar`` value.
 """
 
 from __future__ import annotations
@@ -45,6 +46,10 @@ class DialogueSettlementGuard:
             f"dialogue_settlement_worker_nonce_{id(self)}",
             default=None,
         )
+        self._delegated_task: ContextVar[asyncio.Task[object] | None] = ContextVar(
+            f"dialogue_settlement_delegated_task_{id(self)}",
+            default=None,
+        )
 
     def register_worker(
         self,
@@ -83,6 +88,12 @@ class DialogueSettlementGuard:
         """Return whether ``permit`` is the exact currently authorized tuple."""
         return self._is_current_permit(permit)
 
+    def belongs_to_worker_lineage(self, permit: DialogueSettlementWorkerPermit) -> bool:
+        """Return whether the current context descends from active worker execution."""
+        return (
+            self._is_current_permit(permit) and self._context_nonce.get() == permit.lifecycle_nonce
+        )
+
     @contextmanager
     def activate_worker(
         self,
@@ -98,6 +109,27 @@ class DialogueSettlementGuard:
             yield
         finally:
             self._context_nonce.reset(token)
+
+    @contextmanager
+    def activate_inline_lineage_task(
+        self,
+        permit: DialogueSettlementWorkerPermit,
+    ) -> Iterator[None]:
+        """Authorize one lineage task only while it runs an inline nested handler."""
+        if not self.belongs_to_worker_lineage(permit):
+            raise DialogueSettlementMutationOutsideWorker(
+                "Inline dialogue settlement delegation requires active worker lineage"
+            )
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise DialogueSettlementMutationOutsideWorker(
+                "Inline dialogue settlement delegation requires an asyncio task"
+            )
+        token = self._delegated_task.set(current_task)
+        try:
+            yield
+        finally:
+            self._delegated_task.reset(token)
 
     @contextmanager
     def dialogue_settlement_worker(
@@ -125,8 +157,11 @@ class DialogueSettlementGuard:
             current_task = None
         if (
             permit is None
-            or current_task is not permit.worker_task
             or self._context_nonce.get() != permit.lifecycle_nonce
+            or (
+                current_task is not permit.worker_task
+                and current_task is not self._delegated_task.get()
+            )
         ):
             raise DialogueSettlementMutationOutsideWorker(
                 "Dialogue settlement mutation requires the active worker task"

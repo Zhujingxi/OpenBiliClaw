@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import copy
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
@@ -348,6 +349,15 @@ class _ReservationEntry:
     terminal: AnchorMutationTerminal | None = None
     effective_state: AnchorActualState | None = None
     resolution_count: int = 0
+
+
+@dataclass(slots=True)
+class _WorkerExecutionScope:
+    """Mutable lifetime shared only with children of one active worker handler."""
+
+    active: bool = True
+    inline_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    inline_owner: asyncio.Task[object] | None = None
 
 
 def anchor_snapshot_as_mapping(snapshot: AnchorAdmissionSnapshot) -> dict[str, object]:
@@ -773,6 +783,10 @@ class DialogueSettlementQueue:
         self._next_sequence = 1
         self._started = asyncio.Event()
         self._startup_error: BaseException | None = None
+        self._execution_scope: ContextVar[_WorkerExecutionScope | None] = ContextVar(
+            f"dialogue_settlement_execution_scope_{id(self)}",
+            default=None,
+        )
 
     @property
     def registry(self) -> AnchorAdmissionRegistry:
@@ -840,8 +854,19 @@ class DialogueSettlementQueue:
         completion: bool = False,
     ) -> DialogueJob | None:
         """Atomically classify, snapshot, and enqueue one immutable envelope."""
+        return self._admit(kind, payload, completion=completion, enqueue=True)
+
+    def _admit(
+        self,
+        kind: DialogueJobKind | str,
+        payload: Mapping[str, object],
+        *,
+        completion: bool,
+        enqueue: bool,
+    ) -> DialogueJob | None:
+        """Build one envelope; external admission enqueues, worker reentry does not."""
         parsed_kind = DialogueJobKind(kind)
-        if self._closed or not self._accepting:
+        if enqueue and (self._closed or not self._accepting):
             logger.warning(
                 "DialogueSettlementQueue not accepting; dropped job (kind=%s, closed=%s)",
                 parsed_kind.value,
@@ -849,7 +874,7 @@ class DialogueSettlementQueue:
             )
             return None
         loop = asyncio.get_running_loop()
-        if not self.worker_alive:
+        if enqueue and not self.worker_alive:
             self.start()
 
         sequence = self._next_sequence
@@ -891,13 +916,14 @@ class DialogueSettlementQueue:
             sequence=sequence,
             completion=completion_future,
         )
-        self._queue.put_nowait(job)
-        depth = self._queue.qsize()
-        if depth >= _QUEUE_DEPTH_WARN:
-            logger.warning(
-                "DialogueSettlementQueue depth=%d — settlement is falling behind.",
-                depth,
-            )
+        if enqueue:
+            self._queue.put_nowait(job)
+            depth = self._queue.qsize()
+            if depth >= _QUEUE_DEPTH_WARN:
+                logger.warning(
+                    "DialogueSettlementQueue depth=%d — settlement is falling behind.",
+                    depth,
+                )
         return job
 
     async def submit_and_wait(
@@ -905,17 +931,57 @@ class DialogueSettlementQueue:
         kind: DialogueJobKind | str,
         payload: Mapping[str, object],
     ) -> DialogueJobResult:
-        """Submit with a completion Future; fail immediately on worker reentry."""
-        if asyncio.current_task() is self._worker:
-            raise DialogueSettlementReentryError(
-                "Dialogue settlement worker cannot wait for its own queue"
-            )
+        """Submit with completion, dispatching active worker-lineage reentry inline."""
+        if self._in_active_worker_lineage():
+            return await self._submit_and_wait_inline(kind, payload)
         job = self.submit(kind, payload, completion=True)
         if job is None or job.completion is None:
             raise DialogueSettlementQueueClosedError(
                 "Dialogue settlement queue is not accepting completion jobs"
             )
         return await asyncio.shield(job.completion)
+
+    def _in_active_worker_lineage(self) -> bool:
+        scope = self._execution_scope.get()
+        permit = self._worker_permit
+        return (
+            scope is not None
+            and scope.active
+            and permit is not None
+            and self._guard.belongs_to_worker_lineage(permit)
+        )
+
+    async def _submit_and_wait_inline(
+        self,
+        kind: DialogueJobKind | str,
+        payload: Mapping[str, object],
+    ) -> DialogueJobResult:
+        """Run one nested command directly without waiting behind its parent."""
+        scope = self._execution_scope.get()
+        current_task = asyncio.current_task()
+        if scope is None or not scope.active or current_task is None:
+            raise RuntimeError("Inline dialogue settlement execution has no active scope")
+        already_owner = scope.inline_owner is current_task
+        if not already_owner:
+            await scope.inline_lock.acquire()
+            scope.inline_owner = current_task
+        job: DialogueJob | None = None
+        try:
+            job = self._admit(kind, payload, completion=True, enqueue=False)
+            if job is None or job.completion is None:
+                raise RuntimeError("Inline dialogue settlement admission unexpectedly failed")
+            permit = self._worker_permit
+            if permit is None:
+                raise RuntimeError("Inline dialogue settlement execution has no worker permit")
+            with self._guard.activate_inline_lineage_task(permit):
+                await self._execute(job)
+            return job.completion.result()
+        finally:
+            if job is not None:
+                self._registry.release(job.anchor_snapshot)
+            if not already_owner:
+                scope.inline_owner = None
+                scope.inline_lock.release()
 
     def pause(self) -> None:
         self._accepting = False
@@ -1002,8 +1068,14 @@ class DialogueSettlementQueue:
                     current_permit = self._worker_permit
                     if current_permit is None:
                         raise RuntimeError("Dialogue settlement worker has no permit")
-                    with self._guard.activate_worker(current_permit):
-                        await self._execute(job)
+                    execution_scope = _WorkerExecutionScope()
+                    scope_token = self._execution_scope.set(execution_scope)
+                    try:
+                        with self._guard.activate_worker(current_permit):
+                            await self._execute(job)
+                    finally:
+                        execution_scope.active = False
+                        self._execution_scope.reset(scope_token)
                 except asyncio.CancelledError:
                     self._complete_cancelled(job)
                     raise
