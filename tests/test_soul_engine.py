@@ -3032,7 +3032,9 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
     from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
 
     memory = MemoryManager(tmp_path)
     memory.initialize()
@@ -3068,24 +3070,161 @@ async def test_completed_confusion_reply_scan_replays_attribution_once(
 
     monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", counted_extract)
 
-    assert (
-        await _call_in_test_dialogue_worker(
-            engine,
-            engine.replay_confusion_dialogue_attributions,
-        )
-        == 1
+    queue = DialogueSettlementQueue(
+        _build_dialogue_settlement_dispatcher(engine, {}),
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
     )
-    assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
-    assert memory._database.get_confusion(confusion_id)["replay_queue"] == []
-    assert engine._dialogue_anchor_manager.current() is None
-    assert (
-        await _call_in_test_dialogue_worker(
-            engine,
-            engine.replay_confusion_dialogue_attributions,
-        )
-        == 0
-    )
+    engine.bind_dialogue_settlement_queue(queue)
+    try:
+        assert await engine.replay_confusion_dialogue_attributions() == 1
+        assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
+        assert memory._database.get_confusion(confusion_id)["replay_queue"] == []
+        assert engine._dialogue_anchor_manager.current() is None
+        assert await engine.replay_confusion_dialogue_attributions() == 0
+    finally:
+        await queue.shutdown(timeout=2)
     assert extract_calls == 1
+
+
+async def test_confusion_attribution_replay_dispatches_dedicated_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: the cognition hook submits only its dedicated typed command."""
+    from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJob,
+        DialogueJobKind,
+        DialogueSettlementQueue,
+    )
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="桌游", observation="连续浏览")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question-dedicated",
+        asked_at="2026-07-21T01:00:00+00:00",
+    )
+    memory._database.create_chat_turn(
+        turn_id="completed-dedicated",
+        session="popup",
+        scope="confusion",
+        subject_id=str(confusion_id),
+        subject_title="桌游",
+        message="这确实是我的兴趣",
+    )
+    memory._database.complete_chat_turn("completed-dedicated", reply="明白了")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _anchor_extract("answer", interpretation="real_interest"),
+    )
+    observed: list[tuple[DialogueJobKind, bool]] = []
+    queue: DialogueSettlementQueue
+    runtime_dispatch = _build_dialogue_settlement_dispatcher(engine, {})
+
+    async def observe(job: DialogueJob):  # type: ignore[no-untyped-def]
+        observed.append((job.kind, asyncio.current_task() is queue.worker_task))
+        return await runtime_dispatch(job)
+
+    queue = DialogueSettlementQueue(
+        observe,
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    engine.bind_dialogue_settlement_queue(queue)
+    try:
+        assert await engine.replay_confusion_dialogue_attributions() == 1
+    finally:
+        await queue.shutdown(timeout=2)
+
+    assert observed == [(DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY, True)]
+
+
+async def test_confusion_attribution_replay_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1/R3: ten same-identity jobs analyze/apply once and resolve every owner."""
+    from openbiliclaw.api.runtime_context import _build_dialogue_settlement_dispatcher
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueSettlementQueue,
+    )
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    confusion_id = memory._database.insert_confusion(topic="桌游", observation="连续浏览")
+    assert memory._database.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question-idempotent",
+        asked_at="2026-07-21T01:00:00+00:00",
+    )
+    memory._database.create_chat_turn(
+        turn_id="completed-idempotent",
+        session="popup",
+        scope="confusion",
+        subject_id=str(confusion_id),
+        subject_title="桌游",
+        message="这确实是我的兴趣",
+    )
+    memory._database.complete_chat_turn("completed-idempotent", reply="明白了")
+    extract_calls = 0
+    fake_extract = _anchor_extract("answer", interpretation="real_interest")
+
+    async def counted_extract(**kwargs: object) -> dict[str, object]:
+        nonlocal extract_calls
+        extract_calls += 1
+        return await fake_extract(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", counted_extract)
+    queue = DialogueSettlementQueue(
+        _build_dialogue_settlement_dispatcher(engine, {}),
+        anchor_provider=engine._dialogue_anchor_manager.snapshot,
+    )
+    engine.bind_dialogue_settlement_queue(queue)
+    jobs = [
+        queue.submit(
+            DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
+            {
+                "confusion_id": confusion_id,
+                "turn_id": "completed-idempotent",
+                "replay_id": "completed-idempotent",
+                "ask_turn_id": "question-idempotent",
+                "subject_id": str(confusion_id),
+                "subject_title": "桌游",
+                "message": "这确实是我的兴趣",
+                "reply": "明白了",
+                "has_replay_queue": False,
+                "needs_anchor": True,
+                "target_kind": "confusion",
+                "target_ref": str(confusion_id),
+                "producer_source": "cognition_cycle",
+            },
+            completion=True,
+        )
+        for _ in range(10)
+    ]
+    assert all(job is not None and job.completion is not None for job in jobs)
+    try:
+        results = await asyncio.gather(
+            *[
+                asyncio.shield(job.completion)
+                for job in jobs
+                if job is not None and job.completion is not None
+            ]
+        )
+    finally:
+        await queue.shutdown(timeout=2)
+
+    assert results[0].outcome == "applied"
+    assert [result.outcome for result in results[1:]] == ["already_terminal"] * 9
+    assert extract_calls == 1
+    assert memory._database.get_confusion(confusion_id)["status"] == "resolved"
+    settlement = memory._database.get_card_settlement(str(confusion_id))
+    assert settlement is not None and settlement["applied"] == 1
 
 
 async def test_confusion_anchor_receipts_ambiguous_turn_before_durable_completion(

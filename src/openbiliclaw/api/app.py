@@ -1575,9 +1575,7 @@ def create_app(
             auto_update_service=auto_update_service,
             llm_concurrency_gate=injected_gate,
         )
-        if ctx.dialogue_settlement_queue is None and callable(
-            getattr(soul_engine, "bind_dialogue_settlement_queue", None)
-        ):
+        if ctx.dialogue_settlement_queue is None:
             from openbiliclaw.api.runtime_context import (
                 _build_dialogue_settlement_dispatcher,
             )
@@ -1593,7 +1591,13 @@ def create_app(
                 anchor_provider=anchor_provider if callable(anchor_provider) else None,
                 guard=ctx.dialogue_settlement_guard,
             )
-            soul_engine.bind_dialogue_settlement_queue(ctx.dialogue_settlement_queue)
+            bind_settlement_queue = getattr(
+                soul_engine,
+                "bind_dialogue_settlement_queue",
+                None,
+            )
+            if callable(bind_settlement_queue):
+                bind_settlement_queue(ctx.dialogue_settlement_queue)
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import (
                 DialogueLearningMode,
@@ -2692,6 +2696,20 @@ def create_app(
             )
         except TimeoutError:
             return None
+
+    async def _submit_dialogue_settlement_required(
+        kind: DialogueJobKind,
+        payload: dict[str, object],
+    ) -> DialogueJobResult:
+        """Await a required local command without imposing the HTTP fast-path budget."""
+        queue = _dialogue_settlement_queue()
+        submit_and_wait = getattr(queue, "submit_and_wait", None)
+        if not callable(submit_and_wait):
+            raise RuntimeError("Dialogue settlement queue cannot await required work")
+        return cast(
+            "DialogueJobResult",
+            await submit_and_wait(kind, payload),
+        )
 
     def _read_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
         get_chat_turn = _chat_db_method("get_chat_turn")
@@ -7765,13 +7783,12 @@ def create_app(
             return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
 
-    def _ensure_confusion_dialogue_anchor(turn: ChatTurnOut) -> None:
-        """Claim and anchor a thrown confusion before its reply enters learning."""
+    async def _ensure_confusion_dialogue_anchor(turn: ChatTurnOut) -> None:
+        """Queue the claim and anchor before this reply can admit its learn job."""
         if turn.scope != "confusion":
             return
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
-        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
-        if confusion_manager is None or anchor_manager is None:
+        if confusion_manager is None:
             return
         try:
             confusion_id = int(turn.subject_id)
@@ -7781,11 +7798,20 @@ def create_app(
         confusion = confusion_manager.get(confusion_id)
         if confusion is None or confusion.status in {"resolved", "dismissed", "expired"}:
             return
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
         if confusion.status == "open":
-            claimed = confusion_manager.schedule_ask(
-                confusion_id,
-                ask_turn_id=turn.turn_id,
+            scheduled = await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "schedule",
+                    "confusion_id": confusion_id,
+                    "ask_turn_id": turn.turn_id,
+                    "asked_at": datetime.now(UTC).isoformat(),
+                    "ignore_cooldown": False,
+                },
             )
+            claimed = bool((scheduled.settlement or {}).get("claimed", False))
             if not claimed:
                 raise RuntimeError("Confusion clarifying slot is not available")
             confusion = confusion_manager.get(confusion_id)
@@ -7793,11 +7819,15 @@ def create_app(
             raise RuntimeError("Confusion could not enter clarifying state")
         from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
 
-        anchor_manager.establish(
-            kind="confusion",
-            ref=str(confusion_id),
-            origin_turn_id=confusion.ask_turn_id or turn.turn_id,
-            entry=ENTRY_CONFUSION_PROMPT,
+        await _submit_dialogue_settlement_required(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "target_kind": "confusion",
+                "target_ref": str(confusion_id),
+                "origin_turn_id": confusion.ask_turn_id or turn.turn_id,
+                "entry": ENTRY_CONFUSION_PROMPT,
+                "producer_source": "durable_confusion_ensure",
+            },
         )
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
@@ -7856,69 +7886,28 @@ def create_app(
             )
         elif turn.scope == "probe":
             domain = turn.subject_id or turn.subject_title
-            sentiment, classifier = await _classify_probe_sentiment(turn.message, reply, domain)
-            speculator = getattr(ctx.soul_engine, "_speculator", None)
-            chat_response = "chat_neutral"
-            resulting_action = "none"
-            if sentiment == "negative":
-                chat_response = "chat_rejected"
-                resulting_action = "rejected"
-                if speculator is not None:
-                    with suppress(Exception):
-                        speculator.user_reject_speculation(domain, cooldown_days=14)
-                summary = f"你对「{domain}」的反馈偏负面（{turn.message}），已暂时搁置 14 天。"
-            elif sentiment == "strong_positive":
-                chat_response = "chat_confirmed"
-                resulting_action = "confirmed"
-                if speculator is not None:
-                    with suppress(Exception):
-                        _confirm_speculation_with_source(
-                            speculator,
-                            domain,
-                            confirmation_source="chat_confirmed",
-                        )
-                summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
-            elif sentiment == "weak_positive":
-                chat_response = "weak_positive"
-                resulting_action = "weak_positive_deferred"
-                _record_exploration_buffer_event(
-                    domain=domain,
-                    source_event="weak_positive_chat",
-                )
-                summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
-            elif sentiment == "neutral_deferred":
-                defer_outcome = "deferred"
-                if speculator is not None:
-                    with suppress(Exception):
-                        defer_result = speculator.user_defer_speculation(domain)
-                        defer_outcome = defer_result.outcome
-                if defer_outcome == "exhausted":
-                    chat_response = "defer_exhausted"
-                    resulting_action = "defer_exhausted"
-                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
-                else:
-                    chat_response = "defer"
-                    resulting_action = "deferred"
-                    summary = f"你想把「{domain}」先放一放，过阵子再聊。"
-            else:
-                summary = f"关于「{domain}」你说：{turn.message}"
-            if speculator is not None:
-                _record_probe_feedback_history(
-                    domain,
-                    chat_response,
-                    speculator=speculator,
-                    message=turn.message,
-                    classification=sentiment,
-                    classifier=classifier,
-                    resulting_action=resulting_action,
-                )
-            _record_probe_cognition(
-                summary,
-                domain,
-                "chat",
-                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            completion = await _submit_dialogue_settlement_required(
+                DialogueJobKind.PROBE_REPLY_APPLY,
+                {
+                    "turn_id": turn.turn_id,
+                    "domain": domain,
+                    "message": turn.message,
+                    "reply": reply,
+                },
             )
-            await _publish_probe_event("interest.chat", summary, domain)
+            intent = completion.exploration_intent
+            if intent is not None:
+                queue = _dialogue_settlement_queue()
+                if asyncio.current_task() is getattr(queue, "worker_task", None):
+                    raise RuntimeError("Exploration handoff cannot run in the settlement worker")
+                _record_exploration_buffer_event(
+                    domain=intent.domain,
+                    source_event=intent.source_event,
+                    specifics=list(intent.specifics),
+                    evidence_id=intent.evidence_id,
+                )
         elif turn.scope == "avoidance_probe":
             domain = turn.subject_id or turn.subject_title
             sentiment, classifier = await _classify_probe_sentiment(turn.message, reply, domain)
@@ -7994,19 +7983,18 @@ def create_app(
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
         elif turn.scope == "confusion":
-            # Settlement ownership belongs exclusively to the serial dialogue
-            # anchor handler. This durable completion observer only records the
-            # visible conversation context; it must never resolve/defer here.
-            label = turn.subject_title or turn.subject_id or "这个方向"
-            summary = f"关于「{label}」你说：{turn.message}"
-            _record_probe_cognition(
-                summary,
-                turn.subject_id or label,
-                "chat",
-                source="confusion",
-                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_REPLY_APPLY,
+                {
+                    "turn_id": turn.turn_id,
+                    "subject_id": turn.subject_id,
+                    "subject_title": turn.subject_title,
+                    "message": turn.message,
+                    "reply": reply,
+                },
             )
-            await _publish_probe_event("confusion.chat", summary, turn.subject_id or label)
 
     def _hypothesis_card_payload(payload: ChatTurnIn) -> dict[str, object]:
         raw_evidence = payload.payload.get("evidence_refs", [])
@@ -8329,6 +8317,231 @@ def create_app(
             settlement=MappingProxyType(result),
         )
 
+    def _chat_turn_effect_receipt(turn_id: str, receipt_key: str) -> dict[str, object] | None:
+        row = _read_chat_turn_row(turn_id)
+        if row is None:
+            return None
+        raw_payload = row.get("payload", {})
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        raw_receipt = payload.get(receipt_key)
+        return dict(raw_receipt) if isinstance(raw_receipt, dict) else None
+
+    def _store_chat_turn_effect_receipt(
+        turn_id: str,
+        receipt_key: str,
+        receipt: dict[str, object],
+    ) -> None:
+        store = _chat_db_method("store_chat_turn_effect_receipt")
+        if store is None or not bool(
+            store(
+                turn_id,
+                receipt_key=receipt_key,
+                receipt=receipt,
+            )
+        ):
+            raise RuntimeError(f"Could not persist {receipt_key} for turn {turn_id!r}")
+
+    async def _handle_probe_reply_apply(job: DialogueJob) -> DialogueJobResult:
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJobResult,
+            ExplorationIntent,
+        )
+
+        _require_dialogue_settlement_worker()
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        domain = str(job.payload.get("domain", "")).strip()
+        message = str(job.payload.get("message", ""))
+        reply = str(job.payload.get("reply", ""))
+        if not turn_id or not domain:
+            raise ValueError("probe.reply.apply requires turn_id and domain")
+        receipt_key = "probe_reply_apply"
+        receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
+        speculator = getattr(ctx.soul_engine, "_speculator", None)
+        if receipt is None:
+            sentiment, classifier = await _classify_probe_sentiment(message, reply, domain)
+            metadata = (
+                _probe_metadata_from_active_speculation(speculator, domain)
+                if speculator is not None
+                else {"domain": domain}
+            )
+            chat_response = "chat_neutral"
+            resulting_action = "none"
+            if sentiment == "negative":
+                chat_response = "chat_rejected"
+                resulting_action = "rejected"
+                summary = f"你对「{domain}」的反馈偏负面（{message}），已暂时搁置 14 天。"
+            elif sentiment == "strong_positive":
+                chat_response = "chat_confirmed"
+                resulting_action = "confirmed"
+                summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
+            elif sentiment == "weak_positive":
+                chat_response = "weak_positive"
+                resulting_action = "weak_positive_deferred"
+                summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+            elif sentiment == "neutral_deferred":
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把「{domain}」先放一放，过阵子再聊。"
+            else:
+                summary = f"关于「{domain}」你说：{message}"
+            raw_specifics = metadata.get("specifics", [])
+            specific_names = (
+                [str(item) for item in raw_specifics if str(item).strip()]
+                if isinstance(raw_specifics, list)
+                else []
+            )
+            receipt = {
+                "classification": sentiment,
+                "classifier": classifier,
+                "resulting_action": resulting_action,
+                "chat_response": chat_response,
+                "summary": summary,
+                "metadata": dict(metadata),
+                "specifics": specific_names,
+                "effects": {
+                    "settlement": False,
+                    "history": False,
+                    "cognition": False,
+                    "event": False,
+                },
+            }
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        sentiment = str(receipt.get("classification", "neutral"))
+        classifier = str(receipt.get("classifier", "neutral_default"))
+        resulting_action = str(receipt.get("resulting_action", "none"))
+        chat_response = str(receipt.get("chat_response", "chat_neutral"))
+        summary = str(receipt.get("summary", f"关于「{domain}」你说：{message}"))
+        raw_metadata = receipt.get("metadata", {})
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {"domain": domain}
+        raw_specifics = receipt.get("specifics", [])
+        specifics_tuple = (
+            tuple(str(item) for item in raw_specifics if str(item).strip())
+            if isinstance(raw_specifics, list)
+            else ()
+        )
+        raw_effects = receipt.get("effects", {})
+        effects = dict(raw_effects) if isinstance(raw_effects, dict) else {}
+
+        if not bool(effects.get("settlement", False)):
+            if sentiment == "negative" and speculator is not None:
+                with suppress(Exception):
+                    speculator.user_reject_speculation(domain, cooldown_days=14)
+            elif sentiment == "strong_positive" and speculator is not None:
+                with suppress(Exception):
+                    _confirm_speculation_with_source(
+                        speculator,
+                        domain,
+                        confirmation_source="chat_confirmed",
+                    )
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    with suppress(Exception):
+                        defer_outcome = speculator.user_defer_speculation(domain).outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+                    receipt["chat_response"] = chat_response
+                    receipt["resulting_action"] = resulting_action
+                    receipt["summary"] = summary
+            effects["settlement"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("history", False)):
+            if speculator is not None:
+                _record_probe_feedback_history(
+                    domain,
+                    chat_response,
+                    speculator=speculator,
+                    message=message,
+                    classification=sentiment,
+                    classifier=classifier,
+                    resulting_action=resulting_action,
+                    metadata=metadata,
+                )
+            effects["history"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("cognition", False)):
+            _record_probe_cognition(
+                summary,
+                domain,
+                "chat",
+                detail=f"你的反馈：{message}\n阿b的回复：{reply}",
+            )
+            effects["cognition"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("event", False)):
+            await _publish_probe_event("interest.chat", summary, domain)
+            effects["event"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        exploration_intent = (
+            ExplorationIntent(
+                domain=domain,
+                source_event="weak_positive_chat",
+                specifics=specifics_tuple,
+                evidence_id=turn_id,
+            )
+            if sentiment == "weak_positive"
+            else None
+        )
+        return DialogueJobResult(
+            outcome="applied",
+            classification=sentiment,
+            classifier=classifier,
+            resulting_action=resulting_action,
+            exploration_intent=exploration_intent,
+        )
+
+    async def _handle_confusion_reply_apply(job: DialogueJob) -> DialogueJobResult:
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobResult
+
+        _require_dialogue_settlement_worker()
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        if not turn_id:
+            raise ValueError("confusion.reply.apply requires turn_id")
+        subject_id = str(job.payload.get("subject_id", "")).strip()
+        label = str(job.payload.get("subject_title", "")).strip() or subject_id or "这个方向"
+        message = str(job.payload.get("message", ""))
+        reply = str(job.payload.get("reply", ""))
+        domain = subject_id or label
+        receipt_key = "confusion_reply_apply"
+        receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
+        if receipt is None:
+            receipt = {
+                "summary": f"关于「{label}」你说：{message}",
+                "effects": {"cognition": False, "event": False},
+            }
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        summary = str(receipt.get("summary", f"关于「{label}」你说：{message}"))
+        raw_effects = receipt.get("effects", {})
+        effects = dict(raw_effects) if isinstance(raw_effects, dict) else {}
+        if not bool(effects.get("cognition", False)):
+            _record_probe_cognition(
+                summary,
+                domain,
+                "chat",
+                source="confusion",
+                detail=f"你的反馈：{message}\n阿b的回复：{reply}",
+            )
+            effects["cognition"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        if not bool(effects.get("event", False)):
+            await _publish_probe_event("confusion.chat", summary, domain)
+            effects["event"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        return DialogueJobResult(outcome="applied")
+
     async def _handle_card_reconcile(job: DialogueJob) -> DialogueJobResult:
         from types import MappingProxyType
 
@@ -8363,6 +8576,8 @@ def create_app(
             DialogueJobKind.CARD_DISCUSS: _handle_card_discuss,
             DialogueJobKind.CARD_RECONCILE: _handle_card_reconcile,
             DialogueJobKind.ANCHOR_ESTABLISH: _handle_anchor_establish,
+            DialogueJobKind.PROBE_REPLY_APPLY: _handle_probe_reply_apply,
+            DialogueJobKind.CONFUSION_REPLY_APPLY: _handle_confusion_reply_apply,
             DialogueJobKind.CONFUSION_OPEN_SYNC: _handle_confusion_open_sync,
         }
     )
@@ -8379,7 +8594,7 @@ def create_app(
             if turn.status != "pending":
                 return
             try:
-                _ensure_confusion_dialogue_anchor(turn)
+                await _ensure_confusion_dialogue_anchor(turn)
                 reply = await _generate_durable_chat_reply(turn)
             except Exception as exc:
                 logger.exception("Failed to generate durable chat turn %s", turn_id)

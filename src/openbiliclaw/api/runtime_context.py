@@ -222,6 +222,11 @@ def _build_dialogue_settlement_dispatcher(
                 outcome=str(result.get("outcome", "completed")),
                 settlement=MappingProxyType(dict(result)),
             )
+        if job.kind is DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY:
+            return cast(
+                "DialogueDispatchReturn",
+                await soul_engine._dispatch_confusion_attribution_replay(job),
+            )
         handler = api_handlers.get(job.kind) if api_handlers is not None else None
         if handler is not None:
             return await handler(job)
@@ -231,7 +236,6 @@ def _build_dialogue_settlement_dispatcher(
             DialogueJobKind.ANCHOR_ESTABLISH,
             DialogueJobKind.PROBE_REPLY_APPLY,
             DialogueJobKind.CONFUSION_REPLY_APPLY,
-            DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
             DialogueJobKind.CONFUSION_OPEN_SYNC,
         }:
             raise RuntimeError(f"{job.kind.value} runtime handler is not installed")

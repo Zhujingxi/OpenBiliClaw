@@ -271,9 +271,9 @@ class CognitionCycle:
         except Exception:
             logger.debug("Confusion TTL sweep failed", exc_info=True)
 
-        # 5. Replay any completed clarifying reply that missed its durable
-        # anchor-attribution receipt. The hook drains persisted classifier
-        # output first and is idempotent across later cycles.
+        # 5. Enumerate any completed clarifying reply that missed its durable
+        # attribution receipt. The hook only submits the dedicated typed replay
+        # command; analysis and mutation remain in the settlement worker.
         if self._confusion_replay_hook is not None:
             try:
                 await self._confusion_replay_hook()

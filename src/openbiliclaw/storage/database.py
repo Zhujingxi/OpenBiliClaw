@@ -2490,6 +2490,32 @@ class Database:
         )
         return int(cursor.rowcount or 0) == 1
 
+    def store_chat_turn_effect_receipt(
+        self,
+        turn_id: str,
+        *,
+        receipt_key: str,
+        receipt: Mapping[str, object],
+    ) -> bool:
+        """Persist one dialogue side-effect checkpoint inside the turn payload."""
+        if receipt_key not in {"probe_reply_apply", "confusion_reply_apply"}:
+            raise ValueError(f"Unsupported chat-turn effect receipt: {receipt_key!r}")
+        serialized = json.dumps(dict(receipt), ensure_ascii=False, sort_keys=True)
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,
+                    ?,
+                    json(?)
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+            """,
+            (f"$.{receipt_key}", serialized, turn_id),
+        )
+        return int(cursor.rowcount or 0) == 1
+
     def try_create_card_settlement(
         self,
         *,

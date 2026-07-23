@@ -226,6 +226,8 @@ class SocraticDialogue:
 
                 queue = self._settlement_queue
                 assert queue is not None
+                # ``submit`` synchronously freezes the queue-global logical
+                # anchor head before the immutable learn envelope is put.
                 admitted = queue.submit(DialogueJobKind.LEARN, payload)
                 if admitted is None:
                     raise DialogueLearningConfigurationError(

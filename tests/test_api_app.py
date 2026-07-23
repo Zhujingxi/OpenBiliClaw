@@ -8977,6 +8977,7 @@ class TestBackendAPI:
 
         from openbiliclaw.soul.confusion import ConfusionManager
         from openbiliclaw.soul.dialogue_anchor import DialogueAnchorManager
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJob, DialogueJobKind
         from openbiliclaw.soul.ledger import ProfileLedger
         from openbiliclaw.storage.database import Database
 
@@ -9026,6 +9027,15 @@ class TestBackendAPI:
             soul_engine=soul_engine,
             dialogue=dialogue,
         )
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        runtime_dispatch = queue._dispatcher
+        observed: list[tuple[DialogueJobKind, bool]] = []
+
+        async def observe(job: DialogueJob):  # type: ignore[no-untyped-def]
+            observed.append((job.kind, asyncio.current_task() is queue.worker_task))
+            return await runtime_dispatch(job)
+
+        queue._dispatcher = observe
 
         with TestClient(app) as client:
             client.post(
@@ -9057,6 +9067,167 @@ class TestBackendAPI:
         assert active_anchor is not None
         assert active_anchor.kind == "confusion"
         assert active_anchor.ref == str(confusion_id)
+        stored_turn = db.get_chat_turn("turn-confusion-1")
+        assert stored_turn is not None
+        assert stored_turn["payload"]["confusion_reply_apply"]["effects"] == {
+            "cognition": True,
+            "event": True,
+        }
+        assert observed == [
+            (DialogueJobKind.CONFUSION_OPEN_SYNC, True),
+            (DialogueJobKind.ANCHOR_ESTABLISH, True),
+            (DialogueJobKind.CONFUSION_REPLY_APPLY, True),
+        ]
+
+    def test_probe_result_handoff_runs_exploration_outside_worker_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """F8: classify in-worker once, then consume exploration in the producer task."""
+        import copy
+        import time
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+        from openbiliclaw.storage.database import Database
+
+        class FakeMemory:
+            def __init__(self) -> None:
+                self.runtime_state: dict[str, object] = {"probe_feedback_history": []}
+                self.cognition_updates: list[dict[str, object]] = []
+                self.mutations: list[tuple[frozenset[str], bool]] = []
+                self.queue: object | None = None
+
+            def update_discovery_runtime_state(self, mutate: object) -> None:
+                before = copy.deepcopy(self.runtime_state)
+                mutate(self.runtime_state)  # type: ignore[operator]
+                changed = frozenset(
+                    key
+                    for key in set(before) | set(self.runtime_state)
+                    if before.get(key) != self.runtime_state.get(key)
+                )
+                worker = getattr(self.queue, "worker_task", None)
+                self.mutations.append((changed, asyncio.current_task() is worker))
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.cognition_updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.cognition_updates = list(updates)
+
+        class FakeSentimentLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete_with_core_memory(self, **_kwargs: object) -> object:
+                self.calls += 1
+                return SimpleNamespace(content="weak_positive")
+
+        class FakeSpeculator:
+            def get_active_speculations(self) -> list[object]:
+                return [
+                    SimpleNamespace(
+                        domain="城市基础设施观察",
+                        category="城市",
+                        reason="近期关注城市空间",
+                        experience_mode="wander_observe",
+                        entry_load="light",
+                        specifics=[SimpleNamespace(name="交通节点")],
+                    )
+                ]
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+                self.queue: object | None = None
+
+            def bind_dialogue_settlement_queue(self, queue: object) -> None:
+                self.queue = queue
+
+        class FakeDialogue:
+            async def respond(
+                self,
+                _message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del scope, turn_id, session
+                return "可以，先作为轻量方向观察。"
+
+        database = Database(tmp_path / "openbiliclaw.db")
+        database.initialize()
+        memory = FakeMemory()
+        sentiment_llm = FakeSentimentLLM()
+        app = create_app(
+            memory_manager=memory,
+            database=database,
+            soul_engine=FakeSoulEngine(),
+            dialogue=FakeDialogue(),
+            recommendation_engine=SimpleNamespace(_llm=sentiment_llm),
+        )
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        memory.queue = queue
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "durable-probe-handoff",
+                    "session": "popup",
+                    "scope": "probe",
+                    "subject_id": "城市基础设施观察",
+                    "subject_title": "城市基础设施观察",
+                    "message": "有点意思，可以看看",
+                },
+            )
+            assert response.status_code == 200
+            for _ in range(50):
+                time.sleep(0.02)
+                state = memory.runtime_state
+                if "short_term_exploration_buffer" in state:
+                    break
+
+            duplicate = client.portal.call(
+                queue.submit_and_wait,
+                DialogueJobKind.PROBE_REPLY_APPLY,
+                {
+                    "turn_id": "durable-probe-handoff",
+                    "domain": "城市基础设施观察",
+                    "message": "有点意思，可以看看",
+                    "reply": "可以，先作为轻量方向观察。",
+                },
+            )
+
+        assert duplicate.classification == "weak_positive"
+        assert duplicate.exploration_intent is not None
+        assert duplicate.exploration_intent.evidence_id == "durable-probe-handoff"
+        assert sentiment_llm.calls == 1
+        stored_turn = database.get_chat_turn("durable-probe-handoff")
+        assert stored_turn is not None
+        stored_receipt = stored_turn["payload"]["probe_reply_apply"]
+        assert stored_receipt["classification"] == "weak_positive"
+        assert stored_receipt["effects"] == {
+            "settlement": True,
+            "history": True,
+            "cognition": True,
+            "event": True,
+        }
+        exploration_mutations = [
+            in_worker
+            for changed, in_worker in memory.mutations
+            if "short_term_exploration_buffer" in changed
+        ]
+        assert exploration_mutations == [False]
+        feedback_mutations = [
+            in_worker
+            for changed, in_worker in memory.mutations
+            if "probe_feedback_history" in changed
+        ]
+        assert feedback_mutations == [True]
 
     @pytest.mark.parametrize(
         ("failure", "expected_fragment"),

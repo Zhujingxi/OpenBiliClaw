@@ -27,17 +27,17 @@ class _ProtectedMutatorCategory:
 PROTECTED_MUTATORS = (
     _ProtectedMutatorCategory(
         "hypothesis_dialogue_apply",
-        "SoulEngine.settle_hypothesis",
+        "SoulEngine._apply_dialogue_settlement",
         ("SoulEngine._apply_dialogue_settlement[hypothesis]",),
     ),
     _ProtectedMutatorCategory(
         "confusion_dialogue_apply",
-        "SoulEngine.settle_confusion_answer",
+        "SoulEngine._apply_dialogue_settlement",
         ("SoulEngine._apply_dialogue_settlement[confusion]",),
     ),
     _ProtectedMutatorCategory(
         "speculation_dialogue_apply",
-        "SoulEngine.settle_speculation",
+        "SoulEngine._apply_dialogue_settlement",
         ("SoulEngine._apply_dialogue_settlement[speculation]",),
     ),
     _ProtectedMutatorCategory(
@@ -76,12 +76,12 @@ PROTECTED_MUTATORS = (
     ),
     _ProtectedMutatorCategory(
         "probe_durable_reply_side_effect",
-        "create_app._apply_durable_chat_success_side_effects",
+        "create_app._handle_probe_reply_apply",
         ("probe.reply.side_effect",),
     ),
     _ProtectedMutatorCategory(
         "confusion_durable_reply_side_effect",
-        "create_app._apply_durable_chat_success_side_effects",
+        "create_app._handle_confusion_reply_apply",
         ("confusion.reply.side_effect",),
     ),
 )
@@ -100,22 +100,22 @@ RAW_SINK_INVENTORY = (
         "confusion_schedule",
         "ConfusionManager.schedule_ask",
         ("schedule",),
-        ((8307, "confusion_manager.schedule_ask("),),
+        ((8295, "confusion_manager.schedule_ask("),),
     ),
     _RawSink(
         "confusion_ask_turn_update",
         "Database.update_confusion",
         ("retarget", "create_failure_rollback"),
         (
-            (8319, "updater("),
-            (8325, 'updater(confusion_id, status="open", ask_turn_id="")'),
+            (8307, "updater("),
+            (8313, 'updater(confusion_id, status="open", ask_turn_id="")'),
         ),
     ),
     _RawSink(
         "pending_open_anchor",
         "DialogueAnchorManager.establish",
         ("establish",),
-        ((8260, "established = anchor_manager.establish("),),
+        ((8248, "established = anchor_manager.establish("),),
     ),
 )
 
@@ -329,35 +329,7 @@ async def test_old_worker_finally_cannot_clear_new_worker_permit_after_reload_ha
     assert new_clear_results == [True]
 
 
-_PENDING_WAVE3_GUARD_WIRING = frozenset(
-    {
-        "hypothesis_dialogue_apply",
-        "confusion_dialogue_apply",
-        "speculation_dialogue_apply",
-        "probe_durable_reply_side_effect",
-        "confusion_durable_reply_side_effect",
-    }
-)
-
-
-@pytest.mark.parametrize(
-    "category",
-    [
-        pytest.param(
-            category,
-            id=category.name,
-            marks=(
-                pytest.mark.xfail(
-                    strict=True,
-                    reason="[Q1/F4] remaining production façade wiring lands in Task 3.2",
-                )
-                if category.name in _PENDING_WAVE3_GUARD_WIRING
-                else ()
-            ),
-        )
-        for category in PROTECTED_MUTATORS
-    ],
-)
+@pytest.mark.parametrize("category", PROTECTED_MUTATORS, ids=lambda item: item.name)
 def test_protected_production_wiring_requires_worker_guard(
     category: _ProtectedMutatorCategory,
 ) -> None:

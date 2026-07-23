@@ -45,10 +45,14 @@ from .dialogue_learn_queue import (
     AnchorAbsent,
     AnchorAdmissionSnapshot,
     AnchorFailed,
+    AnchorMutationTerminal,
     AnchorNotApplicable,
     AnchorPersisted,
     AnchorReserved,
+    DialogueDispatchResult,
+    DialogueJob,
     DialogueJobKind,
+    DialogueJobResult,
     DialogueSettlementQueue,
 )
 from .identity import build_hash8_map
@@ -3068,18 +3072,18 @@ class SoulEngine:
             return None
 
     async def replay_confusion_dialogue_attributions(self) -> int:
-        """Recover completed clarifying replies through the same anchor owner.
+        """Enumerate replay candidates read-only and submit the dedicated kind."""
+        queue = self._require_dialogue_settlement_queue()
+        if asyncio.current_task() is queue.worker_task:
+            from .dialogue_learn_queue import DialogueSettlementReentryError
 
-        The 12-hour cognition cycle calls this fallback. Persisted classifier
-        output is drained first without another model call; a crash gap with a
-        completed turn but no queue item is reclassified once and durably
-        receipted on the chat turn.
-        """
-        self._dialogue_anchor_manager.expire()
+            raise DialogueSettlementReentryError(
+                "confusion attribution replay hook cannot submit from the worker"
+            )
         pending = self._confusion_manager.pending_dialogue_replays()
         if not pending:
             return 0
-        processed = 0
+        admitted: list[asyncio.Future[DialogueJobResult]] = []
         for row in pending:
             try:
                 confusion_id = int(row.get("confusion_id", 0))
@@ -3088,133 +3092,316 @@ class SoulEngine:
             confusion = self._confusion_manager.get(confusion_id)
             if confusion is None:
                 continue
-            if confusion.replay_queue:
-                settlement_reader = getattr(
-                    self._ledger_database,
-                    "get_card_settlement",
-                    None,
-                )
-                settlement = (
-                    settlement_reader(str(confusion_id)) if callable(settlement_reader) else None
-                )
-                settlement_payload = (
-                    settlement.get("payload") if isinstance(settlement, dict) else None
-                )
-                if (
-                    isinstance(settlement, dict)
-                    and int(settlement.get("applied", 0)) == 0
-                    and isinstance(settlement_payload, dict)
-                    and str(settlement_payload.get("kind", "")) == "confusion"
-                ):
-                    try:
-                        generation = max(
-                            0,
-                            int(settlement_payload.get("anchor_generation", 0)),
-                        )
-                    except (TypeError, ValueError):
-                        generation = 0
-                    snapshot: AnchorAdmissionSnapshot
-                    if generation > 0:
-                        snapshot = AnchorPersisted(
-                            kind="confusion",
-                            ref=str(confusion_id),
-                            generation=generation,
-                        )
-                    else:
-                        snapshot = AnchorAbsent(
-                            target_kind="confusion",
-                            target_ref=str(confusion_id),
-                            tombstone_epoch=1,
-                        )
-                    result = await self._apply_confusion_answer_settlement(
-                        ref=str(confusion_id),
-                        confusion_id=confusion_id,
-                        interpretation=str(settlement_payload.get("interpretation", "")),
-                        note=str(settlement_payload.get("note", "")),
-                        turn_id=str(settlement.get("turn_id", row.get("turn_id", ""))),
-                        source=str(settlement_payload.get("source", "recovery")),
-                        anchor_snapshot=snapshot,
+            has_replay_queue = bool(confusion.replay_queue)
+            replay_head = confusion.replay_queue[0] if has_replay_queue else {}
+            replay_id = str(
+                replay_head.get("replay_id")
+                or replay_head.get("turn_id")
+                or row.get("turn_id")
+                or ""
+            ).strip()
+            turn_id = str(row.get("turn_id") or replay_head.get("turn_id") or "").strip()
+            if not replay_id:
+                continue
+            active_anchor = self._dialogue_anchor_manager.current()
+            needs_anchor = bool(
+                not has_replay_queue
+                and confusion.status == "clarifying"
+                and (
+                    active_anchor is None
+                    or (
+                        active_anchor.kind == "confusion" and active_anchor.ref == str(confusion_id)
                     )
-                    if result.get("outcome") == "processing":
-                        continue
-                    processed += 1
-                    continue
-                terminal = self._confusion_manager.retry_anchor_settlements(confusion_id)
-                if terminal is None:
-                    continue
-                anchor = self._dialogue_anchor_manager.current()
-                if (
-                    anchor is not None
-                    and anchor.kind == "confusion"
-                    and anchor.ref == str(confusion_id)
-                ):
-                    self._dialogue_anchor_manager.release(
-                        reason="settled",
-                        expected_generation=anchor.generation,
-                    )
-                processed += 1
-                continue
-            if confusion.status != "clarifying":
-                continue
-            anchor = self._dialogue_anchor_manager.current()
-            if anchor is None:
-                anchor = self._dialogue_anchor_manager.establish(
-                    kind="confusion",
-                    ref=str(confusion_id),
-                    origin_turn_id=confusion.ask_turn_id or str(row.get("ask_turn_id", "")),
-                    entry=ENTRY_CONFUSION_PROMPT,
                 )
-            if anchor.kind != "confusion" or anchor.ref != str(confusion_id):
-                logger.warning(
-                    "confusion replay fenced by a different active anchor: "
-                    "confusion_id=%s anchor=%s:%s",
-                    confusion_id,
-                    anchor.kind,
-                    anchor.ref,
-                )
-                continue
-            anchor_context, anchor_texts = self._build_dialogue_anchor_context(anchor)
-            label = str(row.get("subject_title") or row.get("subject_id") or "这个方向")
-            user_message = f"[关于我有点困惑的「{label}」的澄清] {str(row.get('message', ''))}"
-            try:
-                extract_result = await self._dialogue_insight_analyzer.extract(
-                    user_message=user_message,
-                    assistant_reply=str(row.get("reply", "")),
-                    core_memory=self._memory.get_core_memory(),
-                    active_list=self._build_dialogue_active_list()[0],
-                    anchor=anchor_context,
-                )
-            except DialogueInsightAnalysisError:
-                logger.warning(
-                    "confusion dialogue attribution replay failed analysis: turn_id=%s",
-                    row.get("turn_id"),
-                    exc_info=True,
-                )
-                continue
-            raw_decision = extract_result.get("anchor")
-            if not isinstance(raw_decision, dict):
-                logger.warning(
-                    "confusion dialogue attribution replay missing decision: turn_id=%s",
-                    row.get("turn_id"),
-                )
-                continue
-            if (
-                self._dialogue_anchor_manager.validate_snapshot(
-                    anchor.ref,
-                    anchor.generation,
-                )
-                is None
-            ):
-                continue
-            outcome = await self._process_dialogue_anchor_decision(
-                anchor=anchor,
-                anchor_texts=anchor_texts,
-                decision=raw_decision,
-                turn_id=str(row.get("turn_id", "")),
             )
-            if outcome not in {"kept_invalid", "kept_failed", "queued_failed", "stale"}:
+            payload: dict[str, object] = {
+                "confusion_id": confusion_id,
+                "turn_id": turn_id,
+                "replay_id": replay_id,
+                "ask_turn_id": str(row.get("ask_turn_id", "")),
+                "subject_id": str(row.get("subject_id", "")),
+                "subject_title": str(row.get("subject_title", "")),
+                "message": str(row.get("message", "")),
+                "reply": str(row.get("reply", "")),
+                "has_replay_queue": has_replay_queue,
+                "needs_anchor": needs_anchor,
+                "target_kind": "confusion",
+                "target_ref": str(confusion_id),
+                "producer_source": "cognition_cycle",
+            }
+            job = queue.submit(
+                DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
+                payload,
+                completion=True,
+            )
+            if job is not None and job.completion is not None:
+                admitted.append(job.completion)
+
+        processed = 0
+        for completion_future in admitted:
+            try:
+                completion = await asyncio.shield(completion_future)
+            except Exception:
+                logger.warning("confusion attribution replay job failed", exc_info=True)
+                continue
+            if completion.outcome == "applied":
                 processed += 1
         return processed
+
+    async def _dispatch_confusion_attribution_replay(
+        self,
+        job: DialogueJob,
+    ) -> DialogueDispatchResult | DialogueJobResult:
+        """Prepare one replay, resolving any builder before its async effects."""
+        self._require_dialogue_settlement_worker()
+        confusion_id = int(str(job.payload.get("confusion_id", 0)))
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        ref = str(confusion_id)
+        if self._confusion_replay_receipt_exists(turn_id):
+            result = DialogueJobResult(outcome="already_terminal")
+            if job.owned_anchor_reservation_id is None:
+                return result
+            return DialogueDispatchResult(
+                result=result,
+                anchor_terminal=AnchorMutationTerminal.already_terminal(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                ),
+            )
+
+        has_replay_queue = bool(job.payload.get("has_replay_queue", False))
+        if has_replay_queue:
+            return await self._apply_confusion_attribution_replay_effect(
+                job=job,
+                anchor=None,
+            )
+
+        confusion = self._confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status != "clarifying":
+            result = DialogueJobResult(outcome="already_terminal")
+            if job.owned_anchor_reservation_id is None:
+                return result
+            return DialogueDispatchResult(
+                result=result,
+                anchor_terminal=AnchorMutationTerminal.already_terminal(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                ),
+            )
+
+        if job.owned_anchor_reservation_id is not None:
+            existing = self._dialogue_anchor_manager.current()
+            established = self._dialogue_anchor_manager.establish(
+                kind="confusion",
+                ref=ref,
+                origin_turn_id=(
+                    confusion.ask_turn_id or str(job.payload.get("ask_turn_id", "")) or turn_id
+                ),
+                entry=ENTRY_CONFUSION_PROMPT,
+            )
+            terminal = (
+                AnchorMutationTerminal.no_op(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                )
+                if (
+                    existing is not None
+                    and existing.kind == established.kind
+                    and existing.ref == established.ref
+                )
+                else AnchorMutationTerminal.persisted(
+                    kind=established.kind,
+                    ref=established.ref,
+                    generation=established.generation,
+                )
+            )
+
+            async def _after_anchor_resolution() -> DialogueJobResult:
+                return await self._apply_confusion_attribution_replay_effect(
+                    job=job,
+                    anchor=established,
+                )
+
+            return DialogueDispatchResult(
+                result=DialogueJobResult(outcome="prepared"),
+                anchor_terminal=terminal,
+                followup=_after_anchor_resolution,
+            )
+
+        snapshot = job.effective_anchor_snapshot
+        anchor = (
+            self._dialogue_anchor_manager.validate_snapshot(
+                snapshot.ref,
+                snapshot.generation,
+            )
+            if isinstance(snapshot, AnchorPersisted)
+            else None
+        )
+        if anchor is None or anchor.kind != "confusion" or anchor.ref != ref:
+            return DialogueJobResult(outcome="skipped_foreign_anchor")
+        return await self._apply_confusion_attribution_replay_effect(
+            job=job,
+            anchor=anchor,
+        )
+
+    async def _apply_confusion_attribution_replay_effect(
+        self,
+        *,
+        job: DialogueJob,
+        anchor: DialogueAnchor | None,
+    ) -> DialogueJobResult:
+        """Analyze/apply one replay identity without submitting a nested job."""
+        self._require_dialogue_settlement_worker()
+        confusion_id = int(str(job.payload.get("confusion_id", 0)))
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        replay_id = str(job.payload.get("replay_id", "")).strip()
+        if self._confusion_replay_receipt_exists(turn_id):
+            return DialogueJobResult(outcome="already_terminal")
+        confusion = self._confusion_manager.get(confusion_id)
+        if confusion is None:
+            return DialogueJobResult(outcome="already_terminal")
+
+        if bool(job.payload.get("has_replay_queue", False)):
+            if confusion.replay_queue:
+                head = confusion.replay_queue[0]
+                head_id = str(head.get("replay_id") or head.get("turn_id") or "")
+                if head_id != replay_id:
+                    return DialogueJobResult(outcome="already_terminal")
+            settlement_reader = getattr(
+                self._ledger_database,
+                "get_card_settlement",
+                None,
+            )
+            settlement = (
+                settlement_reader(str(confusion_id)) if callable(settlement_reader) else None
+            )
+            settlement_payload = settlement.get("payload") if isinstance(settlement, dict) else None
+            if (
+                isinstance(settlement, dict)
+                and int(settlement.get("applied", 0)) == 0
+                and isinstance(settlement_payload, dict)
+                and str(settlement_payload.get("kind", "")) == "confusion"
+            ):
+                try:
+                    generation = max(
+                        0,
+                        int(settlement_payload.get("anchor_generation", 0)),
+                    )
+                except (TypeError, ValueError):
+                    generation = 0
+                snapshot: AnchorAdmissionSnapshot = (
+                    AnchorPersisted(
+                        kind="confusion",
+                        ref=str(confusion_id),
+                        generation=generation,
+                    )
+                    if generation > 0
+                    else AnchorAbsent(
+                        target_kind="confusion",
+                        target_ref=str(confusion_id),
+                        tombstone_epoch=1,
+                    )
+                )
+                result = await self._apply_confusion_answer_settlement(
+                    ref=str(confusion_id),
+                    confusion_id=confusion_id,
+                    interpretation=str(settlement_payload.get("interpretation", "")),
+                    note=str(settlement_payload.get("note", "")),
+                    turn_id=str(settlement.get("turn_id", turn_id)),
+                    source=str(settlement_payload.get("source", "recovery")),
+                    anchor_snapshot=snapshot,
+                )
+                return DialogueJobResult(
+                    outcome=(
+                        "retry_pending" if result.get("outcome") == "processing" else "applied"
+                    ),
+                )
+            terminal = self._confusion_manager.retry_anchor_settlements(confusion_id)
+            if terminal is None:
+                return DialogueJobResult(outcome="retry_pending")
+            current = self._dialogue_anchor_manager.current()
+            if (
+                current is not None
+                and current.kind == "confusion"
+                and current.ref == str(confusion_id)
+            ):
+                self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    expected_generation=current.generation,
+                )
+            return DialogueJobResult(outcome="applied")
+
+        if confusion.status != "clarifying" or anchor is None:
+            return DialogueJobResult(outcome="already_terminal")
+        anchor_context, anchor_texts = self._build_dialogue_anchor_context(anchor)
+        label = str(job.payload.get("subject_title") or job.payload.get("subject_id") or "这个方向")
+        user_message = f"[关于我有点困惑的「{label}」的澄清] {str(job.payload.get('message', ''))}"
+        try:
+            extract_result = await self._dialogue_insight_analyzer.extract(
+                user_message=user_message,
+                assistant_reply=str(job.payload.get("reply", "")),
+                core_memory=self._memory.get_core_memory(),
+                active_list=self._build_dialogue_active_list()[0],
+                anchor=anchor_context,
+            )
+        except DialogueInsightAnalysisError:
+            logger.warning(
+                "confusion dialogue attribution replay failed analysis: turn_id=%s",
+                turn_id,
+                exc_info=True,
+            )
+            return DialogueJobResult(outcome="retry_pending")
+        raw_decision = extract_result.get("anchor")
+        if not isinstance(raw_decision, dict):
+            logger.warning(
+                "confusion dialogue attribution replay missing decision: turn_id=%s",
+                turn_id,
+            )
+            return DialogueJobResult(outcome="retry_pending")
+        if (
+            self._dialogue_anchor_manager.validate_snapshot(
+                anchor.ref,
+                anchor.generation,
+            )
+            is None
+        ):
+            return DialogueJobResult(outcome="stale")
+        outcome = await self._process_dialogue_anchor_decision(
+            anchor=anchor,
+            anchor_texts=anchor_texts,
+            decision=raw_decision,
+            turn_id=turn_id,
+        )
+        if outcome in {"kept_invalid", "kept_failed", "queued_failed", "stale"}:
+            return DialogueJobResult(outcome="retry_pending")
+        return DialogueJobResult(outcome="applied")
+
+    def _confusion_replay_receipt_exists(self, turn_id: str) -> bool:
+        if not turn_id or self._ledger_database is None:
+            return False
+        get_turn = getattr(self._ledger_database, "get_chat_turn", None)
+        row = get_turn(turn_id) if callable(get_turn) else None
+        raw_payload = row.get("payload", {}) if isinstance(row, dict) else {}
+        return bool(
+            isinstance(raw_payload, dict)
+            and int(raw_payload.get("confusion_anchor_processed", 0) or 0) == 1
+        )
+
+    def _dialogue_anchor_actual_state(
+        self,
+        *,
+        kind: str,
+        ref: str,
+    ) -> AnchorPersisted | AnchorAbsent:
+        current = self._dialogue_anchor_manager.current()
+        if current is not None and current.kind == kind and current.ref == ref:
+            return AnchorPersisted(
+                kind=current.kind,
+                ref=current.ref,
+                generation=current.generation,
+            )
+        return AnchorAbsent(
+            target_kind=kind,
+            target_ref=ref,
+            tombstone_epoch=1,
+        )
 
     def _build_dialogue_anchor_context(
         self,
