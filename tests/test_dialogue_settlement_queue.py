@@ -1,8 +1,8 @@
-"""Wave 0 RED contracts for the dialogue settlement queue.
+"""Dialogue settlement queue invariants frozen in Wave 0 and implemented by Wave 1.
 
-These tests intentionally exercise the legacy ``DialogueLearnQueue`` and
-settlement fence.  Wave 0 freezes the missing contracts without implementing
-the typed queue/registry planned for Wave 1.
+Registry, owner, commit-point, permit, and typed queue cases are GREEN in Wave
+1.  The settlement fence and endpoint cutover cases retain their later-Wave
+strict XFAIL markers.
 
 Spec: docs/plans/2026-07-23-dialogue-settlement-queue-spec.md
 Plan: docs/plans/2026-07-23-dialogue-settlement-queue-plan.md Task 0.1.
@@ -18,7 +18,20 @@ from pathlib import Path
 
 import pytest
 
-from openbiliclaw.soul.dialogue_learn_queue import DialogueLearnQueue
+from openbiliclaw.soul.dialogue_learn_queue import (
+    AnchorAbsent,
+    AnchorMutationDisposition,
+    AnchorMutationTerminal,
+    AnchorPersisted,
+    AnchorReserved,
+    DialogueDispatchResult,
+    DialogueJob,
+    DialogueJobKind,
+    DialogueJobResult,
+    DialogueSettlementQueue,
+    anchor_snapshot_as_mapping,
+    anchor_transition_as_mapping,
+)
 from openbiliclaw.storage.database import Database
 
 _DispatchHook = Callable[[dict[str, object], dict[str, object]], Awaitable[None]]
@@ -166,34 +179,57 @@ def test_dialogue_entry_inventory_excludes_out_of_scope_writers() -> None:
     assert classified.isdisjoint(OUT_OF_SCOPE_WRITERS)
 
 
-async def _capture_legacy_admissions(
+async def _capture_typed_admissions(
     jobs: list[dict[str, object]],
     *,
     dispatch: _DispatchHook,
 ) -> dict[str, dict[str, object]]:
-    """Queue jobs behind a barrier and return their immutable legacy copies."""
+    """Queue jobs behind a barrier and return immutable typed admission copies."""
     persisted: dict[str, object] = {"anchor_ref": "", "anchor_generation": 0}
     observed: dict[str, dict[str, object]] = {}
     blocker_entered = asyncio.Event()
     release_blocker = asyncio.Event()
 
-    async def handler(**payload: object) -> None:
-        record = dict(payload)
+    async def handler(job: DialogueJob) -> DialogueJobResult | AnchorMutationTerminal:
+        record = dict(job.payload)
         job_id = str(record.get("job_id", ""))
+        record["anchor_snapshot"] = anchor_snapshot_as_mapping(job.anchor_snapshot)
+        record["anchor_transition"] = anchor_transition_as_mapping(job.anchor_transition)
+        record["owned_anchor_reservation_id"] = job.owned_anchor_reservation_id or ""
+        record["owner_job_id"] = job.job_id
+        record["owner_sequence"] = job.sequence
         observed[job_id] = record
         if job_id == "wave0-blocker":
             blocker_entered.set()
             await release_blocker.wait()
-            return
+            return DialogueJobResult(outcome="completed")
         await dispatch(record, persisted)
+        if job.owned_anchor_reservation_id is not None:
+            target_kind = str(record["target_kind"])
+            target_ref = str(record["target_ref"])
+            if (
+                persisted.get("anchor_ref") == target_ref
+                and int(persisted.get("anchor_generation", 0)) > 0
+            ):
+                return AnchorMutationTerminal.persisted(
+                    kind=target_kind,
+                    ref=target_ref,
+                    generation=int(persisted["anchor_generation"]),
+                )
+            return AnchorMutationTerminal.absent(
+                target_kind=target_kind,
+                target_ref=target_ref,
+            )
+        return DialogueJobResult(outcome="completed")
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(persisted))
+    queue = DialogueSettlementQueue(handler, anchor_provider=lambda: dict(persisted))
     queue.start()
     try:
-        assert await queue.submit({"job_id": "wave0-blocker", "kind": "learn"})
+        assert queue.submit(DialogueJobKind.LEARN, {"job_id": "wave0-blocker"})
         await asyncio.wait_for(blocker_entered.wait(), timeout=1)
         for job in jobs:
-            assert await queue.submit(job)
+            kind = DialogueJobKind(str(job["kind"]))
+            assert queue.submit(kind, job)
         release_blocker.set()
         await asyncio.wait_for(queue.shutdown(), timeout=2)
     finally:
@@ -279,7 +315,6 @@ async def test_file_fence_does_not_block_event_loop_while_owner_awaits(
     assert heartbeat_before_release == [True]
 
 
-@pytest.mark.xfail(strict=True, reason="[Q3/F2] Wave 1 adds queue-global reservations")
 async def test_queued_anchor_reservation_is_visible_to_later_settlement_admission() -> None:
     """Q3/F2: an accepted establish job must be visible before it persists."""
 
@@ -290,7 +325,7 @@ async def test_queued_anchor_reservation_is_visible_to_later_settlement_admissio
         if payload.get("kind") == "anchor.establish":
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=7)
 
-    observed = await _capture_legacy_admissions(
+    observed = await _capture_typed_admissions(
         [
             {
                 "job_id": "builder",
@@ -317,7 +352,6 @@ async def test_queued_anchor_reservation_is_visible_to_later_settlement_admissio
     assert snapshot.get("reservation_id")
 
 
-@pytest.mark.xfail(strict=True, reason="[Q3/F2] Wave 1 adds typed absent tombstones")
 async def test_no_anchor_tombstone_is_not_upgraded_by_later_establish_admission() -> None:
     """Q3/F2: a settle accepted without an anchor keeps an absent tombstone."""
 
@@ -328,7 +362,7 @@ async def test_no_anchor_tombstone_is_not_upgraded_by_later_establish_admission(
         if payload.get("kind") == "anchor.establish":
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=8)
 
-    observed = await _capture_legacy_admissions(
+    observed = await _capture_typed_admissions(
         [
             {
                 "job_id": "settle",
@@ -355,7 +389,6 @@ async def test_no_anchor_tombstone_is_not_upgraded_by_later_establish_admission(
     assert int(snapshot.get("tombstone_epoch", 0)) > 0
 
 
-@pytest.mark.xfail(strict=True, reason="[Q3/R2-1] Wave 1 classifies card.discuss at admission")
 async def test_card_discuss_reservation_is_visible_to_later_settlement_admission() -> None:
     """Q3/R2-1: card.discuss must reserve before its inline anchor mutation."""
 
@@ -366,7 +399,7 @@ async def test_card_discuss_reservation_is_visible_to_later_settlement_admission
         if payload.get("kind") == "card.discuss":
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=9)
 
-    observed = await _capture_legacy_admissions(
+    observed = await _capture_typed_admissions(
         [
             {
                 "job_id": "discuss",
@@ -417,14 +450,13 @@ async def test_card_discuss_reservation_is_visible_to_later_settlement_admission
         ),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="[Q3/R2-1] Wave 1 adds exhaustive builder policy")
 async def test_every_anchor_building_kind_reserves_before_enqueue(
     job_kind: str,
     producer_source: str,
     needs_anchor: bool,
 ) -> None:
     """Q3/R2-1: the builder policy is exhaustive at admission."""
-    observed = await _capture_legacy_admissions(
+    observed = await _capture_typed_admissions(
         [
             {
                 "job_id": "builder",
@@ -456,7 +488,6 @@ async def test_every_anchor_building_kind_reserves_before_enqueue(
         pytest.param("", 0, "absent", id="actual-absent"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="[Q18/R2-2] Wave 1 adds failed-head advance and GC")
 async def test_failed_reservation_advances_head_for_new_submit_and_gc_after_old_dependents_drain(
     actual_ref: str,
     actual_generation: int,
@@ -464,169 +495,222 @@ async def test_failed_reservation_advances_head_for_new_submit_and_gc_after_old_
 ) -> None:
     """Q18/R2-2: failed is old-dependency-only and retry gets a fresh owner."""
     persisted: dict[str, object] = {"anchor_ref": "", "anchor_generation": 0}
-    observed: dict[str, dict[str, object]] = {}
-    results: dict[str, str] = {}
-    effects: list[str] = []
-    blocker_entered = asyncio.Event()
-    release_blocker = asyncio.Event()
-    first_old_dependency_entered = asyncio.Event()
-    release_old_dependencies = asyncio.Event()
+    failed_resolved = asyncio.Event()
+    release_failed_builder = asyncio.Event()
+    old_effects: list[str] = []
 
-    async def handler(**payload: object) -> None:
-        record = dict(payload)
-        job_id = str(record.get("job_id", ""))
-        observed[job_id] = record
-        if job_id == "blocker":
-            blocker_entered.set()
-            await release_blocker.wait()
-            return
-        if job_id == "builder-failed":
+    async def handler(
+        job: DialogueJob,
+    ) -> DialogueJobResult | DialogueDispatchResult | AnchorMutationTerminal:
+        label = str(job.payload["job_id"])
+        if label == "builder-failed":
             persisted.update(anchor_ref=actual_ref, anchor_generation=actual_generation)
-            results[job_id] = "failed"
-            return
-        if job_id == "old-1":
-            first_old_dependency_entered.set()
-            await release_old_dependencies.wait()
-        if job_id.startswith(("old-", "new-")):
-            effects.append(job_id)
-            results[job_id] = "applied"
-            return
-        if job_id == "retry-builder":
-            persisted.update(anchor_ref="hypothesis-A", anchor_generation=13)
-            results[job_id] = "persisted"
+            actual = (
+                AnchorPersisted("hypothesis", actual_ref, actual_generation)
+                if actual_ref
+                else AnchorAbsent("hypothesis", "hypothesis-A", 1)
+            )
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(persisted))
+            async def after_resolution() -> None:
+                failed_resolved.set()
+                await release_failed_builder.wait()
+
+            return DialogueDispatchResult(
+                result=DialogueJobResult(outcome="failed"),
+                anchor_terminal=AnchorMutationTerminal.failed(
+                    actual,
+                    cause="controlled builder failure",
+                ),
+                followup=after_resolution,
+            )
+        if label.startswith("old-"):
+            old_effects.append(label)
+            return DialogueJobResult(outcome="applied")
+        if label == "retry-builder":
+            persisted.update(anchor_ref="hypothesis-A", anchor_generation=13)
+            return AnchorMutationTerminal.persisted(
+                kind="hypothesis",
+                ref="hypothesis-A",
+                generation=13,
+            )
+        return DialogueJobResult(outcome="applied")
+
+    queue = DialogueSettlementQueue(handler, anchor_provider=lambda: dict(persisted))
     queue.start()
     try:
-        await queue.submit({"job_id": "blocker", "kind": "learn"})
-        await asyncio.wait_for(blocker_entered.wait(), timeout=1)
-        await queue.submit(
+        builder = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
             {
                 "job_id": "builder-failed",
-                "kind": "anchor.establish",
+                "target_kind": "hypothesis",
                 "target_ref": "hypothesis-A",
-            }
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
         )
+        assert builder is not None and builder.owned_anchor_reservation_id is not None
+        failed_reservation_id = builder.owned_anchor_reservation_id
+        old_jobs: list[DialogueJob] = []
         for index in (1, 2):
-            await queue.submit(
+            old_job = queue.submit(
+                DialogueJobKind.SETTLE_HYPOTHESIS,
                 {
                     "job_id": f"old-{index}",
-                    "kind": "settle.hypothesis",
+                    "target_kind": "hypothesis",
                     "target_ref": "hypothesis-A",
-                }
+                },
+                completion=True,
             )
-        release_blocker.set()
-        await asyncio.wait_for(first_old_dependency_entered.wait(), timeout=1)
-        await queue.submit(
+            assert old_job is not None
+            old_jobs.append(old_job)
+        await asyncio.wait_for(failed_resolved.wait(), timeout=1)
+        new_job = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
             {
                 "job_id": "new-after-failure",
-                "kind": "settle.hypothesis",
+                "target_kind": "hypothesis",
                 "target_ref": "hypothesis-A",
-            }
+            },
+            completion=True,
         )
-        await queue.submit(
+        assert new_job is not None
+        assert new_job.anchor_snapshot.state == expected_state
+        assert queue.registry.reservation_reference_count(failed_reservation_id) == 3
+
+        release_failed_builder.set()
+        old_results = await asyncio.gather(
+            *(asyncio.shield(job.completion) for job in old_jobs if job.completion is not None)
+        )
+        assert [result.outcome for result in old_results] == [
+            "anchor_dependency_failed",
+            "anchor_dependency_failed",
+        ]
+        assert old_effects == []
+        assert not queue.registry.has_reservation(failed_reservation_id)
+        retry = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
             {
                 "job_id": "retry-builder",
-                "kind": "anchor.establish",
+                "target_kind": "hypothesis",
                 "target_ref": "hypothesis-A",
-            }
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
         )
-        release_old_dependencies.set()
+        assert retry is not None and retry.owned_anchor_reservation_id is not None
+        assert retry.owned_anchor_reservation_id != failed_reservation_id
+        assert retry.completion is not None
+        retry_result = await asyncio.shield(retry.completion)
+        assert retry_result.outcome == "persisted"
         await asyncio.wait_for(queue.shutdown(), timeout=2)
     finally:
-        release_blocker.set()
-        release_old_dependencies.set()
+        release_failed_builder.set()
         if queue.worker_alive:
             await queue.shutdown(timeout=1)
 
-    new_snapshot = observed["new-after-failure"].get("anchor_snapshot")
-    assert results["old-1"] == results["old-2"] == "anchor_dependency_failed"
-    assert effects == []
-    assert isinstance(new_snapshot, Mapping)
-    assert new_snapshot.get("state") == expected_state
-    assert new_snapshot.get("state") != "failed"
-    assert observed["builder-failed"].get("owned_anchor_reservation_id")
-    assert observed["retry-builder"].get("owned_anchor_reservation_id")
-    assert (
-        observed["builder-failed"]["owned_anchor_reservation_id"]
-        != observed["retry-builder"]["owned_anchor_reservation_id"]
-    )
-    assert results["retry-builder"] == "persisted"
 
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="[Q18/Q19/R2-2/M1] Wave 1 preserves B1 persisted after B2 failed",
-)
 async def test_failed_reservation_after_persisted_builder_keeps_b1_as_effective_head() -> None:
     """Q18/Q19/R2-2/M1: B1 persisted then B2 failed must expose B1 to new submit."""
     persisted: dict[str, object] = {"anchor_ref": "", "anchor_generation": 0}
-    observed: dict[str, dict[str, object]] = {}
-    results: dict[str, str] = {}
-    blocker_entered = asyncio.Event()
-    release_blocker = asyncio.Event()
-    old_dependency_entered = asyncio.Event()
-    release_old_dependency = asyncio.Event()
+    b2_resolved = asyncio.Event()
+    release_b2_followup = asyncio.Event()
+    effects: list[str] = []
 
-    async def handler(**payload: object) -> None:
-        record = dict(payload)
-        job_id = str(record.get("job_id", ""))
-        observed[job_id] = record
-        if job_id == "blocker":
-            blocker_entered.set()
-            await release_blocker.wait()
-        elif job_id == "B1":
+    async def handler(
+        job: DialogueJob,
+    ) -> DialogueJobResult | DialogueDispatchResult | AnchorMutationTerminal:
+        label = str(job.payload["job_id"])
+        if label == "B1":
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=21)
-            results[job_id] = "persisted"
-        elif job_id == "B2":
-            results[job_id] = "failed"
-        elif job_id == "S1":
-            old_dependency_entered.set()
-            await release_old_dependency.wait()
-            results[job_id] = "applied"
-        elif job_id == "S2":
-            results[job_id] = "applied"
+            return AnchorMutationTerminal.persisted(
+                kind="hypothesis",
+                ref="hypothesis-A",
+                generation=21,
+            )
+        if label == "B2":
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(persisted))
+            async def after_resolution() -> None:
+                b2_resolved.set()
+                await release_b2_followup.wait()
+
+            return DialogueDispatchResult(
+                result=DialogueJobResult(outcome="failed"),
+                anchor_terminal=AnchorMutationTerminal.failed(
+                    AnchorPersisted("hypothesis", "hypothesis-A", 21),
+                    cause="B2 controlled failure",
+                ),
+                followup=after_resolution,
+            )
+        effects.append(label)
+        return DialogueJobResult(outcome="applied")
+
+    queue = DialogueSettlementQueue(handler, anchor_provider=lambda: dict(persisted))
     queue.start()
     try:
-        await queue.submit({"job_id": "blocker", "kind": "learn"})
-        await asyncio.wait_for(blocker_entered.wait(), timeout=1)
-        await queue.submit(
-            {"job_id": "B1", "kind": "anchor.establish", "target_ref": "hypothesis-A"}
+        b1 = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "job_id": "B1",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
         )
-        await queue.submit(
-            {"job_id": "B2", "kind": "anchor.establish", "target_ref": "hypothesis-A"}
+        b2 = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "job_id": "B2",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
         )
-        await queue.submit(
-            {"job_id": "S1", "kind": "settle.hypothesis", "target_ref": "hypothesis-A"}
+        s1 = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "job_id": "S1",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+            },
+            completion=True,
         )
-        release_blocker.set()
-        await asyncio.wait_for(old_dependency_entered.wait(), timeout=1)
-        await queue.submit(
-            {"job_id": "S2", "kind": "settle.hypothesis", "target_ref": "hypothesis-A"}
+        assert b1 is not None and b2 is not None and s1 is not None
+        assert isinstance(s1.anchor_snapshot, AnchorReserved)
+        assert s1.anchor_snapshot.reservation_id == b2.owned_anchor_reservation_id
+
+        await asyncio.wait_for(b2_resolved.wait(), timeout=1)
+        s2 = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "job_id": "S2",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+            },
+            completion=True,
         )
-        release_old_dependency.set()
+        assert s2 is not None
+        assert isinstance(s2.anchor_snapshot, AnchorPersisted)
+        assert s2.anchor_snapshot.generation == 21
+        assert s2.anchor_snapshot.resolved_by_reservation_id == b2.owned_anchor_reservation_id
+        release_b2_followup.set()
+        assert s1.completion is not None and s2.completion is not None
+        s1_result, s2_result = await asyncio.gather(
+            asyncio.shield(s1.completion),
+            asyncio.shield(s2.completion),
+        )
+        assert s1_result.outcome == "anchor_dependency_failed"
+        assert s2_result.outcome == "applied"
         await asyncio.wait_for(queue.shutdown(), timeout=2)
     finally:
-        release_blocker.set()
-        release_old_dependency.set()
+        release_b2_followup.set()
         if queue.worker_alive:
             await queue.shutdown(timeout=1)
-
-    b1_reservation = observed["B1"].get("owned_anchor_reservation_id")
-    b2_reservation = observed["B2"].get("owned_anchor_reservation_id")
-    s1_snapshot = observed["S1"].get("anchor_snapshot")
-    s2_snapshot = observed["S2"].get("anchor_snapshot")
-    assert b1_reservation and b2_reservation and b1_reservation != b2_reservation
-    assert isinstance(s1_snapshot, Mapping)
-    assert s1_snapshot.get("state") == "reserved"
-    assert s1_snapshot.get("reservation_id") == b2_reservation
-    assert results["S1"] == "anchor_dependency_failed"
-    assert isinstance(s2_snapshot, Mapping)
-    assert s2_snapshot.get("state") == "persisted"
-    assert s2_snapshot.get("generation") == 21
-    assert s2_snapshot.get("reservation_id") != b2_reservation
+    assert b1.owned_anchor_reservation_id
+    assert b2.owned_anchor_reservation_id
+    assert b1.owned_anchor_reservation_id != b2.owned_anchor_reservation_id
+    assert effects == ["S2"]
 
 
 @pytest.mark.parametrize(
@@ -637,77 +721,106 @@ async def test_failed_reservation_after_persisted_builder_keeps_b1_as_effective_
         pytest.param("confusion.attribution.replay", id="attribution-replay"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="[Q19/R3-1] Wave 1 adds owner-bound reservation entries")
 async def test_same_ref_double_builder_second_noop_resolves_own_head_for_later_settlement(
     builder_kind: str,
 ) -> None:
     """Q19/R3-1: same-ref builders never coalesce or resolve each other."""
     persisted: dict[str, object] = {"anchor_ref": "", "anchor_generation": 0}
-    observed: dict[str, dict[str, object]] = {}
     outcomes: dict[str, str] = {}
-    blocker_entered = asyncio.Event()
-    release_blocker = asyncio.Event()
     s1_finished = asyncio.Event()
 
-    async def handler(**payload: object) -> None:
-        record = dict(payload)
-        job_id = str(record.get("job_id", ""))
-        observed[job_id] = record
-        if job_id == "blocker":
-            blocker_entered.set()
-            await release_blocker.wait()
-            return
-        if job_id == "B1":
+    async def handler(
+        job: DialogueJob,
+    ) -> DialogueJobResult | AnchorMutationTerminal:
+        label = str(job.payload["job_id"])
+        if label == "B1":
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=31)
-            outcomes[job_id] = "persisted"
-        elif job_id == "B2":
-            outcomes[job_id] = "no_op"
-        else:
-            outcomes[job_id] = "applied"
-            if job_id == "S1":
-                s1_finished.set()
+            outcomes[label] = "persisted"
+            return AnchorMutationTerminal.persisted(
+                kind="hypothesis",
+                ref="hypothesis-A",
+                generation=31,
+            )
+        if label == "B2":
+            outcomes[label] = "no_op"
+            return AnchorMutationTerminal.no_op(AnchorPersisted("hypothesis", "hypothesis-A", 31))
+        outcomes[label] = "applied"
+        if label == "S1":
+            s1_finished.set()
+        return DialogueJobResult(outcome="applied")
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(persisted))
+    queue = DialogueSettlementQueue(handler, anchor_provider=lambda: dict(persisted))
     queue.start()
     try:
-        await queue.submit({"job_id": "blocker", "kind": "learn"})
-        await asyncio.wait_for(blocker_entered.wait(), timeout=1)
+        admitted_builders: list[DialogueJob] = []
         for job_id in ("B1", "B2"):
-            await queue.submit(
-                {
-                    "job_id": job_id,
-                    "kind": builder_kind,
-                    "target_ref": "hypothesis-A",
-                    "needs_anchor": True,
-                }
+            payload: dict[str, object] = {
+                "job_id": job_id,
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+                "needs_anchor": True,
+            }
+            if builder_kind == DialogueJobKind.ANCHOR_ESTABLISH.value:
+                payload["producer_source"] = "durable_confusion_ensure"
+            elif builder_kind == DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY.value:
+                payload["producer_source"] = "cognition_cycle"
+            builder = queue.submit(
+                DialogueJobKind(builder_kind),
+                payload,
+                completion=True,
             )
-        await queue.submit(
-            {"job_id": "S1", "kind": "settle.hypothesis", "target_ref": "hypothesis-A"}
+            assert builder is not None
+            admitted_builders.append(builder)
+        s1 = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "job_id": "S1",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+            },
+            completion=True,
         )
-        release_blocker.set()
+        assert s1 is not None
+        b1, b2 = admitted_builders
+        assert isinstance(b1.anchor_snapshot, AnchorReserved)
+        assert isinstance(b2.anchor_snapshot, AnchorReserved)
+        assert isinstance(s1.anchor_snapshot, AnchorReserved)
+        assert b1.anchor_snapshot.reservation_id != b2.anchor_snapshot.reservation_id
+        assert b1.anchor_snapshot.owner_job_id == b1.job_id
+        assert b1.anchor_snapshot.owner_sequence == b1.sequence
+        assert b2.anchor_snapshot.owner_job_id == b2.job_id
+        assert b2.anchor_snapshot.owner_sequence == b2.sequence
+        assert s1.anchor_snapshot.reservation_id == b2.anchor_snapshot.reservation_id
+
         await asyncio.wait_for(s1_finished.wait(), timeout=1)
-        await queue.submit(
-            {"job_id": "S2", "kind": "settle.hypothesis", "target_ref": "hypothesis-A"}
+        s2 = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "job_id": "S2",
+                "target_kind": "hypothesis",
+                "target_ref": "hypothesis-A",
+            },
+            completion=True,
         )
+        assert s2 is not None
+        assert isinstance(s2.anchor_snapshot, AnchorPersisted)
+        assert s2.anchor_snapshot.generation == 31
+        assert s2.anchor_snapshot.resolved_by_reservation_id == b2.owned_anchor_reservation_id
+        completions = [
+            job.completion for job in (*admitted_builders, s1, s2) if job.completion is not None
+        ]
+        await asyncio.gather(*(asyncio.shield(completion) for completion in completions))
         await asyncio.wait_for(queue.shutdown(), timeout=2)
     finally:
-        release_blocker.set()
         if queue.worker_alive:
             await queue.shutdown(timeout=1)
 
-    b1_reservation = observed["B1"].get("owned_anchor_reservation_id")
-    b2_reservation = observed["B2"].get("owned_anchor_reservation_id")
-    s1_snapshot = observed["S1"].get("anchor_snapshot")
-    s2_snapshot = observed["S2"].get("anchor_snapshot")
-    assert b1_reservation and b2_reservation and b1_reservation != b2_reservation
-    assert isinstance(s1_snapshot, Mapping)
-    assert s1_snapshot.get("state") == "reserved"
-    assert s1_snapshot.get("reservation_id") == b2_reservation
-    assert outcomes == {"B1": "persisted", "B2": "no_op", "S1": "applied", "S2": "applied"}
-    assert isinstance(s2_snapshot, Mapping)
-    assert s2_snapshot.get("state") == "persisted"
-    assert s2_snapshot.get("generation") == 31
-    assert s2_snapshot.get("resolved_by_reservation_id") == b2_reservation
+    assert outcomes == {
+        "B1": "persisted",
+        "B2": "no_op",
+        "S1": "applied",
+        "S2": "applied",
+    }
 
 
 @pytest.mark.parametrize(
@@ -721,62 +834,695 @@ async def test_same_ref_double_builder_second_noop_resolves_own_head_for_later_s
         pytest.param("failed", id="failed"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="[Q20/R3-2] Wave 1 resolves at mutator return")
 async def test_anchor_reservation_promotes_before_followup_await_throw_or_replay_short_circuit(
     terminal: str,
 ) -> None:
     """Q20/R3-2: mutator return synchronously resolves its exact owner."""
     persisted: dict[str, object] = {"anchor_ref": "", "anchor_generation": 0}
-    observed: dict[str, dict[str, object]] = {}
-    mutator_returned = asyncio.Event()
+    followup_entered = asyncio.Event()
     release_followup = asyncio.Event()
 
-    async def handler(**payload: object) -> None:
-        record = dict(payload)
-        job_id = str(record.get("job_id", ""))
-        observed[job_id] = record
-        if job_id != "builder":
-            return
+    async def handler(
+        job: DialogueJob,
+    ) -> DialogueJobResult | DialogueDispatchResult:
+        if job.payload.get("job_id") != "builder":
+            return DialogueJobResult(outcome="applied")
         if terminal in {"absent", "failed"}:
             persisted.update(anchor_ref="", anchor_generation=0)
+            actual: AnchorPersisted | AnchorAbsent = AnchorAbsent(
+                "hypothesis",
+                "hypothesis-A",
+                1,
+            )
         else:
             persisted.update(anchor_ref="hypothesis-A", anchor_generation=41)
-        mutator_returned.set()
-        await release_followup.wait()
-        if terminal == "persisted":
-            raise RuntimeError("follow-up effect failed after durable anchor mutation")
+            actual = AnchorPersisted("hypothesis", "hypothesis-A", 41)
 
-    queue = DialogueLearnQueue(handler, anchor_provider=lambda: dict(persisted))
+        disposition = AnchorMutationDisposition(terminal)
+        typed_terminal = AnchorMutationTerminal(
+            disposition=disposition,
+            actual_state=actual,
+            cause="controlled failure" if disposition is AnchorMutationDisposition.FAILED else "",
+        )
+
+        async def after_resolution() -> None:
+            followup_entered.set()
+            await release_followup.wait()
+            if terminal == "persisted":
+                raise RuntimeError("follow-up effect failed after durable anchor mutation")
+
+        return DialogueDispatchResult(
+            result=DialogueJobResult(outcome=terminal),
+            anchor_terminal=typed_terminal,
+            followup=after_resolution,
+        )
+
+    queue = DialogueSettlementQueue(handler, anchor_provider=lambda: dict(persisted))
     queue.start()
     try:
-        await queue.submit(
+        builder = queue.submit(
+            DialogueJobKind.ANCHOR_ESTABLISH,
             {
                 "job_id": "builder",
-                "kind": "anchor.establish",
+                "target_kind": "hypothesis",
                 "target_ref": "hypothesis-A",
-                "terminal": terminal,
-            }
+                "producer_source": "durable_confusion_ensure",
+            },
+            completion=True,
         )
-        await asyncio.wait_for(mutator_returned.wait(), timeout=1)
-        await queue.submit(
+        assert builder is not None
+        reservation_id = builder.owned_anchor_reservation_id
+        assert reservation_id is not None
+        await asyncio.wait_for(followup_entered.wait(), timeout=1)
+        assert queue.registry.reservation_resolution_count(reservation_id) == 1
+        assert queue.registry.reservation_terminal(reservation_id).disposition.value == terminal
+        later = queue.submit(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
             {
                 "job_id": "later-settle",
-                "kind": "settle.hypothesis",
+                "target_kind": "hypothesis",
                 "target_ref": "hypothesis-A",
-            }
+            },
+            completion=True,
         )
+        assert later is not None
+        assert later.anchor_snapshot.state in {"persisted", "absent"}
         release_followup.set()
+        assert builder.completion is not None and later.completion is not None
+        if terminal == "persisted":
+            with pytest.raises(RuntimeError, match="follow-up effect failed"):
+                await asyncio.shield(builder.completion)
+        else:
+            builder_result = await asyncio.shield(builder.completion)
+            assert builder_result.outcome == terminal
+        later_result = await asyncio.shield(later.completion)
+        assert later_result.outcome == "applied"
+        head = queue.registry.head(
+            target_kind="hypothesis",
+            target_ref="hypothesis-A",
+        )
+        assert head.state in {"persisted", "absent"}
         await asyncio.wait_for(queue.shutdown(), timeout=2)
     finally:
         release_followup.set()
         if queue.worker_alive:
             await queue.shutdown(timeout=1)
 
-    builder = observed["builder"]
-    later_snapshot = observed["later-settle"].get("anchor_snapshot")
-    assert builder.get("owned_anchor_reservation_id")
-    assert builder.get("anchor_resolution_count") == 1
-    assert builder.get("resolved_terminal") == terminal
-    assert isinstance(later_snapshot, Mapping)
-    assert later_snapshot.get("state") in {"persisted", "absent"}
-    assert later_snapshot.get("state") not in {"reserved", "failed", "superseded"}
+
+def test_dialogue_job_kind_whitelist_is_exhaustive() -> None:
+    """Q1/F1/F3: Wave 1 exposes every finalized dispatcher kind exactly once."""
+    from openbiliclaw.soul import dialogue_learn_queue
+
+    assert {kind.value for kind in dialogue_learn_queue.DialogueJobKind} == {
+        "learn",
+        "settle.hypothesis",
+        "settle.confusion",
+        "card.defer",
+        "card.discuss",
+        "card.reconcile",
+        "anchor.establish",
+        "probe.reply.apply",
+        "confusion.reply.apply",
+        "confusion.attribution.replay",
+        "confusion.open.sync",
+    }
+    assert set(dialogue_learn_queue.ANCHOR_TRANSITION_POLICY) == set(
+        dialogue_learn_queue.DialogueJobKind
+    )
+
+
+async def test_typed_queue_serializes_100_concurrent_mixed_submissions() -> None:
+    """Q2: concurrent producers share one FIFO consumer and one total order."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    active = 0
+    max_active = 0
+    observed_sequences: list[int] = []
+    release_producers = asyncio.Event()
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        observed_sequences.append(job.sequence)
+        yielded = asyncio.Event()
+        asyncio.get_running_loop().call_soon(yielded.set)
+        await yielded.wait()
+        active -= 1
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    kinds = (
+        DialogueJobKind.LEARN,
+        DialogueJobKind.CARD_DEFER,
+        DialogueJobKind.CONFUSION_REPLY_APPLY,
+        DialogueJobKind.CARD_RECONCILE,
+    )
+
+    async def submit_one(index: int) -> DialogueJob:
+        await release_producers.wait()
+        admitted = queue.submit(
+            kinds[index % len(kinds)],
+            {"index": index},
+            completion=True,
+        )
+        assert admitted is not None
+        return admitted
+
+    producers = [asyncio.create_task(submit_one(index)) for index in range(100)]
+    release_producers.set()
+    jobs = await asyncio.gather(*producers)
+    completions = [job.completion for job in jobs]
+    assert all(completion is not None for completion in completions)
+    await asyncio.gather(
+        *(asyncio.shield(completion) for completion in completions if completion is not None)
+    )
+    await queue.shutdown()
+
+    accepted_sequences = sorted(job.sequence for job in jobs)
+    assert max_active == 1
+    assert observed_sequences == accepted_sequences
+    assert accepted_sequences == list(range(accepted_sequences[0], accepted_sequences[0] + 100))
+
+
+async def test_fire_and_forget_and_completion_jobs_share_one_queue() -> None:
+    """Q2: learn fire-and-forget and request/response actions use one consumer."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    observed: list[str] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        observed.append(str(job.payload["label"]))
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    learn_job = queue.submit(DialogueJobKind.LEARN, {"label": "learn"})
+    assert learn_job is not None
+    result = await queue.submit_and_wait(
+        DialogueJobKind.CARD_DEFER,
+        {"label": "action"},
+    )
+    await queue.shutdown()
+
+    assert learn_job.completion is None
+    assert result.outcome == "completed"
+    assert observed == ["learn", "action"]
+
+
+async def test_completion_failure_does_not_kill_typed_worker() -> None:
+    """Q2: an exceptional completion is delivered and later jobs still run."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    observed: list[str] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        label = str(job.payload["label"])
+        if label == "boom":
+            raise ValueError("typed-dispatch-boom")
+        observed.append(label)
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    with pytest.raises(ValueError, match="typed-dispatch-boom"):
+        await queue.submit_and_wait(DialogueJobKind.CARD_DEFER, {"label": "boom"})
+    first = await queue.submit_and_wait(DialogueJobKind.CARD_DEFER, {"label": "after-1"})
+    second = await queue.submit_and_wait(DialogueJobKind.CARD_DEFER, {"label": "after-2"})
+    await queue.shutdown()
+
+    assert first.outcome == second.outcome == "completed"
+    assert observed == ["after-1", "after-2"]
+
+
+async def test_typed_envelope_deep_copies_payload_before_enqueue() -> None:
+    """Q2: caller mutation after admission cannot alter queued nested payload."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+
+    blocker_entered = asyncio.Event()
+    release_blocker = asyncio.Event()
+    observed: list[object] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        if job.payload.get("label") == "blocker":
+            blocker_entered.set()
+            await release_blocker.wait()
+        else:
+            observed.append(job.payload["nested"])
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    queue.submit(DialogueJobKind.LEARN, {"label": "blocker"})
+    await asyncio.wait_for(blocker_entered.wait(), timeout=1)
+    payload: dict[str, object] = {"label": "copy", "nested": {"value": ["before"]}}
+    copied_job = queue.submit(DialogueJobKind.LEARN, payload, completion=True)
+    assert copied_job is not None and copied_job.completion is not None
+    nested = payload["nested"]
+    assert isinstance(nested, dict)
+    values = nested["value"]
+    assert isinstance(values, list)
+    values.append("after")
+    release_blocker.set()
+    await asyncio.shield(copied_job.completion)
+    await queue.shutdown()
+
+    assert observed == [{"value": ["before"]}]
+
+
+async def test_submit_and_wait_reentry_fails_fast_and_worker_continues() -> None:
+    """Q4: the worker never waits on a job queued behind itself."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+        DialogueSettlementReentryError,
+    )
+
+    reentry_errors: list[str] = []
+    observed: list[str] = []
+    queue: DialogueSettlementQueue
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        label = str(job.payload["label"])
+        if label == "reenter":
+            with pytest.raises(DialogueSettlementReentryError):
+                await asyncio.wait_for(
+                    queue.submit_and_wait(
+                        DialogueJobKind.CARD_DEFER,
+                        {"label": "nested"},
+                    ),
+                    timeout=0.1,
+                )
+            reentry_errors.append(label)
+        observed.append(label)
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    await queue.submit_and_wait(DialogueJobKind.LEARN, {"label": "reenter"})
+    await queue.submit_and_wait(DialogueJobKind.LEARN, {"label": "after"})
+    await queue.shutdown()
+
+    assert reentry_errors == ["reenter"]
+    assert observed == ["reenter", "after"]
+
+
+async def test_typed_worker_permit_rejects_inherited_child_context() -> None:
+    """Q14/F4: queue dispatch owns the permit; a child task never inherits it."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueJobKind,
+        DialogueJobResult,
+        DialogueSettlementQueue,
+    )
+    from openbiliclaw.soul.dialogue_settlement_guard import (
+        DialogueSettlementGuard,
+        DialogueSettlementMutationOutsideWorker,
+    )
+
+    guard = DialogueSettlementGuard()
+    mutations: list[str] = []
+
+    def protected_mutator(label: str) -> None:
+        guard.require_dialogue_settlement_worker()
+        mutations.append(label)
+
+    async def dispatcher(_job: DialogueJob) -> DialogueJobResult:
+        protected_mutator("worker")
+
+        async def child() -> None:
+            protected_mutator("child")
+
+        child_task = asyncio.create_task(child())
+        with pytest.raises(DialogueSettlementMutationOutsideWorker):
+            await child_task
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher, guard=guard)
+    queue.start()
+    await queue.submit_and_wait(DialogueJobKind.LEARN, {"label": "guard"})
+    await queue.shutdown()
+
+    assert mutations == ["worker"]
+
+
+async def test_three_anchor_admission_timelines_repeat_100_times_without_mismatch() -> None:
+    """Q3/F2/R2-1: establish, discuss, and absent-first timelines stay linear."""
+    blocker_entered = asyncio.Event()
+    release_blocker = asyncio.Event()
+
+    async def dispatcher(
+        job: DialogueJob,
+    ) -> DialogueJobResult | AnchorMutationTerminal:
+        if job.payload.get("label") == "blocker":
+            blocker_entered.set()
+            await release_blocker.wait()
+            return DialogueJobResult(outcome="completed")
+        if job.owned_anchor_reservation_id is not None:
+            transition = job.anchor_transition
+            return AnchorMutationTerminal.persisted(
+                kind=transition.target_kind,
+                ref=transition.target_ref,
+                generation=job.sequence + 1,
+            )
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    queue.submit(DialogueJobKind.LEARN, {"label": "blocker"})
+    await asyncio.wait_for(blocker_entered.wait(), timeout=1)
+    try:
+        for iteration in range(100):
+            establish_ref = f"establish-{iteration}"
+            establish = queue.submit(
+                DialogueJobKind.ANCHOR_ESTABLISH,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": establish_ref,
+                    "producer_source": "durable_confusion_ensure",
+                },
+            )
+            establish_settle = queue.submit(
+                DialogueJobKind.SETTLE_HYPOTHESIS,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": establish_ref,
+                },
+            )
+            assert establish is not None and establish_settle is not None
+            assert isinstance(establish_settle.anchor_snapshot, AnchorReserved)
+            assert (
+                establish_settle.anchor_snapshot.reservation_id
+                == establish.owned_anchor_reservation_id
+            )
+
+            discuss_ref = f"discuss-{iteration}"
+            discuss = queue.submit(
+                DialogueJobKind.CARD_DISCUSS,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": discuss_ref,
+                },
+            )
+            discuss_settle = queue.submit(
+                DialogueJobKind.SETTLE_HYPOTHESIS,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": discuss_ref,
+                },
+            )
+            assert discuss is not None and discuss_settle is not None
+            assert isinstance(discuss_settle.anchor_snapshot, AnchorReserved)
+            assert (
+                discuss_settle.anchor_snapshot.reservation_id == discuss.owned_anchor_reservation_id
+            )
+
+            absent_ref = f"absent-first-{iteration}"
+            absent_settle = queue.submit(
+                DialogueJobKind.SETTLE_HYPOTHESIS,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": absent_ref,
+                },
+            )
+            later_builder = queue.submit(
+                DialogueJobKind.ANCHOR_ESTABLISH,
+                {
+                    "target_kind": "hypothesis",
+                    "target_ref": absent_ref,
+                    "producer_source": "pending_probe_throw",
+                },
+            )
+            assert absent_settle is not None and later_builder is not None
+            assert isinstance(absent_settle.anchor_snapshot, AnchorAbsent)
+            assert absent_settle.anchor_snapshot.target_ref == absent_ref
+        release_blocker.set()
+        await asyncio.wait_for(queue.shutdown(), timeout=5)
+    finally:
+        release_blocker.set()
+        if queue.worker_alive:
+            await queue.shutdown(timeout=1)
+
+
+def test_owner_cas_failed_gc_and_double_builder_state_machines_repeat_100_times() -> None:
+    """Q18/Q19: owner checks, failed GC, and later-head protection are stable."""
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorAdmissionRegistry,
+        AnchorReservationResolutionError,
+    )
+
+    registry = AnchorAdmissionRegistry()
+    for iteration in range(100):
+        target_ref = f"double-{iteration}"
+        b1 = registry.reserve(
+            kind="hypothesis",
+            ref=target_ref,
+            owner_job_id=f"B1-{iteration}",
+            owner_sequence=iteration * 2 + 1,
+            producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+            origin="durable_confusion_ensure",
+        )
+        b1_snapshot = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=target_ref,
+        )
+        b2 = registry.reserve(
+            kind="hypothesis",
+            ref=target_ref,
+            owner_job_id=f"B2-{iteration}",
+            owner_sequence=iteration * 2 + 2,
+            producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+            origin="durable_confusion_ensure",
+        )
+        b2_snapshot = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=target_ref,
+        )
+        dependent = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=target_ref,
+        )
+        with pytest.raises(AnchorReservationResolutionError):
+            registry.resolve_owned(
+                ref=target_ref,
+                reservation_id=b1.reservation_id,
+                owner_job_id=b2.owner_job_id,
+                owner_sequence=b2.owner_sequence,
+                terminal=AnchorMutationTerminal.persisted(
+                    kind="hypothesis",
+                    ref=target_ref,
+                    generation=iteration + 1,
+                ),
+            )
+        registry.resolve_owned(
+            ref=target_ref,
+            reservation_id=b1.reservation_id,
+            owner_job_id=b1.owner_job_id,
+            owner_sequence=b1.owner_sequence,
+            terminal=AnchorMutationTerminal.persisted(
+                kind="hypothesis",
+                ref=target_ref,
+                generation=iteration + 1,
+            ),
+        )
+        assert (
+            registry.head(
+                target_kind="hypothesis",
+                target_ref=target_ref,
+            )
+            == b2
+        )
+        registry.resolve_owned(
+            ref=target_ref,
+            reservation_id=b2.reservation_id,
+            owner_job_id=b2.owner_job_id,
+            owner_sequence=b2.owner_sequence,
+            terminal=AnchorMutationTerminal.no_op(
+                AnchorPersisted("hypothesis", target_ref, iteration + 1)
+            ),
+        )
+        with pytest.raises(AnchorReservationResolutionError):
+            registry.resolve_owned(
+                ref=target_ref,
+                reservation_id=b2.reservation_id,
+                owner_job_id=b2.owner_job_id,
+                owner_sequence=b2.owner_sequence,
+                terminal=AnchorMutationTerminal.no_op(
+                    AnchorPersisted("hypothesis", target_ref, iteration + 1)
+                ),
+            )
+        later = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=target_ref,
+        )
+        assert isinstance(later, AnchorPersisted)
+        assert later.resolved_by_reservation_id == b2.reservation_id
+        registry.release(b1_snapshot)
+        registry.release(b2_snapshot)
+        registry.release(dependent)
+        assert not registry.has_reservation(b1.reservation_id)
+        assert not registry.has_reservation(b2.reservation_id)
+
+        failed_ref = f"failed-{iteration}"
+        failed = registry.reserve(
+            kind="hypothesis",
+            ref=failed_ref,
+            owner_job_id=f"failed-owner-{iteration}",
+            owner_sequence=1000 + iteration,
+            producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+            origin="durable_confusion_ensure",
+        )
+        failed_owner = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=failed_ref,
+        )
+        old_one = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=failed_ref,
+        )
+        old_two = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=failed_ref,
+        )
+        registry.resolve_owned(
+            ref=failed_ref,
+            reservation_id=failed.reservation_id,
+            owner_job_id=failed.owner_job_id,
+            owner_sequence=failed.owner_sequence,
+            terminal=AnchorMutationTerminal.failed(
+                AnchorAbsent("hypothesis", failed_ref, 1),
+                cause="controlled",
+            ),
+        )
+        new_snapshot = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=failed_ref,
+        )
+        assert isinstance(new_snapshot, AnchorAbsent)
+        assert registry.reservation_reference_count(failed.reservation_id) == 3
+        registry.release(failed_owner)
+        registry.release(old_one)
+        registry.release(old_two)
+        assert not registry.has_reservation(failed.reservation_id)
+        retry = registry.reserve(
+            kind="hypothesis",
+            ref=failed_ref,
+            owner_job_id=f"retry-owner-{iteration}",
+            owner_sequence=2000 + iteration,
+            producer_kind=DialogueJobKind.ANCHOR_ESTABLISH.value,
+            origin="durable_confusion_ensure",
+        )
+        assert retry.reservation_id != failed.reservation_id
+        retry_owner = registry.snapshot(
+            target_kind="hypothesis",
+            target_ref=failed_ref,
+        )
+        registry.resolve_owned(
+            ref=failed_ref,
+            reservation_id=retry.reservation_id,
+            owner_job_id=retry.owner_job_id,
+            owner_sequence=retry.owner_sequence,
+            terminal=AnchorMutationTerminal.persisted(
+                kind="hypothesis",
+                ref=failed_ref,
+                generation=iteration + 1,
+            ),
+        )
+        registry.release(retry_owner)
+        assert not registry.has_reservation(retry.reservation_id)
+
+
+async def test_builder_timeout_resolves_failed_and_releases_all_old_references() -> None:
+    """Q18/R2-2: timeout cannot leave a reserved entry or run old effects."""
+    old_effects: list[str] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        if job.owned_anchor_reservation_id is not None:
+            raise TimeoutError("controlled anchor timeout")
+        old_effects.append(str(job.payload["label"]))
+        return DialogueJobResult(outcome="applied")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    builder = queue.submit(
+        DialogueJobKind.ANCHOR_ESTABLISH,
+        {
+            "label": "builder",
+            "target_kind": "hypothesis",
+            "target_ref": "timeout-ref",
+            "producer_source": "durable_confusion_ensure",
+        },
+        completion=True,
+    )
+    old_dependency = queue.submit(
+        DialogueJobKind.SETTLE_HYPOTHESIS,
+        {
+            "label": "old",
+            "target_kind": "hypothesis",
+            "target_ref": "timeout-ref",
+        },
+        completion=True,
+    )
+    assert builder is not None and old_dependency is not None
+    reservation_id = builder.owned_anchor_reservation_id
+    assert reservation_id is not None
+    assert builder.completion is not None and old_dependency.completion is not None
+    with pytest.raises(TimeoutError, match="controlled anchor timeout"):
+        await asyncio.shield(builder.completion)
+    dependent_result = await asyncio.shield(old_dependency.completion)
+    assert dependent_result.outcome == "anchor_dependency_failed"
+    assert old_effects == []
+    assert not queue.registry.has_reservation(reservation_id)
+    await queue.shutdown()
+
+
+async def test_queue_reload_handoff_old_finally_cannot_clear_new_permit() -> None:
+    """Q14/R2-3: queue lifecycle uses revoke/register/compare-and-clear."""
+    from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+    guard = DialogueSettlementGuard()
+    mutations: list[str] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        guard.require_dialogue_settlement_worker()
+        mutations.append(str(job.payload["label"]))
+        return DialogueJobResult(outcome="completed")
+
+    old = DialogueSettlementQueue(dispatcher, guard=guard, name="old-settlement-worker")
+    old.start()
+    await old.submit_and_wait(DialogueJobKind.LEARN, {"label": "old"})
+    await old.pause_and_drain()
+    old_permit = old.worker_permit
+    assert old_permit is not None
+    assert old.revoke_worker_permit() is True
+    assert guard.registered_permit is None
+
+    new = DialogueSettlementQueue(dispatcher, guard=guard, name="new-settlement-worker")
+    new.start()
+    await new.submit_and_wait(DialogueJobKind.LEARN, {"label": "new-before-finally"})
+    new_permit = new.worker_permit
+    assert new_permit is not None and guard.is_current(new_permit)
+    await old.shutdown()
+    assert guard.is_current(new_permit)
+    await new.submit_and_wait(DialogueJobKind.LEARN, {"label": "new-after-finally"})
+    await new.shutdown()
+
+    assert mutations == ["old", "new-before-finally", "new-after-finally"]
+    assert guard.registered_permit is None

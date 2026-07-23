@@ -74,6 +74,15 @@ class DialogueSettlementGuard:
         """Clear only when ``permit`` still owns the current worker slot."""
         return self._clear_exact(permit)
 
+    @property
+    def registered_permit(self) -> DialogueSettlementWorkerPermit | None:
+        """Return the current single-slot permit for lifecycle diagnostics."""
+        return self._registered_permit
+
+    def is_current(self, permit: DialogueSettlementWorkerPermit) -> bool:
+        """Return whether ``permit`` is the exact currently authorized tuple."""
+        return self._is_current_permit(permit)
+
     @contextmanager
     def activate_worker(
         self,
@@ -139,6 +148,11 @@ class DialogueSettlementGuard:
 
 
 _DEFAULT_GUARD = DialogueSettlementGuard()
+
+
+def default_dialogue_settlement_guard() -> DialogueSettlementGuard:
+    """Return the process-wide single-slot dialogue mutation guard."""
+    return _DEFAULT_GUARD
 
 
 @contextmanager
