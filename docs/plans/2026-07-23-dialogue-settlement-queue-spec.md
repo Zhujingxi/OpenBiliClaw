@@ -353,9 +353,18 @@ barrier 把 old
 finally 后都断言 old mutation 抛
 `DialogueSettlementMutationOutsideWorker`。**[R2-3]**
 
-如果 worker 内的 learn/anchor handler 再调用公开 `submit_and_wait()`，队列立即抛
-`DialogueSettlementReentryError`；不得把子 job 放到自己身后再等待。普通 chat
-settles 与锚 relation 必须调用 `_apply_*` 内部函数，共享当前 worker context。
+如果 worker 内的 learn/anchor handler 再调用公开 `submit()` 或
+`submit_and_wait()`，队列立即抛 `DialogueSettlementReentryError`；不得把子 job
+放到自己身后再等待，也不得 inline 调 dispatcher。任意深度的普通 coroutine 调用链
+只要仍运行在 actual worker Task 上，普通 chat settles 与锚 relation 就直接调用
+`_apply_*` 内部函数，共享当前 worker context。handler 用 `create_task()` 产生的
+child（包括多层 child）既不能 `_apply_*`，也不能凭继承的 job scope 重新 submit；
+它只能把只读结果交回 actual worker，由父调用栈 apply。
+
+worker job scope 仅作为递归 admission 的拒绝标记，不是 mutation permit。job 结束时
+scope 立即失效；detached child 即使跨到下一 job、仍携带旧 ContextVar，也必须同时被
+guard 的 actual-task identity 与 queue 的 stale-scope 检查拒绝。实现不得存在
+inline child delegation、临时授权或 delegated-task reset 生命周期。
 
 异常只令当前 job 失败并完成其 Future；worker 记录结构化日志后继续消费下一项。
 禁止持同步文件锁跨 `await`，禁止 worker 内 detached `create_task` mutation。
@@ -454,8 +463,9 @@ settles 与锚 relation 必须调用 `_apply_*` 内部函数，共享当前 work
    `logical_head.reservation_id == owned_reservation_id` 时，才把 head 原子折叠为该
    resolution 的 effective `persisted/absent` actual state。若 head 已是同 ref 的更晚
    reservation，较早 result（包括 persisted、no-op、superseded、failed）都只能
-   resolve 较早 entry，绝不能覆盖 head。release 等非 builder anchor mutation 仍按
-   sequence 回报 actual state；较早 resolution 同样不能抹掉较晚预约。
+   resolve 较早 entry，绝不能覆盖 head。release 等 non-builder anchor mutation 仍按
+   sequence 回报 actual state；较早 completion 刷新自己的 per-ref state 时，若全局
+   latest 已是跨 ref 的更晚 reservation，也不得把 `_latest_head_key` 回拨到旧 ref。
    **[F2][R2-2][R3-1]**
 10. registry 对每个 reservation 只统计已经冻结该 id 的 queued/running envelope。
     terminal resolution 后 entry 保留到旧引用排空；归零时 GC，并在它仍是 head 时先
@@ -679,7 +689,7 @@ completion 恢复的是提交 job 的原 task，不是 worker 或 worker child�
 | Q1 | §2.2 的对话结算全部经同一 queue | 任一入口 spy 到 worker 外 protected mutation，包括 pending-open 原始 confusion sink **[F3]** |
 | Q2 | 主进程内恰一个 active consumer/permit holder | 100-job 测试出现 `max_active > 1`，或 reload 在撤旧 permit 前注册新 permit **[R2-3]** |
 | Q3 | queue-global admission timeline 对所有建锚 kind 冻结 persisted/reserved/failed/absent 状态 | 已入队 `card.discuss`/任一建锚路径对后续 job 不可见、worker 补抓 current、absent 升级为未来代次任一发生 **[F2][R2-1][R2-2]** |
-| Q4 | worker 不等待自己 | worker 内 public submit 未立即报 reentry，或测试超过 100 ms 未结束 |
+| Q4 | worker 不等待自己 | actual worker、任意层 active child 或 detached stale child 的 public submit 未立即报 reentry，或出现 inline dispatcher/临时 child 授权 |
 | Q5 | 不持同步 settlement lock 跨 await | 旧锁符号仍存在，或 heartbeat 在 LLM await 期间停止 |
 | Q6 | ref receipt 仅由 worker 创建，且 winner payload 不变 | handler 预留 receipt、同 ref 两 verdict 都写对象，或 retry 使用 contender payload |
 | Q7 | mandatory effect 可安全重做 | 七个 crash gap 任一最终计数不是 1；applied gap reconcile 重做对象语义 **[F7]** |

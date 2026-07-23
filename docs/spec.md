@@ -264,7 +264,9 @@ durable runtime 使用 `SocraticDialogue(queued)`，成功写入 user+agent 历�
 既有 detached direct learning，位于 queue/guard 外。其余 10 个 typed kind 的
 卡片四动作、锚建立/释放/恢复、普通 chat settles、探针/疑惑 reply/open/replay、
 GET reconcile 与 legacy façade 也已全部接入同一个 production dispatcher/worker；
-protected mutation 只允许 actual worker Task，继承 context 的 child 仍 fail closed。
+protected mutation 只允许 actual worker Task；嵌套 settle 沿该 task 的调用栈直调
+`_apply_*`，不 submit、不 inline dispatcher，也不存在 child 临时授权。继承 context
+的 active/detached child 对 mutation 与递归 admission 均 fail closed。
 队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/桌面在 30 秒内读取
 durable turn，重启丢 job 时允许同 action 重新提交；不增加 job table 或恢复 scanner。
 两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
