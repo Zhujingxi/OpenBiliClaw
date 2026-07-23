@@ -8050,7 +8050,14 @@ def create_app(
 
     def _defer_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
         _require_dialogue_settlement_worker()
-        state = str(turn.payload.get("state", ""))
+        state = str(turn.payload.get("state", "")).strip().lower()
+        if state in {"confirmed", "rejected"}:
+            return {
+                "ok": True,
+                "outcome": "already_settled",
+                "verdict": state,
+                "state": state,
+            }
         anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
         active_anchor = anchor_manager.current() if anchor_manager is not None else None
         if (

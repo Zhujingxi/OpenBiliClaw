@@ -11644,6 +11644,47 @@ class TestDialogueConfirmationCards:
         assert state["objects"][ref]["deferred_until"]
 
     @pytest.mark.parametrize(
+        ("settle_action", "terminal_state"),
+        [("confirm", "confirmed"), ("reject", "rejected")],
+    )
+    def test_defer_on_terminal_card_returns_truth_without_writing_cooldown(
+        self,
+        tmp_path: Path,
+        settle_action: str,
+        terminal_state: str,
+    ) -> None:
+        """F3: defer cannot contradict or add cooldown to a terminal card."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"终态后 defer-{settle_action}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        turn_id = f"terminal-defer-{settle_action}"
+        self._create_card(client, turn_id=turn_id, ref=ref, hypothesis=hypothesis)
+        settled = client.post(
+            f"/api/chat/cards/{turn_id}/action",
+            json={"action": settle_action},
+        )
+        assert settled.status_code == 200
+        assert settled.json()["state"] == terminal_state
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        cooldown_before = state_path.read_bytes() if state_path.exists() else None
+
+        deferred = client.post(
+            f"/api/chat/cards/{turn_id}/action",
+            json={"action": "defer"},
+        )
+
+        assert deferred.status_code == 200
+        assert deferred.json() == {
+            "ok": True,
+            "outcome": "already_settled",
+            "verdict": terminal_state,
+            "state": terminal_state,
+        }
+        cooldown_after = state_path.read_bytes() if state_path.exists() else None
+        assert cooldown_after == cooldown_before
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == terminal_state
+
+    @pytest.mark.parametrize(
         ("failure_stage", "checkpoint"),
         [
             ("event", "after_event"),
