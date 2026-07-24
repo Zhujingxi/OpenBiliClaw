@@ -400,6 +400,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ RedditDiscoveryProducer: rdt-cli 默认 + 插件 fallback search/hot/subreddit/related -> pending eval │ │
+│  │ [network].mode -> X twitter-cli / Reddit rdt-cli·OpenCLI；插件 fallback 跟随浏览器网络设置       │ │
 │  │   Reddit bootstrap_events: saved/upvoted/subscribed -> 首版画像信号 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │

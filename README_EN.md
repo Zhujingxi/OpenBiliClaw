@@ -639,7 +639,7 @@ Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → ba
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 
-Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, Bangumi, updater; CN clients remain isolated and direct
+Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater; CN clients remain isolated and direct
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.

@@ -355,6 +355,53 @@ def test_subprocess_run_uses_bundled_rdt_cli_when_console_script_missing(
     assert "rdt, version" in completed.stdout
 
 
+def test_subprocess_run_passes_resolved_network_environment(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(reddit_tasks, "_default_which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        reddit_tasks,
+        "outbound_cli_environment",
+        lambda: {"PATH": "/bin", "HTTPS_PROXY": "http://proxy:7890"},
+    )
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(reddit_tasks.subprocess, "run", fake_run)
+
+    completed = reddit_tasks._subprocess_run(["rdt", "--version"], timeout=5)
+
+    assert completed.returncode == 0
+    assert captured["env"] == {"PATH": "/bin", "HTTPS_PROXY": "http://proxy:7890"}
+
+
+def test_bundled_rdt_cli_receives_resolved_network_environment(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        reddit_tasks,
+        "outbound_cli_environment",
+        lambda: {"PATH": "/bin", "ALL_PROXY": "socks5://proxy:1080"},
+    )
+
+    class FakeRunner:
+        def invoke(self, cli, args, *, env):
+            captured["cli"] = cli
+            captured["args"] = args
+            captured["env"] = env
+            return type("Result", (), {"exit_code": 0, "output": "ok", "exception": None})()
+
+    monkeypatch.setattr("click.testing.CliRunner", FakeRunner)
+    fake_module = type("RdtModule", (), {"cli": object()})()
+    monkeypatch.setattr(reddit_tasks.importlib, "import_module", lambda name: fake_module)
+
+    completed = reddit_tasks._run_rdt_cli_in_process(["rdt", "--version"], timeout=5)
+
+    assert completed.returncode == 0
+    assert captured["env"]["ALL_PROXY"] == "socks5://proxy:1080"
+
+
 def test_build_reddit_command_uses_real_rdt_cli_syntax() -> None:
     assert build_reddit_command("rdt", mode="search", query="local agents", limit=5) == [
         "rdt",

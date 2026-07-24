@@ -485,7 +485,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 ### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
 
-海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -499,6 +499,8 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 > **国内大模型网关豁免（v0.3.166）**：即使 `mode` 为 `system` / `custom`，指向国内网关的 LLM 请求也会被识别并**强制直连**——DeepSeek（`api.deepseek.com`）、商汤 SenseNova（`.cn`）、通义千问（`aliyuncs.com`）、智谱、文心千帆、混元、火山方舟、Kimi、MiniMax、阶跃、百川、硅基流动、无问芯穹、PPIO 等，以及 `localhost` / 内网自建端点（cpa、vLLM 等）。识别覆盖 `.cn` 顶级域、已知厂商的非 `.cn` 域名白名单、loopback / 私有 / link-local IP，由 `openbiliclaw.network.is_domestic_endpoint` 裁决。避免「为连墙外模型开了代理 → 国内模型请求被绕道境外 → 总是超时」。豁免按 endpoint 生效，genuine 墙外网关仍走上面的代理策略。
 >
 > **默认值为什么是 `system`（v0.3.175）**：本节列出的全是海外服务，`direct` 下国内网络必然超时；而这是开箱默认值，新用户配好令牌、启用来源，然后撞上一句没头没尾的网络错误。`system` 即 `trust_env=True`，读取环境变量 `HTTP(S)_PROXY`，macOS 上还会读系统偏好设置里的代理；**没有配代理时 `system` 与直连完全等价**，所以海外用户无损失。国内直连隔离与国内网关豁免（上面两条）不受影响，改的只是「海外那一侧」的缺省出口。
+>
+> **第三方 CLI 也遵循同一语义**：`system` 保留环境代理，并将操作系统代理物化成 CLI 能读取的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`；`custom` 将配置地址显式注入这些变量（X 同时用于 `TWITTER_PROXY`）；`direct` 从子进程环境移除代理变量。运行时切换模式会重建 twitter-cli 缓存的 curl 会话。浏览器扩展 fallback 不属于后端 CLI，仍跟随浏览器网络设置。
 >
 > **只有「从没写过」才吃新默认值**：`_build_network_config` 按 `mode` **键是否存在**判定，不看解析后的值。`config.toml` 里显式写了 `mode = "direct"` 的照旧直连，`OPENBILICLAW_NETWORK_MODE=direct` 同理（env override 注入的是同一张表，也算显式）。因此凡是通过设置页保存过配置的用户，磁盘上已有显式 `mode`，升级后行为一律不变；受益的是全新安装与从未配置过 `[network]` 的老配置。非法值（未知模式、`custom` 但 `proxy` 为空）仍然回退 `direct` 而不是新默认值——用户确实写了东西，不该因为写错就悄悄开始继承环境代理。
 >

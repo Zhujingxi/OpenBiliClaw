@@ -49,17 +49,17 @@ class SourceFamilyRule:
 #
 # ``routed_by_network_mode`` — whether ``[network].mode`` actually governs
 #   that source's requests, i.e. whether changing the setting changes anything.
-#   Only true where the fetch goes through a client built from
+#   True where the fetch goes through a client or CLI environment built from
 #   ``openbiliclaw.network``:
 #     • bangumi — sources/bangumi_client.py passes ``outbound_httpx_kwargs()``.
 #     • youtube — youtube/client.py passes ``outbound_httpx_kwargs()`` /
 #       ``outbound_requests_proxies()`` / ``outbound_ytdlp_proxy()``.
-#   X and Reddit are overseas but NOT app-routed: X reads through
-#   ``twitter_cli`` (curl_cffi, ambient env proxies) and Reddit shells out to
-#   ``rdt`` / OpenCLI or falls back to the browser extension. ``direct`` mode
-#   never unsets HTTP(S)_PROXY, so the setting is a no-op for both — telling a
-#   user to flip it would be advice that cannot fix their failure (rule 7), so
-#   they get their own wording instead.
+#     • twitter — sources/x_client.py resolves the route into twitter-cli's
+#       dedicated ``TWITTER_PROXY`` session setup.
+#     • reddit — sources/reddit_tasks.py passes ``outbound_cli_environment()``
+#       to rdt/OpenCLI subprocesses and the bundled in-process rdt runner.
+#   Browser-extension fallback requests still belong to the browser and follow
+#   its own network settings; the backend cannot override them.
 SOURCE_FAMILY_RULES = (
     SourceFamilyRule(
         family=PLATFORM_BILIBILI,
@@ -93,6 +93,7 @@ SOURCE_FAMILY_RULES = (
         source_prefixes=("x-", "x_", "twitter"),
         url_hosts=("x.com", "twitter.com"),
         requires_overseas_network=True,
+        routed_by_network_mode=True,
     ),
     SourceFamilyRule(
         family=PLATFORM_ZHIHU,
@@ -106,6 +107,7 @@ SOURCE_FAMILY_RULES = (
         source_prefixes=("reddit-", "reddit_"),
         url_hosts=("reddit.com", "redd.it"),
         requires_overseas_network=True,
+        routed_by_network_mode=True,
     ),
     SourceFamilyRule(
         family=PLATFORM_BANGUMI,

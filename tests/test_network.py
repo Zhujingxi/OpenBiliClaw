@@ -121,6 +121,68 @@ def test_custom_mode_exposes_explicit_proxy_for_all_supported_http_stacks() -> N
     assert network.outbound_ytdlp_proxy() == url
 
 
+def test_cli_environment_obeys_direct_system_custom_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(network, "getproxies", lambda: {})
+    ambient = {
+        "PATH": "/bin",
+        "HTTPS_PROXY": "http://ambient:7890",
+        "https_proxy": "http://ambient-lower:7890",
+        "NO_PROXY": "x.com",
+    }
+
+    network.set_outbound_proxy("", mode="direct")
+    direct = network.outbound_cli_environment(ambient)
+    assert direct["PATH"] == "/bin"
+    assert "HTTPS_PROXY" not in direct
+    assert "https_proxy" not in direct
+
+    network.set_outbound_proxy("", mode="system")
+    assert network.outbound_cli_environment(ambient) == ambient
+    assert network.outbound_cli_proxy_url(environment=ambient) == "http://ambient:7890"
+
+    custom_url = "socks5://127.0.0.1:1080"
+    network.set_outbound_proxy(custom_url, mode="custom")
+    custom = network.outbound_cli_environment(ambient)
+    assert all(custom[name] == custom_url for name in network._PROXY_ENV_VARS)
+    assert "NO_PROXY" not in custom
+    assert network.outbound_cli_proxy_url(environment=ambient) == custom_url
+
+
+def test_system_cli_environment_materializes_os_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        network,
+        "getproxies",
+        lambda: {"http": "http://os-http:8080", "https": "http://os-https:8443"},
+    )
+    network.set_outbound_proxy("", mode="system")
+
+    resolved = network.outbound_cli_environment({"PATH": "/bin"})
+
+    assert resolved["HTTP_PROXY"] == "http://os-http:8080"
+    assert resolved["http_proxy"] == "http://os-http:8080"
+    assert resolved["HTTPS_PROXY"] == "http://os-https:8443"
+    assert resolved["https_proxy"] == "http://os-https:8443"
+
+
+def test_system_cli_proxy_honors_tool_specific_override() -> None:
+    network.set_outbound_proxy("", mode="system")
+
+    assert (
+        network.outbound_cli_proxy_url(
+            environment={
+                "TWITTER_PROXY": "socks5://twitter:1080",
+                "HTTPS_PROXY": "http://generic:7890",
+            },
+            dedicated_variable="TWITTER_PROXY",
+        )
+        == "socks5://twitter:1080"
+    )
+
+
 def test_custom_mode_requires_a_proxy_url() -> None:
     with pytest.raises(ValueError, match="custom"):
         network.set_outbound_proxy("", mode="custom")

@@ -49,17 +49,13 @@ HINT_MARKERS = ("network_hint", "networkHint", "source-network-hint", "NetworkHi
 # would miss. Each is asserted to still be part of the shipped copy.
 HINT_FRAGMENTS = (
     "会绕开系统代理直接请求",  # app-routed wording
-    "它的取数不经过",  # externally-routed wording
     "[network].mode 当前为 direct",  # exception-message suffix
 )
 
 
 def _hint_strings() -> tuple[str, ...]:
-    """Both rendered wordings, taken from the backend rather than restated."""
-    return (
-        overseas_network_hint("bangumi", network_mode="direct"),
-        overseas_network_hint("reddit", network_mode="direct"),
-    )
+    """Rendered wording, taken from the backend rather than restated."""
+    return (overseas_network_hint("bangumi", network_mode="direct"),)
 
 
 def test_overseas_platform_list_is_the_verified_one() -> None:
@@ -78,26 +74,19 @@ def test_overseas_platform_list_is_the_verified_one() -> None:
         assert requires_overseas_network(alias), alias
 
 
-def test_only_app_routed_platforms_are_told_to_change_the_setting() -> None:
+def test_all_overseas_backend_transports_are_told_to_change_the_setting() -> None:
     """Advice that cannot fix the failure is worse than none (rule 7).
 
-    ``[network].mode`` only governs sources fetched through an httpx client
-    built from ``openbiliclaw.network``. X reads via twitter_cli/curl_cffi and
-    Reddit shells out to rdt/OpenCLI or the browser extension, and ``direct``
-    never unsets HTTP(S)_PROXY — so neither is fixed by flipping the setting
-    and neither may be told to.
+    ``[network].mode`` governs each overseas backend transport: HTTP clients,
+    twitter-cli's curl session, and rdt/OpenCLI environments. Browser fallback
+    remains browser-owned, but that does not make the backend advice false.
     """
     routed = {rule.family for rule in SOURCE_FAMILY_RULES if rule.routed_by_network_mode}
-    assert routed == {"bangumi", "youtube"}
-    assert routed < OVERSEAS_EGRESS_PLATFORMS
+    assert routed == OVERSEAS_EGRESS_PLATFORMS
 
     for family in routed:
         hint = overseas_network_hint(family, network_mode="direct")
         assert "改成「跟随系统代理」或「自定义代理」" in hint, family
-    for family in OVERSEAS_EGRESS_PLATFORMS - routed:
-        hint = overseas_network_hint(family, network_mode="direct")
-        assert "不会影响它" in hint, family
-        assert "改成「跟随系统代理」" not in hint, family
 
 
 @pytest.mark.parametrize("mode", ["system", "custom", "", "DIRECT ", "unknown"])

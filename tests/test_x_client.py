@@ -8,10 +8,12 @@ is never actually driven against x.com.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 
 import pytest
 
+from openbiliclaw import network
 from openbiliclaw.sources.x_client import (
     XAuthError,
     XBlockedError,
@@ -82,6 +84,58 @@ def test_missing_cookie_raises_before_any_call() -> None:
 def test_missing_cookie_blank_string() -> None:
     with pytest.raises(XMissingCookieError):
         XClient(cookie="")._auth_pair()
+
+
+def test_xclient_applies_project_proxy_to_twitter_cli_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from twitter_cli import client as twitter_client
+
+    seen: list[str | None] = []
+
+    class FakeTwitterClient:
+        def __init__(self, auth_token: str, ct0: str) -> None:
+            assert (auth_token, ct0) == ("a", "b")
+            assert twitter_client._cffi_session is None
+            seen.append(os.environ.get("TWITTER_PROXY"))
+
+    monkeypatch.setattr(twitter_client, "TwitterClient", FakeTwitterClient)
+    monkeypatch.setattr(twitter_client, "_cffi_session", object())
+    monkeypatch.setattr(XClient, "_build_transaction", lambda _self: None)
+    monkeypatch.delattr(twitter_client, "_openbiliclaw_proxy", raising=False)
+    monkeypatch.setenv("TWITTER_PROXY", "http://ambient:7890")
+    network.set_outbound_proxy("socks5://custom:1080", mode="custom")
+
+    XClient(cookie="auth_token=a; ct0=b")._client()
+
+    assert seen == ["socks5://custom:1080"]
+    assert os.environ["TWITTER_PROXY"] == "http://ambient:7890"
+    assert twitter_client._cffi_session is None
+    assert twitter_client._openbiliclaw_proxy == "socks5://custom:1080"
+    network.reset_outbound_proxy_for_tests()
+
+
+def test_xclient_direct_mode_clears_ambient_twitter_proxy_during_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from twitter_cli import client as twitter_client
+
+    seen: list[str | None] = []
+
+    class FakeTwitterClient:
+        def __init__(self, _auth_token: str, _ct0: str) -> None:
+            seen.append(os.environ.get("TWITTER_PROXY"))
+
+    monkeypatch.setattr(twitter_client, "TwitterClient", FakeTwitterClient)
+    monkeypatch.setattr(XClient, "_build_transaction", lambda _self: None)
+    monkeypatch.delattr(twitter_client, "_openbiliclaw_proxy", raising=False)
+    monkeypatch.setenv("TWITTER_PROXY", "http://ambient:7890")
+    network.set_outbound_proxy("", mode="direct")
+
+    XClient(cookie="auth_token=a; ct0=b")._client()
+
+    assert seen == [None]
+    assert os.environ["TWITTER_PROXY"] == "http://ambient:7890"
 
 
 async def test_xclient_search_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:

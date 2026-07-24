@@ -191,9 +191,10 @@ headed = false
 
 # ── 海外网络路由（仅作用于海外客户端）──
 # 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
-# 的 chat + embedding、YouTube(yt-dlp)、Bangumi(api.bgm.tv 与封面 CDN
-# lain.bgm.tv 均为海外 Cloudflare,国内网络直连易超时,需走代理)、
-# GitHub 自动更新、Codex OAuth。
+# 的 chat + embedding、YouTube(yt-dlp)、X(twitter-cli)、Reddit(rdt-cli /
+# OpenCLI)、Bangumi(api.bgm.tv 与封面 CDN lain.bgm.tv 均为海外 Cloudflare,
+# 国内网络直连易超时,需走代理)、GitHub 自动更新、Codex OAuth。
+# X / Reddit 回落到浏览器扩展任务时仍由浏览器自己的网络设置决定。
 # B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
 # system(默认) = 继承环境 / 系统代理；direct = 忽略环境 / 系统代理；
 # custom = 只使用下方 proxy。

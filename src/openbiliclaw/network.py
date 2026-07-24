@@ -15,8 +15,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
+from urllib.request import getproxies
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 OutboundProxyMode = Literal["direct", "system", "custom"]
 _VALID_MODES = frozenset({"direct", "system", "custom"})
@@ -40,6 +44,15 @@ logger = logging.getLogger(__name__)
 # construction, before a request can be diagnosed or routed through a proxy.
 _CA_FILE_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 _CA_DIR_ENV_VARS = ("SSL_CERT_DIR",)
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+_NO_PROXY_ENV_VARS = ("NO_PROXY", "no_proxy")
 
 # Domestic (mainland-China) LLM gateways must ALWAYS connect directly, even
 # when ``[network].mode`` is ``system`` / ``custom`` for reaching overseas
@@ -175,6 +188,75 @@ def outbound_ytdlp_proxy() -> str | None:
     if _outbound_mode == "system":
         return None
     return _outbound_proxy or ""
+
+
+def outbound_cli_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build an environment for an overseas third-party CLI.
+
+    ``system`` preserves the caller's environment and materializes OS proxy
+    settings (notably macOS System Settings) for subprocesses that only inspect
+    environment variables. ``custom`` pins every common proxy variable to the
+    configured URL. ``direct`` removes them so a child process cannot
+    accidentally inherit an ambient proxy.
+    """
+    resolved = dict(os.environ if environment is None else environment)
+    if _outbound_mode == "direct":
+        for variable in _PROXY_ENV_VARS:
+            resolved.pop(variable, None)
+        return resolved
+    if _outbound_mode == "custom":
+        proxy = _outbound_proxy or ""
+        for variable in _PROXY_ENV_VARS:
+            resolved[variable] = proxy
+        # ``custom`` means this overseas client must use the selected proxy,
+        # independently of an ambient host bypass list.
+        for variable in _NO_PROXY_ENV_VARS:
+            resolved.pop(variable, None)
+        return resolved
+
+    system_proxies = getproxies()
+    for scheme, upper, lower in (
+        ("http", "HTTP_PROXY", "http_proxy"),
+        ("https", "HTTPS_PROXY", "https_proxy"),
+        ("all", "ALL_PROXY", "all_proxy"),
+    ):
+        value = str(system_proxies.get(scheme, "") or "").strip()
+        if value and upper not in resolved and lower not in resolved:
+            resolved[upper] = value
+            resolved[lower] = value
+    return resolved
+
+
+def outbound_cli_proxy_url(
+    *,
+    environment: Mapping[str, str] | None = None,
+    dedicated_variable: str = "",
+) -> str | None:
+    """Resolve one proxy URL for a CLI that accepts only a single proxy.
+
+    A tool-specific variable (for example ``TWITTER_PROXY``) wins only in
+    ``system`` mode. ``custom`` and ``direct`` remain authoritative.
+    """
+    original = os.environ if environment is None else environment
+    if _outbound_mode == "system" and dedicated_variable:
+        dedicated = str(original.get(dedicated_variable, "") or "").strip()
+        if dedicated:
+            return dedicated
+    resolved = outbound_cli_environment(original)
+    for variable in (
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ):
+        value = str(resolved.get(variable, "") or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _endpoint_host(url: str) -> str:

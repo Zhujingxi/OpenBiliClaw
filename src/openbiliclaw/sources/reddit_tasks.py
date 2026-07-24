@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.network import outbound_cli_environment
 from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.event_format import SOURCE_REDDIT, build_event
 
@@ -1006,6 +1007,7 @@ def _subprocess_run(args: list[str], *, timeout: float) -> subprocess.CompletedP
         errors="replace",
         timeout=timeout,
         check=False,
+        env=outbound_cli_environment(),
     )
 
 
@@ -1030,7 +1032,7 @@ def _run_rdt_cli_in_process(
         cli = cast("Any", rdt_cli).cli
     except Exception as exc:
         raise FileNotFoundError("rdt") from exc
-    result = CliRunner().invoke(cli, args[1:])
+    result = CliRunner().invoke(cli, args[1:], env=outbound_cli_environment())
     return subprocess.CompletedProcess(
         args=args,
         returncode=int(result.exit_code),
