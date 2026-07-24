@@ -132,6 +132,8 @@ module = [
     "playwright.*",
     "twitter_cli",
     "twitter_cli.*",
+    "x_client_transaction",
+    "x_client_transaction.*",
 ]
 ignore_missing_imports = true
 
