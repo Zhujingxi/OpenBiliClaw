@@ -41,7 +41,7 @@ def test_recommendation_feedback_bar_stays_isolated_from_saved_cards() -> None:
     app_js = _read()
     recommendation_bar = _fn_body(app_js, "cardFeedbackBarHtml")
     saved_render = _fn_body(app_js, "renderSavedList")
-    recommendation_render = _fn_body(app_js, "renderVideos")
+    recommendation_render = _fn_body(app_js, "recommendationCardHtml")
 
     # Recommendation cards keep their original full bar, including dismiss and
     # the inline composer. Saved cards must never mutate or reuse that renderer.

@@ -217,9 +217,10 @@ def test_init_onboarding_gate_trusts_init_status_when_runtime_status_is_unavaila
 def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
     """Progressive runtime reads apply and recover independently."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
-    assert "async function hydrateFromBackend()" in app_js
-    hydrate = app_js.split("async function hydrateFromBackend()", 1)[1]
-    hydrate = hydrate.split("\n    function renderAll()", 1)[0]
+    marker = "async function hydrateFromBackend({ replaceRecommendations = false } = {}) {"
+    assert marker in app_js
+    hydrate = app_js.split(marker, 1)[1]
+    hydrate = hydrate.split("\n    function renderAll(", 1)[0]
 
     # The first runtime read has its own immediate application/recovery branch.
     assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in hydrate

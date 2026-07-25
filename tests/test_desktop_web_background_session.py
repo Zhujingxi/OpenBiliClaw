@@ -20,7 +20,9 @@ def test_hidden_desktop_tab_does_not_hydrate_or_open_runtime_stream() -> None:
     stream = _function_body("connectRuntimeStream")
 
     assert "if (document.hidden || desktopBackendSessionInFlight) return;" in start
-    assert "await hydrateFromBackend();" in start
+    # Resume hydration never replaces the recommendation list; only the boot
+    # path (forceHydrate) is allowed to seed/replace it.
+    assert "await hydrateFromBackend({ replaceRecommendations: forceHydrate });" in start
     assert "if (!document.hidden) connectRuntimeStream();" in start
     assert "if (document.hidden) return;" in stream
     assert "WebSocket.CONNECTING" in stream

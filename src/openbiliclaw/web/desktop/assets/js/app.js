@@ -1943,6 +1943,17 @@
       }, delayMs);
     }
 
+    // 初始化状态刷新会被 refresh.pool_updated 高频拽起来（见 handleRuntimeEvent），
+    // 补货一轮能打好几次。网格里已经是真实卡片、又不需要退回引导门时，这条路径
+    // 只刷新头部 / 库存 / 侧栏，不重绘推荐列表 —— 与 refreshPlatformAvailability
+    // 的约定保持一致：库存事件不许碰已加载的卡片。
+    function initStatusRenderOptions() {
+      if (shouldShowInitOnboarding(state.runtimeStatus)) return {};
+      if (grid.querySelector(".init-onboarding") || grid.querySelector(".empty-state")) return {};
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return {};
+      return { preserveVideos: true };
+    }
+
     async function refreshInitStatus({ schedule = true } = {}) {
       if (initRefreshInFlight) {
         initRefreshPending = true;
@@ -1957,12 +1968,12 @@
         state.initStatus = status;
         state.initReason = "";
         if (status?.running) {
-          renderAll();
+          renderAll(initStatusRenderOptions());
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
           return;
         }
         if (status?.initialized) {
-          renderAll();
+          renderAll(initStatusRenderOptions());
           clearInitPolling();
           initRefreshPending = false;
           // Stage 3 makes initialized=true while stage 4 still owns the run.
@@ -1979,7 +1990,7 @@
           }
           return;
         }
-        renderAll();
+        renderAll(initStatusRenderOptions());
         if (embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
@@ -1988,7 +1999,7 @@
       } catch (error) {
         scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         state.initReason = `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`;
-        renderAll();
+        renderAll(initStatusRenderOptions());
       } finally {
         initRefreshInFlight = false;
         if (initRefreshPending) {
@@ -3555,8 +3566,132 @@ ${savedCardFeedbackBarHtml(listKind)}
       ).then(() => setCrossState(desktopSavedMutations.isSaved(crossKind, savedItem.item_key)));
     }
 
+    // recommendation key -> { node, html }：上一轮渲染出来的卡片。只有 markup 真的
+    // 变了才会重建节点，其余情况原样复用 —— 见 syncRecommendationCards 的注释。
+    const renderedRecommendationCards = new Map();
+
+    function recommendationCardHtml(item, index) {
+      const url = contentUrl(item);
+      const durationBadge = item.content_type === "video" && item.duration > 0
+        ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
+        : "";
+      const stats = recommendationStats(item);
+      return `
+          ${url
+          ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </a>`
+          : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </button>`}
+          <div>
+            <p class="video-title">${escapeHtml(item.title)}</p>
+            <p class="video-meta">${recommendationMetaHtml(item)}</p>
+            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
+          </div>
+          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
+${cardFeedbackBarHtml()}`;
+    }
+
+    function createRecommendationCard(item, html) {
+      const card = document.createElement("article");
+      card.className = "video-card";
+      card.dataset.bvid = item.bvid || item.id;
+      card.innerHTML = html;
+      const reason = card.querySelector(".reason");
+      const toggleReason = () => {
+        const expanded = reason.classList.toggle("is-expanded");
+        reason.setAttribute("aria-expanded", expanded ? "true" : "false");
+      };
+      reason.addEventListener("click", toggleReason);
+      reason.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggleReason();
+        }
+      });
+      const cover = card.querySelector(".cover");
+      cover.addEventListener("click", () => openRecommendation(item, card));
+      cover.addEventListener("auxclick", (event) => {
+        if (event.button === 1) openRecommendation(item, card);
+      });
+      card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
+      card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") handleCardAction("send-comment", item, card);
+        if (event.key === "Escape") closeCardComposer(card);
+      });
+      card.querySelector(".comment-field input").addEventListener("blur", (event) => {
+        autoCollapseComposer(card.querySelector(".card-actions"), event, () => closeCardComposer(card));
+      });
+      // Lazy-load watch-later state
+      const wlBtn = card.querySelector('[data-action="watch-later"]');
+      if (wlBtn) {
+        const savedItem = desktopSavedItem(item);
+        void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
+          const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
+          wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+          wlBtn.title = saved ? "取消稍后再看" : "稍后再看";
+        });
+      }
+      // Lazy-load favorite state
+      const favBtn = card.querySelector('[data-action="favorite"]');
+      if (favBtn) {
+        const savedItem = desktopSavedItem(item);
+        void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
+          const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
+          favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+          favBtn.title = saved ? "取消收藏" : "收藏";
+        });
+      }
+      return card;
+    }
+
+    // 按 recommendation key 做增量对账，而不是 grid.replaceChildren(...)。整表重建
+    // 会把用户正在看的卡片全部销毁：浏览器丢掉滚动锚点（列表跳动）、首屏之外的
+    // 懒加载封面回落成占位、展开的推荐理由和收藏 / 稍后再看的 aria-pressed 复位。
+    // 补货期间 refresh.pool_updated 会高频打到这条路径，所以它必须是幂等的 ——
+    // 列表没变时一个 DOM 节点都不许动。
+    function syncRecommendationCards(items) {
+      const previous = renderedRecommendationCards;
+      const next = new Map();
+      // 骨架卡由 showAppendSkeletons / removeAppendSkeletons owns；这里只负责把它们
+      // 保持在真实卡片后面，加载中的占位不能被一次库存重绘顺手抹掉。
+      const skeletons = Array.from(grid.querySelectorAll(".video-card.is-skeleton"));
+      let cursor = null;
+      items.forEach((item, index) => {
+        const key = recommendationKey(item) || `#${index}`;
+        const html = recommendationCardHtml(item, index);
+        const cached = previous.get(key);
+        // 复用要求 markup 和 recommendation_id 都没变：卡片上的监听器闭包持有的是
+        // 建卡时那个 item 对象，而 /api/feedback 按 recommendation_id 定位。同一条
+        // 内容换了一行新推荐（换一批 / 手动刷新）时 id 会变，必须重建，否则反馈会
+        // 打到已经作废的那一行上。
+        const node =
+          cached && cached.html === html && cached.id === item.id && cached.node.parentNode === grid
+            ? cached.node
+            : createRecommendationCard(item, html);
+        next.set(key, { node, html, id: item.id });
+        const target = cursor ? cursor.nextSibling : grid.firstChild;
+        if (node !== target) grid.insertBefore(node, target);
+        cursor = node;
+      });
+      const keep = new Set(Array.from(next.values(), (entry) => entry.node));
+      for (const node of Array.from(grid.children)) {
+        if (keep.has(node) || skeletons.includes(node)) continue;
+        node.remove();
+      }
+      for (const skeleton of skeletons) grid.appendChild(skeleton);
+      previous.clear();
+      for (const [key, entry] of next) previous.set(key, entry);
+    }
+
     function renderVideos() {
       if (shouldShowInitOnboarding(state.runtimeStatus)) {
+        renderedRecommendationCards.clear();
         renderInitOnboarding();
         return;
       }
@@ -3590,85 +3725,12 @@ ${savedCardFeedbackBarHtml(listKind)}
         const retry = desktopRecommendationLoadState === "failed-exhausted"
           ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
           : "";
+        renderedRecommendationCards.clear();
         grid.innerHTML = `<div class="empty-state">${message}${retry}</div>`;
         $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
         return;
       }
-      grid.replaceChildren(...items.map((item, index) => {
-        const card = document.createElement("article");
-        const url = contentUrl(item);
-        const durationBadge = item.content_type === "video" && item.duration > 0
-          ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
-          : "";
-        const stats = recommendationStats(item);
-        card.className = "video-card";
-        card.dataset.bvid = item.bvid || item.id;
-        card.innerHTML = `
-          ${url
-            ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item, index)}
-            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
-            ${durationBadge}
-          </a>`
-            : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item, index)}
-            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
-            ${durationBadge}
-          </button>`}
-          <div>
-            <p class="video-title">${escapeHtml(item.title)}</p>
-            <p class="video-meta">${recommendationMetaHtml(item)}</p>
-            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
-          </div>
-          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
-${cardFeedbackBarHtml()}`;
-        const reason = card.querySelector(".reason");
-        const toggleReason = () => {
-          const expanded = reason.classList.toggle("is-expanded");
-          reason.setAttribute("aria-expanded", expanded ? "true" : "false");
-        };
-        reason.addEventListener("click", toggleReason);
-        reason.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            toggleReason();
-          }
-        });
-        const cover = card.querySelector(".cover");
-        cover.addEventListener("click", () => openRecommendation(item, card));
-        cover.addEventListener("auxclick", (event) => {
-          if (event.button === 1) openRecommendation(item, card);
-        });
-        card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
-        card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
-          if (event.key === "Enter") handleCardAction("send-comment", item, card);
-          if (event.key === "Escape") closeCardComposer(card);
-        });
-        card.querySelector(".comment-field input").addEventListener("blur", (event) => {
-          autoCollapseComposer(card.querySelector(".card-actions"), event, () => closeCardComposer(card));
-        });
-        // Lazy-load watch-later state
-        const wlBtn = card.querySelector('[data-action="watch-later"]');
-        if (wlBtn) {
-          const savedItem = desktopSavedItem(item);
-          void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
-            const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
-            wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
-            wlBtn.title = saved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
-          });
-        }
-        // Lazy-load favorite state
-        const favBtn = card.querySelector('[data-action="favorite"]');
-        if (favBtn) {
-          const savedItem = desktopSavedItem(item);
-          void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
-            const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
-            favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
-            favBtn.title = saved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
-          });
-        }
-        return card;
-      }));
+      syncRecommendationCards(items);
     }
 
     function trackRecommendationClick(item) {
@@ -5749,7 +5811,8 @@ ${cardFeedbackBarHtml()}`;
       const result = await requestJson(ENDPOINTS.refresh, { method: "POST" });
       if (result) {
         showToast("已请求后端开始补货");
-        await hydrateFromBackend();
+        // 用户手动点的刷新，是明确要求换掉当前列表。
+        await hydrateFromBackend({ replaceRecommendations: true });
       } else {
         showToast("刷新失败：请检查后端连接");
       }
@@ -7987,7 +8050,9 @@ ${cardFeedbackBarHtml()}`;
         await ensureAuthenticated();
         const stale = Date.now() - desktopLastHydratedAt >= DESKTOP_RESUME_HYDRATE_TTL_MS;
         if (forceHydrate || backendHydrationPending || !desktopLastHydratedAt || stale) {
-          await hydrateFromBackend();
+          // forceHydrate 只有首屏引导会传：那时列表本来就是空的。切回标签页触发的
+          // 再水合不带这个标志，列表原样保留。
+          await hydrateFromBackend({ replaceRecommendations: forceHydrate });
           desktopLastHydratedAt = Date.now();
           backendHydrationPending = false;
         }
@@ -8016,12 +8081,17 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
-    async function hydrateFromBackend() {
+    // replaceRecommendations 只留给「用户明确要求换一批列表」的调用方：首屏引导和
+    // 手动刷新。后台再水合（切回标签页、config_reloaded、保存配置、初始化完成）一律
+    // 保持 false —— /api/recommendations 只返回最新的 top 窗口，整表覆盖会把用户
+    // 滚动加载出来的卡片全部丢掉并按后端最新排序重排（群反馈的「重新排序」）。
+    // replace=false 时 applyDesktopRecommendationSnapshot 只在列表为空时装填。
+    async function hydrateFromBackend({ replaceRecommendations = false } = {}) {
       const firstRuntimeGeneration = desktopRuntimeGeneration;
       let runtimeReconciliationGeneration = null;
 
       function applyInitialRecommendations(items) {
-        applyDesktopRecommendationSnapshot(items, { replace: true });
+        applyDesktopRecommendationSnapshot(items, { replace: replaceRecommendations });
         renderFilters();
         renderVideos();
         scheduleAutoLoadCheck();
@@ -8232,9 +8302,12 @@ ${cardFeedbackBarHtml()}`;
       ]);
     }
 
-    function renderAll() {
+    // preserveVideos：跳过推荐网格这一步。给「高频后台事件顺手带起来的重绘」用，
+    // 它们只想刷新头部 / 库存 / 侧栏，不该碰用户正在浏览的列表。
+    function renderAll({ preserveVideos = false } = {}) {
       const steps = [renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
       for (const step of steps) {
+        if (preserveVideos && step === renderVideos) continue;
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
       scheduleActivityRailHeightSync();

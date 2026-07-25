@@ -27,11 +27,15 @@ def test_desktop_web_starts_with_empty_recommendation_list() -> None:
 
 
 def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
-    """An empty backend recommendation response must clear stale local cards."""
+    """A *replacing* hydration must clear stale local cards when the backend is empty.
+
+    Background re-hydration (tab resume, config_reloaded, config save) deliberately
+    keeps the list — see test_desktop_resume_hydration_preserves_loaded_cards.
+    """
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     hydrate = re.search(
-        r"async function hydrateFromBackend\(\) \{(?P<body>.*?)\n    \}",
+        r"async function hydrateFromBackend\([^)]*\) \{(?P<body>.*?)\n    \}",
         app_js,
         flags=re.S,
     )
@@ -39,7 +43,8 @@ def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
     body = hydrate.group("body")
     assert "const recommendationsPromise = readRecommendationSnapshot();" in body
     assert "function applyInitialRecommendations(items)" in body
-    assert "applyDesktopRecommendationSnapshot(items, { replace: true });" in body
+    assert "applyDesktopRecommendationSnapshot(items, { replace: replaceRecommendations });" in body
+    assert "await hydrateFromBackend({ replaceRecommendations: true });" in app_js
     assert 'desktopRecommendationLoadState = "empty-success"' in app_js
 
 
@@ -105,7 +110,7 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     hydrate = re.search(
-        r"async function hydrateFromBackend\(\) \{(?P<body>.*?)\n    \}",
+        r"async function hydrateFromBackend\([^)]*\) \{(?P<body>.*?)\n    \}",
         app_js,
         flags=re.S,
     )
@@ -197,14 +202,13 @@ def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     assert 'x: "twitter"' in saved_sync_js
     assert 'host === "x.com"' in saved_sync_js
 
-    render_videos = re.search(
-        r"function renderVideos\(\) \{(?P<body>.*?)\n    \}",
+    card_html = re.search(
+        r"function recommendationCardHtml\(item, index\) \{(?P<body>.*?)\n    \}",
         app_js,
         flags=re.S,
     )
-    assert render_videos is not None, "desktop renderVideos not found"
-    render_body = render_videos.group("body")
-    assert "recommendationMediaHtml(item, index)" in render_body
+    assert card_html is not None, "desktop recommendationCardHtml not found"
+    assert "recommendationMediaHtml(item, index)" in card_html.group("body")
 
     media_html = re.search(
         r"function recommendationMediaHtml\(item, index = 0\) \{(?P<body>.*?)\n    \}",
