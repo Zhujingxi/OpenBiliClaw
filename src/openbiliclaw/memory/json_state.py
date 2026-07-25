@@ -30,6 +30,24 @@ def _process_lock(path: Path) -> threading.RLock:
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
     lock_path = path.with_suffix(path.suffix + ".lock")
+    with exclusive_file_lock(lock_path) as acquired:
+        if not acquired:  # pragma: no cover - blocking mode always acquires
+            raise RuntimeError(f"failed to acquire blocking lock: {lock_path}")
+        yield
+
+
+@contextmanager
+def exclusive_file_lock(lock_path: Path, *, blocking: bool = True) -> Iterator[bool]:
+    """Hold an OS-level exclusive lock on ``lock_path``.
+
+    Yields whether the lock was acquired; in non-blocking mode a caller that
+    loses the race gets ``False`` instead of waiting. The lock is released by
+    the kernel if the process dies, so a crash cannot strand it.
+
+    The lock file itself is never deleted or replaced — an unlinked path would
+    let two processes hold locks on different inodes for the same logical
+    resource.
+    """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+b") as handle:
         if os.name == "nt":
@@ -37,18 +55,32 @@ def _file_lock(path: Path) -> Iterator[None]:
 
             msvcrt_module = cast("Any", msvcrt)
             handle.seek(0)
-            msvcrt_module.locking(handle.fileno(), msvcrt_module.LK_LOCK, 1)
+            mode = msvcrt_module.LK_LOCK if blocking else msvcrt_module.LK_NBLCK
             try:
-                yield
+                msvcrt_module.locking(handle.fileno(), mode, 1)
+            except OSError:
+                if blocking:
+                    raise
+                yield False
+                return
+            try:
+                yield True
             finally:
                 handle.seek(0)
                 msvcrt_module.locking(handle.fileno(), msvcrt_module.LK_UNLCK, 1)
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
             try:
-                yield
+                fcntl.flock(handle.fileno(), flags)
+            except OSError:
+                if blocking:
+                    raise
+                yield False
+                return
+            try:
+                yield True
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 

@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.network import outbound_cli_environment
+from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.event_format import SOURCE_REDDIT, build_event
 
 if TYPE_CHECKING:
@@ -148,6 +150,28 @@ def rdt_credential_cookie_names() -> tuple[str, ...]:
     return tuple(sorted(str(name) for name, value in cookies.items() if str(name) and value))
 
 
+def rdt_credential_saved_at() -> str:
+    """When rdt-cli last wrote its credential file, ISO-8601 (empty if unknown).
+
+    The source-auth contract needs a timestamp behind every TTL-bearing verdict
+    (``verified_at``): "ready" for Reddit means "this file is younger than
+    ``_RDT_CREDENTIAL_TTL_SECONDS``", and a freshness claim the user cannot date
+    is not checkable. Lives next to the other credential-file readers so the
+    file keeps exactly one reading family (invariant I1).
+    """
+
+    try:
+        data = json.loads(_rdt_credential_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    saved_at = _optional_float(data.get("saved_at"))
+    if saved_at is None:
+        return ""
+    return datetime.fromtimestamp(saved_at, tz=UTC).isoformat()
+
+
 def _parse_cookie_header(cookie: str) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for part in cookie.split(";"):
@@ -215,6 +239,10 @@ def reddit_items_to_contents(
             source_keyword_id = keyword_ids.get(keyword)
         if source_keyword_id is None:
             source_keyword_id = fallback_keyword_id
+        published = normalize_published_time(
+            item.get("published_at") or item.get("created_utc"),
+            label=item.get("published_label"),
+        )
 
         contents.append(
             DiscoveredContent(
@@ -236,6 +264,8 @@ def reddit_items_to_contents(
                 tags=tags,
                 score_threshold=REDDIT_DISCOVERY_SCORE_THRESHOLD,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
         )
     return contents
@@ -458,7 +488,9 @@ class RedditTaskQueue:
         count_today = self._budgeted_count_today(task_type) if daily_budget > 0 else 0
         if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
-                "reddit task budget exhausted: type=%s, count=%d, budget=%d",
+                "reddit task budget exhausted: type=%s used_today=%d budget=%d "
+                "(per-day UTC cap from config [sources.reddit] daily_*_budget; "
+                "0 = unlimited)",
                 task_type,
                 count_today,
                 daily_budget,
@@ -930,6 +962,27 @@ def _rdt_saved_credential_state() -> tuple[str, str]:
     return "present", "rdt credential 就绪。"
 
 
+def local_reddit_credential_status() -> RedditCommandStatus:
+    """Return the saved rdt credential state without running a command.
+
+    The settings page calls this helper so merely opening or refreshing it
+    never invokes rdt and never sends a request to Reddit.
+    """
+
+    state, message = _rdt_saved_credential_state()
+    if state == "present":
+        return RedditCommandStatus(
+            "rdt",
+            "ready",
+            "Reddit 本地凭据已就绪（未实时访问 Reddit 验证）。",
+        )
+    if state == "expired":
+        return RedditCommandStatus("rdt", "stale", message)
+    if state == "missing":
+        return RedditCommandStatus("rdt", "login_required", message)
+    return RedditCommandStatus("rdt", "error", message)
+
+
 def _rdt_credential_file() -> Path:
     try:
         constants = importlib.import_module("rdt_cli.constants")
@@ -954,6 +1007,7 @@ def _subprocess_run(args: list[str], *, timeout: float) -> subprocess.CompletedP
         errors="replace",
         timeout=timeout,
         check=False,
+        env=outbound_cli_environment(),
     )
 
 
@@ -978,7 +1032,7 @@ def _run_rdt_cli_in_process(
         cli = cast("Any", rdt_cli).cli
     except Exception as exc:
         raise FileNotFoundError("rdt") from exc
-    result = CliRunner().invoke(cli, args[1:])
+    result = CliRunner().invoke(cli, args[1:], env=outbound_cli_environment())
     return subprocess.CompletedProcess(
         args=args,
         returncode=int(result.exit_code),

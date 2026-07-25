@@ -17,6 +17,7 @@ from typing import Any
 
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinBudgetExhausted as _DouyinBudgetExhausted,
 )
@@ -50,10 +51,20 @@ class DouyinDiscoveryProducer:
     soul_engine: Any
     discover: DouyinDiscoverCallable
     enabled: bool = True
-    min_interval_minutes: int = 30
+    min_interval_minutes: int = 15
     sources: tuple[str, ...] = ("search", "hot", "feed")
+    # How many pending keywords to claim AND search per run. Must equal the
+    # strategy's effective search count: the strategy truncates seed keywords to
+    # ``keywords_per_run`` (douyin_direct._dedupe_cap), so claiming more than we
+    # search silently burns the extra words as ``used`` without ever searching
+    # them. Keep this in lock-step with ``DouyinDiscoveryOptions.keywords_per_run``.
+    keywords_per_run: int = 3
     evaluate: bool = True
     candidate_pipeline: Any | None = None
+    # API/OpenClaw runtime composition flips this after attaching its shared
+    # CandidateEvalCoordinator. Standalone producer runs preserve the legacy
+    # inline drain path.
+    candidate_evaluation_owned_by_coordinator: bool = False
     per_source_limit: int = 20
     # Unified keyword planner fetch coordinator (P1.7). When wired AND the flag
     # is on, the producer's search source claims words from the keyword store
@@ -104,7 +115,9 @@ class DouyinDiscoveryProducer:
             and "search" in selected_sources
         )
         if flag_on_search and coordinator is not None:
-            claimed = coordinator.claim(_PLATFORM_DOUYIN)
+            # Claim exactly as many words as the strategy will search
+            # (``keywords_per_run``) so none are burned unsearched.
+            claimed = coordinator.claim(_PLATFORM_DOUYIN, n=self.keywords_per_run)
             if not claimed:
                 # Flag on but the store has no claimable pending words → skip the
                 # search fetch this cycle (the planner will refill); don't run a
@@ -117,7 +130,7 @@ class DouyinDiscoveryProducer:
             cache=not use_candidate_pipeline,
             evaluate=False if use_candidate_pipeline else self.evaluate,
             per_source_limit=per_source_limit,
-            keywords_per_run=1,
+            keywords_per_run=self.keywords_per_run,
             keywords=tuple(item.keyword for item in claimed) if claimed else (),
             # P1.8: thread the producing word's id onto each search candidate for
             # admit-time yield backfill.
@@ -166,7 +179,7 @@ class DouyinDiscoveryProducer:
             )
         )
         payload["enqueued"] = enqueued
-        if enqueued > 0:
+        if enqueued > 0 and not self.candidate_evaluation_owned_by_coordinator:
             drain_result = await self.candidate_pipeline.drain_pending(
                 profile=profile,
                 batch_size=requested_limit,
@@ -184,15 +197,15 @@ class DouyinDiscoveryProducer:
     def _sources_for_limit(self, requested_limit: int) -> tuple[str, ...]:
         configured = tuple(source for source in self.sources if str(source).strip())
         if requested_limit >= 10:
-            selected = tuple(source for source in ("search", "hot") if source in configured)
-            if selected:
-                return selected
+            prioritized = tuple(source for source in ("search", "hot") if source in configured)
+            if prioritized:
+                return prioritized
             return configured[:1] or ("search",)
 
-        preferred = ("feed",) if requested_limit <= 3 else ("hot", "feed")
-        selected = tuple(source for source in preferred if source in configured)
-        if selected:
-            return selected
+        preferred: tuple[str, ...] = ("feed",) if requested_limit <= 3 else ("hot", "feed")
+        preferred_configured = tuple(source for source in preferred if source in configured)
+        if preferred_configured:
+            return preferred_configured
 
         non_search = tuple(source for source in configured if source != "search")
         if non_search:
@@ -200,16 +213,9 @@ class DouyinDiscoveryProducer:
         return configured[:1] or ("search",)
 
     def _candidate_pool_full(self) -> bool:
-        if self.candidate_pipeline is None:
-            return False
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug("douyin producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "douyin", logger=logger, label="douyin producer"
+        )
 
     def _stamp_candidate_score_thresholds(self, items: list[Any]) -> None:
         for item in items:
@@ -303,7 +309,7 @@ def build_douyin_discovery_producer(
         soul_engine=soul_engine,
         discover=_discover,
         enabled=bool(getattr(scheduler, "enabled", True)),
-        min_interval_minutes=30,
+        min_interval_minutes=15,
         sources=("search", "hot", "feed"),
         candidate_pipeline=candidate_pipeline,
         per_source_limit=20,

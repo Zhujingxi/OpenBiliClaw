@@ -1,8 +1,11 @@
 # OpenBiliClaw configuration example
 # Copy this file to config.toml and edit as needed.
 # 首次运行如果缺少 config.toml，程序会自动基于本文件生成模板。
-# 使用远程模型（OpenAI / Claude / Gemini / DeepSeek / OpenRouter）时，需要为默认 provider 填写 api_key。
-# 如仅使用本地 Ollama，可将 default_provider 设为 "ollama"。
+# 使用远程模型（OpenAI / Claude / Gemini / DeepSeek / OpenRouter）时，需要为调用链中的实例填写 api_key。
+# 本地 Ollama 主要用于向量检索（embedding, bge-m3）。作为聊天 provider 属高级用法：
+# 捆绑的 Ollama 只装了 embedding 模型，小体积本地聊天模型达不到内容管线质量线，
+# 因此图形向导 / init / bootstrap 都不再推荐把它当聊天默认。确要如此的高级用户可手动
+# 新建一个 provider_type = "ollama" 的实例，并把实例 ID 放入 default_chain。
 
 [general]
 # Language for Agent output (zh / en)
@@ -38,141 +41,71 @@ trusted_proxies = []
 # 默认空 = 只允许同源 Cookie 登录，绝不向 JS 返回 token。
 allowed_bearer_origins = []
 
+# 扩展设备访问默认关闭。启用后仅接受下方已配置设备密钥签发的访问令牌。
+extension_access_enabled = false
+# 扩展设备密钥摘要记录（<12 位 key ID>:<SHA-256 digest>）；不要填入完整密钥。
+extension_access_keys = []
+# 扩展设备访问令牌有效期（小时），允许范围 1..168，默认 24。
+extension_token_ttl_hours = 24
+
 [llm]
-# Default LLM provider: "deepseek" | "openai" | "claude" | "gemini" | "ollama" | "openrouter" | "openai_compatible"
-# 这里选择的 provider 决定了运行时会检查哪一组敏感字段。
-default_provider = "deepseek"
+# v2：每个实例都是完整可调用端点（类型 + Base URL + 凭据 + 模型）。
+# default_chain 从左到右依次尝试；失败、超时或限流时降级到下一实例。
+# 可复制任意 [llm.instances.<id>] 表并换一个稳定 ID，从而配置同类型的多个账号/网关。
+routing_version = 2
+default_chain = ["deepseek"]
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-concurrency = 3
+# 总并发 4；后台派生为 3
+concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # openai_compatible. Allowed range: 10..600. Default 300s.
 timeout = 300
-# 旧兼容开关；实际 fallback 只在 fallback_provider 非空时发生。
-fallback_enabled = false
-# 第二个备选 provider；默认空 = 不 fallback，不再自动尝试其它 provider。
-# 设为 "ollama" 可让本地 Ollama 兜底 chat，但需在 [llm.ollama] 配好 chat 模型
-# （或本地已 `ollama pull llama3`）——bge-m3 只能做 embedding，不能兜底 chat。
-fallback_provider = ""
+# 新实例请直接在桌面设置页创建。手工配置时复制下面的完整表，
+# 给每个渠道一个稳定且唯一的 ID，再把 ID 加进 default_chain：
+#
+# [llm.instances.relay-backup]
+# name = "备用中转"
+# provider_type = "openai_compatible"
+# enabled = true
+# api_key = ""
+# model = "gpt-5-nano"
+# base_url = "https://relay.example.com/v1"
+# api_flavor = ""
+#
+# default_chain = ["deepseek", "relay-backup"]
 
-[llm.openai]
-# 若 default_provider = "openai"，api_key 必填
-# 实验选项：先运行 `openbiliclaw login codex` 导入 Codex CLI 的 ChatGPT OAuth
-# 凭据后，可把 auth_mode 改成 "codex_oauth"，此时 api_key 会被忽略。
-# 这是非官方路径，可能因 OpenAI / Codex CLI 变更随时失效；同时必须保持
-# base_url 为空或指向 OpenAI 官方 API 域名，避免把 ChatGPT token 发给第三方代理。
-# 当前(2026-05)模型清单: gpt-5-nano (最便宜) / gpt-5.4-nano / gpt-5.4-mini /
-#                      gpt-5.5 (旗舰 4/2026) / gpt-5.5-pro
-# gpt-4o 系列已从 ChatGPT 退役但 API 仍可调
-api_key = ""
-model = "gpt-5-nano"
-base_url = ""  # Leave empty for default, or set for compatible APIs
-auth_mode = ""  # "" / "api_key" / "codex_oauth"
-
-[llm.claude]
-# 若 default_provider = "claude"，api_key 必填
-# 当前(2026-05)主线: claude-opus-4-7 (旗舰) / claude-sonnet-4-6 (默认 / 1M ctx) /
-#                  claude-haiku-4-5 (便宜)
-api_key = ""
-model = "claude-sonnet-4-6"
-
-[llm.gemini]
-# 若 default_provider = "gemini"，推荐设置 GEMINI_API_KEY / GOOGLE_API_KEY；
-# 也可直接在这里填写 api_key。
-# 当前(2026-05)清单: gemini-2.5-flash (默认 / 稳定) / gemini-3-flash-preview (新) /
-#                 gemini-3.1-pro-preview (旗舰 / Public Preview) / gemini-3.1-flash-lite-preview (最便宜)
-# 注: 3.1 Pro 当前仍为 Public Preview, 真实模型 ID 带 "-preview" 后缀,
-#     需要绑定付费的 AI Studio / Vertex 项目, 免费档无法调用。
-api_key = ""
-model = "gemini-2.5-flash"
-
-[llm.deepseek]
-# 若 default_provider = "deepseek"，api_key 必填
+[llm.instances.deepseek]
+name = "DeepSeek 官方"
+provider_type = "deepseek"
+enabled = true
+# 当前位于 default_chain，api_key 必填
 api_key = ""
 # 可选模型：deepseek-v4-flash（默认） / deepseek-v4-pro
 # 旧名 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
-# v4 模型支持 thinking 模式：设置 "high" 或 "max" 开启，空字符串关闭。
-# 开启后会自动附带 thinking={"type": "enabled"} 请求字段。
-#
-# v0.3.26 默认改成空(关闭),因为当时 prompt 没 cache,每次按 32K tokens
-# 预算计费,日花费被放大 5-10x。
-# v0.3.31 改回 "max":配合 prompt-cache 改造(系统 prompt 100% 静态,
-# DeepSeek 自动 cache 90% off 输入)+ caller 标签 + cost 观测台账,
-# reasoning 带来的 LLM 标签质量提升(franchise_key / topic_group 标得更
-# 准、score 更稳)抵消掉了 thinking 阶段的 token 消耗,综合下来比关闭
-# 时还便宜。运行 ``openbiliclaw cost --by caller`` 看实际花费。需要再
-# 关回去就改成 "" 即可。
-reasoning_effort = "max"
-
-[llm.ollama]
-# Local model via Ollama（本地运行，不要求 api_key）
-# base_url MUST include the /v1 suffix — OpenBiliClaw uses Ollama's
-# OpenAI-compatible shim (`/v1/chat/completions`) for chat, and the
-# native `/api/embeddings` route is derived by stripping that suffix.
-# A bare "http://localhost:11434" makes the OpenAI SDK call
-# `/chat/completions` which Ollama 404s.
-# 当前 (2026-05) 推荐: qwen2.5:7b (中文好) / llama3.2 (Meta 新版) /
-# gemma2 / mistral / deepseek-r1。``ollama list`` 看本地已拉的模型
-model = "qwen2.5:7b"
-base_url = "http://localhost:11434/v1"
-# num_ctx: 上下文窗口大小 (tokens)。0 = 用 Ollama 服务端默认值 (通常 4096),
-# 走 OpenAI 兼容的 /v1 路径。⚠️ /v1 兼容层会"静默丢弃"num_ctx,大批量
-# prompt 一旦超过 4096 就被截断,导致本地小模型 (如 qwen) 输出无法解析的
-# JSON / 推荐文案重复且和视频对不上。设 >0 (推荐 8192) 后,聊天改走 Ollama
-# 原生 /api/chat 端点,num_ctx 才真正生效。按显存酌情调大;qwen2.5 原生
-# 支持 32K。仅 Ollama 生效,其它 provider 忽略此项。
-num_ctx = 0
-
-[llm.openrouter]
-# 若 default_provider = "openrouter"，api_key 必填
-# OpenRouter 模型名格式: <vendor>/<model>,如:
-#   openai/gpt-5-nano (默认) / anthropic/claude-sonnet-4-6 / google/gemini-2.5-flash
-api_key = ""
-model = "openai/gpt-5-nano"
-base_url = "https://openrouter.ai/api/v1"
-http_referer = ""
-x_title = "OpenBiliClaw"
-
-[llm.openai_compatible]
-# v0.3.32+ — generic OpenAI-protocol-compatible provider. Use this for
-# Groq / Together / Azure OpenAI / vLLM / self-hosted, etc. Distinct from
-# [llm.openai] so cost stats / retries / billing stay separate.
-#
-# Examples:
-#   - Groq:     base_url = "https://api.groq.com/openai/v1"
-#               model = "llama-3.1-70b-versatile"
-#   - Together: base_url = "https://api.together.xyz/v1"
-#               model = "Qwen/Qwen2.5-72B-Instruct-Turbo"
-#   - Azure:    base_url = "https://<resource>.openai.azure.com/openai/deployments/<deployment>"
-#               model = "(matches Azure deployment name)"
-#   - vLLM:     base_url = "http://localhost:8000/v1"
-#               model = "(model loaded by vLLM)"
-#
-# base_url is REQUIRED — without it, this provider degrades to ``openai``
-# (and would 401 against api.openai.com). The backend refuses to register
-# without one and surfaces a ConfigIssue at startup.
-api_key = ""
-model = ""
-base_url = ""
+# v4 thinking 默认用均衡档 medium（DeepSeek 官方兼容映射为 high）。
+# 渠道的关键词、抽取、评分和短文案任务仍按单次调用传空并关闭 thinking；
+# 需要最深推理时可改为 "max"，完全关闭可改为 ""。
+reasoning_effort = "medium"
 
 [llm.embedding]
 # Embedding model for semantic similarity (topic dedup, fatigue, feedback)
 #
 # v0.3.32+ note: this section now owns its own ``api_key`` / ``base_url``.
-# Embedding is fully decoupled from ``[llm].default_provider`` — pick the
+# Embedding is fully decoupled from ``[llm].default_chain`` — pick the
 # embedding provider, supply its credentials here, and chat traffic keeps
-# using whatever ``[llm].default_provider`` points to.
+# using the ordered endpoint instances in ``[llm].default_chain``.
 #
-# provider: empty = disable embedding; embedding no longer follows [llm].default_provider
+# provider: empty = disable embedding; embedding does not implicitly follow the chat chain
 #           "ollama" = local Ollama (no API key needed)
 #           "openai" / "gemini" = remote embeddings
 # model:    matched to provider when empty:
 #             gemini → gemini-embedding-001
 #             openai → text-embedding-3-small
-#             ollama → bge-m3   (multilingual, ~568MB, sub-second on CPU)
+#             ollama → bge-m3   (multilingual, ~1.1GB, sub-second on CPU)
 #
 # To enable local Ollama embedding:
 #   1. install Ollama   (Mac: `brew install ollama` ; Windows: ollama.com/download)
@@ -187,10 +120,10 @@ provider = ""
 #   openai → text-embedding-3-small
 #   ollama → bge-m3
 model = ""
-# v0.3.32+: dedicated embedding credentials. Leave empty to fall back to
-# [llm.<provider>].api_key / .base_url (back-compat — emits a one-time
-# WARNING; will be removed in a future release). Ollama doesn't need an
-# api_key. base_url is optional for Ollama (defaults to localhost), OpenAI
+# v0.3.32+: dedicated embedding credentials. Empty values only borrow the
+# first matching enabled [llm.instances.*] endpoint when fallback_enabled=true
+# (back-compat; emits a one-time WARNING). Ollama doesn't need an api_key.
+# base_url is optional for Ollama (defaults to localhost), OpenAI
 # (defaults to api.openai.com), and Gemini (defaults to the official API).
 api_key = ""
 base_url = ""
@@ -200,7 +133,8 @@ output_dimensionality = 1024
 # Cosine similarity threshold: topics above this are considered "same topic"
 similarity_threshold = 0.82
 # 默认关闭 embedding fallback；只有 fallback_provider 非空时才会尝试一个显式备选 provider。
-# 插件设置页会在你选择备选 provider 时同步打开 fallback_enabled，以允许借用对应 chat-side 凭据。
+# 设置页会在你选择备选 provider 时同步打开 fallback_enabled，以允许借用首个同类型已启用实例的凭据。
+# 请确保主备 embedding 模型输出维度/向量空间兼容，避免相似度结果漂移。
 fallback_enabled = false
 fallback_provider = ""
 # Optional cover image embedding (image-only vectors, same space as text).
@@ -214,30 +148,28 @@ fallback_provider = ""
 # Independent of [discovery].multimodal_evaluation_enabled (vision LLM eval).
 multimodal_enabled = false
 
-# Per-module LLM overrides — set provider/model to use a different LLM
-# for specific modules. Leave empty to inherit from [llm] defaults.
-# This lets you e.g. use a cheaper model for discovery evaluation
-# but a smarter model for soul profile generation.
+# Per-module routes. inherit=true 表示完整继承 [llm].default_chain；
+# 需要隔离质量/成本时改为 false，并按优先级填写实例 ID。
 
-[llm.soul]
+[llm.routes.soul]
 # Soul profile generation / incremental updates (init, role/values/core delta)
-provider = ""
-model = ""
+inherit = true
+chain = []
 
-[llm.discovery]
+[llm.routes.discovery]
 # Content discovery (search query generation, domain exploration)
-provider = ""
-model = ""
+inherit = true
+chain = []
 
-[llm.recommendation]
+[llm.routes.recommendation]
 # Recommendation expression generation
-provider = ""
-model = ""
+inherit = true
+chain = []
 
-[llm.evaluation]
+[llm.routes.evaluation]
 # Content relevance evaluation (LLM-as-judge for discovered content)
-provider = ""
-model = ""
+inherit = true
+chain = []
 
 [bilibili]
 # Authentication method: "cookie" | "qrcode" | "none"
@@ -245,12 +177,34 @@ model = ""
 auth_method = "cookie"
 # Cookie string (from browser)
 cookie = ""
+# B站 请求专用代理（默认留空 = 恒直连）。
+# 后端访问 B站 时会忽略环境变量和系统代理——代理出口 IP 常触发 B站 风控，
+# 导致明明已登录却显示"未登录"。只有你的网络确实无法直连 B站 时才需要填，
+# 例如 "http://127.0.0.1:7890"。
+proxy = ""
 
 [bilibili.browser]
 # agent-browser executable path (leave empty for global install)
 executable = ""
 # Use headed mode for debugging
 headed = false
+
+# ── 海外网络路由（仅作用于海外客户端）──
+# 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
+# 的 chat + embedding、YouTube(yt-dlp)、X(twitter-cli)、Reddit(rdt-cli /
+# OpenCLI)、Bangumi(api.bgm.tv 与封面 CDN lain.bgm.tv 均为海外 Cloudflare,
+# 国内网络直连易超时,需走代理)、GitHub 自动更新、Codex OAuth。
+# X / Reddit 回落到浏览器扩展任务时仍由浏览器自己的网络设置决定。
+# B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
+# system(默认) = 继承环境 / 系统代理；direct = 忽略环境 / 系统代理；
+# custom = 只使用下方 proxy。
+# 默认给 system,是因为上面列的全是海外服务:direct 下国内网络必然超时,
+# 而这是开箱默认值——新用户配好令牌、启用来源,然后撞上一句没头没尾的
+# 网络错误。没有配代理时 system 与直连等价,海外用户无影响。
+# 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
+[network]
+mode = "system"
+proxy = ""
 
 # ── 通用 Web / 自定义网页源的浏览器配置 ──
 # 与 [bilibili.browser] 独立：Bilibili 走 agent-browser CLI，
@@ -367,6 +321,28 @@ daily_related_budget = 300              # 相关扩展 discovery 每日条目上
 request_interval_seconds = 3            # 插件任务轮询间隔 / 命令 fallback 超时估算
 min_interval_minutes = 60               # RedditDiscoveryProducer 两次执行最小间隔
 
+# ── Bangumi 官方公开 API（只读）──
+# 无需 Cookie 或 OAuth。username 留空时只参与后续内容发现；填写后，首次初始化可读取
+# 该账号的公开收藏。latest 是兼容配置名，实际为按日期浏览，可能包含未播出的未来条目。
+[sources.bangumi]
+enabled = false
+username = ""
+# Optional personal access token. Generate one (valid ~1 year) at
+# https://next.bgm.tv/demo/access-token. When set, init/discovery identify your
+# account via /v0/me and read your OWN collections — including PRIVATE ones —
+# with a Bearer header; the username above is auto-resolved. Leave empty to keep
+# the anonymous public-username path (only reads public collections). Treat this
+# token like a password; it is written to config.toml (which is gitignored).
+access_token = ""
+subject_types = ["anime", "book", "game"]
+source_modes = ["search", "ranked", "latest"]
+daily_search_budget = 300
+daily_ranked_budget = 100
+daily_latest_budget = 100
+request_interval_seconds = 1
+min_interval_minutes = 60
+bootstrap_limit = 300
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -424,7 +400,8 @@ auto_update_allow_prerelease = false  # 是否允许 backend-vX.Y.Z-rc/beta/dev 
 auto_update_allowed_remotes = [
   "https://github.com/whiteguo233/OpenBiliClaw.git",
   "git@github.com:whiteguo233/OpenBiliClaw.git",
-] # 只有 origin 精确匹配这些远端时才允许自动快进；带凭据的 URL 一律拒绝
+] # 只有 origin 匹配这些远端时才允许自动快进（.git 后缀可省、HTTPS/SSH 拼法等价、大小写
+  # 不敏感）；带凭据的 URL 一律拒绝；走 GitHub 镜像克隆的安装把镜像 URL 加进来即可
 
 [scheduler.pool_source_shares]
 # Candidate-pool source mix by platform family. The saved default 5:1:1:1:1:1
@@ -439,6 +416,7 @@ youtube = 1
 twitter = 1
 zhihu = 1
 reddit = 1
+bangumi = 1
 
 # ── 统一关键词规划器 / Discover 背压 (P1) ──
 # 把"每平台各自定时调 LLM 生成搜索词"换成缺口拉动的双缓冲背压模型：一个关键词
@@ -467,6 +445,30 @@ planner_poll_seconds = 120
 plan_ttl_hours = 12
 # 统一推荐池入池最低分。来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
+# 可选 query inspiration 脑暴。默认关闭；开启后 planner 会通过本机 mcporter 调用
+# 搜索 provider 链获取预览，再由 discovery.keyword_inspiration 生成带溯源 metadata 的搜索词。
+inspiration_search_enabled = false
+# 搜索后端按顺序尝试。默认先用 local_cache 复用本地 content_cache evidence；
+# 本地证据不足时再用已启用的平台源做 inspiration-only grounding（当前同步支持
+# B站 / YouTube / X / Reddit，抖音 direct client；小红书 / 知乎 bridge 可用时
+# 也会加入；不写候选池），再用 Exa；Exa 免费 MCP 限流 / 返回空时再用
+# You.com 免费 MCP profile 兜底。远端 MCP 需要在本机 mcporter 配置里有
+# `exa` 和 / 或 `you` server。
+inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]
+# 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
+# 每轮 due 平台只用 inspiration flow 产词。
+inspiration_replace_merged_keywords = false
+# 探索广度档位：low / medium / high。medium 与旧默认逐项等值；十个旧的
+# inspiration_* 细粒度旋钮（aspect_window_size / interest_sample_size /
+# max_probe_searches_per_stage / platforms_per_probe / riskcontrolled_probe_budget /
+# search_pages_per_probe / search_results_per_query / max_seeds_per_aspect /
+# max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
+# 并在启动提示中给出迁移说明。
+inspiration_breadth = "high"
+# 候选评估期望并发，合法范围 1..3；每个 worker 最多 30 条，因此最多 90 条
+# raw 候选在途。运行时会为聊天等交互保留一个全局 LLM 槽位，因此有效并发为
+# min(本值, max(1, llm.concurrency - 1))。
+candidate_eval_concurrency = 3
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false
@@ -482,8 +484,12 @@ multimodal_image_timeout_seconds = 6
 # `openbiliclaw autostart enable` 开启，以便同步注册/反注册 OS 自启动项。
 enabled = false
 # 当 LLM / embedding 使用本机 Ollama 时，后端启动时顺带确保 `ollama serve`
-# 已运行。仅管理本机 localhost:11434，远端 Ollama 不会被拉起。
+# 已运行。仅管理本机 127.0.0.1:11434，远端 Ollama 不会被拉起。
 manage_ollama = true
+
+[saved_sync]
+# 同步外部平台收藏的总开关；默认关闭，需由用户明确开启。
+auto_sync_enabled = false
 
 [storage]
 # SQLite database path

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -79,6 +80,16 @@ def test_sync_profile_files_applies_overlay_on_dict_input(tmp_path: Path) -> Non
     assert "覆盖文案" in md
 
 
+def test_propagate_event_documents_event_only_contract() -> None:
+    doc = inspect.getdoc(MemoryManager.propagate_event) or ""
+    source = inspect.getsource(MemoryManager.propagate_event)
+
+    assert "only persists" in doc
+    assert "ProfileUpdatePipeline" in doc
+    assert "upward" not in doc
+    assert "TODO" not in source
+
+
 @pytest.mark.asyncio
 async def test_propagate_event_persists_to_sqlite(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
@@ -97,6 +108,36 @@ async def test_propagate_event_persists_to_sqlite(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0]["title"] == "测试视频"
     assert "BV1xx411c7mD" in events[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_propagate_events_batches_init_imports(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    inserted = await memory.propagate_events(
+        [
+            {
+                "event_type": "view",
+                "url": "https://example.test/1",
+                "title": "批量事件 1",
+                "context": "看完第一条",
+                "metadata": {},
+            },
+            {
+                "event_type": "favorite",
+                "url": "https://example.test/2",
+                "title": "批量事件 2",
+                "context": "收藏第二条",
+                "metadata": {},
+            },
+        ]
+    )
+
+    assert inserted == 2
+    rows = memory.query_events(limit=10)
+    assert {row["title"] for row in rows} == {"批量事件 1", "批量事件 2"}
+    assert all("signal_strength" in row["metadata"] for row in rows)
 
 
 @pytest.mark.asyncio
@@ -135,7 +176,7 @@ async def test_propagate_event_accepts_extension_behavior_types(tmp_path: Path) 
     memory = MemoryManager(tmp_path)
     memory.initialize()
 
-    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin"]:
+    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin", "reshuffle"]:
         await memory.propagate_event(
             {
                 "event_type": event_type,
@@ -148,7 +189,7 @@ async def test_propagate_event_accepts_extension_behavior_types(tmp_path: Path) 
     events = memory.query_events(limit=20)
     persisted_types = {event["event_type"] for event in events}
 
-    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin"]:
+    for event_type in ["snapshot", "scroll", "hover", "pause", "seek", "coin", "reshuffle"]:
         assert event_type in persisted_types
 
 
@@ -625,6 +666,8 @@ def test_account_sync_state_defaults_when_missing(tmp_path: Path) -> None:
         "following_mids": [],
         "last_account_sync_at": "",
         "last_sync_error": "",
+        "last_sync_error_kind": "",
+        "last_sync_issues": [],
     }
 
 
@@ -850,3 +893,68 @@ def test_load_profile_overrides_corrupt_file_returns_empty(tmp_path: Path) -> No
 
     # Corrupt overrides must not raise (which would degrade the profile API).
     assert memory.load_profile_overrides().is_empty()
+
+
+def test_account_sync_state_default_includes_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    # Missing state file must still expose the full schema — a caller reading
+    # last_sync_error_kind should never hit a KeyError.
+    assert memory.load_account_sync_state()["last_sync_error_kind"] == ""
+
+
+def test_account_sync_state_roundtrips_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    state = memory.load_account_sync_state()
+    state["last_sync_error"] = "Bilibili session expired on /x/web-interface/nav (-101)."
+    state["last_sync_error_kind"] = "auth_expired"
+    state["last_sync_issues"] = [
+        {"stage": "bilibili_history", "kind": "auth_expired"},
+        {"stage": "bilibili_favorites", "kind": "auth_expired"},
+    ]
+    memory.save_account_sync_state(state)
+
+    # Regression: the save/load whitelists used to drop this field, so the
+    # desktop's auth_expired branch was unreachable and users saw raw English.
+    reloaded = memory.load_account_sync_state()
+    assert reloaded["last_sync_error_kind"] == "auth_expired"
+    assert reloaded["last_sync_issues"] == state["last_sync_issues"]
+
+
+def test_account_sync_state_rejects_malformed_issue_rows(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    state = memory.load_account_sync_state()
+    state["last_sync_issues"] = [
+        {"stage": "bilibili_history", "kind": "timeout"},
+        {"stage": ["not", "a", "string"], "kind": "api_error"},
+        {"stage": "bilibili_favorites", "kind": {"nested": "value"}},
+        "not-an-object",
+        {"stage": "bilibili_history", "kind": "timeout"},
+    ]
+    memory.save_account_sync_state(state)
+
+    assert memory.load_account_sync_state()["last_sync_issues"] == [
+        {"stage": "bilibili_history", "kind": "timeout"}
+    ]
+
+
+def test_account_sync_state_reads_legacy_file_without_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    path = tmp_path / "memory" / "account_sync_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"last_account_sync_at": "2026-07-18T06:36:39+00:00"}),
+        encoding="utf-8",
+    )
+
+    # State files written before the field existed must stay readable.
+    loaded = memory.load_account_sync_state()
+    assert loaded["last_sync_error_kind"] == ""
+    assert loaded["last_sync_issues"] == []
+    assert loaded["last_account_sync_at"] == "2026-07-18T06:36:39+00:00"

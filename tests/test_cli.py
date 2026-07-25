@@ -131,6 +131,222 @@ def _ignore_runtime_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _registered_option_names(command_name: str) -> set[str]:
+    click_app = typer.main.get_command(app)
+    command = click_app.commands[command_name]
+    return {option for param in command.params for option in getattr(param, "opts", [])}
+
+
+def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-dry-run", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-dry-run" in result.output
+    options = _registered_option_names("keyword-inspiration-dry-run")
+    assert "--platform" in options
+    assert "--interest-limit" in options
+
+
+def test_keyword_inspiration_preview_command_exposes_persist_axes(
+    runner: CliRunner,
+) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-preview", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-preview" in result.output
+    assert "--persist-axes" in _registered_option_names("keyword-inspiration-preview")
+
+
+def test_keyword_inspiration_preview_threads_persist_axes(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="游戏评价", category="游戏", weight=0.9)]
+                )
+            )
+
+    class FakePlanner:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            captured["platforms"] = platforms
+            captured["query_kind"] = query_kind
+            captured["persist_axes"] = persist_axes
+            captured["profile"] = profile
+            return {"ok": True}
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.LLMService",
+        FakeLLMService,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "keyword-inspiration-preview",
+            "--platform",
+            "bilibili",
+            "--kind",
+            "explore",
+            "--persist-axes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"ok": True}
+    assert captured["platforms"] == ["bilibili"]
+    assert captured["query_kind"] == "explore"
+    assert captured["persist_axes"] is True
+
+
+def test_keyword_inspiration_report_command_is_registered(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-report", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-report" in result.output
+    assert "--window-days" in _registered_option_names("keyword-inspiration-report")
+
+
+def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Post config-collapse, --limit / --interest-limit apply as one-shot
+    overrides on the derived breadth params injected at planner construction —
+    the user-visible flag behavior is unchanged (Spec AC6b)."""
+    cfg = config_module.Config()
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="游戏评价", category="游戏", weight=0.9)]
+                )
+            )
+
+    class FakePlanner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["inspiration_params"] = kwargs.get("inspiration_params")
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            return {"ok": True}
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
+    monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "keyword-inspiration-preview",
+            "--platform",
+            "bilibili",
+            "--limit",
+            "3",
+            "--interest-limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    params = captured["inspiration_params"]
+    assert params is not None
+    assert params.max_keywords_per_platform == 3  # type: ignore[union-attr]
+    assert params.interest_sample_size == 2  # type: ignore[union-attr]
+    # Non-overridden knobs stay at the derived default-tier (high) values.
+    base = config_module.derive_inspiration_breadth_params("high")
+    assert params.max_probe_searches_per_stage == base.max_probe_searches_per_stage  # type: ignore[union-attr]
+    assert params.search_results_per_query == base.search_results_per_query  # type: ignore[union-attr]
+
+
 def test_main_bootstraps_container_runtime_when_project_root_is_configured(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -173,6 +389,102 @@ def test_config_show_generates_template_and_prints_guidance(
     assert "当前配置" in result.stdout
     assert "已自动生成" in result.stdout
     assert "llm.openai.api_key" in result.stdout
+
+
+def test_config_export_legacy_writes_verified_private_copy_with_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config(
+        llm=config_module.LLMConfig(
+            instance_routing=True,
+            instances={
+                "primary": config_module.LLMInstanceConfig(
+                    name="主渠道",
+                    provider_type="openai_compatible",
+                    api_key="sk-primary",
+                    model="model-a",
+                    base_url="https://primary.example/v1",
+                ),
+                "same-type-backup": config_module.LLMInstanceConfig(
+                    name="同类型备选",
+                    provider_type="openai_compatible",
+                    api_key="sk-backup",
+                    model="model-b",
+                    base_url="https://backup.example/v1",
+                ),
+                "deepseek-backup": config_module.LLMInstanceConfig(
+                    name="跨类型备选",
+                    provider_type="deepseek",
+                    api_key="sk-deepseek",
+                    model="deepseek-chat",
+                ),
+            },
+            default_chain=["primary", "same-type-backup", "deepseek-backup"],
+        )
+    )
+    config_path = tmp_path / "config.toml"
+    config_module.save_config(cfg, config_path)
+    original = config_path.read_bytes()
+    monkeypatch.setattr(config_module, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-export-legacy"])
+
+    export_path = tmp_path / "config.legacy.toml"
+    assert result.exit_code == 0, result.output
+    assert config_path.read_bytes() == original
+    assert export_path.exists()
+    assert export_path.stat().st_mode & 0o777 == 0o600
+    assert config_module.load_config(export_path).llm.instance_routing is False
+    text = export_path.read_text(encoding="utf-8")
+    assert "routing_version" not in text
+    assert "[llm.openai_compatible]" in text
+    assert "sk-primary" in text
+    assert "旧版配置已导出" in result.output
+    assert "旧格式每种 Provider" in result.output
+    assert "只能保留一个端点" in result.output
+    assert "全局链最多只有" in result.output
+    assert "一个不同类型备选" in result.output
+    assert "明文凭据" in result.output
+
+
+def test_config_export_legacy_refuses_overwrite_without_force_and_active_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_module.save_config(
+        config_module.Config(
+            llm=config_module.LLMConfig(
+                default_provider="ollama",
+                ollama=config_module.LLMProviderConfig(model="qwen2.5:7b"),
+            )
+        ),
+        config_path,
+    )
+    export_path = tmp_path / "config.legacy.toml"
+    export_path.write_text("do not overwrite", encoding="utf-8")
+    monkeypatch.setattr(config_module, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    existing = runner.invoke(app, ["config-export-legacy"])
+    same_path = runner.invoke(
+        app,
+        ["config-export-legacy", "--output", str(config_path), "--force"],
+    )
+
+    assert existing.exit_code == 1
+    assert "--force" in existing.output
+    assert export_path.read_text(encoding="utf-8") == "do not overwrite"
+    assert same_path.exit_code == 1
+    assert "不能直接覆盖当前配置" in same_path.output
+
+    forced = runner.invoke(app, ["config-export-legacy", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "do not overwrite" not in export_path.read_text(encoding="utf-8")
 
 
 def test_recommend_reports_clear_config_error(
@@ -235,6 +547,31 @@ def test_config_show_displays_runtime_pause_fields(
     assert "是" in result.stdout
     assert "浏览器断开后暂停" in result.stdout
     assert "开启（宽限 45s）" in result.stdout
+
+
+def test_config_show_displays_saved_auto_sync_status(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cfg = config_module.Config()
+
+    class FakeRegistry:
+        default_provider = "openai"
+        available_providers = ["openai"]
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "收藏自动同步" in result.stdout
+    assert "关闭" in result.stdout
 
 
 def test_health_check_reports_provider_statuses(
@@ -1126,6 +1463,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     import openbiliclaw.llm.service as llm_service_module
     import openbiliclaw.memory.manager as memory_module
     import openbiliclaw.recommendation.engine as recommendation_module
+    import openbiliclaw.soul.engine as soul_module
     import openbiliclaw.storage.database as database_module
 
     created_databases: list[object] = []
@@ -1159,12 +1497,14 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             usage_recorder: object | None = None,
             module_overrides: object | None = None,
             concurrency: int = 1,
+            concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
             self.module_overrides = module_overrides
             self.concurrency = concurrency
+            self.concurrency_gate = concurrency_gate
 
     class FakeRecommendationEngine:
         def __init__(
@@ -1200,10 +1540,35 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
+        soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
+        scheduler=SimpleNamespace(
+            speculation_interval_minutes=10,
+            speculation_ttl_days=3,
+            speculation_cooldown_days=7,
+            speculation_confirmation_threshold=3,
+            speculation_max_active=5,
+            speculation_max_primary_interests=15,
+            speculation_max_secondary_interests=60,
+            avoidance_speculation_interval_minutes=10,
+            avoidance_speculation_ttl_days=3,
+            avoidance_speculation_cooldown_days=7,
+            avoidance_speculation_confirmation_threshold=3,
+            avoidance_speculation_max_active=5,
+            speculator_idle_interval_minutes=30,
+            profile_consolidation_enabled=True,
+            profile_consolidation_interval_hours=12,
+            profile_consolidation_like_target_upper=512,
+            profile_consolidation_like_target_soft=450,
+            profile_consolidation_archive_enabled=True,
+        ),
     )
 
     monkeypatch.setattr(cli_module, "_RUNTIME_COMPONENTS", {}, raising=False)
@@ -1214,6 +1579,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(memory_module, "MemoryManager", FakeMemoryManager)
     monkeypatch.setattr(llm_service_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(recommendation_module, "RecommendationEngine", FakeRecommendationEngine)
+    monkeypatch.setattr(soul_module, "SoulEngine", FakeSoulEngine)
     monkeypatch.setattr(discovery_module, "ContentDiscoveryEngine", FakeDiscoveryEngine)
     monkeypatch.setattr(strategy_module, "SearchStrategy", FakeStrategy)
     monkeypatch.setattr(strategy_module, "TrendingStrategy", FakeStrategy)
@@ -1222,6 +1588,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
 
     recommendation_engine = cli_module._build_recommendation_engine()
     discovery_engine = cli_module._build_discovery_engine()
+    soul_engine = cli_module._build_soul_engine()
 
     assert len(created_databases) == 1
     assert created_databases[0].initialized == 1
@@ -1234,6 +1601,11 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     assert recorder is not None
     assert recorder is discovery_engine.llm_service.usage_recorder
     assert recorder._sink is created_databases[0]
+    assert (
+        recommendation_engine.llm.concurrency_gate is discovery_engine.llm_service.concurrency_gate
+    )
+    assert soul_engine.kwargs["llm_concurrency_gate"] is recommendation_engine.llm.concurrency_gate
+    assert discovery_engine.concurrency.llm_evaluation_concurrency == 2
 
 
 def test_start_accepts_explicit_host_and_port(
@@ -2007,6 +2379,40 @@ def test_chat_runs_single_turn_and_prints_reply(
     assert "我听见你在说：我最近总在刷讲结构的视频。" in result.stdout
 
 
+def test_chat_reports_safe_turn_failure_and_keeps_loop_usable(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    from openbiliclaw.llm.service import LLMResponseContentError
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(personality_portrait="稳定用户画像" * 30)
+
+    class FakeDialogue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def respond(self, user_message: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMResponseContentError("sk-live-secret")
+            return f"第二轮成功：{user_message}"
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module, "_build_dialogue", lambda soul_engine: FakeDialogue(), raising=False
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["chat"], input="第一轮\n第二轮\nexit\n")
+
+    assert result.exit_code == 0
+    assert "空响应" in result.stdout
+    assert "sk-live-secret" not in result.stdout
+    assert "第二轮成功：第二轮" in result.stdout
+
+
 def test_chat_exits_cleanly_on_exit_command(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -2149,11 +2555,30 @@ def test_recommend_displays_results_and_marks_them_presented(
                         bvid="BV1REC",
                         title="讲透城市与建筑的空间叙事",
                         up_name="城市观察局",
+                        published_at="2020-07-08T06:30:00Z",
+                        published_label="3 days ago",
                     ),
                     expression="这条会对上你最近那种想把结构想透的劲头。",
                     topic_label="你最近那股想把结构想透的劲头",
                     confidence=0.88,
-                )
+                ),
+                Recommendation(
+                    recommendation_id=8,
+                    content=DiscoveredContent(
+                        bvid="BV1LABEL",
+                        title="只有来源相对时间的推荐",
+                        up_name="时间观察局",
+                        published_label="3 days ago",
+                    ),
+                ),
+                Recommendation(
+                    recommendation_id=9,
+                    content=DiscoveredContent(
+                        bvid="BV1EMPTY",
+                        title="没有可靠时间的推荐",
+                        up_name="空值观察局",
+                    ),
+                ),
             ]
 
         def mark_presented(self, recommendation_ids: list[int]) -> None:
@@ -2180,7 +2605,10 @@ def test_recommend_displays_results_and_marks_them_presented(
     assert "这条会对上你最近那种想把结构想透的劲头。" in result.stdout
     assert "话题标签" in result.stdout
     assert "BV1REC" in result.stdout
-    assert fake_engine.marked_ids == [7]
+    assert "2020-07-08" in result.stdout
+    assert "3 days ago" in result.stdout
+    assert result.stdout.count("发布时间") == 2
+    assert fake_engine.marked_ids == [7, 8, 9]
 
 
 def test_feedback_command_updates_recommendation_and_records_event(
@@ -2490,7 +2918,8 @@ def test_init_guides_missing_runtime_config_interactively(
     #   5. "n" — skip module overrides
     #   6. "y" — allow LAN access
     #   7-9. "" — accept Bili history/favorite/follow init limits
-    #   10+. "n" — skip optional source prompts (xhs / douyin / youtube / X / zhihu / reddit)
+    #   10+. "n" — skip optional source prompts
+    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi)
     wizard_input = (
         "\n".join(
             [
@@ -2503,6 +2932,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -2580,9 +3010,13 @@ def test_init_guides_missing_auth_interactively(
     # test exercising the manual-paste path, send "2" first.
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
-    # to XHS / Douyin / YouTube / X / Zhihu / Reddit so this test stays focused on the
+    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi so this test stays focused on the
     # cookie-prompt path.
-    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\n")
+    result = runner.invoke(
+        app,
+        ["init"],
+        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\n",
+    )
 
     assert result.exit_code == 1
     assert fake_auth.saved_cookie == "SESSDATA=valid"
@@ -2701,7 +3135,10 @@ def test_init_runs_history_preference_profile_and_discovery(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -2846,7 +3283,10 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -2955,7 +3395,10 @@ def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3062,6 +3505,7 @@ def test_init_includes_xhs_bootstrap_events(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3119,11 +3563,6 @@ def test_init_includes_xhs_bootstrap_events(
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     # v0.3.21+: init now uses split enqueue/collect APIs so the
     # XHS task can run in parallel with B站 fetches. The test fakes
@@ -3151,7 +3590,9 @@ def test_init_includes_xhs_bootstrap_events(
         raising=False,
     )
 
-    result = runner.invoke(app, ["init"])
+    # Selection is opt-in: unselected collectors must not run or consume their
+    # wait budget. Explicitly select XHS so this test exercises its pipeline.
+    result = runner.invoke(app, ["init", "--yes-xhs"])
 
     assert result.exit_code == 0
     assert "小红书" in result.stdout
@@ -3218,6 +3659,7 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3282,11 +3724,6 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
         cli_module,
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
     )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_xhs_bootstrap_task", fail_xhs_enqueue, raising=False)
@@ -3689,7 +4126,10 @@ def test_init_youtube_env_skip_overrides_yes_flag(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -3719,11 +4159,6 @@ def test_init_youtube_env_skip_overrides_yes_flag(
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine())
     monkeypatch.setattr(cli_module, "_run_with_progress", passthrough_progress)
     monkeypatch.setattr(cli_module, "_run_init_discovery_backfill_async", fake_discovery_backfill)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_yt_bootstrap_task", fake_enqueue_youtube)
 
@@ -3799,6 +4234,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -3841,6 +4277,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -3891,7 +4328,10 @@ def test_init_no_xhs_flag_skips_enqueue(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3940,11 +4380,6 @@ def test_init_no_xhs_flag_skips_enqueue(
         cli_module,
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
     )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(
@@ -3998,7 +4433,10 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4006,7 +4444,12 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
             return SoulProfile(
                 personality_portrait="稳定用户画像" * 30,
                 core_traits=["理性"],
-                preferences=PreferenceLayer(),
+                preferences=PreferenceLayer(
+                    interests=[
+                        InterestTag(name="人工智能", category="科技", weight=0.96),
+                        InterestTag(name="篮球战术", category="体育", weight=0.72),
+                    ]
+                ),
             )
 
     class FakeDatabase:
@@ -4074,19 +4517,6 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
     )
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(
-            preferences=PreferenceLayer(
-                interests=[
-                    InterestTag(name="人工智能", category="科技", weight=0.96),
-                    InterestTag(name="篮球战术", category="体育", weight=0.72),
-                ]
-            )
-        ),
-        raising=False,
-    )
 
     result = runner.invoke(app, ["init"])
 
@@ -4146,7 +4576,10 @@ def test_init_skips_backfill_when_pool_target_is_already_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4254,7 +4687,10 @@ def test_init_reports_partial_success_when_discovery_fails(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4429,7 +4865,7 @@ def test_save_embedding_config_writes_to_toml(
     reloaded, _ = load_config_with_diagnostics()
     assert reloaded.llm.embedding.provider == "ollama"
     assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:11434/v1"
+    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
 
 
 def test_save_embedding_config_custom_openai_compat(
@@ -4475,12 +4911,42 @@ def test_save_module_overrides_writes_per_module_blocks(
     from openbiliclaw.config import (
         Config,
         LLMConfig,
+        LLMInstanceConfig,
         load_config_with_diagnostics,
         save_config,
     )
 
     config_path = tmp_path / "config.toml"
-    save_config(Config(llm=LLMConfig(default_provider="openai")), config_path)
+    save_config(
+        Config(
+            llm=LLMConfig(
+                instance_routing=True,
+                instances={
+                    "openai-main": LLMInstanceConfig(
+                        name="OpenAI",
+                        provider_type="openai",
+                        api_key="sk-openai",
+                        model="gpt-main",
+                    ),
+                    "deepseek-fast": LLMInstanceConfig(
+                        name="DeepSeek",
+                        provider_type="deepseek",
+                        api_key="sk-deepseek",
+                        model="deepseek-chat",
+                        base_url="https://api.deepseek.com",
+                    ),
+                    "claude-quality": LLMInstanceConfig(
+                        name="Claude",
+                        provider_type="claude",
+                        api_key="sk-claude",
+                        model="claude-sonnet-4-5-20250929",
+                    ),
+                },
+                default_chain=["openai-main"],
+            )
+        ),
+        config_path,
+    )
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
@@ -4493,12 +4959,13 @@ def test_save_module_overrides_writes_per_module_blocks(
     )
 
     reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.discovery.provider == "deepseek"
-    assert reloaded.llm.discovery.model == "deepseek-chat"
-    assert reloaded.llm.soul.provider == "claude"
-    assert reloaded.llm.soul.model == "claude-sonnet-4-5-20250929"
-    assert reloaded.llm.evaluation.provider == ""
-    assert reloaded.llm.evaluation.model == ""
+    assert reloaded.llm.instance_routing is True
+    assert reloaded.llm.discovery.inherit is False
+    assert reloaded.llm.discovery.chain == ["deepseek-fast"]
+    assert reloaded.llm.soul.inherit is False
+    assert reloaded.llm.soul.chain == ["claude-quality"]
+    assert reloaded.llm.evaluation.inherit is True
+    assert reloaded.llm.evaluation.chain == []
 
 
 def test_build_recommendation_engine_wires_module_overrides(
@@ -5543,6 +6010,163 @@ def test_discover_source_reddit_runs_formal_producer(monkeypatch: pytest.MonkeyP
     assert calls == {"limit": 11}
 
 
+def test_explicit_bangumi_discovery_ignores_scheduler_master_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config_module.Config()
+    cfg.scheduler.enabled = False
+    cfg.sources.bangumi.enabled = True
+    captured: dict[str, object] = {}
+    result_reasons = iter(("disabled", "no_profile"))
+    panels: list[tuple[str, str, str]] = []
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"preferences": {"interests": [{"name": "科幻"}]}}
+
+    class FakeBangumiClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self) -> "FakeBangumiClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeProducer:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def produce_if_due(self, *, limit: int, force: bool) -> dict[str, object]:
+            captured["limit"] = limit
+            captured["force"] = force
+            return {"reason": next(result_reasons), "discovered": 0, "enqueued": 0}
+
+    class FakeKeywordFetch:
+        def __init__(self, **kwargs: object) -> None:
+            captured["keyword_fetch_kwargs"] = kwargs
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", object)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", FakeSoulEngine)
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", object)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **kwargs: SimpleNamespace(last_admitted_items=[]),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_fetch.KeywordFetchCoordinator",
+        FakeKeywordFetch,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi_client.BangumiClient",
+        FakeBangumiClient,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.bangumi_producer.BangumiDiscoveryProducer",
+        FakeProducer,
+    )
+    monkeypatch.setattr(cli_module, "_print_page_title", lambda *args: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_print_status_panel",
+        lambda kind, title, body: panels.append((kind, title, body)),
+    )
+
+    cli_module._run_bangumi_discovery(limit=7, force=True)
+    cli_module._run_bangumi_discovery(limit=7, force=True)
+
+    assert captured["enabled"] is True
+    assert captured["limit"] == 7
+    assert captured["force"] is True
+    assert [title for _, title, _ in panels] == [
+        "Bangumi discovery 已禁用",
+        "尚未初始化用户画像",
+    ]
+
+
+def test_bangumi_discovery_reports_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = config_module.Config()
+    cfg.sources.bangumi.enabled = True
+    panels: list[tuple[str, str, str]] = []
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"preferences": {"interests": [{"name": "科幻"}]}}
+
+    class FakeBangumiClient:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeBangumiClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeProducer:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+        async def produce_if_due(self, *, limit: int, force: bool) -> dict[str, object]:
+            return {
+                "reason": "budget_exhausted",
+                "discovered": 0,
+                "enqueued": 0,
+                "mode_results": {
+                    "search": "budget_exhausted",
+                    "ranked": "budget_exhausted",
+                    "latest": "budget_exhausted",
+                },
+            }
+
+    class FakeKeywordFetch:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", object)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", FakeSoulEngine)
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", object)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **kwargs: SimpleNamespace(last_admitted_items=[]),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_fetch.KeywordFetchCoordinator",
+        FakeKeywordFetch,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi_client.BangumiClient",
+        FakeBangumiClient,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.bangumi_producer.BangumiDiscoveryProducer",
+        FakeProducer,
+    )
+    monkeypatch.setattr(cli_module, "_print_page_title", lambda *args: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_print_status_panel",
+        lambda kind, title, body: panels.append((kind, title, body)),
+    )
+
+    cli_module._run_bangumi_discovery(limit=5, force=True)
+
+    assert panels == [
+        (
+            "info",
+            "Bangumi discovery 今日预算已用完",
+            "所有启用分支的每日预算均已耗尽，可在配置页调整对应分支预算或明日重试。",
+        )
+    ]
+
+
 def test_discover_reddit_default_uses_rdt_command_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6116,11 +6740,140 @@ def test_fetch_xhs_handles_timeout_status(monkeypatch: pytest.MonkeyPatch) -> No
         lambda task_id, *, max_wait_seconds: ([], {}, "timeout"),
     )
     result = runner.invoke(app, ["fetch-xhs"])
-    assert result.exit_code == 0  # timeout is not a hard failure
+    assert result.exit_code == 1
     assert "超时" in result.output
 
 
 # ── Password gate CLI (set-password / init prompt) ──────────────────────────
+
+
+def _extension_key_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, "config_module.Config"]:
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(root))
+    cfg = config_module.Config()
+    config_module.save_config(cfg, root / "config.toml")
+    return root, cfg
+
+
+def test_ext_key_generate_persists_digest_once_and_keeps_switch_off(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import parse_extension_access_key
+
+    _root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 0, result.stdout
+
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert len(loaded.api.auth.extension_access_keys) == 1
+    record = loaded.api.auth.extension_access_keys[0]
+    key_id, digest = record.split(":")
+    assert len(key_id) == 12
+    assert len(digest) == 64
+    assert record not in result.stdout
+    full_keys = [part for part in result.stdout.split() if part.startswith("obc_ext_")]
+    assert len(full_keys) == 1
+    assert parse_extension_access_key(full_keys[0]) is not None
+
+
+def test_ext_key_list_never_prints_digest_or_secret(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "list"])
+    assert result.exit_code == 0
+    assert key_id in result.stdout
+    assert record.split(":", 1)[1] not in result.stdout
+    assert full_key not in result.stdout
+
+
+def test_ext_key_enable_disable_requires_key_and_preserves_records(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    no_key = runner.invoke(app, ["ext-key", "enable"])
+    assert no_key.exit_code == 1
+
+    _key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    assert runner.invoke(app, ["ext-key", "enable"]).exit_code == 0
+    assert config_module.load_config().api.auth.extension_access_enabled is True
+
+    assert runner.invoke(app, ["ext-key", "disable"]).exit_code == 0
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert loaded.api.auth.extension_access_keys == [record]
+
+
+def test_ext_key_revoke_removes_one_key_and_bumps_epoch(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.storage.database import Database
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    first_id, _first_key, first_record = generate_extension_access_key()
+    _second_id, _second_key, second_record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [first_record, second_record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "revoke", first_id])
+    assert result.exit_code == 0, result.stdout
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_keys == [second_record]
+    db = Database(loaded.data_path / "openbiliclaw.db")
+    db.initialize()
+    try:
+        assert db.get_auth_epoch() == 1
+    finally:
+        db.close()
+
+
+def test_ext_key_revoke_rolls_back_config_when_epoch_bump_fails(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    before = (root / "config.toml").read_bytes()
+    monkeypatch.setattr(cli_module, "_bump_auth_epoch", lambda _cfg: False)
+
+    result = runner.invoke(app, ["ext-key", "revoke", key_id])
+    assert result.exit_code == 1
+    assert (root / "config.toml").read_bytes() == before
+    assert config_module.load_config().api.auth.extension_access_keys == [record]
+
+
+@pytest.mark.parametrize("mode", ["env", "local"])
+def test_ext_key_writes_refuse_shadowed_auth_config(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path, mode: str
+) -> None:
+    root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    if mode == "env":
+        monkeypatch.setenv("OPENBILICLAW_API_AUTH_ENABLED", "true")
+    else:
+        (root / "config.local.toml").write_text(
+            "[api.auth]\nextension_access_enabled = false\n", encoding="utf-8"
+        )
+
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 1
+    assert config_module.load_config().api.auth.extension_access_keys == []
 
 
 def test_set_password_command_sets_enables_and_disables(
@@ -6514,6 +7267,20 @@ async def test_fetch_x_init_data_fetches_likes_and_bookmarks(monkeypatch, tmp_pa
     assert [t["id"] for t in likes] == ["1"]
     assert [t["id"] for t in bookmarks] == ["2"]
 
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
+
+    db = Database(tmp_path / "openbiliclaw.db")
+    db.initialize()
+    health = XSourceHealthStore(db).get()
+    assert health["state"] == "ok"
+    assert health["last_success_at"]
+    assert health["last_success_credential"] == credential_fingerprint(
+        "twitter", "auth_token=a; ct0=b"
+    )
+    db.close()
+
 
 def test_fetch_x_ingests_likes_and_bookmarks(runner, monkeypatch) -> None:
     async def _fake_fetch(*, likes_limit, bookmarks_limit):
@@ -6667,8 +7434,22 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         ),
         raising=False,
     )
+
+    async def _fetch_bangumi(*, username: str, token: str = ""):
+        state["bangumi_fetch_token"] = token
+        events = list(state.get("bangumi_events", []))
+        counts: dict[str, int] = {}
+        for event in events:
+            status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        if events:
+            return events, counts, "ok"
+        if token or username:
+            return events, counts, "empty"
+        return events, counts, "missing_username"
+
+    monkeypatch.setattr(cli_module, "_fetch_bangumi_init_data", _fetch_bangumi)
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
-    monkeypatch.setattr(cli_module, "_build_draft_profile_for_discover", lambda memory: object())
 
     class _Memory:
         async def propagate_event(self, event: dict[str, Any]) -> None:
@@ -6856,6 +7637,51 @@ def test_run_guided_init_without_bilibili_builds_profile_from_reddit(monkeypatch
     assert state["propagated"] == state["reddit_events"]
 
 
+def test_run_guided_init_builds_profile_from_bangumi_public_collection(monkeypatch) -> None:
+    import asyncio
+
+    state = _guided_init_pipeline_doubles(monkeypatch)
+    state["bangumi_events"] = [
+        {
+            "event_type": "like",
+            "title": "Cowboy Bebop",
+            "url": "https://bgm.tv/subject/253",
+            "context": "在Bangumi点赞了《Cowboy Bebop》",
+            "metadata": {
+                "source_platform": "bangumi",
+                "collection_status": "collect",
+                "user_rate": 9,
+            },
+        }
+    ]
+
+    result = asyncio.run(
+        cli_module.run_guided_init(
+            client=None,
+            memory=state["memory"],
+            soul_engine=state["soul"],
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            include_zhihu=False,
+            include_reddit=False,
+            include_bangumi=True,
+            bangumi_username="sai",
+            target_pool_count=10,
+            discover_backfill=state["backfill"],
+        )
+    )
+
+    assert result.bangumi_status == "ok"
+    assert result.bangumi_scope_counts == {"collect": 1}
+    assert state["analyzed"] == state["bangumi_events"]
+    assert state["profile_history"][0]["source_platform"] == "bangumi"
+    assert state["propagated"] == state["bangumi_events"]
+
+
 def test_init_command_rejects_no_sources_at_all(monkeypatch) -> None:
     """--no-bilibili plus every other source disabled must exit with guidance."""
     runner = CliRunner()
@@ -6881,6 +7707,340 @@ def test_init_command_rejects_no_sources_at_all(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "至少需要一个数据来源" in result.output
+
+
+def test_fetch_bangumi_init_data_token_resolves_me_and_reads_private(monkeypatch) -> None:
+    """With a token, /v0/me decides the account and private rows are included."""
+    import asyncio
+
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.sources.bangumi.access_token = "tok-123"
+    cfg.sources.bangumi.username = "typed-name"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    fetch_calls: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            fetch_calls["access_token"] = kwargs.get("access_token")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            return {"username": "token-owner"}
+
+    async def _fake_fetch(client, *, username, subject_types, limit, include_private=False):
+        fetch_calls["username"] = username
+        fetch_calls["include_private"] = include_private
+        return [
+            {
+                "event_type": "like",
+                "title": "t",
+                "url": "u",
+                "metadata": {"collection_status": "done"},
+            }
+        ]
+
+    monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi.fetch_bangumi_public_collection_events", _fake_fetch
+    )
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username="typed-name"))
+
+    assert status == "ok"
+    assert len(events) == 1
+    assert counts == {"done": 1}
+    assert fetch_calls["access_token"] == "tok-123"
+    # /v0/me wins over the differing configured username; private rows included.
+    assert fetch_calls["username"] == "token-owner"
+    assert fetch_calls["include_private"] is True
+
+
+def test_fetch_bangumi_init_data_reports_invalid_token(monkeypatch) -> None:
+    """A 401 from /v0/me surfaces as invalid_token instead of a silent skip."""
+    import asyncio
+
+    from openbiliclaw.config import Config
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    cfg = Config()
+    cfg.sources.bangumi.access_token = "expired"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+    monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username=""))
+
+    assert status == "invalid_token"
+    assert events == []
+    assert counts == {}
+
+
+def test_init_command_rejects_bangumi_only_without_username(monkeypatch) -> None:
+    from openbiliclaw.config import Config
+
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
+    monkeypatch.setattr(
+        cli_module, "_get_runtime_database", lambda: SimpleNamespace(max_llm_usage_id=lambda: None)
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: (_ for _ in ()).throw(AssertionError("client must not be built")),
+    )
+    monkeypatch.setattr(cli_module, "_ask_network_binding", lambda: False)
+    monkeypatch.setattr(cli_module, "_persist_api_host_choice", lambda **kwargs: None)
+    monkeypatch.setattr(cli_module, "_maybe_setup_password_in_init", lambda **kwargs: None)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: Config())
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--no-bilibili",
+            "--no-xhs",
+            "--no-douyin",
+            "--no-youtube",
+            "--no-x",
+            "--no-zhihu",
+            "--no-reddit",
+            "--yes-bangumi",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Bangumi 缺少令牌或用户名" in result.output
+
+
+def _patch_bangumi_init_fetch(monkeypatch, *, me_username_value="token-owner", token_error=None):
+    """Wire fake Bangumi client + collection fetch for _fetch_bangumi_init_data."""
+    import openbiliclaw.sources.bangumi as bangumi_mod
+    import openbiliclaw.sources.bangumi_client as bc_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *, access_token=None, **kwargs):
+            captured["access_token"] = access_token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            if token_error is not None:
+                raise token_error
+            return {"username": me_username_value}
+
+    async def _fake_fetch(client, *, username, subject_types, limit, include_private=False):
+        captured["username"] = username
+        captured["include_private"] = include_private
+        return [
+            {
+                "event_type": "like",
+                "title": "X",
+                "url": "https://bgm.tv/subject/1",
+                "metadata": {"collection_status": "collect"},
+            }
+        ]
+
+    monkeypatch.setattr(bc_mod, "BangumiClient", _FakeClient)
+    monkeypatch.setattr(bangumi_mod, "fetch_bangumi_public_collection_events", _fake_fetch)
+    return captured
+
+
+def test_fetch_bangumi_init_data_token_resolves_username_and_reads_private(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    cfg.sources.bangumi.access_token = "tok-1"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    captured = _patch_bangumi_init_fetch(monkeypatch, me_username_value="token-owner")
+
+    events, counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="typed-name", token="")
+    )
+
+    assert status == "ok"
+    assert len(events) == 1
+    # Token wins: username auto-resolved from /v0/me and private rows included.
+    assert captured["access_token"] == "tok-1"
+    assert captured["username"] == "token-owner"
+    assert captured["include_private"] is True
+
+
+def test_fetch_bangumi_init_data_without_token_uses_public_username(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    captured = _patch_bangumi_init_fetch(monkeypatch)
+
+    events, _counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="sai", token="")
+    )
+
+    assert status == "ok"
+    assert captured["access_token"] is None
+    assert captured["username"] == "sai"
+    assert captured["include_private"] is False
+
+
+def test_fetch_bangumi_init_data_missing_username_without_token(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(monkeypatch)
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username="", token=""))
+
+    assert (events, counts, status) == ([], {}, "missing_username")
+
+
+def test_load_extension_bangumi_identity_reads_runtime_state(monkeypatch, tmp_path) -> None:
+    import json
+
+    cfg = config_module.Config()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    # No state file yet → ("", False).
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+
+    state_dir = tmp_path / "memory"
+    state_dir.mkdir(parents=True)
+    state_path = state_dir / "discovery_runtime.json"
+
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", True)
+
+    # Fail-open (bgm.tv unreachable) record: usable, but flagged unverified.
+    state_path.write_text(
+        json.dumps(
+            {"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": False}}
+        ),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
+
+    # A verified record with no username is one the superseded 404 path wrote;
+    # no current rule produces it, so it normalises to unverified on read.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+
+    # Backward compatibility: a record written before the flag existed cannot
+    # prove it was ever cross-checked, so it reads back as unverified.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user"}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
+
+    # Malformed values are treated as missing, never propagated.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "bad/name"}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+    state_path.write_text("not-json", encoding="utf-8")
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+
+
+def test_fetch_bangumi_init_data_expired_token_returns_invalid_token(monkeypatch) -> None:
+    import asyncio
+
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(
+        monkeypatch,
+        token_error=BangumiAPIError("unauthorized", "denied", status_code=401),
+    )
+
+    events, counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="", token="expired-tok")
+    )
+
+    assert status == "invalid_token"
+    assert events == []
+
+
+def test_fetch_bangumi_rebuild_profile_skips_bilibili_auth_gate(monkeypatch) -> None:
+    """``fetch-bangumi --rebuild-profile`` rebuilds from Bangumi events alone, so
+    it must NOT go through the Bilibili auth gate. On a non-interactive terminal
+    the old ``_prepare_init_runtime()`` would abort with '请先执行 auth login';
+    the rebuild now passes ``require_bili_auth=False`` and proceeds without ever
+    building a Bilibili auth manager."""
+    runner = CliRunner()
+
+    cfg = config_module.Config()
+    cfg.sources.bangumi.username = "sai"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(monkeypatch)
+
+    # Runtime config is fine; the auth manager must never be built for a
+    # Bangumi-only rebuild — trip it to prove the B站 auth gate is bypassed.
+    monkeypatch.setattr(cli_module, "_load_runtime_config_error", lambda render=False: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_auth_manager",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Bangumi rebuild must not touch the Bilibili auth gate")
+        ),
+    )
+    monkeypatch.setattr(cli_module, "_write_events_to_memory", lambda events, source="": (1, 0))
+
+    analyzed: dict[str, object] = {}
+
+    class _Soul:
+        async def analyze_events(self, events, **kwargs):
+            analyzed["events"] = list(events)
+
+        async def build_initial_profile(self, history):
+            analyzed["history"] = list(history)
+            return {"ok": True}
+
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: _Soul())
+
+    result = runner.invoke(app, ["fetch-bangumi", "--rebuild-profile"])
+
+    assert result.exit_code == 0, result.output
+    assert "完成" in result.output and "画像重建" in result.output
+    assert analyzed.get("events")  # analyze ran on the fetched Bangumi events
+    assert analyzed.get("history")  # profile builder consumed the history items
 
 
 def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -> None:
@@ -6965,3 +8125,227 @@ def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -
     assert captured["include_bili"] is False
     assert captured["include_reddit"] is True
     assert "Reddit" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeypatch) -> None:
+    """Heartbeat appends the live sub-progress and never pins the ETA at ~0s.
+
+    Guards the desktop.log stall-visibility fix: past ``eta_seconds`` the tick
+    reads "已超预估" (not a lying "预计还需 ~0s") and carries the
+    ``status_provider`` suffix so a frozen "已完成 X/N 批" localises the hang.
+    """
+    import asyncio as _asyncio
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+
+    async def _work() -> str:
+        await _asyncio.sleep(0.16)
+        return "ok"
+
+    result = await cli_module._run_with_progress(
+        _work(),
+        label="分析偏好（分片批处理）",
+        eta_seconds=0,
+        tick_seconds=0.05,
+        status_provider=lambda: "已完成 2/5 批",
+    )
+
+    out = buf.getvalue()
+    assert result == "ok"
+    assert "已超预估" in out
+    assert "已完成 2/5 批" in out
+    assert "预计还需 ~0s" not in out
+
+
+def _render_cli_console(monkeypatch, render) -> str:
+    """Run ``render()`` against a captured CLI console and return the text."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+    render()
+    return buf.getvalue()
+
+
+def test_discovered_content_preview_shows_non_bilibili_author_as_neutral_label(
+    monkeypatch,
+) -> None:
+    """Bangumi rows carry only ``author_name`` — show it, and call it 作者.
+
+    Regression for the CLI half of the four-surface contract: the three GUI
+    surfaces already read the universal ``author_name``, but the CLI read the
+    Bilibili-only ``up_name``, so every non-Bilibili source printed "（未知）"
+    (real smoke: ``discover-bangumi 攻壳机动队`` hid 押井守). "UP 主" is also
+    wrong for a film director / Zhihu answerer / YouTube channel.
+    """
+    content = DiscoveredContent(
+        content_id="8",
+        title="攻壳机动队",
+        source_platform="bangumi",
+        author_name="押井守",
+        source_strategy="bangumi-search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+    assert "（未知）" not in out
+
+
+def test_discovered_content_preview_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili keeps its native "UP 主" label and still resolves the name."""
+    content = DiscoveredContent(
+        bvid="BV1AUTHOR",
+        title="城市与建筑的空间叙事",
+        up_name="城市观察局",
+        source_platform="bilibili",
+        source_strategy="search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out
+
+
+def test_discovered_content_preview_falls_back_to_bilibili_label_for_legacy_rows(
+    monkeypatch,
+) -> None:
+    """A row with no ``source_platform`` keeps the old "UP 主" label.
+
+    Matches ``formatRecommendationAuthorLine``'s ``|| "bilibili"`` default so
+    pre-multi-source rows do not silently re-label themselves.
+    """
+    content = DiscoveredContent(title="老数据行为", up_name="旧的观察局")
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "旧的观察局" in out
+    assert "作者" not in out
+
+
+def test_recommendation_card_shows_non_bilibili_author_as_neutral_label(monkeypatch) -> None:
+    """The recommendation card reads the same universal author field."""
+    item = Recommendation(
+        recommendation_id=11,
+        content=DiscoveredContent(
+            content_id="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+
+
+def test_recommendation_card_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili recommendation cards are untouched by the author-row fix."""
+    item = Recommendation(
+        recommendation_id=12,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out
+
+
+def test_recommendation_card_labels_non_bilibili_id_neutrally(monkeypatch) -> None:
+    """A Bangumi subject id must not be announced as a "BV号".
+
+    ``bangumi_subject_to_content`` stores the subject id in the universal
+    ``bvid`` column, so the old unconditional label rendered ``BV号  8``.
+    """
+    item = Recommendation(
+        recommendation_id=13,
+        content=DiscoveredContent(
+            content_id="8",
+            bvid="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "内容 ID" in out
+    assert "BV号" not in out
+    assert "8" in out
+
+
+def test_recommendation_card_keeps_bv_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili rows keep the native "BV号" wording."""
+    item = Recommendation(
+        recommendation_id=14,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+            source_platform="bilibili",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1REC" in out
+    assert "内容 ID" not in out
+
+
+def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch) -> None:
+    """No ``source_platform`` keeps the old "BV号" label, like the author row."""
+    item = Recommendation(
+        recommendation_id=15,
+        content=DiscoveredContent(bvid="BV1LEGACY", title="老数据行为", up_name="旧的观察局"),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1LEGACY" in out
+    assert "内容 ID" not in out

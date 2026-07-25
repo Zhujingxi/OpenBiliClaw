@@ -6,11 +6,14 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import os
 import re
 import sys
+import threading
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,7 +23,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.llm.base import safe_llm_failure_message
+from openbiliclaw.llm.service import _background_admission_bypass
+from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
+    _is_default_ollama_endpoint,
     _ollama_is_running,
     _ollama_start_serve_background,
     effective_ollama_endpoint,
@@ -28,6 +35,260 @@ from openbiliclaw.runtime.ollama_supervisor import (
     ollama_required,
 )
 from openbiliclaw.soul.preference_analyzer import DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE
+
+# ── Init stage ceilings ──────────────────────────────────────────────────
+#
+# Calibration provenance (2026-07-20, field report): a healthy SenseTime
+# ``deepseek-v4-flash`` gateway (``openai_compatible``) needs ~140s for one
+# 200-event preference chunk and up to ~300s for a worst-case chunk. The old
+# ceilings were sized as *performance expectations* for a fast provider, so a
+# slow-but-perfectly-healthy gateway was killed mid-run while the progress UI
+# still showed batches landing ("已处理 280s", 2/6 批).
+#
+# EVERY constant below is now a **wedged-run backstop, not a performance
+# expectation**: it exists only so a permanently stuck run eventually ends. An
+# init that legitimately takes 30-60 minutes on a slow gateway must survive.
+# Where a stage emits real per-unit progress we additionally guard it with an
+# idle limit (see ``_INIT_PROGRESS_IDLE_*``), which is what actually catches a
+# wedged run quickly; the absolute ceiling is then free to be generous.
+_INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
+# Stage 3 (``build_initial_profile``) is ONE long LLM call with no per-unit
+# progress signal, so an idle limit is meaningless there — a single slow call
+# is indistinguishable from a hung one. Absolute backstop only: 30 min is ~6x
+# the ~300s a slow gateway needs for this single synthesis call.
+_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 1800.0
+# Stage 4 (discovery + scoring + copy) emits coarse per-plan-stage progress,
+# so it gets the idle+absolute pair. 45 min absolute matches stage 2's ceiling:
+# both are LLM fan-outs over the same gateway.
+_INIT_DISCOVERY_TIMEOUT_SECONDS = 2700.0
+# Stage 1 global budget across ALL selected sources. Eight sources each waiting
+# up to 3-5 min for a browser extension to answer cannot fit in 10 min, so the
+# old value silently starved whichever sources ran last. 30 min lets a full
+# eight-source bootstrap finish while still bounding a wedged extension.
+_INIT_COLLECTION_TIMEOUT_SECONDS = 1800.0
+# Per-source waits. Bilibili history+favorites+following on a throttled account
+# routinely walks many paginated calls; X likes/bookmarks likewise. Doubled
+# from the fast-network calibration so slow/proxied networks are not clipped.
+_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 600.0
+_INIT_X_COLLECTION_TIMEOUT_SECONDS = 480.0
+
+# ── Progress-aware deadlines (idle + absolute) ───────────────────────────
+#
+# IDLE: max seconds with NO new progress signal. Derived from the same
+# slow-gateway figure as ``_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE`` — one
+# chunk on a slow real gateway ≈ 300s — doubled for slack, so a chunk that
+# takes twice the worst observed time still counts as alive. A genuinely
+# unreachable Base URL / wrong model name / dead proxy produces *zero* chunks
+# and therefore still fails fast (10 min), which is what users need diagnosed.
+_INIT_PROGRESS_IDLE_SECONDS = 600.0
+# Stage 4's progress reports are coarser (a handful per plan stage, each
+# covering a full discover+score+copy sweep), so it needs a wider idle window
+# than stage 2's per-chunk cadence.
+_INIT_DISCOVERY_PROGRESS_IDLE_SECONDS = 900.0
+# ABSOLUTE: hard stop for a run that keeps dribbling progress forever. The
+# reported case (6 chunks × ~140s, concurrency-throttled) lands in ~15 min;
+# 45 min leaves ~3x headroom for a larger bootstrap on the same slow gateway
+# while still bounding the lease. Wedged-run backstop, not an expectation.
+_INIT_PROGRESS_ABSOLUTE_SECONDS = 2700.0
+
+# Stage 2 fans bootstrap events into bounded LLM chunks. Real gateways can
+# legitimately need about three minutes for one 200-event chunk, and the
+# analyzer only starts as many chunks at once as the configured LLM service
+# concurrency permits. Scale the default wall clock by concurrency waves so a
+# healthy single-slot gateway is not killed halfway through a 1,100-event
+# bootstrap while faster multi-slot gateways still retain a useful deadline.
+# One extra wave covers the single reasoning-only / transient-limit recovery
+# that a healthy run may need without turning progress into an unlimited lease.
+# Explicit caller overrides (including tiny test budgets and <=0 "disabled")
+# remain exact.
+_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE = 300.0
+_INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS = 300.0
+
+_INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
+    "画像生成等待 AI 服务超过 30 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "这一步是一次性的完整综合分析，没有分批进度可判断，因此只设了一个很宽松的兜底上限。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
+)
+
+
+def _profile_analysis_concurrency(soul_engine: Any) -> int:
+    """Return the effective preference-analysis fan-out for timeout sizing."""
+    analyzer = getattr(soul_engine, "_preference_analyzer", None)
+    service = getattr(analyzer, "registry", None)
+    configured = getattr(service, "concurrency", 1)
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _profile_analysis_timeout_seconds(
+    *,
+    event_count: int,
+    requested: float | None,
+    concurrency: int = 1,
+) -> float | None:
+    """Return stage-2's bounded wall clock for this bootstrap size."""
+    if requested is not None:
+        return requested if requested > 0 else None
+    chunks = max(
+        1,
+        (max(0, event_count) + DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE - 1)
+        // DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    )
+    waves = (chunks + max(1, concurrency) - 1) // max(1, concurrency)
+    return max(
+        _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+        waves * _INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE
+        + _INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS,
+    )
+
+
+def _profile_analysis_deadlines(
+    *,
+    event_count: int,
+    requested: float | None,
+    concurrency: int = 1,
+) -> tuple[float | None, float | None]:
+    """Return stage 2's ``(idle_seconds, absolute_seconds)`` deadline pair.
+
+    An explicit caller override (API/test budget) stays an exact pure wall
+    clock — callers that ask for N seconds get N seconds, and ``<=0`` still
+    means "no limit". Only the default path becomes progress-aware.
+    """
+    if requested is not None:
+        return None, (requested if requested > 0 else None)
+    scaled = _profile_analysis_timeout_seconds(
+        event_count=event_count,
+        requested=None,
+        concurrency=concurrency,
+    )
+    absolute = max(_INIT_PROGRESS_ABSOLUTE_SECONDS, scaled or 0.0)
+    return _INIT_PROGRESS_IDLE_SECONDS, absolute
+
+
+def _timeout_minutes(seconds: float) -> int:
+    return max(1, (max(1, int(seconds)) + 59) // 60)
+
+
+def _profile_analysis_idle_timeout_message(seconds: float) -> str:
+    """Nothing came back at all — almost always a connectivity/config fault."""
+    return (
+        f"AI 服务长时间没有返回任何新结果（约 {_timeout_minutes(seconds)} 分钟无进展），"
+        "已自动停止，避免继续卡住。常见原因是 Base URL、模型名或代理配置错误，"
+        "或网络无法访问模型服务。请到模型设置测试 AI 服务，修正后再重试初始化。"
+    )
+
+
+def _profile_analysis_absolute_timeout_message(seconds: float, *, progress_note: str = "") -> str:
+    """Results kept coming, just too slowly for a bootstrap this size."""
+    progress_part = f"（{progress_note}）" if progress_note else ""
+    minutes = _timeout_minutes(seconds)
+    return (
+        f"偏好分析总时长超过上限（约 {minutes} 分钟），已自动停止{progress_part}。"
+        "AI 服务一直在返回结果，只是对这次初始化的数据量来说太慢了。"
+        "建议到模型设置换一个更快的模型，或稍后重试初始化。"
+    )
+
+
+class _InitIdleTimeoutError(TimeoutError):
+    """No progress signal within the idle limit."""
+
+
+class _InitAbsoluteTimeoutError(TimeoutError):
+    """Total runtime exceeded the absolute ceiling despite progress."""
+
+
+class _InitProgressMarker:
+    """Shared monotonic 'last progress' marker.
+
+    The work's own per-unit progress callbacks call :meth:`touch`; the
+    watchdog in :func:`_await_with_progress_deadline` reads :attr:`last`.
+    Heartbeat ticks deliberately do NOT touch it — a tick fires on a timer
+    regardless of whether the work advanced, so counting it as progress would
+    turn the idle limit into no limit at all.
+    """
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock: Callable[[], float] = clock or _loop_clock
+        self.started = self._clock()
+        self.last = self.started
+
+    def now(self) -> float:
+        return self._clock()
+
+    def touch(self) -> None:
+        self.last = self._clock()
+
+
+def _loop_clock() -> float:
+    return asyncio.get_running_loop().time()
+
+
+async def _await_with_progress_deadline(
+    awaitable: Awaitable[Any],
+    *,
+    marker: _InitProgressMarker,
+    idle_seconds: float | None,
+    absolute_seconds: float | None,
+    poll_seconds: float = 1.0,
+) -> Any:
+    """Await ``awaitable`` under an idle limit AND an absolute ceiling.
+
+    A fixed wall clock cannot tell "hung" from "slow but progressing", which
+    is exactly how a healthy-but-slow gateway got killed mid-bootstrap. This
+    replaces it with two limits: ``idle_seconds`` since the last progress
+    signal, and ``absolute_seconds`` overall. Either limit (and cancellation)
+    cancels the work task and awaits its cancellation so nothing leaks.
+    """
+    task: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
+    started = marker.now()
+    marker.touch()
+    try:
+        while True:
+            now = marker.now()
+            # Sleep only until the nearest limit so a tiny injected budget is
+            # honoured promptly instead of always costing a full poll interval.
+            wait_for = poll_seconds
+            if absolute_seconds is not None:
+                wait_for = min(wait_for, started + absolute_seconds - now)
+            if idle_seconds is not None:
+                wait_for = min(wait_for, marker.last + idle_seconds - now)
+            done_tasks, _ = await asyncio.wait({task}, timeout=max(0.0, wait_for))
+            if task in done_tasks:
+                return task.result()
+            now = marker.now()
+            if absolute_seconds is not None and now - started >= absolute_seconds:
+                raise _InitAbsoluteTimeoutError(absolute_seconds)
+            if idle_seconds is not None and now - marker.last >= idle_seconds:
+                raise _InitIdleTimeoutError(idle_seconds)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        raise
+
+
+_INIT_DISCOVERY_TIMEOUT_MESSAGE = (
+    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 45 分钟仍未完成，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_IDLE_MESSAGE = (
+    "画像已生成，但首轮内容池已经约 15 分钟没有任何新进展，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 服务无法访问。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_PARTIAL_MESSAGE = (
+    "画像已生成，但首轮内容发现、个性化评分或推荐文案生成失败，"
+    "尚未产出可直接浏览的首轮内容，本次初始化已按“部分完成”结束。"
+    "常见原因是所选内容源暂不可用，或 AI 评估 / 文案生成失败。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
 
 
 def _force_utf8_stdout_on_windows() -> None:
@@ -72,10 +333,12 @@ auth_app = typer.Typer(help="B 站认证命令")
 login_app = typer.Typer(help="账号登录命令")
 browser_app = typer.Typer(help="agent-browser 浏览器命令")
 autostart_app = typer.Typer(help="开机自启动命令")
+ext_key_app = typer.Typer(help="浏览器扩展密钥管理命令")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
 app.add_typer(autostart_app, name="autostart")
+app.add_typer(ext_key_app, name="ext-key")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -131,6 +394,39 @@ _DOUYIN_SEARCH_KEYWORDS_OPTION = typer.Option(
     "-k",
     help="抖音搜索关键词，可重复传或用逗号分隔。",
 )
+_KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
+    None,
+    "--platform",
+    "-p",
+    help=(
+        "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
+        "douyin/youtube/twitter/zhihu/reddit。"
+    ),
+)
+_KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
+    "regular",
+    "--kind",
+    help="关键词类型：regular 或 explore。",
+)
+_KEYWORD_INSPIRATION_LIMIT_OPTION = typer.Option(
+    None,
+    "--limit",
+    min=1,
+    max=48,
+    help="本次 dry-run 每个平台最多生成多少关键词；不传则使用 config.toml。",
+)
+_KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION = typer.Option(
+    None,
+    "--interest-limit",
+    min=1,
+    max=16,
+    help="本次 dry-run 最多抽取多少个二级兴趣；只影响预览成本，不写回 config.toml。",
+)
+_KEYWORD_INSPIRATION_PERSIST_AXES_OPTION = typer.Option(
+    False,
+    "--persist-axes",
+    help="预览时写入 / 合并 inspiration axis 库；不增加 axis 使用计数。",
+)
 _CODEX_LOGIN_IMPORT_OPTION = typer.Option(
     False,
     "--import",
@@ -150,6 +446,18 @@ _CODEX_LOGIN_LOGOUT_OPTION = typer.Option(
     False,
     "--logout",
     help="删除 OpenBiliClaw 本地 Codex 凭据。",
+)
+_CONFIG_EXPORT_LEGACY_OUTPUT_OPTION = typer.Option(
+    None,
+    "--output",
+    "-o",
+    dir_okay=False,
+    help="旧格式输出路径（默认：当前配置旁的 config.legacy.toml）",
+)
+_CONFIG_EXPORT_LEGACY_FORCE_OPTION = typer.Option(
+    False,
+    "--force",
+    help="覆盖已存在的输出文件",
 )
 
 
@@ -211,7 +519,7 @@ _EXTENSION_PRESENCE_REQUIRED_WARNING = (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
 
 def _print_page_title(title: str, subtitle: str = "") -> None:
@@ -262,14 +570,6 @@ def _warn_if_pause_on_disconnect_requires_presence() -> None:
             f"[yellow]{_EXTENSION_PRESENCE_REQUIRED_WARNING}[/yellow]",
             soft_wrap=True,
         )
-
-
-def _is_default_ollama_endpoint(endpoint: str) -> bool:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(endpoint)
-    host = (parsed.hostname or "").strip().lower()
-    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
 
 
 def _preflight_loopback_ollama(cfg: Any) -> None:
@@ -346,6 +646,8 @@ async def _run_with_progress(
     label: str,
     eta_seconds: int,
     tick_seconds: int = 20,
+    status_provider: Callable[[], str] | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> Any:
     """Run a coroutine while printing periodic progress updates.
 
@@ -356,6 +658,14 @@ async def _run_with_progress(
     "started, ETA Xs" line, ticks every ``tick_seconds`` with
     elapsed/ETA while the work runs, and prints a final completion
     line with actual wall time.
+
+    ``status_provider`` (optional) returns a short live-status suffix —
+    e.g. ``"已完成 3/12 批"`` — appended to every heartbeat so a stalled
+    inner batch shows a *frozen* sub-progress next to the growing
+    elapsed clock, pinpointing where it hung. The ETA half never lies:
+    once ``elapsed`` passes ``eta_seconds`` the heartbeat switches from a
+    ``预计还需 ~Ns`` countdown (which would otherwise pin at ``~0s`` and
+    read as "about to finish") to an explicit "已超预估、仍在处理" notice.
     """
     import time as _time
     from contextlib import suppress as _suppress
@@ -367,8 +677,20 @@ async def _run_with_progress(
         while True:
             await asyncio.sleep(tick_seconds)
             elapsed = int(_time.monotonic() - start)
-            remaining = max(0, eta_seconds - elapsed)
-            console.print(f"  [dim]· {label}: 已用 {elapsed}s / 预计还需 ~{remaining}s[/dim]")
+            if elapsed < eta_seconds:
+                eta_part = f"预计还需 ~{eta_seconds - elapsed}s"
+            else:
+                eta_part = f"已超预估(~{eta_seconds}s)，仍在处理"
+            status = ""
+            if status_provider is not None:
+                with _suppress(Exception):
+                    text = status_provider()
+                    if text:
+                        status = f" · {text}"
+            console.print(f"  [dim]· {label}: 已用 {elapsed}s / {eta_part}{status}[/dim]")
+            if progress_callback is not None:
+                with _suppress(Exception):
+                    await progress_callback(elapsed, eta_seconds)
 
     ticker_task = asyncio.create_task(_ticker())
     try:
@@ -382,18 +704,73 @@ async def _run_with_progress(
     return result
 
 
+def _content_author_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) author row for one content-like object.
+
+    Two source-agnostic rules, shared with the three GUI surfaces:
+
+    * **Value** — ``author_name`` is the universal author field and
+      ``up_name`` is the Bilibili-only legacy one. ``DiscoveredContent``
+      back-fills ``author_name`` from ``up_name`` but never the reverse,
+      so non-Bilibili sources (Bangumi, Zhihu, YouTube, …) populate only
+      ``author_name`` and reading ``up_name`` alone rendered "（未知）"
+      for all of them. Prefer ``author_name``, keep ``up_name`` as the
+      fallback for legacy rows — same order as the backend's
+      ``content.author_name or content.up_name``.
+    * **Label** — mirrors ``formatRecommendationAuthorLine`` in
+      ``extension/popup/popup-helpers.js``: Bilibili keeps the native
+      "UP 主", every other platform gets the neutral "作者" (a Bangumi
+      director or a Zhihu answerer is not an UP). A missing / unknown
+      ``source_platform`` falls back to bilibili so legacy rows keep
+      their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    name = str(getattr(content, "author_name", "") or getattr(content, "up_name", "") or "").strip()
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "UP 主" if (platform or "bilibili") == "bilibili" else "作者"
+    return (label, name or "（未知）")
+
+
+def _content_id_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) identifier row for one content-like object.
+
+    ``bvid`` is the universal identifier column, not a Bilibili-only one:
+    every non-Bilibili mapper stores its own id there (``bangumi.py``'s
+    ``bangumi_subject_to_content`` sets ``bvid=content_id``, i.e. the bgm
+    subject id). Labelling it "BV号" unconditionally printed rows like
+    ``BV号  8`` for Bangumi — 8 is a subject id, not a BV number.
+
+    Same two rules as :func:`_content_author_row`: Bilibili keeps its native
+    term, every other platform gets a neutral "内容 ID", and a missing /
+    unknown ``source_platform`` falls back to bilibili so legacy rows keep
+    their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "BV号" if (platform or "bilibili") == "bilibili" else "内容 ID"
+    return (label, str(getattr(content, "bvid", "") or "") or "（暂无）")
+
+
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
+    published = format_published_time(
+        getattr(item.content, "published_at", ""),
+        getattr(item.content, "published_label", ""),
+    )
     rows = [
         ("标题", item.content.title or "（暂无）"),
-        ("UP 主", item.content.up_name or "（未知）"),
+        _content_author_row(item.content),
     ]
+    if published:
+        rows.append(("发布时间", published))
     if item.topic_label:
         rows.append(("话题标签", item.topic_label))
     rows.extend(
         [
             ("推荐理由", item.expression or "（暂无）"),
-            ("BV号", item.content.bvid or "（暂无）"),
+            _content_id_row(item.content),
         ]
     )
     _print_key_value_table(f"推荐 {index}", rows)
@@ -405,7 +782,7 @@ def _print_discovered_content_preview(item: Any, index: int) -> None:
         f"发现 {index}",
         [
             ("标题", item.title or "（暂无）"),
-            ("UP 主", item.up_name or "（未知）"),
+            _content_author_row(item),
             ("来源策略", item.source_strategy or "（未知）"),
             ("相关性分数", f"{float(item.relevance_score or 0.0):.2f}"),
         ],
@@ -442,12 +819,26 @@ def _build_registry() -> Any:
     return build_llm_registry(load_config())
 
 
+def _build_llm_concurrency_gate() -> Any:
+    """Return the single LLM gate owned by this CLI process composition."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    cached = _RUNTIME_COMPONENTS.get("llm_concurrency_gate")
+    if cached is not None:
+        return cached
+    gate = LLMConcurrencyGate(load_config().llm.concurrency)
+    _RUNTIME_COMPONENTS["llm_concurrency_gate"] = gate
+    return gate
+
+
 def _build_auth_manager() -> Any:
     """Build the configured Bilibili auth manager."""
     from openbiliclaw.bilibili.auth import AuthManager
     from openbiliclaw.config import load_config
 
-    return AuthManager(load_config().data_path)
+    config = load_config()
+    return AuthManager(config.data_path, proxy=config.bilibili.proxy or None)
 
 
 def _build_browser() -> Any:
@@ -478,7 +869,8 @@ def _build_bilibili_client() -> Any:
         cookie=resolve_runtime_cookie(
             data_dir=config.data_path,
             configured_cookie=config.bilibili.cookie,
-        )
+        ),
+        proxy=config.bilibili.proxy or None,
     )
 
 
@@ -513,6 +905,7 @@ def _build_soul_engine() -> Any:
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
+        llm_concurrency_gate=_build_llm_concurrency_gate(),
         speculation_interval_minutes=cfg.scheduler.speculation_interval_minutes,
         speculation_ttl_days=cfg.scheduler.speculation_ttl_days,
         speculation_cooldown_days=cfg.scheduler.speculation_cooldown_days,
@@ -537,6 +930,7 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        database=_get_runtime_database(),
     )
 
 
@@ -559,6 +953,7 @@ def _build_recommendation_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     from openbiliclaw.llm.registry import build_embedding_service
 
@@ -606,7 +1001,7 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             + "\n\nOpen the extension popup settings to fix the LLM credentials, "
             "then restart the daemon."
         )
-        _print_status_panel("warning", "降级模式 / Degraded mode", body)
+        _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
     uvicorn.run(api_app, host=host, port=port, log_level="info")
 
 
@@ -626,6 +1021,21 @@ def _build_memory_manager() -> Any:
     return memory
 
 
+def _guided_init_completed_best_effort() -> bool | None:
+    """Cheap pre-server read of whether guided init ever completed.
+
+    Mirrors the runtime's soul-layer check. Returns ``None`` when the check
+    itself fails — callers should stay silent on unknown state rather than
+    nag a healthy install.
+    """
+    try:
+        layer = _build_memory_manager().get_layer("soul")
+        data = getattr(layer, "data", {})
+        return isinstance(data, dict) and bool(data)
+    except Exception:
+        return None
+
+
 def _build_discovery_engine() -> Any:
     """Build the discovery engine with currently implemented strategies."""
     from openbiliclaw.discovery.engine import (
@@ -638,6 +1048,7 @@ def _build_discovery_engine() -> Any:
         SearchStrategy,
         TrendingStrategy,
     )
+    from openbiliclaw.llm.concurrency import background_llm_concurrency
     from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 
     memory = _build_memory_manager()
@@ -653,12 +1064,11 @@ def _build_discovery_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=2,
-        # Inherit dataclass default (currently 32) — sized so an init
-        # discover's ~32 batches all fan out in a single wave instead
-        # of queueing behind a tight cap. See engine.py for rationale.
+        llm_evaluation_concurrency=background_llm_concurrency(cfg.llm.concurrency),
     )
 
     # Build embedding service from config (optional)
@@ -879,6 +1289,25 @@ def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     _APP_CONTEXT["log_level"] = log_level
     _bootstrap_container_runtime()
     _initialize_logging(log_level_override=log_level)
+    _sync_outbound_proxy()
+
+
+def _sync_outbound_proxy() -> None:
+    """Mirror [network].proxy into the process-level source of truth for CLI.
+
+    Runs once per CLI invocation so any command that builds an LLM registry or
+    the updater routes overseas traffic through the configured proxy. Guarded
+    so a missing/broken config never blocks a command from starting.
+    """
+    import contextlib
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.network import set_outbound_proxy
+
+    # Config resolution must never block a command from starting.
+    with contextlib.suppress(Exception):
+        network = load_config().network
+        set_outbound_proxy(network.proxy, mode=network.mode)
 
 
 def _print_config_guidance(messages: list[str]) -> None:
@@ -967,27 +1396,73 @@ def _save_runtime_provider_config(
     base_url: str = "",
     model: str = "",
 ) -> None:
-    """Persist the selected provider's full config triple to ``config.toml``.
-
-    Writes ``default_provider`` plus the per-provider ``[llm.<name>]``
-    block. ``api_key`` / ``base_url`` / ``model`` are only written when
-    non-empty (so existing saved values aren't blown away when the
-    wizard's user accepts a default by leaving the prompt blank).
-    """
-    from openbiliclaw.config import load_config_with_diagnostics, save_config
+    """Persist one complete provider instance and make it the global primary."""
+    from openbiliclaw.config import (
+        LLMInstanceConfig,
+        effective_llm_default_chain,
+        effective_llm_instances,
+        effective_llm_routes,
+        load_config_with_diagnostics,
+        save_config,
+    )
 
     config, diagnostics = load_config_with_diagnostics()
-    config.llm.default_provider = provider
+    provider = provider.strip().lower()
     provider_config = getattr(config.llm, provider, None)
     if provider_config is None:
         save_config(config, diagnostics.config_path)
         return
-    if api_key and hasattr(provider_config, "api_key"):
-        provider_config.api_key = api_key.strip()
-    if base_url and hasattr(provider_config, "base_url"):
-        provider_config.base_url = base_url.strip()
-    if model and hasattr(provider_config, "model"):
-        provider_config.model = model.strip()
+
+    instances = effective_llm_instances(config.llm)
+    chain = effective_llm_default_chain(config.llm)
+    routes = effective_llm_routes(config.llm)
+    instance_id = next(
+        (
+            candidate
+            for candidate in [*chain, *instances]
+            if candidate in instances
+            and instances[candidate].provider_type.strip().lower() == provider
+        ),
+        "",
+    )
+    if not instance_id:
+        instance_id = f"{provider.replace('_', '-')}-main"
+        suffix = 2
+        while instance_id in instances:
+            instance_id = f"{provider.replace('_', '-')}-{suffix}"
+            suffix += 1
+        instance = LLMInstanceConfig(
+            api_key=provider_config.api_key,
+            model=provider_config.model,
+            base_url=provider_config.base_url,
+            auth_mode=provider_config.auth_mode,
+            api_flavor=provider_config.api_flavor,
+            http_referer=provider_config.http_referer,
+            x_title=provider_config.x_title,
+            reasoning_effort=provider_config.reasoning_effort,
+            num_ctx=provider_config.num_ctx,
+            name=provider,
+            provider_type=provider,
+            enabled=True,
+        )
+        instances[instance_id] = instance
+    instance = instances[instance_id]
+    instance.enabled = True
+    if api_key:
+        instance.api_key = api_key.strip()
+    if base_url:
+        instance.base_url = base_url.strip()
+    if model:
+        instance.model = model.strip()
+
+    config.llm.instance_routing = True
+    config.llm.instances = instances
+    config.llm.default_chain = [
+        instance_id,
+        *[candidate for candidate in chain if candidate != instance_id],
+    ]
+    for module_name, route in routes.items():
+        setattr(config.llm, module_name, route)
     save_config(config, diagnostics.config_path)
 
 
@@ -1012,7 +1487,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     # Ollama: project is Chinese-primary; qwen2.5:7b handles Chinese
     # noticeably better than llama3 at the same size.
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"},
+    "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
     # OpenRouter: route to OpenAI's cheapest current-gen by default.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
 }
@@ -1147,8 +1622,8 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         {
             "label": "MiniMax 官方",
             "description": (
-                "国产代码 / agent 场景的当前 SOTA 之一 (M2.7 在 SWE-Bench 上 80%+),"
-                "便宜 ($0.30 / $1.20 per M),适合做推荐这种结构化输出任务"
+                "国产代码 / agent 场景的当前 SOTA 之一 (M3: 1M ctx / 图文视频输入),"
+                "便宜 ($0.60 / $2.40 per M),适合做推荐这种结构化输出任务"
             ),
             "signup_url": (
                 "https://platform.minimaxi.com/user-center/basic-information/interface-key "
@@ -1156,10 +1631,10 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
             ),
             "supports_embedding": "false",
             "base_url": "https://api.minimax.io/v1",
-            "default_model": "MiniMax-M2.7",
+            "default_model": "MiniMax-M3",
             "hint": (
-                "MiniMax-M2.7 (默认 / 最新 / 4-2026 / 228K ctx) / "
-                "MiniMax-M2.5 / MiniMax-M2.1。"
+                "MiniMax-M3 (默认 / 最新 / 5-2026 / 1M ctx) / "
+                "MiniMax-M2.7 / MiniMax-M2.5 / MiniMax-M2.1。"
                 "旧 abab 系列 (abab6.5*) 已被 M 系列替代"
             ),
             "domain_alt": (
@@ -1292,7 +1767,7 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_has_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
 
@@ -1311,7 +1786,7 @@ def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
     return False
 
 
-def _ollama_pull_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_pull_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Stream a model pull from Ollama; print progress to console."""
     import httpx
 
@@ -1442,31 +1917,85 @@ def _save_embedding_config(
     if base_url:
         config.llm.embedding.base_url = base_url.strip()
     elif provider == "ollama" and not config.llm.embedding.base_url.strip():
-        config.llm.embedding.base_url = "http://localhost:11434/v1"
+        config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
     if api_key:
         config.llm.embedding.api_key = api_key.strip()
     save_config(config, diagnostics.config_path)
 
 
 def _save_module_overrides(overrides: dict[str, dict[str, str]]) -> None:
-    """Persist per-module LLM overrides to config.toml.
-
-    ``overrides`` maps module name (``soul`` / ``discovery`` /
-    ``recommendation`` / ``evaluation``) to a dict with optional
-    ``provider`` and ``model`` keys. Empty values are written as empty
-    strings, which the loader treats as "use global default".
-    """
-    from openbiliclaw.config import load_config_with_diagnostics, save_config
+    """Persist per-module overrides as complete custom instance chains."""
+    from openbiliclaw.config import (
+        LLMInstanceConfig,
+        ModuleLLMConfig,
+        effective_llm_default_chain,
+        effective_llm_instances,
+        effective_llm_routes,
+        load_config_with_diagnostics,
+        save_config,
+    )
 
     config, diagnostics = load_config_with_diagnostics()
+    instances = effective_llm_instances(config.llm)
+    default_chain = effective_llm_default_chain(config.llm)
+    routes = effective_llm_routes(config.llm)
     for module, payload in overrides.items():
-        module_config = getattr(config.llm, module, None)
-        if module_config is None:
+        if module not in routes:
             continue
-        if "provider" in payload:
-            module_config.provider = payload["provider"].strip()
-        if "model" in payload:
-            module_config.model = payload["model"].strip()
+        provider_type = payload.get("provider", "").strip().lower()
+        model = payload.get("model", "").strip()
+        if not provider_type and not model:
+            routes[module] = ModuleLLMConfig(inherit=True)
+            continue
+        primary = instances.get(default_chain[0]) if default_chain else None
+        if not provider_type and primary is not None:
+            provider_type = primary.provider_type.strip().lower()
+        instance_id = next(
+            (
+                candidate
+                for candidate, instance in instances.items()
+                if instance.provider_type.strip().lower() == provider_type
+                and (not model or instance.model.strip() == model)
+            ),
+            "",
+        )
+        if not instance_id:
+            base = next(
+                (
+                    instance
+                    for instance in instances.values()
+                    if instance.provider_type.strip().lower() == provider_type
+                ),
+                None,
+            )
+            if base is None:
+                continue
+            base_instance_id = f"{module}-{provider_type.replace('_', '-')}"
+            instance_id = base_instance_id
+            suffix = 2
+            while instance_id in instances:
+                instance_id = f"{base_instance_id}-{suffix}"
+                suffix += 1
+            instances[instance_id] = LLMInstanceConfig(
+                api_key=base.api_key,
+                model=model or base.model,
+                base_url=base.base_url,
+                auth_mode=base.auth_mode,
+                api_flavor=base.api_flavor,
+                http_referer=base.http_referer,
+                x_title=base.x_title,
+                reasoning_effort=base.reasoning_effort,
+                num_ctx=base.num_ctx,
+                name=f"{module} · {base.name}",
+                provider_type=base.provider_type,
+                enabled=base.enabled,
+            )
+        routes[module] = ModuleLLMConfig(inherit=False, chain=[instance_id])
+    config.llm.instance_routing = True
+    config.llm.instances = instances
+    config.llm.default_chain = default_chain
+    for module, route in routes.items():
+        setattr(config.llm, module, route)
     save_config(config, diagnostics.config_path)
 
 
@@ -1483,10 +2012,17 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
 # Numbered menu shown in Phase 1. Order matters (v0.3.20+):
 # DeepSeek first as the default zero-friction recommendation
 # (¥0.001/千 token); OpenAI / Gemini / Claude / OpenRouter for users who
-# already have those keys; Ollama as the offline-only fallback (slow CPU
-# inference, real hardware floor); "OpenAI 协议兼容自建网关" demoted to
+# already have those keys; "OpenAI 协议兼容自建网关" demoted to
 # the final "(高级)" entry so 普通用户 don't pick it by mistake — most
 # people who think they want it actually want option 2 (OpenAI 官方).
+#
+# Local Ollama is intentionally NOT offered here as a chat provider
+# (v0.3.176+): the bundled Ollama is embedding-only (bge-m3), and small
+# local chat models don't meet the content-pipeline quality bar. Ollama
+# chat stays supported in the backend registry / desktop settings page
+# for advanced users, and ``ollama`` remains a valid ``default_provider``
+# when it arrives from an existing config or an explicit flag — we just
+# stop *offering* it in the interactive menu.
 _LLM_MENU: tuple[tuple[str, str, str], ...] = (
     (
         "deepseek",
@@ -1518,11 +2054,6 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
         "OpenRouter 聚合",
         "默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费",
     ),
-    (
-        "ollama",
-        "本地 Ollama（完全离线）",
-        "默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s",
-    ),
 )
 
 
@@ -1539,7 +2070,9 @@ def _print_provider_table() -> None:
     console.print(table)
     console.print(
         "[dim]Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。"
-        "已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。[/dim]"
+        "已经买了中转站 / OneAPI Key 选 2 (协议兼容)。"
+        "本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;"
+        "如需本地聊天模型请到设置页手动配置。[/dim]"
     )
 
 
@@ -1767,7 +2300,16 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
         ).strip()
         or default_model
     )
-    return provider, default_base_url, api_key, model
+    base_url = default_base_url
+    if provider == "claude":
+        # issue #72 — Claude keys bought from third-party relays need a
+        # custom Anthropic-protocol (/v1/messages) endpoint. Enter = official.
+        base_url = typer.prompt(
+            "Base URL（直接回车 = Anthropic 官方；第三方中转填其地址）",
+            default="",
+            show_default=False,
+        ).strip()
+    return provider, base_url, api_key, model
 
 
 def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool = False) -> None:
@@ -2023,8 +2565,9 @@ def _interactive_runtime_config_setup() -> None:
     """Guide the user through missing LLM config before init.
 
     Four-phase flow:
-      1) Pick LLM service (Ollama-first menu; OpenAI-compat is its own entry,
-         not buried inside ``openai``).
+      1) Pick LLM service (DeepSeek-first menu; OpenAI-compat is its own entry,
+         not buried inside ``openai``). Local Ollama is not offered as a
+         chat provider — it's embedding-only here.
       2) Provide the fields that option actually needs.
       3) Choose how embeddings are served (separate question, not bundled).
       4) Optional per-module overrides (advanced, default skip).
@@ -2033,7 +2576,7 @@ def _interactive_runtime_config_setup() -> None:
     _print_provider_table()
 
     while True:
-        raw = typer.prompt("\n请输入序号或名称（默认 1=Ollama）", default="1")
+        raw = typer.prompt("\n请输入序号或名称（默认 1=DeepSeek）", default="1")
         choice = _resolve_menu_choice(raw)
         if choice is None:
             console.print("[bold red]看不懂这个输入，请重新输入序号或名称[/bold red]")
@@ -2123,14 +2666,24 @@ def _interactive_auth_setup(auth_manager: Any) -> Any:
             raise typer.Exit(code=1)
 
 
-def _prepare_init_runtime() -> Any:
-    """Ensure runtime config and auth are ready before init proceeds."""
+def _prepare_init_runtime(*, require_bili_auth: bool = True) -> Any:
+    """Ensure runtime config and auth are ready before init proceeds.
+
+    ``require_bili_auth`` gates the Bilibili-authentication step. Bilibili init
+    needs it, but off-platform profile rebuilds (e.g. Bangumi collections feed
+    only ``soul_engine.analyze_events`` + ``build_initial_profile``) never touch
+    Bilibili, so they pass ``False`` to keep the runtime-config validation while
+    skipping the B 站 auth gate that would otherwise abort a non-interactive run.
+    """
     error = _load_runtime_config_error(render=False)
     if error is not None:
         if not _is_interactive_terminal():
             _print_runtime_config_error(error)
             raise typer.Exit(code=1)
         _interactive_runtime_config_setup()
+
+    if not require_bili_auth:
+        return None
 
     auth_manager = _build_auth_manager()
     status = asyncio.run(auth_manager.get_status())
@@ -2152,24 +2705,42 @@ async def _run_init_discovery_backfill_async(
     *,
     target_pool_count: int = 100,
     label_suffix: str = "",
+    progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
 ) -> int:
-    """Backfill the initial discovery pool in stages until the target is reached."""
+    """Build the first serviceable discovery pool from the committed profile."""
     from openbiliclaw.discovery.pool_snapshot import build_cold_start_pool_snapshot
+    from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+    async def _report(done: int, total: int, note: str) -> None:
+        if progress_callback is None:
+            return
+        result = progress_callback(done, total, note)
+        if inspect.isawaitable(result):
+            await result
 
     database = _get_runtime_database()
     discovery_engine = _build_discovery_engine()
+    gate = _build_llm_concurrency_gate()
+    target = max(0, int(target_pool_count))
+    if target == 0:
+        await _report(4, 4, "已跳过首轮内容池构建")
+        return 0
+
     discovered_count = 0
+    copy_error: BaseException | None = None
 
     for index, strategies in enumerate(_INIT_DISCOVERY_PLAN, start=1):
         current_pool_count = database.count_pool_candidates()
-        if current_pool_count >= target_pool_count:
+        gate.update_inventory(available=current_pool_count, target=target)
+        if current_pool_count >= target:
             break
-        request_limit = max(20, target_pool_count - current_pool_count)
+        await _report(0, 4, "正在基于完整画像生成发现方向并抓取候选")
+        request_limit = max(20, target - current_pool_count)
         pool_snapshot = (
             build_cold_start_pool_snapshot(
                 profile,
-                pool_target_count=target_pool_count,
-                source_targets={"bilibili": target_pool_count},
+                pool_target_count=target,
+                source_targets={"bilibili": target},
             )
             if current_pool_count <= 0
             else None
@@ -2178,9 +2749,7 @@ async def _run_init_discovery_backfill_async(
             f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
             f"{label_suffix}"
         )
-        console.print(
-            f"当前池子 {current_pool_count}/{target_pool_count}，本轮请求上限 {request_limit}"
-        )
+        console.print(f"当前池子 {current_pool_count}/{target}，本轮请求上限 {request_limit}")
         discovered = await _run_with_progress(
             discovery_engine.discover(
                 profile,
@@ -2195,34 +2764,43 @@ async def _run_init_discovery_backfill_async(
             eta_seconds=300,
         )
         discovered_count += len(discovered)
-        console.print(
-            "阶段完成: "
-            f"当前池子 {database.count_pool_candidates()}/{target_pool_count}，"
-            f"本轮发现 {len(discovered)} 条"
+        current_pool_count = database.count_pool_candidates()
+        gate.update_inventory(available=current_pool_count, target=target)
+        await _report(
+            2,
+            4,
+            f"已发现 {discovered_count} 条候选，正在生成首轮推荐文案",
         )
 
+        if current_pool_count < target:
+            recommendation_engine = _build_recommendation_engine()
+            try:
+                copied = await recommendation_engine.drain_pending_expression_copy(
+                    profile=profile,
+                    limit=max(1, target),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                copy_error = exc
+                copied = max(0, int(getattr(exc, "completed", 0) or 0))
+            current_pool_count = database.count_pool_candidates()
+            gate.update_inventory(available=current_pool_count, target=target)
+            await _report(
+                3,
+                4,
+                f"已生成 {copied} 条推荐文案，正在验证首轮内容可用性",
+            )
+        console.print(
+            f"阶段完成: 当前池子 {current_pool_count}/{target}，本轮发现 {len(discovered)} 条"
+        )
+
+    available = database.count_pool_candidates()
+    gate.update_inventory(available=available, target=target)
+    if available <= 0:
+        raise InitialPoolUnavailableError(discovered_count=discovered_count) from copy_error
+    await _report(4, 4, f"首轮内容池已就绪（{available} 条可直接浏览）")
     return discovered_count
-
-
-def _build_draft_profile_for_discover(memory: Any) -> Any:
-    """Build a preference-only ``OnionProfile`` so discover can start
-    in parallel with ``build_initial_profile`` (P3).
-
-    The full profile builder runs an LLM synthesis call over history +
-    preference + awareness + insights to produce
-    ``personality_portrait``, ``deep_needs``, ``core_traits`` etc. —
-    fields that *colour* discover's evaluation prompt but aren't
-    load-bearing for relevance scoring (interests + style +
-    favorite_up_users carry the signal). Letting discover use a
-    preference-only draft while the real profile builds in the
-    background overlaps two phases that previously serialised.
-    """
-    from openbiliclaw.soul.profile import OnionProfile
-
-    preference_layer = memory.get_layer("preference").data
-    draft = OnionProfile()
-    draft.populate_from_flat_preference(preference_layer)
-    return draft
 
 
 def _xhs_bootstrap_dedupe_hours() -> float:
@@ -2385,6 +2963,7 @@ def _collect_xhs_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued bootstrap_profile task.
 
@@ -2430,6 +3009,8 @@ def _collect_xhs_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2561,6 +3142,7 @@ def _collect_dy_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued Douyin bootstrap task.
 
@@ -2606,6 +3188,8 @@ def _collect_dy_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2721,6 +3305,7 @@ def _collect_yt_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued YouTube bootstrap task.
 
@@ -2759,6 +3344,8 @@ def _collect_yt_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2884,6 +3471,7 @@ def _collect_zhihu_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued Zhihu bootstrap task."""
     import json
@@ -2922,6 +3510,8 @@ def _collect_zhihu_bootstrap_events(
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], empty_counts, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -3402,6 +3992,7 @@ def _collect_reddit_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and convert a Reddit bootstrap_events task."""
     import json
@@ -3434,6 +4025,8 @@ def _collect_reddit_bootstrap_events(
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], empty_counts, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -3880,6 +4473,27 @@ def _reddit_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[s
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+def _bangumi_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Bangumi public-collection events into profile history rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": "",
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "bangumi",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
 @app.command("setup-embedding")
 def setup_embedding() -> None:
     """配置本地 Ollama 作为 embedding 兜底服务（可选）.
@@ -4233,6 +4847,14 @@ def start(
         "API 服务",
         f"正在启动本地后端，当前监听 {effective_host}:{effective_port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if effective_host == "0.0.0.0" else effective_host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"启动后打开 http://{hint_host}:{effective_port}/setup/ 完成引导初始化；"
+            "无浏览器环境改用 `openbiliclaw init`。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     if cfg.api.auth.enabled:
         _print_status_panel(
@@ -4630,6 +5252,164 @@ def set_password(
     )
 
 
+# ── ext-key: 浏览器扩展密钥管理 ────────────────────────────────────────
+
+
+_EXT_KEY_AUTH_FIELDS = frozenset({"extension_access_enabled", "extension_access_keys"})
+
+
+def _ensure_ext_key_config_writable() -> None:
+    """Refuse writes that would be hidden by a higher-priority auth layer."""
+    from openbiliclaw.config import API_AUTH_ENV_VARS, config_local_auth_keys
+
+    managed = [name for name in API_AUTH_ENV_VARS if (os.environ.get(name) or "").strip()]
+    if managed:
+        _print_status_panel(
+            "error",
+            "检测到环境变量覆盖，设备密钥配置不会可靠生效",
+            f"已设置 {', '.join(managed)}；请先移除环境变量覆盖，再管理设备密钥。",
+        )
+        raise typer.Exit(code=1)
+    shadowed = sorted(config_local_auth_keys() & _EXT_KEY_AUTH_FIELDS)
+    if shadowed:
+        _print_status_panel(
+            "error",
+            "config.local.toml 正在覆盖设备密钥配置",
+            f"被覆盖字段：{', '.join(shadowed)}；请直接修改 config.local.toml。",
+        )
+        raise typer.Exit(code=1)
+
+
+@ext_key_app.command("generate")
+def ext_key_generate() -> None:
+    """生成并保存一个扩展设备访问密钥（明文只显示一次）。"""
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys.append(record)
+    save_config(cfg)
+    _print_status_panel(
+        "success",
+        "设备访问密钥已生成",
+        f"Key ID: {key_id}\n设备访问密钥（仅显示一次）:\n{full_key}\n\n"
+        "总开关保持关闭；确认保存密钥后执行 `openbiliclaw ext-key enable`。",
+    )
+
+
+@ext_key_app.command("list")
+def ext_key_list() -> None:
+    """显示设备访问开关和已保存的 key ID。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config
+
+    cfg = load_config()
+    auth = cfg.api.auth
+    key_ids = extension_access_key_ids(auth.extension_access_keys)
+    rows: list[tuple[str, str]] = [
+        ("设备访问", "开启" if auth.extension_access_enabled else "关闭"),
+        ("密钥数量", str(len(key_ids))),
+    ]
+    rows.extend((f"Key [{index}]", key_id) for index, key_id in enumerate(key_ids, start=1))
+    _print_key_value_table("扩展设备访问密钥", rows)
+
+
+@ext_key_app.command("enable")
+def ext_key_enable() -> None:
+    """开启扩展设备访问（至少需要一个有效密钥）。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已开启", "扩展设备访问已是开启状态。")
+        return
+    if not extension_access_key_ids(cfg.api.auth.extension_access_keys):
+        _print_status_panel(
+            "error",
+            "没有可用的设备密钥",
+            "请先执行 `openbiliclaw ext-key generate`。",
+        )
+        raise typer.Exit(code=1)
+    cfg.api.auth.extension_access_enabled = True
+    save_config(cfg)
+    _print_status_panel("success", "已开启", "扩展设备访问已开启；重启后端后可配对。")
+
+
+@ext_key_app.command("disable")
+def ext_key_disable() -> None:
+    """关闭扩展设备 token 交换，保留已保存密钥。"""
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if not cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已关闭", "扩展设备访问已是关闭状态。")
+        return
+    cfg.api.auth.extension_access_enabled = False
+    save_config(cfg)
+    _print_status_panel("success", "已关闭", "新的设备会话交换已关闭；密钥记录仍保留。")
+
+
+@ext_key_app.command("revoke")
+def ext_key_revoke(
+    key_id: str = typer.Argument(..., help="要撤销的 12 位 key ID"),
+) -> None:
+    """撤销一个设备密钥，并立即失效所有现有登录会话。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config_with_diagnostics, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg, diagnostics = load_config_with_diagnostics()
+    valid_ids = extension_access_key_ids(cfg.api.auth.extension_access_keys)
+    if key_id not in valid_ids:
+        _print_status_panel("error", "未找到设备密钥", f"没有 key ID `{key_id}`。")
+        raise typer.Exit(code=1)
+
+    config_path = diagnostics.config_path
+    if config_path is None:
+        _print_status_panel("error", "无法定位配置文件", "未修改任何设备密钥。")
+        raise typer.Exit(code=1)
+    previous = config_path.read_bytes() if config_path.exists() else None
+    cfg.api.auth.extension_access_keys = [
+        record
+        for record in cfg.api.auth.extension_access_keys
+        if not record.startswith(f"{key_id}:")
+    ]
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "保存设备密钥失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if not _bump_auth_epoch(cfg):
+        try:
+            if previous is None:
+                config_path.unlink(missing_ok=True)
+            else:
+                config_path.write_bytes(previous)
+        except OSError as exc:
+            _print_status_panel(
+                "error", "撤销失败且配置回滚失败", f"请立即检查 {config_path}: {exc}"
+            )
+            raise typer.Exit(code=1) from exc
+        _print_status_panel(
+            "error",
+            "未能撤销设备密钥",
+            "运行库不可写，配置已回滚；现有会话和设备密钥均保持有效。",
+        )
+        raise typer.Exit(code=1)
+
+    _print_status_panel(
+        "success",
+        "设备密钥已撤销",
+        f"Key ID {key_id} 已删除；所有 Web 与扩展会话已立即失效。重启后端以重载密钥列表。",
+    )
+
+
 @app.command("serve-api")
 def serve_api(
     host: str = typer.Option("0.0.0.0", "--host", help="API 监听地址"),
@@ -4642,6 +5422,15 @@ def serve_api(
         "API 服务",
         f"正在启动容器友好的后端入口，当前监听 {host}:{port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"打开 http://{hint_host}:{port}/setup/ 可完成 AI 配置与前置检查；"
+            "容器内图形化初始化不可用，请在容器里运行 `openbiliclaw init`"
+            "（宿主机执行 `docker exec -it openbiliclaw-backend openbiliclaw init`）。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     _run_api_server(host=host, port=port)
 
@@ -5005,6 +5794,26 @@ def _ask_reddit_inclusion() -> bool:
     return True
 
 
+def _ask_bangumi_inclusion() -> bool:
+    """Decide whether to enable Bangumi discovery and public bootstrap."""
+    if os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
+        console.print("[dim]  跳过 Bangumi 来源(OPENBILICLAW_NO_BANGUMI=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+    console.print()
+    console.print("[bold]Bangumi 数据接入(可选)[/bold]")
+    console.print(
+        "使用 Bangumi 官方公开 API 导入[bold cyan]公开收藏[/bold cyan]，"
+        "并启用动画 / 书籍 / 游戏的搜索、排名和日期浏览。"
+    )
+    console.print("[dim]无需登录；只读取用户主动公开的收藏，不会向 Bangumi 写入任何内容。[/dim]")
+    if not typer.confirm("启用 Bangumi 数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用 Bangumi。[/dim]")
+        return False
+    return True
+
+
 def _ask_network_binding() -> bool:
     """Ask whether the backend should listen on all interfaces (0.0.0.0).
 
@@ -5092,6 +5901,9 @@ def _persist_init_source_enabled_flags(
     include_x: bool = False,
     include_zhihu: bool = False,
     include_reddit: bool = False,
+    include_bangumi: bool = False,
+    bangumi_username: str = "",
+    bangumi_token: str = "",
 ) -> None:
     """Persist init source choices so background discovery obeys them."""
 
@@ -5127,6 +5939,27 @@ def _persist_init_source_enabled_flags(
         reddit_cfg = getattr(cfg.sources, "reddit", None)
         if reddit_cfg is not None and bool(getattr(reddit_cfg, "enabled", False)) != include_reddit:
             reddit_cfg.enabled = include_reddit
+            changed = True
+        bangumi_cfg = getattr(cfg.sources, "bangumi", None)
+        if (
+            bangumi_cfg is not None
+            and bool(getattr(bangumi_cfg, "enabled", False)) != include_bangumi
+        ):
+            bangumi_cfg.enabled = include_bangumi
+            changed = True
+        if (
+            bangumi_cfg is not None
+            and bangumi_username
+            and str(getattr(bangumi_cfg, "username", "")) != bangumi_username
+        ):
+            bangumi_cfg.username = bangumi_username
+            changed = True
+        if (
+            bangumi_cfg is not None
+            and bangumi_token
+            and str(getattr(bangumi_cfg, "access_token", "")) != bangumi_token
+        ):
+            bangumi_cfg.access_token = bangumi_token
             changed = True
         if changed:
             save_config(cfg)
@@ -5366,6 +6199,11 @@ class InitResult:
     discovered_count: int
     discovery_error: bool
     discover_exc: BaseException | None
+    discovery_reason: str | None = None
+    discovery_detail: str = ""
+    bangumi_events: list[dict[str, Any]] = field(default_factory=list)
+    bangumi_scope_counts: dict[str, Any] = field(default_factory=dict)
+    bangumi_status: str = "skipped"
 
 
 class GuidedInitError(Exception):
@@ -5470,7 +6308,11 @@ async def _fetch_x_init_data(
     never hard-fail ``init``. Returns ``(likes, bookmarks)`` as
     ``tweet_to_dict`` dicts.
     """
+    import logging
+
     from openbiliclaw.config import load_config
+
+    logger = logging.getLogger("openbiliclaw.cli")
 
     cfg = load_config()
     x_cfg = getattr(getattr(cfg, "sources", None), "twitter", None)
@@ -5486,22 +6328,189 @@ async def _fetch_x_init_data(
         )
         return [], []
 
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
     from openbiliclaw.sources.x_client import XClient
+    from openbiliclaw.storage.database import Database
+    from openbiliclaw.storage.x_health import XSourceHealthStore
 
     x_client = XClient(cookie=cookie)
+    health_db: Database | None = None
+    health_store: XSourceHealthStore | None = None
+    try:
+        health_db = Database(cfg.data_path / "openbiliclaw.db")
+        health_db.initialize()
+        health_store = XSourceHealthStore(
+            health_db,
+            credential_fingerprint=credential_fingerprint("twitter", cookie),
+        )
+    except Exception:
+        # Health evidence is observability, not a prerequisite for the user's
+        # read-only smoke/init fetch. Keep the request path available if the
+        # local status database is temporarily unavailable.
+        logger.debug("fetch-x: failed to open the shared X health store", exc_info=True)
+        if health_db is not None:
+            health_db.close()
+        health_db = None
+        health_store = None
+
+    def _record_success(strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_success(strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s success", strategy, exc_info=True)
+
+    def _record_error(exc: BaseException, strategy: str) -> None:
+        if health_store is None:
+            return
+        try:
+            health_store.record_error(exc, strategy=strategy)
+        except Exception:
+            logger.debug("fetch-x: failed to record %s error", strategy, exc_info=True)
+
     likes: list[dict[str, Any]] = []
     bookmarks: list[dict[str, Any]] = []
-    if likes_limit > 0:
-        try:
-            likes = await x_client.likes(limit=likes_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
-    if bookmarks_limit > 0:
-        try:
-            bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
-        except Exception as exc:
-            console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
-    return likes, bookmarks
+    try:
+        if likes_limit > 0:
+            try:
+                likes = await x_client.likes(limit=likes_limit)
+                _record_success("likes")
+            except Exception as exc:
+                _record_error(exc, "likes")
+                console.print(f"  [yellow]X 点赞拉取失败: {exc}[/yellow]")
+        if bookmarks_limit > 0:
+            try:
+                bookmarks = await x_client.bookmarks(limit=bookmarks_limit)
+                _record_success("bookmarks")
+            except Exception as exc:
+                _record_error(exc, "bookmarks")
+                console.print(f"  [yellow]X 收藏拉取失败: {exc}[/yellow]")
+        return likes, bookmarks
+    finally:
+        if health_db is not None:
+            health_db.close()
+
+
+def _load_extension_bangumi_identity() -> tuple[str, bool]:
+    """Read the extension-reported Bangumi ``(username, verified)``.
+
+    The Bangumi content script reports the logged-in account's public uid +
+    username to ``POST /api/sources/bangumi/identity``, which persists
+    ``bangumi_self_info`` into ``data/memory/discovery_runtime.json``. Returns
+    ``("", False)`` on any miss or malformed value — the caller falls through
+    to its normal error path.
+
+    ``verified`` mirrors the backend flag: True only when bgm.tv confirmed the
+    username belongs to the reported uid. Records written before the flag
+    existed read back as unverified (they cannot prove a check ever ran) and
+    self-heal on the next bgm.tv page view. A ``verified`` record with no
+    username is likewise read as unverified — the superseded 404 path wrote
+    those, and no current rule can produce one.
+    """
+    import json as _json
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+    try:
+        state_path = load_config().data_path / "memory" / "discovery_runtime.json"
+        if not state_path.exists():
+            return "", False
+        with open(state_path, encoding="utf-8") as file:
+            state = _json.load(file)
+        info = state.get("bangumi_self_info") if isinstance(state, dict) else None
+        if not isinstance(info, dict):
+            return "", False
+        username = validate_bangumi_username(info.get("username"))
+        return username, bool(username) and info.get("verified") is True
+    except Exception:
+        return "", False
+
+
+async def _fetch_bangumi_init_data(
+    *,
+    username: str,
+    token: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Fetch one bounded Bangumi bootstrap sample.
+
+    With a personal access token (arg or ``[sources.bangumi].access_token``),
+    the account is resolved via ``/v0/me`` and its collections — including
+    private ones — are read with a Bearer header. Without a token, the
+    historical anonymous public-username path is used unchanged. A token
+    rejected at fetch time (e.g. expired since the pre-flight check) returns
+    status ``invalid_token`` rather than silently degrading.
+    """
+    import logging
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import fetch_bangumi_public_collection_events
+    from openbiliclaw.sources.bangumi_client import (
+        BangumiAPIError,
+        BangumiClient,
+        me_username,
+        validate_bangumi_access_token,
+    )
+
+    logger = logging.getLogger("openbiliclaw.cli")
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    effective_token = validate_bangumi_access_token(token or bangumi_cfg.access_token)
+
+    def _summarize(events: list[dict[str, Any]]) -> tuple[dict[str, int], str]:
+        counts: dict[str, int] = {}
+        for event in events:
+            status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        return counts, "ok" if events else "empty"
+
+    if effective_token:
+        async with BangumiClient(
+            access_token=effective_token,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
+        ) as bangumi_client:
+            try:
+                resolved_username = me_username(await bangumi_client.get_me())
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    logger.warning(
+                        "bangumi init: access token rejected by /v0/me "
+                        "(token present, length=%d); likely expired or revoked",
+                        len(effective_token),
+                    )
+                    return [], {}, "invalid_token"
+                raise
+            if username.strip() and username.strip() != resolved_username:
+                logger.warning(
+                    "bangumi init: configured username %r differs from /v0/me %r; "
+                    "using the token owner's account",
+                    username.strip(),
+                    resolved_username,
+                )
+            events = await fetch_bangumi_public_collection_events(
+                bangumi_client,
+                username=resolved_username,
+                subject_types=tuple(bangumi_cfg.subject_types),
+                limit=int(bangumi_cfg.bootstrap_limit),
+                include_private=True,
+            )
+        counts, status = _summarize(events)
+        return events, counts, status
+
+    if not username.strip():
+        return [], {}, "missing_username"
+    async with BangumiClient(
+        request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+    ) as bangumi_client:
+        events = await fetch_bangumi_public_collection_events(
+            bangumi_client,
+            username=username,
+            subject_types=tuple(bangumi_cfg.subject_types),
+            limit=int(bangumi_cfg.bootstrap_limit),
+        )
+    counts, status = _summarize(events)
+    return events, counts, status
 
 
 async def run_guided_init(
@@ -5519,10 +6528,17 @@ async def run_guided_init(
     include_x: bool = False,
     include_zhihu: bool = False,
     include_reddit: bool = False,
+    include_bangumi: bool = False,
+    bangumi_username: str = "",
+    bangumi_token: str = "",
     target_pool_count: int,
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
     run_id: str | None = None,
+    profile_analysis_timeout_seconds: float | None = None,
+    profile_build_timeout_seconds: float = _INIT_PROFILE_BUILD_TIMEOUT_SECONDS,
+    discovery_timeout_seconds: float = _INIT_DISCOVERY_TIMEOUT_SECONDS,
+    collection_timeout_seconds: float = _INIT_COLLECTION_TIMEOUT_SECONDS,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
 
@@ -5532,14 +6548,20 @@ async def run_guided_init(
 
       1. fetch B站 + collect cross-platform bootstrap signals → propagate
       2. analyze preferences
-      3/4. build soul profile ‖ backfill discovery pool (parallel)
+      3. build and durably commit the full soul profile
+      4. discover, evaluate, write recommendation copy, and verify the first
+         serviceable pool from that committed profile
 
     Bilibili is optional like every other source (``include_bili``); at
     least one selected source must yield signals or stage 1 raises
     ``GuidedInitError("empty_signals")``. ``client`` may be ``None`` when
-    ``include_bili`` is False.
+    ``include_bili`` is False. Stage 1 has one wall-clock budget shared by all
+    selected sources (10 minutes by default), with shorter Bilibili/X caps and
+    cooperative cancellation for extension collectors. Collected events are
+    committed in one SQLite transaction before preference analysis starts.
 
-    ``discover_backfill`` is the one genuinely path-specific step: the CLI
+    Stage 4 never starts from a draft profile. ``discover_backfill`` is the one
+    genuinely path-specific step: the CLI
     injects :func:`_run_init_discovery_backfill_async` (one-shot engine);
     the API injects ``controller.run_init_backfill`` (holds the refresh
     lock). When ``coordinator``/``run_id`` are supplied, stage transitions
@@ -5555,9 +6577,218 @@ async def run_guided_init(
         if coordinator is not None and run_id is not None:
             await coordinator.stage_done(run_id, n, status=status, reason=reason)
 
+    async def _report_stage_progress(
+        stage: int,
+        *,
+        done: int = 0,
+        total: int = 0,
+        note: str | None = None,
+        mode: str = "determinate",
+        elapsed_seconds: int | None = None,
+        max_seconds: int | None = None,
+        substantive: bool = True,
+    ) -> None:
+        """Send additive progress fields while tolerating legacy test/plugins.
+
+        Third-party coordinators built against the older ``done/total/note``
+        contract keep working; the in-tree coordinator receives the richer
+        elapsed/indeterminate payload.
+        """
+        if coordinator is None or run_id is None:
+            return
+        progress = coordinator.stage_progress
+        values: dict[str, Any] = {
+            "done": done,
+            "total": total,
+            "note": note,
+            "mode": mode,
+            "elapsed_seconds": elapsed_seconds,
+            "max_seconds": max_seconds,
+            "substantive": substantive,
+        }
+        try:
+            parameters = inspect.signature(progress).parameters.values()
+            accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+            accepted = {p.name for p in parameters}
+        except (TypeError, ValueError):
+            accepts_kwargs = True
+            accepted = set()
+        kwargs = (
+            values
+            if accepts_kwargs
+            else {key: value for key, value in values.items() if key in accepted}
+        )
+        await progress(run_id, stage, **kwargs)
+
     def _register_task(task_id: str | None) -> None:
         if coordinator is not None and run_id is not None and task_id:
             coordinator.register_enqueued_task(run_id, task_id)
+
+    # Stage-1 per-source progress: stage 1 serially fetches/collects each
+    # selected source (single platform can block up to ~300s), so surface which
+    # source is in flight and how many are done — otherwise the GUI bar sits at
+    # 13% for minutes (init-progress spec Phase 1). done counts sources that
+    # finished; total is the count of selected sources (B站 is the first).
+    _stage1_source_total = sum(
+        (
+            include_bili,
+            include_xhs,
+            include_dy,
+            include_yt,
+            include_x,
+            include_zhihu,
+            include_reddit,
+            include_bangumi,
+        )
+    )
+    _stage1_source_done = 0
+    _stage1_started_at = asyncio.get_running_loop().time()
+    _stage1_deadline = (
+        _stage1_started_at + collection_timeout_seconds
+        if collection_timeout_seconds > 0
+        else float("inf")
+    )
+    _stage1_budget_exhausted = False
+
+    def _stage1_remaining_seconds() -> float:
+        return max(0.0, _stage1_deadline - asyncio.get_running_loop().time())
+
+    async def _await_stage1_operation(
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        label: str,
+        max_wait_seconds: float,
+    ) -> tuple[Any | None, bool]:
+        """Run one source under both its own and stage-1's global budget."""
+        nonlocal _stage1_budget_exhausted
+        available = _stage1_remaining_seconds()
+        budget = min(max(0.0, max_wait_seconds), available)
+        if budget <= 0:
+            _stage1_budget_exhausted = True
+            return None, True
+        started = asyncio.get_running_loop().time()
+        operation: asyncio.Future[Any] = asyncio.ensure_future(factory())
+        timed_out = False
+        try:
+            while not operation.done():
+                elapsed = asyncio.get_running_loop().time() - started
+                remaining = min(
+                    budget - elapsed,
+                    _stage1_remaining_seconds(),
+                )
+                if remaining <= 0:
+                    timed_out = True
+                    _stage1_budget_exhausted = _stage1_remaining_seconds() <= 0
+                    break
+                done_tasks, _ = await asyncio.wait({operation}, timeout=min(10.0, remaining))
+                if operation in done_tasks:
+                    break
+                elapsed_int = max(0, int(asyncio.get_running_loop().time() - started))
+                global_left = max(0, int(_stage1_remaining_seconds()))
+                await _report_stage_progress(
+                    1,
+                    done=_stage1_source_done,
+                    total=_stage1_source_total,
+                    note=f"正在采集 {label} · 已等待 {elapsed_int}s · 阶段剩余最多 {global_left}s",
+                    mode="indeterminate",
+                    elapsed_seconds=elapsed_int,
+                    max_seconds=max(1, int(budget)),
+                    substantive=False,
+                )
+            if timed_out:
+                operation.cancel()
+                with suppress(BaseException):
+                    await operation
+                return None, True
+            return await operation, False
+        except asyncio.CancelledError:
+            operation.cancel()
+            with suppress(BaseException):
+                await operation
+            raise
+
+    def _source_wait_seconds(env_name: str, fallback: float) -> float:
+        try:
+            return max(0.0, float(os.environ.get(env_name, str(fallback))))
+        except (TypeError, ValueError):
+            return fallback
+
+    async def _run_extension_collector(
+        collector: Callable[..., tuple[list[dict[str, Any]], dict[str, int], str]],
+        task_id: str | None,
+        *,
+        label: str,
+        env_name: str,
+        default_wait_seconds: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+        """Run a blocking extension poll with a cooperative stop flag."""
+        cancel_event = threading.Event()
+        collector_done = threading.Event()
+        wait_seconds = min(
+            _source_wait_seconds(env_name, default_wait_seconds),
+            _stage1_remaining_seconds(),
+        )
+
+        def _collect() -> tuple[list[dict[str, Any]], dict[str, int], str]:
+            try:
+                kwargs: dict[str, Any] = {}
+                try:
+                    parameters = inspect.signature(collector).parameters.values()
+                    accepts_kwargs = any(
+                        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters
+                    )
+                    accepted = {p.name for p in parameters}
+                except (TypeError, ValueError):
+                    accepts_kwargs = True
+                    accepted = set()
+                if accepts_kwargs or "max_wait_seconds" in accepted:
+                    kwargs["max_wait_seconds"] = wait_seconds
+                if accepts_kwargs or "cancel_event" in accepted:
+                    kwargs["cancel_event"] = cancel_event
+                return collector(task_id, **kwargs)
+            finally:
+                collector_done.set()
+
+        try:
+            result, timed_out = await _await_stage1_operation(
+                lambda: asyncio.to_thread(_collect),
+                label=label,
+                # Leave one poll interval of outer grace; the global budget
+                # remains the hard ceiling enforced by the helper.
+                max_wait_seconds=wait_seconds + 0.75,
+            )
+        finally:
+            cancel_event.set()
+            # Cancelling asyncio.to_thread() cannot stop an already-running
+            # worker. Give the cooperative 0.5s poll loop a bounded drain so a
+            # terminal init does not leave a collector touching the task queue
+            # after its run lock has been released. Poll the threading.Event
+            # from the event loop instead of consuming a second executor slot.
+            drain_deadline = asyncio.get_running_loop().time() + 1.0
+            while not collector_done.is_set():
+                remaining = drain_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.01, remaining))
+        if timed_out or result is None:
+            return [], {}, "timeout"
+        return cast("tuple[list[dict[str, Any]], dict[str, int], str]", result)
+
+    async def _stage1_begin_source(label: str, *, wait_hint: str = "") -> None:
+        if coordinator is not None and run_id is not None:
+            note = f"正在采集 {label}"
+            if wait_hint:
+                note += f" · {wait_hint}"
+            await _report_stage_progress(
+                1,
+                done=_stage1_source_done,
+                total=_stage1_source_total,
+                note=note,
+            )
+
+    def _stage1_finish_source() -> None:
+        nonlocal _stage1_source_done
+        _stage1_source_done += 1
 
     async def _enqueue_register_kick(
         enqueue_fn: Callable[..., str | None], source: str
@@ -5597,29 +6828,95 @@ async def run_guided_init(
     favorites_data: list[dict[str, Any]] = []
     following_data: list[dict[str, Any]] = []
     if include_bili:
-        history, favorites_data, following_data = await _fetch_bilibili_init_data(
-            client,
-            history_limit=history_limit,
-            favorite_limit=favorite_limit,
-            follow_limit=follow_limit,
+        await _stage1_begin_source("B 站")
+        bili_result, bili_timed_out = await _await_stage1_operation(
+            lambda: _fetch_bilibili_init_data(
+                client,
+                history_limit=history_limit,
+                favorite_limit=favorite_limit,
+                follow_limit=follow_limit,
+            ),
+            label="B 站",
+            max_wait_seconds=_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
         )
-        if not history:
-            raise GuidedInitError("empty_history", "当前无法从 B 站历史中生成初始画像。")
-        console.print(
-            f"  浏览历史 [green]{len(history)}[/green] 条"
-            f" / 收藏 [green]{len(favorites_data)}[/green] 个"
-            f" / 关注 [green]{len(following_data)}[/green] 人"
-        )
+        if bili_timed_out or bili_result is None:
+            console.print("  [yellow]B 站采集超过本阶段等待上限，已跳过并继续其他来源。[/yellow]")
+        else:
+            history, favorites_data, following_data = cast(
+                "tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]",
+                bili_result,
+            )
+            console.print(
+                f"  浏览历史 [green]{len(history)}[/green] 条"
+                f" / 收藏 [green]{len(favorites_data)}[/green] 个"
+                f" / 关注 [green]{len(following_data)}[/green] 人"
+            )
+        _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
+
+    bangumi_events: list[dict[str, Any]] = []
+    bangumi_scope_counts: dict[str, int] = {}
+    bangumi_status = "skipped"
+    if include_bangumi:
+        await _stage1_begin_source("Bangumi", wait_hint="仅读取公开收藏")
+        try:
+            bangumi_result, bangumi_timed_out = await _await_stage1_operation(
+                lambda: _fetch_bangumi_init_data(username=bangumi_username, token=bangumi_token),
+                label="Bangumi",
+                max_wait_seconds=_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
+            )
+            if bangumi_timed_out or bangumi_result is None:
+                bangumi_status = "timeout"
+            else:
+                bangumi_events, bangumi_scope_counts, bangumi_status = cast(
+                    "tuple[list[dict[str, Any]], dict[str, int], str]",
+                    bangumi_result,
+                )
+        except Exception as exc:
+            bangumi_status = "failed"
+            console.print(f"  [yellow]Bangumi 公开收藏读取失败: {exc}[/yellow]")
+        _stage1_finish_source()
+        if bangumi_status == "ok":
+            status_text = ", ".join(
+                f"{key}={value}" for key, value in sorted(bangumi_scope_counts.items())
+            )
+            console.print(
+                f"  Bangumi 公开收藏 [green]{len(bangumi_events)}[/green] 条 ({status_text})"
+            )
+        elif bangumi_status == "missing_username":
+            console.print(
+                "  [yellow]Bangumi 来源已启用，但未配置公开用户名；"
+                "本次只启用后续内容发现，不导入收藏信号。[/yellow]"
+            )
+        elif bangumi_status == "invalid_token":
+            console.print(
+                "  [yellow]Bangumi 个人令牌被拒绝（可能已过期或撤销）；"
+                "请到 https://next.bgm.tv/demo/access-token 重新生成。[/yellow]"
+            )
+        elif bangumi_status == "empty":
+            console.print("  [yellow]Bangumi 用户存在，但没有读到公开收藏。[/yellow]")
+        elif bangumi_status == "timeout":
+            console.print("  [yellow]Bangumi 公开收藏读取超时，已跳过并继续初始化。[/yellow]")
 
     # Bootstrap collectors poll a DB task queue with a blocking sleep —
     # run them in a worker thread (Database is check_same_thread=False) so
     # the API event loop isn't frozen for the collect window. CLI output /
     # ordering is unchanged (it's sequential here regardless).
-    xhs_events, xhs_scope_counts, xhs_status = await asyncio.to_thread(
-        _collect_xhs_bootstrap_events, xhs_task_id
-    )
+    if include_xhs:
+        await _stage1_begin_source("小红书", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_xhs:
+        xhs_events, xhs_scope_counts, xhs_status = await _run_extension_collector(
+            _collect_xhs_bootstrap_events,
+            xhs_task_id,
+            label="小红书",
+            env_name="OPENBILICLAW_XHS_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_XHS_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        xhs_events, xhs_scope_counts, xhs_status = [], {}, "skipped"
+    if include_xhs:
+        _stage1_finish_source()
     if xhs_status == "ok":
         console.print(
             "  小红书 "
@@ -5650,9 +6947,20 @@ async def run_guided_init(
             "  [dim]已请求扩展拉抖音发布 / 收藏 / 点赞 / 关注"
             "(开始抢一次浏览器焦点,~60-90 秒)。[/dim]"
         )
-    dy_events, dy_scope_counts, dy_status = await asyncio.to_thread(
-        _collect_dy_bootstrap_events, dy_task_id
-    )
+    if include_dy:
+        await _stage1_begin_source("抖音", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_dy:
+        dy_events, dy_scope_counts, dy_status = await _run_extension_collector(
+            _collect_dy_bootstrap_events,
+            dy_task_id,
+            label="抖音",
+            env_name="OPENBILICLAW_DY_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        dy_events, dy_scope_counts, dy_status = [], {}, "skipped"
+    if include_dy:
+        _stage1_finish_source()
     if dy_status == "ok":
         console.print(
             "  抖音 "
@@ -5685,9 +6993,20 @@ async def run_guided_init(
             "  [dim]已请求扩展拉 YouTube 观看历史 / 订阅 / 点赞"
             "(开始抢一次浏览器焦点,~30-90 秒)。[/dim]"
         )
-    yt_events, yt_scope_counts, yt_status = await asyncio.to_thread(
-        _collect_yt_bootstrap_events, yt_task_id
-    )
+    if include_yt:
+        await _stage1_begin_source("YouTube", wait_hint="扩展未响应会在约 5 分钟后自动跳过")
+    if include_yt:
+        yt_events, yt_scope_counts, yt_status = await _run_extension_collector(
+            _collect_yt_bootstrap_events,
+            yt_task_id,
+            label="YouTube",
+            env_name="OPENBILICLAW_YT_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        yt_events, yt_scope_counts, yt_status = [], {}, "skipped"
+    if include_yt:
+        _stage1_finish_source()
     if yt_status == "ok":
         console.print(
             "  YouTube "
@@ -5718,9 +7037,20 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉知乎浏览 / 收藏 / 点赞(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
-    zhihu_events, zhihu_scope_counts, zhihu_status = await asyncio.to_thread(
-        _collect_zhihu_bootstrap_events, zhihu_task_id
-    )
+    if include_zhihu:
+        await _stage1_begin_source("知乎", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_zhihu:
+        zhihu_events, zhihu_scope_counts, zhihu_status = await _run_extension_collector(
+            _collect_zhihu_bootstrap_events,
+            zhihu_task_id,
+            label="知乎",
+            env_name="OPENBILICLAW_ZHIHU_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_ZHIHU_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        zhihu_events, zhihu_scope_counts, zhihu_status = [], {}, "skipped"
+    if include_zhihu:
+        _stage1_finish_source()
     if zhihu_status == "ok":
         zhihu_activity_favorites = int(zhihu_scope_counts.get("zhihu_activity_favorite", 0))
         zhihu_favorites = (
@@ -5752,10 +7082,22 @@ async def run_guided_init(
     x_likes_data: list[dict[str, Any]] = []
     x_bookmarks_data: list[dict[str, Any]] = []
     if include_x:
-        x_likes_data, x_bookmarks_data = await _fetch_x_init_data(
-            likes_limit=_INIT_X_LIKES_LIMIT,
-            bookmarks_limit=_INIT_X_BOOKMARKS_LIMIT,
+        await _stage1_begin_source("X")
+        x_result, x_timed_out = await _await_stage1_operation(
+            lambda: _fetch_x_init_data(
+                likes_limit=_INIT_X_LIKES_LIMIT,
+                bookmarks_limit=_INIT_X_BOOKMARKS_LIMIT,
+            ),
+            label="X",
+            max_wait_seconds=_INIT_X_COLLECTION_TIMEOUT_SECONDS,
         )
+        if x_timed_out or x_result is None:
+            console.print("  [yellow]X 采集超过等待上限，已跳过并继续初始化。[/yellow]")
+        else:
+            x_likes_data, x_bookmarks_data = cast(
+                "tuple[list[dict[str, Any]], list[dict[str, Any]]]", x_result
+            )
+        _stage1_finish_source()
         if x_likes_data or x_bookmarks_data:
             console.print(
                 f"  X 点赞 [green]{len(x_likes_data)}[/green] 条"
@@ -5770,9 +7112,20 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉 Reddit 收藏 / 点赞 / 订阅(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
-    reddit_events, reddit_scope_counts, reddit_status = await asyncio.to_thread(
-        _collect_reddit_bootstrap_events, reddit_task_id
-    )
+    if include_reddit:
+        await _stage1_begin_source("Reddit", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_reddit:
+        reddit_events, reddit_scope_counts, reddit_status = await _run_extension_collector(
+            _collect_reddit_bootstrap_events,
+            reddit_task_id,
+            label="Reddit",
+            env_name="OPENBILICLAW_REDDIT_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_REDDIT_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        reddit_events, reddit_scope_counts, reddit_status = [], {}, "skipped"
+    if include_reddit:
+        _stage1_finish_source()
     if reddit_status == "ok":
         console.print(
             "  Reddit "
@@ -5862,14 +7215,28 @@ async def run_guided_init(
     events_to_persist = list(events)
     events_to_persist.extend(zhihu_events)
     events_to_persist.extend(reddit_events)
+    events_to_persist.extend(bangumi_events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
     events.extend(zhihu_events)
     events.extend(reddit_events)
+    events.extend(bangumi_events)
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
+        if _stage1_budget_exhausted:
+            raise GuidedInitError(
+                "collection_timeout",
+                "数据采集已达到 10 分钟总等待上限，且暂未取得可用于画像的行为信号。"
+                "系统已停止继续等待平台或扩展，避免初始化锁死；请确认平台登录和扩展连接后重试。",
+            )
+        if include_bili and _stage1_source_total == 1:
+            raise GuidedInitError(
+                "empty_history",
+                "B 站历史为空，收藏和关注也没有取得可用于画像的信号。"
+                "请先在 B 站产生一些观看 / 收藏 / 关注记录，或启用其他数据来源后重试 init。",
+            )
         raise GuidedInitError(
             "empty_signals",
             "所选数据来源没有拉到任何行为信号，无法生成初始画像。"
@@ -5890,32 +7257,159 @@ async def run_guided_init(
                 "twitter": x_event_count,
                 "zhihu": len(zhihu_events),
                 "reddit": len(reddit_events),
+                "bangumi": len(bangumi_events),
             }
         )
-    for event in events_to_persist:
-        await memory.propagate_event(event)
+    propagate_events = getattr(memory, "propagate_events", None)
+    if callable(propagate_events):
+        await propagate_events(events_to_persist)
+    else:
+        for event in events_to_persist:
+            await memory.propagate_event(event)
     await _stage_done(1)
 
     # ── Stage 2: analyze preferences ──
     await _stage_started(2)
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
+    profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
+    # Progress-aware deadline: the idle limit is what actually catches a wedged
+    # gateway, so the absolute ceiling can stay generous for slow-but-healthy
+    # ones. ``profile_analysis_budget`` remains the number published to the GUI
+    # as ``progress.max_seconds`` — it is now the absolute ceiling, i.e. still
+    # the only limit that can end the stage on the clock.
+    profile_analysis_idle_budget, profile_analysis_budget = _profile_analysis_deadlines(
+        event_count=len(events),
+        requested=profile_analysis_timeout_seconds,
+        concurrency=profile_analysis_concurrency,
+    )
+    stage2_marker = _InitProgressMarker()
+
+    # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
+    # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
+    # completion line to stdout (desktop.log captures stdout, not the logger's
+    # openbiliclaw.log — so without this the desktop log shows only the eta
+    # heartbeat and a stall is invisible) and, on the API path, also fan the
+    # count onto coordinator.stage_progress for the GUI. ``_chunk_progress`` is
+    # a live mirror the heartbeat reads so every tick shows "已完成 X/N 批";
+    # when a chunk hangs that count freezes next to the growing clock.
+    expected_chunk_total = max(
+        1,
+        (len(events) + DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE - 1)
+        // DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    )
+    _chunk_progress = {"done": 0, "total": expected_chunk_total}
+    stage2_started_at = asyncio.get_running_loop().time()
+
+    def _stage2_elapsed() -> int:
+        return max(0, int(asyncio.get_running_loop().time() - stage2_started_at))
+
+    async def _stage2_progress(done: int, total: int) -> None:
+        _chunk_progress["done"] = done
+        _chunk_progress["total"] = total
+        # Real per-chunk completion — the only thing that counts as progress.
+        stage2_marker.touch()
+        console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
+        await _report_stage_progress(
+            2,
+            done=done,
+            total=total,
+            note=f"第 {done}/{total} 批",
+            elapsed_seconds=_stage2_elapsed(),
+            max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
+        )
+
+    def _chunk_status() -> str:
+        total = _chunk_progress["total"]
+        return f"已完成 {_chunk_progress['done']}/{total} 批"
+
+    async def _stage2_tick(elapsed: int, eta_seconds: int) -> None:
+        total = _chunk_progress["total"]
+        await _report_stage_progress(
+            2,
+            done=_chunk_progress["done"],
+            total=total,
+            note=f"{_chunk_status()} · AI 已处理 {elapsed}s",
+            mode="determinate" if total > 0 else "indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
+            substantive=False,
+        )
+
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
-    await _run_with_progress(
-        soul_engine.analyze_events(
-            events,
-            event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    await _report_stage_progress(
+        2,
+        done=0,
+        total=expected_chunk_total,
+        note=(
+            f"已完成 0/{expected_chunk_total} 批 · "
+            f"AI 开始处理（并发上限 {profile_analysis_concurrency}）"
         ),
-        label="分析偏好（分片批处理）",
-        eta_seconds=180,
+        elapsed_seconds=0,
+        max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
     )
+    try:
+        with _background_admission_bypass():
+            await _await_with_progress_deadline(
+                _run_with_progress(
+                    soul_engine.analyze_events(
+                        events,
+                        event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                        progress_callback=_stage2_progress,
+                    ),
+                    label="分析偏好（分片批处理）",
+                    eta_seconds=180,
+                    status_provider=_chunk_status,
+                    progress_callback=_stage2_tick,
+                ),
+                marker=stage2_marker,
+                idle_seconds=profile_analysis_idle_budget,
+                absolute_seconds=profile_analysis_budget,
+            )
+    except _InitIdleTimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _profile_analysis_idle_timeout_message(
+                profile_analysis_idle_budget or _INIT_PROGRESS_IDLE_SECONDS
+            ),
+        ) from exc
+    except TimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _profile_analysis_absolute_timeout_message(
+                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+                progress_note=_chunk_status(),
+            ),
+        ) from exc
+    except Exception as exc:
+        # Surface the real LLM cause (SSL / no provider / rate limit / timeout /
+        # moderation) so the init page shows *why* stage 2 stalled instead of a
+        # generic crash. Mirrors the stage-3 (build_initial_profile) handling —
+        # this stage is equally LLM-heavy and was the silent-retry sink behind
+        # "卡在分析偏好" reports (issue #113). CancelledError is NOT caught: it
+        # propagates so the wrapper records `cancelled`, never `completed`.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        llm_reason = describe_llm_failure(exc)
+        message = (
+            f"偏好分析失败：{llm_reason}"
+            if llm_reason
+            else "偏好分析阶段出错。可稍后手动重试 `openbiliclaw init`。"
+        )
+        raise GuidedInitError("analyze_failed", message) from exc
     await _stage_done(2)
 
-    # ── Stage 3 + 4: build profile ‖ discovery backfill (parallel) ──
+    # ── Stage 3: build and durably commit the full profile ──
     await _stage_started(3)
-    await _stage_started(4)
-    _print_section_title("3/4 生成画像 + 4/4 发现内容(并发)")
+    _print_section_title("3/4 生成并保存完整画像")
+    await _report_stage_progress(
+        3,
+        note="正在综合偏好、历史与认知线索",
+        mode="indeterminate",
+        elapsed_seconds=0,
+        max_seconds=max(1, int(profile_build_timeout_seconds)),
+    )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
         combined_history.append(
@@ -5949,70 +7443,171 @@ async def run_guided_init(
         combined_history.extend(_zhihu_events_to_history_items(zhihu_events))
     if reddit_events:
         combined_history.extend(_reddit_events_to_history_items(reddit_events))
+    if bangumi_events:
+        combined_history.extend(_bangumi_events_to_history_items(bangumi_events))
     # X likes/bookmarks previously only fed the analyze stage; feeding the
     # profile builder too keeps cross-source flow uniform AND guarantees a
     # non-empty profile input when X is the only selected source.
     if x_likes_events or x_bookmark_events:
         combined_history.extend(_x_events_to_history_items(x_likes_events + x_bookmark_events))
 
-    # Discover starts on a preference-only draft so trending / search /
-    # related_chain / explore can score candidates while the LLM
-    # synthesizes the rich personality_portrait / deep_needs fields.
-    draft_profile = _build_draft_profile_for_discover(memory)
+    async def _build_initial_profile() -> Any:
+        with _background_admission_bypass():
+            return await soul_engine.build_initial_profile(combined_history)
 
-    profile_task = asyncio.create_task(
-        _run_with_progress(
-            soul_engine.build_initial_profile(combined_history),
-            label="生成画像(单次 LLM 综合分析)",
-            eta_seconds=70,
+    async def _stage3_tick(elapsed: int, eta_seconds: int) -> None:
+        await _report_stage_progress(
+            3,
+            note=f"AI 正在综合完整画像 · 已处理 {elapsed}s",
+            mode="indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(profile_build_timeout_seconds)),
+            substantive=False,
         )
-    )
-    discover_task = asyncio.create_task(
-        discover_backfill(
-            draft_profile,
-            target_pool_count=target_pool_count,
-            label_suffix=" — 用 P2 草稿画像并发预热",
-        )
-    )
+
     profile_data: Any = None
     discovered_count = 0
     discover_exc: BaseException | None = None
-    try:
-        # Profile is load-bearing. CancelledError is deliberately NOT caught —
-        # it propagates (and the finally tears down the sibling) so the wrapper
-        # records `cancelled`, never `completed`.
-        try:
-            profile_data = await profile_task
-        except Exception as exc:
-            raise GuidedInitError(
-                "profile_failed",
-                "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。",
-            ) from exc
-        await _stage_done(3)
+    discovery_reason: str | None = None
+    discovery_detail = ""
 
-        # Discover is best-effort: a normal failure leaves a partial pool the
-        # user can still start with. Cancellation propagates (not caught).
-        try:
-            discovered_count = await discover_task
-        except Exception as exc:
-            discovered_count = 0
-            discover_exc = exc
-        await _stage_done(
-            4,
-            status="warning" if discover_exc is not None else "ok",
-            reason="discovery_partial" if discover_exc is not None else None,
+    # Profile is load-bearing. CancelledError is deliberately NOT caught so
+    # the API wrapper records `cancelled`, never `completed`.
+    try:
+        profile_data = await asyncio.wait_for(
+            _run_with_progress(
+                _build_initial_profile(),
+                label="生成并保存完整画像(单次 LLM 综合分析)",
+                eta_seconds=70,
+                progress_callback=_stage3_tick,
+            ),
+            timeout=profile_build_timeout_seconds if profile_build_timeout_seconds > 0 else None,
         )
-    finally:
-        # Guarantee neither parallel task outlives this scope on ANY exit path —
-        # including a CancelledError raised at an await *between* the stages
-        # (e.g. _stage_done(3)'s event publish). An orphaned run_init_backfill
-        # would otherwise keep holding _refresh_lock. Cancel then drain both.
-        for _parallel_task in (profile_task, discover_task):
-            if not _parallel_task.done():
-                _parallel_task.cancel()
-        for _parallel_task in (profile_task, discover_task):
-            with suppress(BaseException):
-                await _parallel_task
+    except Exception as exc:
+        # Surface the real LLM cause (moderation refusal / no provider /
+        # rate limit / timeout) so the init page shows *why* it failed.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        if isinstance(exc, TimeoutError):
+            message = _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE
+        else:
+            llm_reason = describe_llm_failure(exc)
+            message = (
+                f"画像生成失败：{llm_reason}"
+                if llm_reason
+                else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
+            )
+        raise GuidedInitError("profile_failed", message) from exc
+
+    await _report_stage_progress(
+        3,
+        done=1,
+        total=1,
+        note="完整画像已保存，下一步将严格基于它生成内容",
+    )
+    await _stage_done(3)
+
+    # ── Stage 4: only the committed full profile may drive discovery ──
+    await _stage_started(4)
+    _print_section_title("4/4 建立首轮可用内容池")
+
+    _stage4_live_done = 0
+    _stage4_live_total = 4
+    _stage4_live_note = "准备发现候选内容"
+    stage4_marker = _InitProgressMarker()
+    # Stage 4 reports real progress (per plan stage, from run_init_backfill), so
+    # it gets the idle+absolute pair too. Ticks are excluded for the same reason
+    # as stage 2: they fire on a timer, not on work.
+    stage4_idle_budget: float | None = (
+        _INIT_DISCOVERY_PROGRESS_IDLE_SECONDS
+        if discovery_timeout_seconds == _INIT_DISCOVERY_TIMEOUT_SECONDS
+        else None
+    )
+    stage4_absolute_budget = discovery_timeout_seconds if discovery_timeout_seconds > 0 else None
+
+    async def _stage4_progress(done: int, total: int, note: str) -> None:
+        nonlocal _stage4_live_done, _stage4_live_total, _stage4_live_note
+        stage4_marker.touch()
+        _stage4_live_done = done
+        _stage4_live_total = total
+        _stage4_live_note = note
+        if coordinator is not None and run_id is not None:
+            await _report_stage_progress(4, done=done, total=total, note=note)
+        else:
+            console.print(f"  [dim]首轮内容池：{note}（{done}/{total}）[/dim]")
+
+    async def _stage4_tick(elapsed: int, eta_seconds: int) -> None:
+        await _report_stage_progress(
+            4,
+            done=_stage4_live_done,
+            total=_stage4_live_total,
+            note=f"{_stage4_live_note} · 已处理 {elapsed}s",
+            mode="indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(discovery_timeout_seconds)),
+            substantive=False,
+        )
+
+    await _stage4_progress(0, 4, "完整画像已就绪，准备发现候选内容")
+    backfill_kwargs: dict[str, Any] = {
+        "target_pool_count": target_pool_count,
+        "label_suffix": "",
+    }
+    try:
+        signature = inspect.signature(discover_backfill)
+    except (TypeError, ValueError):
+        accepts_progress_callback = True
+    else:
+        accepts_progress_callback = "progress_callback" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+    if accepts_progress_callback:
+        backfill_kwargs["progress_callback"] = _stage4_progress
+
+    # Stage 4 is best-effort once the full profile exists: timeout/failure is
+    # terminal *partial success*, and clients may enter the app while the
+    # restarted runtime continues replenishment. Cancellation still propagates.
+    try:
+        discovered_count = await _await_with_progress_deadline(
+            _run_with_progress(
+                discover_backfill(profile_data, **backfill_kwargs),
+                label="基于完整画像生成首轮内容池",
+                eta_seconds=300,
+                progress_callback=_stage4_tick,
+            ),
+            marker=stage4_marker,
+            idle_seconds=stage4_idle_budget,
+            absolute_seconds=stage4_absolute_budget,
+        )
+        await _stage4_progress(4, 4, "首轮内容已完成评分与推荐文案，可直接浏览")
+    except Exception as exc:
+        from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+        discovered_count = max(0, int(getattr(exc, "discovered_count", 0) or 0))
+        discover_exc = exc
+        if isinstance(exc, _InitIdleTimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_IDLE_MESSAGE
+        elif isinstance(exc, TimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
+        elif isinstance(exc, InitialPoolUnavailableError):
+            discovery_reason = "discovery_partial"
+            discovery_detail = (
+                "画像已生成，首轮发现也已完成"
+                f"（发现 {exc.discovered_count} 条候选），但尚无候选完成评分与推荐文案，"
+                "因此目前没有可直接浏览的首轮内容。本次初始化已按“部分完成”结束，"
+                "系统会在后台继续补齐；你可以先进入应用，并检查 AI 服务与平台登录状态。"
+            )
+        else:
+            discovery_reason = "discovery_partial"
+            discovery_detail = _INIT_DISCOVERY_PARTIAL_MESSAGE
+    await _stage_done(
+        4,
+        status="warning" if discover_exc is not None else "ok",
+        reason=discovery_reason,
+    )
 
     return InitResult(
         history=history,
@@ -6039,6 +7634,11 @@ async def run_guided_init(
         discovered_count=discovered_count,
         discovery_error=discover_exc is not None,
         discover_exc=discover_exc,
+        discovery_reason=discovery_reason,
+        discovery_detail=discovery_detail,
+        bangumi_events=bangumi_events,
+        bangumi_scope_counts=bangumi_scope_counts,
+        bangumi_status=bangumi_status,
     )
 
 
@@ -6109,6 +7709,30 @@ def init(
         "--yes-reddit",
         help="跳过 Reddit 的 y/n 提问,直接启用 Reddit 数据接入(适合脚本化场景)。",
     ),
+    no_bangumi: bool = typer.Option(
+        False,
+        "--no-bangumi",
+        help="跳过 Bangumi 数据接入(默认非交互模式下就是跳过)。",
+    ),
+    skip_bangumi_prompt: bool = typer.Option(
+        False,
+        "--yes-bangumi",
+        help="跳过 Bangumi 的 y/n 提问，直接启用来源。",
+    ),
+    bangumi_username: str = typer.Option(
+        "",
+        "--bangumi-username",
+        help="用于初始化的公开 Bangumi 用户名；留空则读配置或交互输入。",
+    ),
+    bangumi_token: str = typer.Option(
+        "",
+        "--bangumi-token",
+        help=(
+            "Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；"
+            "留空则读 [sources.bangumi].access_token。生成: "
+            "https://next.bgm.tv/demo/access-token"
+        ),
+    ),
     bilibili_history_limit: int | None = typer.Option(
         None,
         "--bilibili-history-limit",
@@ -6153,19 +7777,26 @@ def init(
 
     _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
-        "拉 B 站历史 / 收藏 / 关注（≈ 20–60s，看你的列表大小）"
+        "拉 B 站历史 / 收藏 / 关注（时长看你的列表大小）"
         if include_bili
         else "拉取所选平台数据（B 站已跳过）"
     )
+    # No total-duration forecast: it depends on the selected platforms, the
+    # collected history AND the provider's latency, so any number here would be
+    # wrong for someone and make a healthy long run read as broken (field
+    # report 2026-07-20). State the variability, then let the per-step heartbeat
+    # report elapsed time as evidence of progress.
     console.print(
-        "[bold yellow]⏱  这一步首次运行预计需要 2–5 分钟，"
-        "请保持网络畅通别中断。[/bold yellow]\n"
-        "  四个阶段会依次跑：\n"
+        "[bold yellow]⏱  这一步首次运行耗时差别很大，取决于你勾了几个平台、"
+        "拉到多少历史，以及 AI 服务的快慢，请保持网络畅通别中断。[/bold yellow]\n"
+        "  只要还在出结果就不会被打断，慢一些是正常的。\n"
+        "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
-        "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成灵魂画像（LLM 调用，≈ 30–60s）\n"
-        "    4/4  发现首轮内容池（多策略并发 + LLM 评估，≈ 1–3 分钟）\n"
-        "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
+        "    2/4  分析偏好（LLM 调用，按事件量分片，每片单独计时）\n"
+        "    3/4  生成并保存完整画像（单次 LLM 调用）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案）\n"
+        "[dim]全程会打印已用时和已完成的量，不要以为卡住了——"
+        "远程 AI 服务单次响应就可能要几分钟。[/dim]\n"
     )
     if not include_bili:
         console.print(
@@ -6266,6 +7897,94 @@ def init(
     else:
         include_reddit = _ask_reddit_inclusion()
 
+    if no_bangumi:
+        include_bangumi = False
+        console.print("[dim]  跳过 Bangumi 数据接入(命令行 --no-bangumi)。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
+        include_bangumi = False
+        console.print("[dim]  跳过 Bangumi 数据接入(OPENBILICLAW_NO_BANGUMI=1)。[/dim]")
+    elif skip_bangumi_prompt:
+        include_bangumi = True
+    else:
+        include_bangumi = _ask_bangumi_inclusion()
+
+    selected_bangumi_username = ""
+    selected_bangumi_token = ""
+    if include_bangumi:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.bangumi_client import (
+            BangumiAPIError,
+            resolve_access_token_identity,
+            validate_bangumi_access_token,
+            validate_bangumi_username,
+        )
+
+        bangumi_cfg = load_config().sources.bangumi
+        configured_username = str(bangumi_cfg.username or "").strip()
+        configured_token = str(bangumi_cfg.access_token or "").strip()
+        try:
+            selected_bangumi_token = validate_bangumi_access_token(
+                bangumi_token or configured_token
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--bangumi-token") from exc
+        raw_username = str(bangumi_username or configured_username).strip()
+        if selected_bangumi_token:
+            # Validate the token live and resolve the account before persisting
+            # anything: reject a bad/expired token with its real cause (project
+            # rule 7) instead of writing an unusable secret.
+            try:
+                resolved = asyncio.run(resolve_access_token_identity(selected_bangumi_token))
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    _print_status_panel(
+                        "error",
+                        "Bangumi 个人令牌无效",
+                        "令牌被 Bangumi 拒绝（缺失、错误或已过期）。请到 "
+                        "https://next.bgm.tv/demo/access-token 重新生成后重试。",
+                    )
+                    raise typer.Exit(code=1) from exc
+                _print_status_panel("error", "Bangumi 令牌校验失败", str(exc))
+                raise typer.Exit(code=1) from exc
+            if raw_username and raw_username != resolved:
+                console.print(
+                    f"[dim]  Bangumi 令牌对应用户为 {resolved}，已覆盖填写的 {raw_username}。[/dim]"
+                )
+            selected_bangumi_username = resolved
+        else:
+            if not raw_username and _is_interactive_terminal():
+                raw_username = str(
+                    typer.prompt(
+                        "公开 Bangumi 用户名(留空则只启用内容发现)",
+                        default="",
+                        show_default=False,
+                    )
+                    or ""
+                ).strip()
+            if not raw_username:
+                # Zero-config fallback: the browser extension reports the
+                # logged-in bgm.tv account's public username into runtime
+                # state. Priority: token /v0/me > explicit username >
+                # extension-reported username.
+                extension_username, extension_verified = _load_extension_bangumi_identity()
+                if extension_username:
+                    raw_username = extension_username
+                    if extension_verified:
+                        console.print(
+                            f"[dim]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}。[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[yellow]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}（未经 bgm.tv 校验，可能不准）。"
+                            "如果不是你本人，请用 --bangumi-username 指定。[/yellow]"
+                        )
+            try:
+                selected_bangumi_username = validate_bangumi_username(raw_username)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--bangumi-username") from exc
+
     selected_sources = (
         include_bili,
         include_xhs,
@@ -6274,6 +7993,7 @@ def init(
         include_x,
         include_zhihu,
         include_reddit,
+        include_bangumi,
     )
     if not any(selected_sources):
         _print_status_panel(
@@ -6282,9 +8002,25 @@ def init(
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
             "--yes-youtube / --yes-x / --yes-zhihu "
-            "启用其他来源。",
+            "/ --yes-reddit / --yes-bangumi 启用其他来源。",
         )
         raise typer.Exit(code=1)
+
+    profile_signal_sources = selected_sources[:-1]
+    if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
+        _print_status_panel(
+            "error",
+            "Bangumi 缺少令牌或用户名",
+            "只选择 Bangumi 初始化时，需提供 --bangumi-token（推荐，自动识别当前用户）"
+            "或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别；"
+            "如果只想启用内容发现，请先保存来源配置而不是运行 init。",
+        )
+        raise typer.Exit(code=1)
+    if include_bangumi and not selected_bangumi_username:
+        console.print(
+            "[yellow]  Bangumi 未填公开用户名：本次仅启用条目发现，"
+            "画像由其他已选来源提供。[/yellow]"
+        )
 
     _persist_init_source_enabled_flags(
         include_bili=include_bili,
@@ -6294,6 +8030,9 @@ def init(
         include_x=include_x,
         include_zhihu=include_zhihu,
         include_reddit=include_reddit,
+        include_bangumi=include_bangumi,
+        bangumi_username=selected_bangumi_username,
+        bangumi_token=selected_bangumi_token,
     )
 
     # gui-init (B2): the four init stages now run inside the shared async
@@ -6316,6 +8055,9 @@ def init(
                 include_x=include_x,
                 include_zhihu=include_zhihu,
                 include_reddit=include_reddit,
+                include_bangumi=include_bangumi,
+                bangumi_username=selected_bangumi_username,
+                bangumi_token=selected_bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
             )
@@ -6347,6 +8089,9 @@ def init(
     reddit_events = result.reddit_events
     reddit_scope_counts = result.reddit_scope_counts
     reddit_status = result.reddit_status
+    bangumi_events = list(getattr(result, "bangumi_events", []))
+    bangumi_scope_counts = dict(getattr(result, "bangumi_scope_counts", {}))
+    bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
 
@@ -6354,7 +8099,7 @@ def init(
         _print_status_panel(
             "warning",
             "部分完成",
-            "画像已生成，但 discover 阶段失败，可稍后手动执行 `openbiliclaw discover`。",
+            result.discovery_detail + " 也可稍后手动执行 `openbiliclaw discover`。",
         )
 
     _print_status_panel(
@@ -6394,6 +8139,9 @@ def init(
     reddit_saved_count = int(reddit_scope_counts.get("reddit_saved", 0))
     reddit_upvoted_count = int(reddit_scope_counts.get("reddit_upvoted", 0))
     reddit_subscribed_count = int(reddit_scope_counts.get("reddit_subscribed", 0))
+    bangumi_wish_count = int(bangumi_scope_counts.get("wish", 0))
+    bangumi_done_count = int(bangumi_scope_counts.get("done", 0))
+    bangumi_doing_count = int(bangumi_scope_counts.get("doing", 0))
     summary_rows: list[tuple[str, str]] = [
         ("📺 B 站观看历史", f"{len(history)} 条"),
         ("📺 B 站收藏夹", f"{len(favorites_data)} 条"),
@@ -6420,6 +8168,10 @@ def init(
         ("Reddit 点赞(upvoted)", f"{reddit_upvoted_count} 条"),
         ("Reddit 订阅 subreddit", f"{reddit_subscribed_count} 个"),
         ("🌐 Reddit 入库事件", f"{len(reddit_events)} 条"),
+        ("Bangumi 想看/想读/想玩", f"{bangumi_wish_count} 条"),
+        ("Bangumi 看过/读过/玩过", f"{bangumi_done_count} 条"),
+        ("Bangumi 在看/在读/在玩", f"{bangumi_doing_count} 条"),
+        ("🌐 Bangumi 入库事件", f"{len(bangumi_events)} 条"),
         ("📊 画像建模总事件", f"{len(events)} 条"),
         ("✅ 灵魂画像", "已生成"),
         ("🔍 首轮发现内容", f"{discovered_count} 条"),
@@ -6456,6 +8208,11 @@ def init(
             "https://www.reddit.com / saved、upvoted、订阅列表为空或任务仍在后台跑。"
             "装好扩展后重新跑 [cyan]openbiliclaw init --yes-reddit[/cyan] 可补齐。[/dim]"
         )
+    if not bangumi_events and bangumi_status not in {"skipped", "missing_username"}:
+        console.print(
+            "[dim]ℹ️  Bangumi 0 条信号入库。请确认用户名存在，且收藏已设为公开。"
+            "可用 [cyan]openbiliclaw fetch-bangumi --username <name>[/cyan] 只读验证。[/dim]"
+        )
 
     source_parts = []
     if bilibili_events > 0:
@@ -6470,6 +8227,8 @@ def init(
         source_parts.append(f"[green]{len(zhihu_events)}[/green] 条知乎信号")
     if len(reddit_events) > 0:
         source_parts.append(f"[green]{len(reddit_events)}[/green] 条 Reddit 信号")
+    if len(bangumi_events) > 0:
+        source_parts.append(f"[green]{len(bangumi_events)}[/green] 条 Bangumi 信号")
     if len(source_parts) > 1:
         console.print(
             "[dim]ℹ️  本次画像综合了 "
@@ -6728,6 +8487,8 @@ def _run_single_source_bootstrap(
 
     events, scope_counts, status_label = collect(task_id)
     summary_renderer(scope_counts, status_label, len(events))
+    if status_label in {"timeout", "failed"}:
+        raise typer.Exit(code=1)
 
 
 @app.command("profile-consolidate")
@@ -6789,6 +8550,7 @@ def profile_consolidate(
             usage_recorder=_build_usage_recorder(),
             module_overrides=module_overrides_from_config(cfg),
             concurrency=cfg.llm.concurrency,
+            concurrency_gate=_build_llm_concurrency_gate(),
         )
     except Exception as exc:
         console.print(f"[yellow]  LLM 不可用（{exc}）— 只做规则合并与聚类预览。[/yellow]")
@@ -6819,6 +8581,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
     else:
         consolidator = ProfileConsolidator(
@@ -6828,6 +8591,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
 
     if revert.strip():
@@ -7277,6 +9041,153 @@ def fetch_zhihu(
             )
         )
         _print_status_panel("success", "完成", "知乎事件已写入并完成画像重建")
+
+
+@app.command("fetch-bangumi")
+def fetch_bangumi(
+    username: str = typer.Option(
+        "",
+        "--username",
+        "-u",
+        help="公开 Bangumi 用户名；不提供时读取 [sources.bangumi].username。",
+    ),
+    token: str = typer.Option(
+        "",
+        "--token",
+        help=(
+            "Bangumi 个人令牌（自动识别当前用户并可读私密收藏）；"
+            "不提供时读取 [sources.bangumi].access_token。"
+        ),
+    ),
+    limit: int = typer.Option(0, "--limit", "-n", min=0, help="最多读取的公开收藏条目数。"),
+    write_memory: bool = typer.Option(
+        False,
+        "--write-memory",
+        help="将转换后的公开收藏事件写入 memory；默认只做只读 smoke。",
+    ),
+    rebuild_profile: bool = typer.Option(
+        False,
+        "--rebuild-profile",
+        help="写入 memory 后用本次 Bangumi 事件重建画像（会触发真实 LLM 调用）。",
+    ),
+) -> None:
+    """读取 Bangumi 公开收藏；默认不写本地数据也不调用 LLM。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import fetch_bangumi_public_collection_events
+    from openbiliclaw.sources.bangumi_client import (
+        BangumiAPIError,
+        BangumiClient,
+        me_username,
+        validate_bangumi_access_token,
+        validate_bangumi_username,
+    )
+
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    try:
+        selected_token = validate_bangumi_access_token(token or bangumi_cfg.access_token)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--token") from exc
+    selected_username = ""
+    if not selected_token:
+        try:
+            selected_username = validate_bangumi_username(username or bangumi_cfg.username)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--username") from exc
+        if not selected_username:
+            raise typer.BadParameter(
+                "请通过 --token（推荐，自动识别当前用户）或 --username / "
+                "[sources.bangumi].username 提供访问方式。",
+                param_hint="--username",
+            )
+    selected_limit = limit or int(bangumi_cfg.bootstrap_limit)
+    write_memory = write_memory or rebuild_profile
+    auth_subtitle = "官方只读 API · 个人令牌" if selected_token else "官方只读 API · anonymous"
+
+    async def _fetch() -> tuple[str, list[dict[str, Any]]]:
+        async with BangumiClient(
+            access_token=selected_token or None,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
+        ) as client:
+            resolved = selected_username
+            if selected_token:
+                resolved = me_username(await client.get_me())
+            events = await fetch_bangumi_public_collection_events(
+                client,
+                username=resolved,
+                subject_types=tuple(bangumi_cfg.subject_types),
+                limit=selected_limit,
+                include_private=bool(selected_token),
+            )
+            return resolved, events
+
+    _print_page_title("Bangumi 公开收藏", auth_subtitle)
+    try:
+        selected_username, events = asyncio.run(_fetch())
+    except BangumiAPIError as exc:
+        if exc.code == "not_found":
+            body = "用户不存在，或该用户没有可公开读取的收藏。"
+        elif exc.code == "rate_limited":
+            body = "Bangumi API 正在限流，请等待冷却后重试。"
+        elif exc.code == "unauthorized":
+            body = (
+                "个人令牌被拒绝（缺失、错误或已过期）。请到 "
+                "https://next.bgm.tv/demo/access-token 重新生成后重试。"
+            )
+        else:
+            body = str(exc)
+        _print_status_panel("warning", "Bangumi 读取失败", body)
+        raise typer.Exit(code=1) from exc
+
+    counts: dict[str, int] = {}
+    for event in events:
+        status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    _print_key_value_table(
+        "抓取摘要",
+        [
+            ("用户名", selected_username),
+            ("公开收藏事件", str(len(events))),
+            ("收藏状态", ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))),
+            ("写入 memory", "将写入" if write_memory else "未写入 memory"),
+            ("画像生成", "将重建" if rebuild_profile else "未触发画像生成"),
+        ],
+    )
+    for index, event in enumerate(events[:5], start=1):
+        console.print(
+            f"  {index}. [{event.get('event_type', '')}] {event.get('title') or '（无标题）'}"
+        )
+        console.print(f"     [dim]{event.get('url', '')}[/dim]")
+
+    if write_memory:
+        written, skipped = _write_events_to_memory(events, source="bangumi")
+        console.print(
+            f"  [green]已写入 memory: {written} 条 Bangumi 事件[/green]"
+            f"{f'，跳过重复 {skipped} 条。' if skipped else '。'}"
+        )
+    if rebuild_profile:
+        # Bangumi profile rebuild only consumes bangumi collection events; it
+        # never calls Bilibili, so skip the B 站 auth gate (still validates the
+        # runtime config) to keep non-interactive rebuilds from aborting.
+        _prepare_init_runtime(require_bili_auth=False)
+        soul_engine = _build_soul_engine()
+        _print_section_title("1/2 分析 Bangumi 偏好")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.analyze_events(events, event_chunk_size=200),
+                label="分析 Bangumi 偏好",
+                eta_seconds=180,
+            )
+        )
+        _print_section_title("2/2 生成画像")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.build_initial_profile(_bangumi_events_to_history_items(events)),
+                label="生成灵魂画像",
+                eta_seconds=70,
+            )
+        )
+        _print_status_panel("success", "完成", "Bangumi 事件已写入并完成画像重建")
 
 
 @app.command("fetch-reddit")
@@ -8527,6 +10438,159 @@ def profile() -> None:
     )
 
 
+@app.command("keyword-inspiration-dry-run")
+@app.command("keyword-inspiration-preview")
+def keyword_inspiration_dry_run(
+    platforms: list[str] | None = _KEYWORD_INSPIRATION_PLATFORMS_OPTION,
+    query_kind: str = _KEYWORD_INSPIRATION_KIND_OPTION,
+    limit: int | None = _KEYWORD_INSPIRATION_LIMIT_OPTION,
+    interest_limit: int | None = _KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION,
+    persist_axes: bool = _KEYWORD_INSPIRATION_PERSIST_AXES_OPTION,
+) -> None:
+    """预览 search-backed inspiration 关键词生成链路，不写入关键词池."""
+
+    import dataclasses
+
+    from openbiliclaw.config import derive_inspiration_breadth_params, load_config
+    from openbiliclaw.discovery.douyin import split_csv_values
+    from openbiliclaw.discovery.inspiration_provider import (
+        build_inspiration_search_provider,
+        build_platform_source_backends,
+    )
+    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+    from openbiliclaw.runtime.keyword_planner import KeywordPlanner
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+
+    allowed = {
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+    }
+    selected_platforms = list(split_csv_values(platforms or [])) or ["bilibili"]
+    unknown = [platform for platform in selected_platforms if platform not in allowed]
+    if unknown:
+        _print_status_panel(
+            "error",
+            "平台参数无效",
+            f"未知平台：{', '.join(unknown)}。可选：{', '.join(sorted(allowed))}",
+        )
+        raise typer.Exit(code=1)
+    normalized_kind = query_kind.strip().lower()
+    if normalized_kind not in {"regular", "explore"}:
+        _print_status_panel("error", "kind 参数无效", "仅支持 regular / explore。")
+        raise typer.Exit(code=1)
+
+    _require_runtime_config()
+    config = load_config()
+    config.discovery.inspiration_search_enabled = True
+    # One-shot overrides apply on the DERIVED breadth params (internal config
+    # view injected via planner construction) — the per-knob config fields are
+    # gone (Phase-2 collapse), so nothing mutates config.discovery here.
+    inspiration_params = derive_inspiration_breadth_params(
+        getattr(config.discovery, "inspiration_breadth", "medium")
+    )
+    if limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, max_keywords_per_platform=int(limit)
+        )
+    if interest_limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, interest_sample_size=int(interest_limit)
+        )
+    memory = _build_memory_manager()
+    database = _get_runtime_database()
+    registry = _build_registry()
+    llm_service = LLMService(
+        registry=registry,
+        memory=memory,
+        usage_recorder=_build_usage_recorder(),
+        module_overrides=module_overrides_from_config(config),
+        concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
+    )
+    soul_engine = _build_soul_engine()
+    try:
+        profile_data = asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    x_client: object | None = None
+    twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+    if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+
+        x_client = XClient(
+            cookie=resolve_x_cookie(
+                data_dir=config.data_path,
+                cookie_env=str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
+            )
+        )
+
+    planner = KeywordPlanner(
+        llm_service=llm_service,
+        database=database,
+        config=config,
+        soul_engine=soul_engine,
+        pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
+        signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
+        inspiration_provider=build_inspiration_search_provider(
+            getattr(config.discovery, "inspiration_search_backends", None),
+            database=database,
+            platform_backends=build_platform_source_backends(
+                config,
+                bilibili_client=(
+                    _build_bilibili_client()
+                    if bool(getattr(getattr(config.sources, "bilibili", None), "enabled", True))
+                    else None
+                ),
+                x_client=x_client,
+            ),
+            platforms_per_probe=int(inspiration_params.platforms_per_probe),
+            riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+            pages_per_probe=int(inspiration_params.search_pages_per_probe),
+        ),
+        inspiration_params=inspiration_params,
+    )
+    report = asyncio.run(
+        planner.preview_inspiration_keywords(
+            selected_platforms,
+            profile=profile_data,
+            query_kind=normalized_kind,
+            persist_axes=persist_axes,
+        )
+    )
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+
+
+@app.command("keyword-inspiration-report")
+def keyword_inspiration_report(
+    window_days: int = typer.Option(
+        14,
+        "--window-days",
+        min=1,
+        help="统计最近 N 天 additive inspiration / merged 关键词 cohort。",
+    ),
+) -> None:
+    """输出 inspiration additive cohort 对比与 replace 启用门禁."""
+
+    _require_runtime_config()
+    database = _get_runtime_database()
+    stats = database.get_keyword_cohort_stats(window_days=int(window_days))
+    sys.stdout.write(json.dumps(stats, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+
+
 _BILIBILI_STRATEGY_NAMES = ("search", "trending", "explore", "related_chain")
 
 
@@ -8584,6 +10648,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(config),
         concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
 
     xhs_cfg = getattr(config.sources, "xiaohongshu", None)
@@ -9100,6 +11165,196 @@ def _run_reddit_discovery(*, limit: int) -> None:
     _print_status_panel(kind, title, body)
 
 
+def _run_bangumi_discovery_smoke(*, mode: str, keyword: str = "", limit: int) -> None:
+    """Run one read-only Bangumi API branch without cache, memory, or LLM writes."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import bangumi_subject_to_content
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError, BangumiClient
+
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+
+    async def _fetch() -> list[Any]:
+        async with BangumiClient(
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+        ) as client:
+            if mode == "search":
+                page = await client.search_subjects(
+                    keyword,
+                    subject_types=tuple(bangumi_cfg.subject_types),
+                    limit=limit,
+                    sort="match",
+                )
+            else:
+                page = await client.browse_subjects(
+                    str(bangumi_cfg.subject_types[0]),
+                    sort="rank" if mode == "ranked" else "date",
+                    limit=limit,
+                )
+        return [
+            item
+            for row in page.data
+            if (item := bangumi_subject_to_content(row, strategy=f"bangumi-{mode}")) is not None
+        ]
+
+    subtitle = {
+        "search": f"关键词搜索 · {keyword}",
+        "ranked": "排名浏览",
+        "latest": "按日期浏览（可能含未播条目）",
+    }[mode]
+    _print_page_title("Bangumi 内容发现 smoke", subtitle)
+    try:
+        items = asyncio.run(_fetch())
+    except (BangumiAPIError, ValueError) as exc:
+        _print_status_panel("warning", "Bangumi API 读取失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_key_value_table(
+        "只读召回摘要",
+        [
+            ("模式", mode),
+            ("条目数", str(len(items))),
+            ("本地写入", "0"),
+            ("LLM 调用", "0"),
+        ],
+    )
+    for index, item in enumerate(items[:5], start=1):
+        _print_discovered_content_preview(item, index)
+
+
+@app.command("discover-bangumi")
+def discover_bangumi(
+    keyword: str = typer.Argument(..., help="Bangumi 搜索关键词。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 关键词搜索。"""
+    if not keyword.strip():
+        raise typer.BadParameter("搜索关键词不能为空。", param_hint="keyword")
+    _run_bangumi_discovery_smoke(mode="search", keyword=keyword.strip(), limit=limit)
+
+
+@app.command("discover-bangumi-ranked")
+def discover_bangumi_ranked(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 排名浏览。"""
+    _run_bangumi_discovery_smoke(mode="ranked", limit=limit)
+
+
+@app.command("discover-bangumi-latest")
+def discover_bangumi_latest(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 按日期浏览（可能含未播条目）。"""
+    _run_bangumi_discovery_smoke(mode="latest", limit=limit)
+
+
+def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
+    """Run one formal Bangumi cycle through the shared candidate pipeline."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.bangumi_producer import BangumiDiscoveryProducer
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.bangumi_client import BangumiClient
+
+    _require_runtime_config()
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    if not bangumi_cfg.enabled:
+        _print_status_panel(
+            "warning",
+            "Bangumi discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.bangumi].enabled。",
+        )
+        raise typer.Exit(code=1)
+    database = _get_runtime_database()
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。")
+        raise typer.Exit(code=1) from exc
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+
+    async def _produce() -> dict[str, object]:
+        async with BangumiClient(
+            access_token=str(bangumi_cfg.access_token or "") or None,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
+        ) as client:
+            producer = BangumiDiscoveryProducer(
+                database=database,
+                soul_engine=soul_engine,
+                client=client,
+                access_token=str(bangumi_cfg.access_token or ""),
+                enabled=bool(bangumi_cfg.enabled),
+                subject_types=tuple(bangumi_cfg.subject_types),
+                source_modes=tuple(bangumi_cfg.source_modes),
+                daily_search_budget=bangumi_cfg.daily_search_budget,
+                daily_ranked_budget=bangumi_cfg.daily_ranked_budget,
+                daily_latest_budget=bangumi_cfg.daily_latest_budget,
+                min_interval_minutes=bangumi_cfg.min_interval_minutes,
+                candidate_pipeline=candidate_pipeline,
+                keyword_fetch=keyword_fetch,
+            )
+            return await producer.produce_if_due(limit=limit, force=force)
+
+    result = asyncio.run(_produce())
+    reason = str(result.get("reason") or "")
+    discovered = int(cast("Any", result.get("discovered") or 0))
+    enqueued = int(cast("Any", result.get("enqueued") or 0))
+    modes = ", ".join(bangumi_cfg.source_modes)
+    _print_page_title("Bangumi 内容发现", f"正式 discover · {modes}")
+    if reason in {"ok", "partial"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "bangumi"),
+                ("分支", modes),
+                ("状态", reason),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+    messages = {
+        "disabled": (
+            "warning",
+            "Bangumi discovery 已禁用",
+            "请在配置页或 config.toml 中启用 [sources.bangumi].enabled。",
+        ),
+        "no_profile": (
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init`。",
+        ),
+        "throttled": ("info", "Bangumi discovery 尚未到期", "可使用 --force 手动验证。"),
+        "rate_limited": ("warning", "Bangumi API 正在冷却", "到期后会自动重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需补充 Bangumi 候选。"),
+        "budget_exhausted": (
+            "info",
+            "Bangumi discovery 今日预算已用完",
+            "所有启用分支的每日预算均已耗尽，可在配置页调整对应分支预算或明日重试。",
+        ),
+        "empty": ("info", "Bangumi discovery 返回为空", "官方 API 可达，但本轮无可转换条目。"),
+        "error": ("warning", "Bangumi discovery 执行失败", str(result.get("mode_results") or "")),
+    }
+    kind, title, body = messages.get(
+        reason,
+        ("info", "Bangumi discovery 未产出内容", reason or "无详细信息"),
+    )
+    _print_status_panel(kind, title, body)
+
+
 @app.command("discover-douyin")
 def discover_douyin(
     keywords: list[str] | None = _DOUYIN_DISCOVERY_KEYWORDS_OPTION,
@@ -9139,7 +11394,7 @@ def discover(
         "bilibili",
         "--source",
         "-s",
-        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu 或 reddit。",
+        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit 或 bangumi。",
         case_sensitive=False,
     ),
     strategies: list[str] | None = _DISCOVER_STRATEGIES_OPTION,
@@ -9147,7 +11402,7 @@ def discover(
     force: bool = typer.Option(
         False,
         "--force",
-        help="xiaohongshu：忽略 4 小时节流强制生产一次关键词。",
+        help="xiaohongshu / bangumi：忽略最小调度间隔强制执行一次。",
     ),
 ) -> None:
     """手动触发内容发现（按来源选择渠道）."""
@@ -9195,9 +11450,20 @@ def discover(
         _run_reddit_discovery(limit=limit)
         return
 
+    if source_normalized == "bangumi":
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "bangumi 渠道走 source_modes 配置的官方 API discovery 分支，已忽略策略过滤。",
+            )
+        _run_bangumi_discovery(limit=limit, force=force)
+        return
+
     if source_normalized != "bilibili":
         raise typer.BadParameter(
-            f"未知的内容源 `{source}`，当前支持：bilibili、xiaohongshu、douyin、zhihu、reddit。"
+            f"未知的内容源 `{source}`，当前支持："
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)
@@ -9276,7 +11542,11 @@ def chat() -> None:
                 console.print("阿花：对话结束。")
                 return
 
-            reply = asyncio.run(dialogue.respond(user_message))
+            try:
+                reply = asyncio.run(dialogue.respond(user_message))
+            except Exception as exc:
+                console.print(f"阿花：{safe_llm_failure_message(exc)}")
+                continue
             console.print(f"阿花：{reply}")
     except KeyboardInterrupt:
         console.print("阿花：对话结束。")
@@ -9462,14 +11732,18 @@ def probe() -> None:
 @app.command()
 def config_show() -> None:
     """显示当前配置."""
-    from openbiliclaw.config import load_config_with_diagnostics
+    from openbiliclaw.config import effective_llm_default_chain, load_config_with_diagnostics
     from openbiliclaw.llm import RegistryBuildError, summarize_registry
 
     cfg, diagnostics = load_config_with_diagnostics()
+    instance_routing = bool(getattr(cfg.llm, "instance_routing", False))
+    default_chain = effective_llm_default_chain(cfg.llm)
+    llm_label = "LLM 默认调用链" if instance_routing else "LLM"
+    llm_value = " → ".join(default_chain) if instance_routing else cfg.llm.default_provider
     _print_page_title("当前配置概览", "运行时配置")
     rows = [
         ("语言", cfg.language),
-        ("LLM", cfg.llm.default_provider),
+        (llm_label, llm_value or "未配置"),
         ("LLM 并发", str(cfg.llm.concurrency)),
         ("B站认证", cfg.bilibili.auth_method),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
@@ -9482,6 +11756,14 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
+        (
+            "海外网络模式",
+            {"direct": "直连", "system": "跟随系统代理", "custom": "自定义代理"}.get(
+                cfg.network.mode, cfg.network.mode
+            ),
+        ),
+        ("海外自定义代理", cfg.network.proxy or "未设置"),
+        ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:
@@ -9491,11 +11773,13 @@ def config_show() -> None:
     try:
         registry = _build_registry()
         summary = summarize_registry(cfg, registry)
+        provider_label = "已注册 Provider 实例" if instance_routing else "已注册 Provider"
+        default_label = "最终默认 Provider 实例" if instance_routing else "最终默认 Provider"
         _print_key_value_table(
             "Provider 概览",
             [
-                ("已注册 Provider", ", ".join(summary.registered_providers)),
-                ("最终默认 Provider", summary.effective_default),
+                (provider_label, ", ".join(summary.registered_providers)),
+                (default_label, summary.effective_default),
             ],
         )
     except RegistryBuildError as exc:
@@ -9511,6 +11795,98 @@ def config_show() -> None:
         f"{issue.field}: {issue.message}" for issue in diagnostics.issues
     ]
     _print_config_guidance(hints)
+
+
+@app.command("config-export-legacy")
+def config_export_legacy(
+    output: Path | None = _CONFIG_EXPORT_LEGACY_OUTPUT_OPTION,
+    force: bool = _CONFIG_EXPORT_LEGACY_FORCE_OPTION,
+) -> None:
+    """导出可供旧版 OpenBiliClaw 读取的配置副本."""
+    import tempfile
+
+    from openbiliclaw.config import (
+        load_config_with_diagnostics,
+        project_config_to_legacy,
+        save_config,
+    )
+
+    temp_path: Path | None = None
+    try:
+        cfg, diagnostics = load_config_with_diagnostics()
+        source_path = diagnostics.config_path
+        if source_path is None:
+            raise ValueError("无法确定当前 config.toml 的路径。")
+        target = (
+            output.expanduser()
+            if output is not None
+            else source_path.with_name(f"{source_path.stem}.legacy{source_path.suffix}")
+        )
+        if target.resolve() == source_path.resolve():
+            raise ValueError("旧格式必须导出到另一个文件，不能直接覆盖当前配置。")
+        if target.exists() and not force:
+            raise ValueError(f"输出文件已存在：{target}；确认后可加 --force 覆盖。")
+
+        projected, report = project_config_to_legacy(cfg)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+
+        save_config(projected, temp_path)
+        verified, _ = load_config_with_diagnostics(
+            temp_path,
+            ensure_default_file=False,
+        )
+        if (
+            verified.llm.instance_routing
+            or verified.llm.default_provider != projected.llm.default_provider
+            or verified.llm.fallback_provider != projected.llm.fallback_provider
+        ):
+            raise ValueError("旧格式导出后的回读校验失败，未替换目标文件。")
+        temp_path.chmod(0o600)
+        if target.exists() and not force:
+            raise ValueError(f"输出文件已存在：{target}；确认后可加 --force 覆盖。")
+        os.replace(temp_path, target)
+        temp_path = None
+    except (OSError, ValueError) as exc:
+        _print_status_panel("error", "旧版配置导出失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+    _print_page_title("旧版配置已导出", "当前 v2 配置保持不变")
+    _print_key_value_table(
+        "导出结果",
+        [
+            ("源配置", str(source_path)),
+            ("旧版副本", str(target)),
+            ("主实例", report.primary_instance_id or "沿用旧格式"),
+            ("备选实例", report.fallback_instance_id or "无"),
+        ],
+    )
+    if report.issues:
+        _print_status_panel(
+            "warning",
+            "降级兼容告警",
+            "\n".join(f"• ({issue.code}) {issue.message}" for issue in report.issues),
+        )
+    else:
+        _print_status_panel("success", "降级兼容", "旧格式可完整表达当前 LLM 路由。")
+    permission_note = (
+        "权限已设为仅当前用户可读写（0600）。"
+        if os.name != "nt"
+        else "Windows 会继承目标目录 ACL，请把它放在仅当前账户可访问的目录。"
+    )
+    console.print(
+        "[bold yellow]安全提示：导出文件包含模型 API Key 等明文凭据，"
+        f"{permission_note}[/bold yellow]"
+    )
 
 
 @auth_app.command("login")

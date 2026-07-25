@@ -47,7 +47,7 @@ def test_extract_llm_json_list_accepts_caller_wrapper_aliases() -> None:
 
 def test_extract_llm_json_list_accepts_singleton_when_enabled() -> None:
     assert extract_llm_json_list(
-        '{"score":0.8}',
+        '{\n  "score": 0.8\n}',
         allow_singleton=True,
         item_predicate=_has_score,
     ) == [{"score": 0.8}]

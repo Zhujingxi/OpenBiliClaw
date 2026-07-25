@@ -518,7 +518,7 @@
   <text x="920" y="206" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">precompute_delight_scores() (_delight_lock)</text>
   <text x="760" y="228" fill="#8b949e" font-size="9.5">粗筛：relevance≥0.55，DESC top 50</text>
   <text x="760" y="243" fill="#8b949e" font-size="9.5">复用 Evo：delight_score = relevance_score</text>
-  <text x="760" y="258" fill="#8b949e" font-size="9.5">reason 优先复用 pool_expression；hook 来自 topic labels</text>
+  <text x="760" y="258" fill="#8b949e" font-size="9.5">正式 expression/topic 未齐时不选取、不打分</text>
   <text x="760" y="276" fill="#3fb950" font-size="9.5">阈值 max(profile floor, pool Top10%)</text>
   <text x="760" y="291" fill="#3fb950" font-size="9.5">→ delight_score / delight_reason / delight_hook</text>
   <text x="760" y="309" fill="#6e7681" font-size="9">无独立 Delight LLM scorer；只复用已有结果</text>
@@ -721,7 +721,7 @@
   <div class="src-body"><ol>
     <li><b>源无关分类</b> <code>classify_pool_backlog</code>：给跨源（小红书 / 抖音扩展）那些没分类的内容补上 风格 / 话题 / 相关度，用的是和发现侧一样的评估提示（含「近期反例」）。每批 10 条。<span class="sub">补完之后，推荐层就只看内容特征、对来源平台透明。</span></li>
     <li><b>预生成文案</b> <code>precompute_pool_copy</code>：后台批量写「推荐语 / 话题标签」，默认每批 30 条、2 worker 并发；解析失败先拆半重试，遇到限流就<b>留空、下一轮重试</b>，不卡住。</li>
-    <li><b>惊喜打分</b> <code>precompute_delight_scores</code>：先免费粗筛相关度≥0.55 取前 50，然后直接复用 Evo 的 <code>relevance_score</code> 写入 <code>delight_score</code>，优先复用 <code>pool_expression</code> 写入 <code>delight_reason</code>，并用 topic 标签生成 <code>delight_hook</code>；过动态阈值（profile floor 与池内 Top 10% 取高）才留下理由和钩子，不再单独调用 LLM scorer。</li>
+    <li><b>惊喜打分</b> <code>precompute_delight_scores</code>：只读取正式 <code>pool_expression / pool_topic_label</code> 已同时就绪的候选，再免费粗筛相关度≥0.55 取前 50，直接复用 Evo 的 <code>relevance_score</code> 写入 <code>delight_score</code>；过动态阈值（profile floor 与池内 Top 10% 取高）时，用条件写入把正式文案原子同步为 <code>delight_reason / delight_hook</code>。pending API / runtime 继续校验精确快照，evaluator 的内部 reason 不能成为惊喜状态或展示兜底；不再单独调用 LLM scorer。</li>
     <li><span class="sub">三者各自独立加锁，互不阻塞 —— 文案队列短不会饿死惊喜打分。</span></li>
   </ol></div>
 </div>

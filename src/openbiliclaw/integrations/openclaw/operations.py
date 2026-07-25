@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.soul.avoidance_speculator import choose_next_avoidance_candidate
 from openbiliclaw.soul.dislike_writeback import apply_new_dislikes, topics_for_confirmed_avoidance
 from openbiliclaw.soul.speculator import (
@@ -153,7 +154,11 @@ class OpenClawAdapter:
                     rows = [
                         row for row in get_recommendations(limit=limit) if isinstance(row, dict)
                     ]
-            if rows is not None:
+            # A fresh one-shot runtime has canonical pool rows but no
+            # recommendation-history rows yet.  Only return the history fast
+            # path when it actually has entries; otherwise serve the newly
+            # copied pool below.
+            if rows:
                 return RecommendationResponse(
                     items=[
                         RecommendationItem(
@@ -300,7 +305,8 @@ class OpenClawAdapter:
             )
             reply = await dialogue.respond(request.message)
         except Exception as exc:  # pragma: no cover - defensive adapter boundary
-            raise AdapterOperationError("Failed to run Socratic dialogue turn.") from exc
+            message = safe_llm_failure_message(exc)
+            raise AdapterOperationError(f"Failed to run Socratic dialogue turn: {message}") from exc
         return ChatResponse(reply=str(reply), session=request.session)
 
     async def get_next_probe(self) -> InterestProbeResponse:
@@ -615,6 +621,14 @@ class OpenClawAdapter:
             unread_count=self._to_int(runtime_status.get("unread_count", 0)),
             pool_available_count=self._to_int(runtime_status.get("pool_available_count", 0)),
             pool_target_count=self._to_int(runtime_status.get("pool_target_count", 0)),
+            llm_refill_active=self._to_int(runtime_status.get("llm_refill_active", 0)),
+            llm_refill_waiting=self._to_int(runtime_status.get("llm_refill_waiting", 0)),
+            llm_maintenance_active=self._to_int(runtime_status.get("llm_maintenance_active", 0)),
+            llm_maintenance_waiting=self._to_int(runtime_status.get("llm_maintenance_waiting", 0)),
+            llm_refill_priority_active=bool(
+                runtime_status.get("llm_refill_priority_active", False)
+            ),
+            inventory_priority_state=str(runtime_status.get("inventory_priority_state", "healthy")),
             last_discovered_count=self._to_int(runtime_status.get("last_discovered_count", 0)),
             last_refresh_at=str(runtime_status.get("last_refresh_at", "")),
             last_account_sync_at=str(runtime_status.get("last_account_sync_at", "")),

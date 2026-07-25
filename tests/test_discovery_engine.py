@@ -15,6 +15,7 @@ from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
     DiscoveryConcurrencyController,
+    _prompt_visible_content_fields,
     compact_evaluation_profile_summary,
     discovery_raw_candidate_mode_enabled,
     llm_eval_candidate_limit,
@@ -77,11 +78,35 @@ class _SlowLLMService:
         return _SlowResponse('{"score": 0.88, "reason": "still relevant"}')
 
 
+def test_prompt_catalog_metrics_are_only_emitted_when_present() -> None:
+    ordinary = _prompt_visible_content_fields(
+        DiscoveredContent(bvid="BV1", title="普通视频", source_strategy="search")
+    )
+    catalog = _prompt_visible_content_fields(
+        DiscoveredContent(
+            bvid="326",
+            title="目录条目",
+            source_strategy="bangumi-ranked",
+            rating_score=9.2,
+            rating_count=9_959,
+            source_rank=1,
+        )
+    )
+
+    assert "rating_score" not in ordinary
+    assert "rating_count" not in ordinary
+    assert "source_rank" not in ordinary
+    assert catalog["rating_score"] == 9.2
+    assert catalog["rating_count"] == 9_959
+    assert catalog["source_rank"] == 1
+
+
 class _DynamicBatchLLMService:
     """Returns one score per item found in the batch prompt."""
 
     def __init__(self) -> None:
         self.user_inputs: list[str] = []
+        self.max_tokens: list[int] = []
 
     async def complete_structured_task(
         self,
@@ -95,6 +120,7 @@ class _DynamicBatchLLMService:
         reasoning_effort: str | None = None,
     ) -> object:
         self.user_inputs.append(user_input)
+        self.max_tokens.append(max_tokens)
         batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
         items = json.loads(batch_json.strip())
         payload = [
@@ -267,6 +293,15 @@ class _RecordingCacheDatabase(_RecentViewedDatabase):
 
     def cache_content(self, bvid: str, **kwargs: object) -> None:
         self.cached_bvids.append(bvid)
+
+    def pool_admission_threshold(
+        self,
+        source_strategy: str,
+        requested_threshold: object | None = None,
+    ) -> float:
+        if source_strategy == "explore":
+            return max(0.58, float(requested_threshold or 0.0))
+        return max(0.60, float(requested_threshold or 0.0))
 
 
 class _RawModeAwareStrategy:
@@ -585,6 +620,19 @@ async def test_evaluate_content_batch_skips_recently_viewed_non_bilibili_before_
     assert "已经看过的 YouTube" not in user_input
 
 
+def test_candidate_view_keys_normalize_zhihu_alias() -> None:
+    keys = ContentDiscoveryEngine._candidate_view_keys(
+        DiscoveredContent(
+            content_id="answer:42",
+            source_platform="zh",
+            title="知乎回答",
+            source_strategy="zhihu-hot",
+        )
+    )
+
+    assert "zhihu:answer:42" in keys
+
+
 @pytest.mark.asyncio
 async def test_evaluate_content_batch_omits_duplicate_text_description() -> None:
     llm_service = _DynamicBatchLLMService()
@@ -661,6 +709,29 @@ async def test_multimodal_evaluation_uses_configured_smaller_batch_size() -> Non
     assert len(llm_service.user_inputs) == 3
     assert [prompt.count('"content_id"') for prompt in llm_service.user_inputs] == [2, 2, 1]
     assert engine.multimodal_unavailable_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_text_batch_evaluation_bounds_declared_output_tokens() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"text-{idx}",
+                title=f"text item {idx}",
+                source_platform="bilibili",
+                source_strategy="trending",
+            )
+            for idx in range(8)
+        ],
+        _build_profile(),
+        batch_size=8,
+    )
+
+    assert scores == [0.8] * 8
+    assert llm_service.max_tokens == [4096]
 
 
 @pytest.mark.asyncio
@@ -741,6 +812,7 @@ async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) ->
         ]
     ]
     assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
+    assert llm_service.max_tokens == [4096]
 
 
 async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
@@ -896,8 +968,8 @@ def test_cache_results_skips_recently_viewed_items() -> None:
 
     engine._cache_results(
         [
-            DiscoveredContent(bvid="BV1VIEWED", title="已经看过"),
-            DiscoveredContent(bvid="BV1FRESH", title="新内容"),
+            DiscoveredContent(bvid="BV1VIEWED", title="已经看过", relevance_score=0.90),
+            DiscoveredContent(bvid="BV1FRESH", title="新内容", relevance_score=0.90),
         ]
     )
 
@@ -915,16 +987,44 @@ def test_cache_results_skips_recently_viewed_non_bilibili_items() -> None:
                 content_id="note-seen",
                 source_platform="xiaohongshu",
                 title="已经看过的小红书",
+                relevance_score=0.90,
             ),
             DiscoveredContent(
                 content_id="note-fresh",
                 source_platform="xiaohongshu",
                 title="新小红书",
+                relevance_score=0.90,
             ),
         ]
     )
 
-    assert database.cached_bvids == ["note-fresh"]
+    assert database.cached_bvids == ["xiaohongshu:note-fresh"]
+
+
+def test_cache_results_rechecks_admission_before_writing() -> None:
+    database = _RecordingCacheDatabase(set())
+    engine = ContentDiscoveryEngine(database=database)  # type: ignore[arg-type]
+
+    engine._cache_results(
+        [
+            DiscoveredContent(
+                bvid="BV1TRENDLOW",
+                title="不匹配的热门内容",
+                source_strategy="trending",
+                relevance_score=0.59,
+                score_threshold=0.20,
+            ),
+            DiscoveredContent(
+                bvid="BV1EXPLORE",
+                title="合格的跨域发现",
+                source_strategy="explore",
+                relevance_score=0.58,
+                score_threshold=0.55,
+            ),
+        ]
+    )
+
+    assert database.cached_bvids == ["BV1EXPLORE"]
 
 
 @pytest.mark.asyncio
@@ -1994,8 +2094,8 @@ async def test_discovery_engine_cache_results_preserves_multi_source_fields() ->
 
         row = db.conn.execute(
             "SELECT source, source_platform, content_id, content_url "
-            "FROM content_cache WHERE bvid=?",
-            ("6613e9ac000000001a015e65",),
+            "FROM content_cache WHERE item_key=?",
+            ("xiaohongshu:6613e9ac000000001a015e65",),
         ).fetchone()
         assert row is not None
         assert row["source_platform"] == "xiaohongshu"
@@ -2363,6 +2463,71 @@ async def test_evaluate_batch_matches_results_by_bvid_when_response_reorders() -
 
 
 @pytest.mark.asyncio
+async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
+    class _PartialLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            items = json.loads(raw.strip())
+            ids = tuple(str(item["bvid"]) for item in items)
+            self.request_ids.append(ids)
+            returned = ids[:2] if len(self.request_ids) == 1 else ids
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "bvid": content_id,
+                            "score": 0.8,
+                            "reason": f"ok {content_id}",
+                            "style_key": "deep_dive",
+                        }
+                        for content_id in returned
+                    ]
+                )
+            )
+
+    llm = _PartialLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [
+        DiscoveredContent(bvid=key, title=key, source_strategy="trending")
+        for key in ("A", "B", "C", "D")
+    ]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.8] * 4
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_retries_duplicate_key_without_overwriting_valid_sibling() -> None:
+    class _DuplicateKeyLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            ids = tuple(str(item["bvid"]) for item in json.loads(raw.strip()))
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                payload = [
+                    {"bvid": "A", "score": 0.1, "reason": "bad first"},
+                    {"bvid": "A", "score": 0.2, "reason": "bad last"},
+                    {"bvid": "B", "score": 0.8, "reason": "B once"},
+                ]
+            else:
+                payload = [{"bvid": "A", "score": 0.7, "reason": "A retry"}]
+            return _SlowResponse(json.dumps(payload))
+
+    llm = _DuplicateKeyLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [DiscoveredContent(bvid=key, title=key) for key in ("A", "B")]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.7, 0.8]
+    assert llm.request_ids == [("A", "B"), ("A",)]
+    assert batch[0].relevance_reason == "A retry"
+    assert batch[1].relevance_reason == "B once"
+
+
+@pytest.mark.asyncio
 async def test_evaluate_batch_accepts_newline_delimited_json_objects() -> None:
     """Some providers return one scored JSON object per line instead of an array."""
 
@@ -2534,6 +2699,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="张雪机车",
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1B",
@@ -2542,6 +2708,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="张雪机车",  # exact match
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1C",
@@ -2550,6 +2717,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="风犬少年的天空",
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1D",
@@ -2558,6 +2726,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="",
+        relevance_score=0.90,
     )
 
     counts = db.count_pool_by_franchise()

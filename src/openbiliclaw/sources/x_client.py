@@ -34,10 +34,45 @@ Design contract (see ``docs/plans/2026-06-08-x-twitter-source-plan.md`` Task 6):
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw.network import outbound_cli_proxy_url
+
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime here
+    from collections.abc import Iterator
+
     from twitter_cli.models import Tweet
+
+logger = logging.getLogger(__name__)
+
+# Sentinel for "transaction bootstrap not yet attempted" (distinct from a
+# cached ``None`` meaning "attempted and failed; don't retry this instance").
+_UNSET: Any = object()
+
+
+_TWITTER_TRANSPORT_LOCK = threading.RLock()
+_MISSING = object()
+
+
+@contextmanager
+def _twitter_proxy_environment(proxy: str | None) -> Iterator[None]:
+    """Expose the resolved project route to twitter-cli during session setup."""
+    previous = os.environ.get("TWITTER_PROXY", _MISSING)
+    if proxy:
+        os.environ["TWITTER_PROXY"] = proxy
+    else:
+        os.environ.pop("TWITTER_PROXY", None)
+    try:
+        yield
+    finally:
+        if previous is _MISSING:
+            os.environ.pop("TWITTER_PROXY", None)
+        else:
+            os.environ["TWITTER_PROXY"] = str(previous)
 
 
 class XClientError(RuntimeError):
@@ -93,6 +128,9 @@ class XClient:
 
     def __init__(self, cookie: str) -> None:
         self._cookie = cookie or ""
+        # Cached x-client-transaction generator (see ``_ensure_transaction``).
+        # ``_UNSET`` = not yet built; a ``ClientTransaction`` or ``None`` after.
+        self._ct: Any = _UNSET
 
     # -- internal helpers -------------------------------------------------
 
@@ -101,11 +139,93 @@ class XClient:
         return _parse_cookie(self._cookie)
 
     def _client(self) -> Any:
-        """Build a ``twitter_cli`` client (lazy import lives here)."""
-        from twitter_cli.client import TwitterClient
+        """Build a ``twitter_cli`` client (lazy import lives here).
+
+        Every ``twitter_cli`` client is seeded with a working
+        ``x-client-transaction-id`` generator (see :meth:`_ensure_transaction`).
+        X's ``SearchTimeline`` endpoint (used by discovery ``search`` /
+        ``for_you`` / ``user_tweets``) hard-requires that header and returns a
+        bare ``HTTP 404`` without it, whereas ``twitter_cli``'s own bootstrap
+        fetches the *anonymous* homepage, which no longer embeds the
+        ``ondemand.s`` reference the transaction library needs — so it silently
+        fails and search 404s. We seed from the *authenticated* homepage instead,
+        which still serves the full ``client-web`` bundle. Session construction
+        also applies the process-wide OpenBiliClaw network route.
+        """
+        from twitter_cli import client as twitter_client
 
         auth_token, ct0 = self._auth_pair()
-        return TwitterClient(auth_token, ct0)
+        proxy = outbound_cli_proxy_url(dedicated_variable="TWITTER_PROXY")
+        with _TWITTER_TRANSPORT_LOCK:
+            marker = getattr(twitter_client, "_openbiliclaw_proxy", _MISSING)
+            if marker is _MISSING or marker != proxy:
+                # twitter-cli caches one curl_cffi session globally. Reset it
+                # when runtime config changes so direct/custom/system takes
+                # effect without restarting the backend.
+                twitter_client._cffi_session = None
+                twitter_client._openbiliclaw_proxy = proxy
+            with _twitter_proxy_environment(proxy):
+                client = twitter_client.TwitterClient(auth_token, ct0)
+                transaction = self._ensure_transaction()
+            if transaction is not None:
+                # Inject the generator and mark ``twitter_cli``'s own (broken)
+                # anonymous bootstrap as already attempted so it is skipped.
+                client._client_transaction = transaction
+                client._ct_init_attempted = True
+            return client
+
+    def _ensure_transaction(self) -> Any:
+        """Return a cached ``ClientTransaction`` (or ``None``), building once.
+
+        Built at most once per ``XClient`` instance: a ``ClientTransaction`` is
+        reusable for the client's lifetime (this mirrors ``twitter_cli``'s own
+        1h-TTL cache). A failed build caches ``None`` so a transient error does
+        not add two homepage fetches to every subsequent call; the next cycle's
+        fresh ``XClient`` retries.
+        """
+        if self._ct is _UNSET:
+            self._ct = self._build_transaction()
+        return self._ct
+
+    def _build_transaction(self) -> Any:
+        """Bootstrap an ``x-client-transaction-id`` generator from the cookie.
+
+        Fetches the *authenticated* homepage (``https://x.com/home`` with the
+        cookie) so the response carries the ``client-web`` bundle whose
+        ``ondemand.s`` reference the transaction library parses. Reuses
+        ``twitter_cli``'s shared ``curl_cffi`` session so TLS fingerprint and
+        proxy match every other X request. Never raises: any failure logs a
+        warning and returns ``None`` (search then behaves as before the fix).
+        """
+        try:
+            import bs4
+            from twitter_cli.client import _get_cffi_session
+            from x_client_transaction import ClientTransaction
+            from x_client_transaction.utils import (
+                generate_headers,
+                get_ondemand_file_url,
+            )
+
+            session = _get_cffi_session()
+            headers = dict(generate_headers())
+            headers["cookie"] = self._cookie
+            home = session.get("https://x.com/home", headers=headers, timeout=15)
+            soup = bs4.BeautifulSoup(home.content, "html.parser")
+            ondemand_url = get_ondemand_file_url(response=soup)
+            ondemand = session.get(ondemand_url, headers=headers, timeout=15)
+            transaction = ClientTransaction(
+                home_page_response=soup,
+                ondemand_file_response=ondemand.text,
+            )
+        except Exception as exc:  # noqa: BLE001 - bootstrap is best-effort
+            logger.warning(
+                "x-client-transaction bootstrap failed (%s); "
+                "search may return 404 until it recovers",
+                exc,
+            )
+            return None
+        logger.info("x-client-transaction-id bootstrapped from authenticated homepage")
+        return transaction
 
     # -- network seams (synchronous; monkeypatched in tests) --------------
     #

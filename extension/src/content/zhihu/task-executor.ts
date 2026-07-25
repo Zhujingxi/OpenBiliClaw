@@ -24,6 +24,7 @@ export interface ZhihuBootstrapItem {
   author: string;
   author_url?: string;
   url: string;
+  cover?: string;
   question_id?: string;
   summary?: string;
   interaction_action?: string;
@@ -36,6 +37,8 @@ export interface ZhihuBootstrapItem {
   search_keyword?: string;
   source_strategy?: string;
   source_keyword_id?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface ZhihuExecuteMessage {
@@ -255,6 +258,50 @@ function stripHtml(value: string): string {
     .trim();
 }
 
+const ZHIHU_TITLE_PLACEHOLDERS: Record<string, string> = {
+  answer: "来自知乎的回答",
+  article: "来自知乎的文章",
+  question: "来自知乎的提问",
+};
+const ZHIHU_TITLE_CLIP_LENGTH = 40;
+
+/**
+ * Some Zhihu endpoints (search_v3 / feeds / moments) return answers without an
+ * embedded question title. Fall back to the excerpt's first sentence, then to a
+ * readable placeholder, so cards never surface raw `answer_<id>` IDs (issue #79).
+ */
+function zhihuDisplayTitle(candidate: string, summary: string, contentType: string): string {
+  const title = stripHtml(candidate);
+  if (title) return title;
+  const text = stripHtml(summary);
+  if (text) {
+    const firstSentence = (text.split(/[。！？!?\n]/, 1)[0] ?? "").trim() || text;
+    return firstSentence.length > ZHIHU_TITLE_CLIP_LENGTH
+      ? `${firstSentence.slice(0, ZHIHU_TITLE_CLIP_LENGTH)}…`
+      : firstSentence;
+  }
+  return ZHIHU_TITLE_PLACEHOLDERS[contentType] ?? "来自知乎的内容";
+}
+
+/** Best-effort cover extraction across the field shapes Zhihu endpoints use. */
+function zhihuCoverUrl(...sources: Record<string, unknown>[]): string {
+  for (const source of sources) {
+    const direct =
+      str(source.thumbnail) || str(source.image_url) || str(source.title_image) || str(source.cover_url);
+    const candidates: string[] = direct ? [direct] : [];
+    const info = asRecord(source.thumbnail_info);
+    const thumbnails = Array.isArray(info.thumbnails) ? info.thumbnails : [];
+    for (const thumb of thumbnails) {
+      candidates.push(str(thumb) || str(asRecord(thumb).url));
+    }
+    for (const candidate of candidates) {
+      const url = absoluteZhihuUrl(candidate);
+      if (url.startsWith("https://") || url.startsWith("http://")) return url;
+    }
+  }
+  return "";
+}
+
 function extractPeopleSlug(url: string): string {
   const match = url.match(/\/people\/([^/?#]+)/);
   return match?.[1] ? decodeURIComponent(match[1]) : "";
@@ -291,7 +338,11 @@ export function normalizeZhihuReadHistory(raw: unknown): ZhihuBootstrapItem | nu
   const contentType = str(extra.content_type);
   const contentId = str(extra.content_token);
   const questionId = str(extra.question_token);
-  const title = str(header.title) || str(content.title) || str(content.summary) || contentId;
+  const title = zhihuDisplayTitle(
+    str(header.title) || str(content.title),
+    str(content.summary),
+    contentType,
+  );
   const url = absoluteZhihuUrl(str(action.url));
   if (!contentType || !contentId || (!title && !url)) return null;
 
@@ -308,6 +359,8 @@ export function normalizeZhihuReadHistory(raw: unknown): ZhihuBootstrapItem | nu
   if (summary) item.summary = summary;
   const readTime = str(extra.read_time);
   if (readTime) item.interaction_time = readTime;
+  const publishedAt = num(content.created_time ?? content.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -336,8 +389,8 @@ export function normalizeZhihuActivity(raw: unknown): ZhihuBootstrapItem | null 
   const author = asRecord(target.author);
   const title =
     contentType === "answer"
-      ? str(question.title) || `answer_${contentId}`
-      : str(target.title) || `article_${contentId}`;
+      ? zhihuDisplayTitle(str(question.title), str(target.excerpt), contentType)
+      : zhihuDisplayTitle(str(target.title), str(target.excerpt), contentType);
 
   const item: ZhihuBootstrapItem = {
     scope: "zhihu_activity",
@@ -353,6 +406,8 @@ export function normalizeZhihuActivity(raw: unknown): ZhihuBootstrapItem | null 
   if (voteup !== undefined) item.voteup = voteup;
   const activityId = str(activity.id);
   if (activityId) item.interaction_time = activityId;
+  const publishedAt = num(target.created_time ?? target.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -377,10 +432,11 @@ export function normalizeZhihuCollectionItem(
   if (!url) return null;
 
   const author = asRecord(content.author);
+  const summary = str(content.excerpt) || str(content.summary);
   const title =
     contentType === "answer"
-      ? str(question.title) || str(content.title) || `answer_${contentId}`
-      : str(content.title) || `article_${contentId}`;
+      ? zhihuDisplayTitle(str(question.title) || str(content.title), summary, contentType)
+      : zhihuDisplayTitle(str(content.title), summary, contentType);
 
   const item: ZhihuBootstrapItem = {
     scope: "zhihu_collection",
@@ -393,10 +449,11 @@ export function normalizeZhihuCollectionItem(
     collection_name: collection.name,
   };
   if (questionId) item.question_id = questionId;
-  const summary = str(content.excerpt) || str(content.summary);
   if (summary) item.summary = summary;
   const voteup = num(content.voteup_count);
   if (voteup !== undefined) item.voteup = voteup;
+  const publishedAt = num(content.created_time ?? content.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -445,11 +502,11 @@ function normalizeZhihuDiscoveryObject(
 
   const author = asRecord(object.author);
   const authorUrl = peopleUrlFromAuthor(author, fallbackAuthorUrl);
+  const summary = stripHtml(str(object.excerpt) || str(object.summary) || str(row.excerpt));
   const title =
     contentType === "answer"
-      ? stripHtml(str(question.title) || str(row.title) || `answer_${contentId}`)
-      : stripHtml(str(object.title) || str(row.title) || `zhihu_${contentId}`);
-  const summary = stripHtml(str(object.excerpt) || str(object.summary) || str(row.excerpt));
+      ? zhihuDisplayTitle(str(question.title) || str(row.title), summary, contentType)
+      : zhihuDisplayTitle(str(object.title) || str(row.title), summary, contentType);
 
   const item: ZhihuBootstrapItem = {
     scope,
@@ -463,6 +520,8 @@ function normalizeZhihuDiscoveryObject(
   if (authorUrl) item.author_url = authorUrl;
   if (questionId && contentType !== "question") item.question_id = questionId;
   if (summary) item.summary = summary;
+  const cover = zhihuCoverUrl(object, row);
+  if (cover) item.cover = cover;
   const voteup = num(object.voteup_count ?? row.voteup_count);
   if (voteup !== undefined) item.voteup = voteup;
   const favoriteCount = num(object.favorite_count ?? object.collect_count ?? row.favorite_count);
@@ -473,6 +532,8 @@ function normalizeZhihuDiscoveryObject(
   if (commentCount === undefined && answerCount !== undefined) item.comment_count = answerCount;
   const followerCount = num(object.follower_count ?? row.follower_count);
   if (favoriteCount === undefined && followerCount !== undefined) item.favorite_count = followerCount;
+  const publishedAt = num(object.created_time ?? object.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from openbiliclaw.integrations.openclaw.errors import AdapterValidationError
+import pytest
+
+from openbiliclaw.integrations.openclaw.errors import AdapterOperationError, AdapterValidationError
+from openbiliclaw.integrations.openclaw.operations import OpenClawAdapter
 from openbiliclaw.integrations.openclaw.schemas import (
     AvoidanceProbeFeedbackResponse,
     AvoidanceProbeItem,
     AvoidanceProbeResponse,
+    ChatRequest,
     ChatResponse,
     DelightItem,
     DelightResponse,
@@ -22,6 +27,7 @@ from openbiliclaw.integrations.openclaw.schemas import (
     RuntimeStatusResponse,
     SyncAccountResponse,
 )
+from openbiliclaw.llm.service import LLMResponseContentError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SKILL_PACK_PATH = _REPO_ROOT / "skills" / "openbiliclaw-adapter" / "SKILL.md"
@@ -381,6 +387,26 @@ def test_chat_cli_accepts_custom_session(capsys) -> None:
     assert exit_code == 0
     payload = json.loads(captured.out)
     assert payload["data"]["session"] == "my-session"
+
+
+@pytest.mark.asyncio
+async def test_chat_adapter_error_contains_safe_classification_without_raw_detail() -> None:
+    class FailingService:
+        async def complete_socratic_dialogue(self, **_kwargs: object) -> object:
+            raise LLMResponseContentError("sk-live-secret")
+
+    adapter = OpenClawAdapter(
+        services=SimpleNamespace(
+            soul_engine=SimpleNamespace(_llm=None),
+            llm_service=FailingService(),
+        )
+    )
+
+    with pytest.raises(AdapterOperationError) as caught:
+        await adapter.chat(ChatRequest(message="继续聊", session="openclaw"))
+
+    assert "空响应" in str(caught.value)
+    assert "sk-live-secret" not in str(caught.value)
 
 
 def test_next_probe_cli_emits_json_and_returns_zero(capsys) -> None:

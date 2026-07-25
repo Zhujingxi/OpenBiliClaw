@@ -2,6 +2,7 @@
 
 from .base import (
     HealthCheckResult,
+    LLMAuthError,
     LLMFallbackError,
     LLMProvider,
     LLMProviderError,
@@ -9,6 +10,8 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    classify_llm_failure_kind,
+    classify_llm_unavailability,
 )
 from .claude_provider import ClaudeProvider
 from .gemini_provider import GeminiProvider
@@ -34,6 +37,7 @@ __all__ = [
     "DeepSeekProvider",
     "GeminiProvider",
     "HealthCheckResult",
+    "LLMAuthError",
     "LLMFallbackError",
     "LLMProvider",
     "LLMProviderError",
@@ -51,6 +55,8 @@ __all__ = [
     "LLMServiceError",
     "LLMResponseContentError",
     "build_llm_registry",
+    "classify_llm_unavailability",
+    "classify_llm_failure_kind",
     "is_llm_rate_limit_error",
     "summarize_registry",
 ]

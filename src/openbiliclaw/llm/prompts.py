@@ -201,6 +201,12 @@ def build_socratic_dialogue_prompt(
                 "请使用苏格拉底式对话风格：温和、追问动机、确认理解，"
                 f"但整体更像会接话的{friend_label}，不像客服，也不要像咨询师。"
             ),
+            (
+                "能力边界：系统会在回复后尝试把用户明确、稳定的兴趣和避雷写入"
+                "OpenBiliClaw 本地长期画像，并用于后续 OpenBiliClaw 候选过滤；"
+                "不要声称这些信息只能留在当前聊天上下文。你不能修改 B 站或其他"
+                "内容平台自身的推荐算法，必须把本地推荐与平台推荐区分清楚。"
+            ),
             _render_tone_profile(tone_profile, source_platform_mix),
             "以下是当前用户的 core memory，请把它作为理解用户的背景，而不是机械复述：",
             core_memory_text,
@@ -245,10 +251,19 @@ _PREFERENCE_ANALYSIS_SYSTEM_PROMPT = """
 10. 如果事件的 inferred_satisfaction 是 negative，或 metadata.feedback_type 是 dislike / metadata.reaction 是 thumbs_down，表示负向证据。不要把负向事件提取为 interests / favorite_up_users；只能用于 disliked_topics、风格避让或降低相关偏好置信度。
 11. metadata.signal_strength 表示该事件作为偏好证据的强度，不是最终 interest.weight。如果存在该字段，优先用它判断证据强弱；最终 weight 仍要结合重复次数、内容一致性、最近性、负向反馈和跨来源一致性。没有 signal_strength 时按事件类型粗略理解：favorite / bookmark / save / collect 是强正向；coin / share 是强正向；like 是明确正向；comment 是主动参与但要看语义；follow / subscription 是长期兴趣信号但偏创作者/频道维度，不能直接等同于每个题材都喜欢；view / history 是弱到中等信号，单条不能推出高权重兴趣，重复出现或与强信号同向时才提高；click 只有足够停留、完播或 positive inferred_satisfaction 时才增强；search 是意图信号不是喜欢信号；hover / scroll / snapshot 只作被动上下文辅助；dialogue 是用户主动聊到，按表达强度判断。负向反馈、dislike、thumbs_down 或 inferred_satisfaction=negative 优先级最高，不能被 signal_strength 抵消。
 12. 如果 metadata.feedback_type 是 comment，它是用户对推荐内容的直接反馈和中性反馈容器，不预设正向或负向。必须根据备注、feedback_note、context 中的具体内容判断用户是喜欢、不喜欢，还是仅补充说明：正向才可强化 interests / style；负向只能用于 disliked_topics、风格避让或降低相关偏好置信度；不明确时不要强行改偏好。
+12b. 如果事件的 context 结尾带「(已撤销)」标记，或 metadata.retracted 为真，表示用户后来撤销了这次正向行为（取消赞 / 取消收藏 / 取消关注等）。这类证据已被降级（signal_strength 通常为 0.2），只能当作很弱的兴趣线索：不要据此提高任何兴趣权重，也不要把它计入 favorite_up_users；有明确反向证据时可用于降低相关偏好置信度。
 13. 初始化分片时，可顺手输出少量 awareness_candidates / insight_candidates：
     - awareness_candidates 是对本批事件的直接观察，不是人格结论，最多 3 条；
     - insight_candidates 是有证据支撑的轻量假设，最多 2 条，confidence 0~1；
     - 它们只用于下一步初始画像生成的临时上下文，不要为了完整而编造。
+14. style / exploration_openness 字段有严格取值约束，违反会被系统丢弃：
+    - style.preferred_duration 只能是 short | medium | long 之一；
+    - style.preferred_pace 只能是 fast | moderate | slow 之一；
+    - style.quality_sensitivity / humor_preference / depth_preference 以及
+      exploration_openness 都是 0~1 之间的浮点数。
+    当证据不足以判断时，直接省略该字段或填 0.5（openness/数值型）；
+    严禁用 "unknown"、"未知"、"none" 之类占位符或用 0 当"没数据"的替身
+    （0 会被当作"该维度确实极低"的真实取值）。
 </rules>
 
 <output_schema>
@@ -301,6 +316,8 @@ def build_preference_analysis_prompt(
     existing_preference: dict[str, object],
 ) -> list[dict[str, str]]:
     """Build a structured prompt for extracting user preferences from events."""
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
     user_prompt = "\n\n".join(
         [
@@ -308,7 +325,11 @@ def build_preference_analysis_prompt(
             json.dumps(existing_preference, ensure_ascii=False, indent=2),
             "</existing_preference>",
             "<event_batch>",
-            json.dumps(events, ensure_ascii=False, indent=2),
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+            ),
             "</event_batch>",
         ]
     )
@@ -700,6 +721,8 @@ def build_awareness_prompt(
     soul_profile: dict[str, object],
 ) -> list[dict[str, str]]:
     """Build a structured prompt for recent awareness-note generation."""
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
     user_prompt = "\n\n".join(
         [
             "<soul_profile>",
@@ -709,7 +732,12 @@ def build_awareness_prompt(
             json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
             "</preference_summary>",
             "<recent_events>",
-            json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "</recent_events>",
         ]
     )
@@ -967,10 +995,14 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "2. score 范围必须在 0 到 1 之间。\n"
     "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n"
     '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n'
-    "5. 根据 <source_context> 调整评判宽容度:search 要求高度匹配;"
-    "trending 来源的内容已经过大众验证,只要不在用户讨厌列表中且内容质量过关,基础分应 ≥ 0.6,若还能和画像产生关联则给更高分;"
-    "related_chain 允许适度偏移;explore 允许主题陌生,但内容仍需具备可看性和吸引力,"
-    "不能仅因为心理需求抽象匹配就给高分,过于学术、艰深、小众的内容应适当降分。\n"
+    "5. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
+    "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
+    "都必须按内容与用户画像的真实匹配度统一评分;"
+    "不得因为内容热门、来自推荐流、命中搜索词、沿相关推荐获得、来自订阅频道或得到平台算法背书，"
+    "就设置基础分、自动加分、降低门槛或事后编造画像关联。"
+    "明显不匹配画像的内容必须允许低于 admission 门槛。"
+    "只有 explore 允许主题陌生，但内容仍需具备具体、可信的可看性和吸引力，"
+    "不能仅因为心理需求抽象匹配就给高分，过于学术、艰深、小众的内容应适当降分。\n"
     "6. topic_group 是该内容所属的粗粒度主题分类,用于推荐去重。"
     "要求:2-4 个中文词,抽象到能覆盖同类内容,"
     '例如"强化学习"而非"强化学习ppo算法源码级讲解",'
@@ -1071,9 +1103,14 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
     "reason(一句中文)、topic_group(2-4词粗分类)、style_key(13选1)、"
     "franchise_key(可空)。\n"
-    "4. 根据 <source_context> 调整评判宽容度:search 要求高度匹配;"
-    "trending 基础分 >= 0.6;related_chain 允许适度偏移;"
-    "explore 允许主题陌生,但内容仍需具备可看性,过于学术艰深的应适当降分。\n"
+    "4. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
+    "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
+    "都必须按内容与用户画像的真实匹配度统一评分;"
+    "不得因为内容热门、来自推荐流、命中搜索词、沿相关推荐获得、来自订阅频道或得到平台算法背书，"
+    "就设置基础分、自动加分、降低门槛或事后编造画像关联。"
+    "明显不匹配画像的内容必须允许低于 admission 门槛。"
+    "只有 explore 允许主题陌生，但内容仍需具备具体、可信的可看性和吸引力，"
+    "不能仅因为心理需求抽象匹配就给高分，过于学术、艰深、小众的内容应适当降分。\n"
     "5. topic_group 规则:2-4 个中文词的粗分类,同主题不同切面统一。"
     "语义相同必须用同一词(AI/人工智能/机器学习 统一为 人工智能)。\n"
     "6. style_key(13选1) 描述用户消费这条内容时的观看状态,不是题材分类。"
@@ -1396,6 +1433,45 @@ def build_batch_expression_prompt(
     user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _BATCH_EXPRESSION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+# 100% static system prompt for probe-chat sentiment classification.
+# Per-call variables (方向 / 用户发言) live in the user message — see
+# ``build_probe_sentiment_prompt``. ``neutral_deferred`` = user actively asks to
+# shelve the direction (routes to the defer state machine); plain ``neutral`` =
+# undecided (no state change). ``neutral_ambiguous`` is intentionally NOT a label.
+_PROBE_SENTIMENT_SYSTEM_PROMPT = (
+    "任务：判断用户对一个兴趣方向的态度。\n\n"
+    "规则：\n"
+    "1. 只输出一个英文标签："
+    "strong_positive、weak_positive、neutral_deferred、neutral、negative\n"
+    "2. 不要输出任何其他内容\n\n"
+    "判断标准：\n"
+    "- strong_positive = 用户明确要加入画像、以后多推、这就是想看的\n"
+    "- weak_positive = 用户表达轻微兴趣、可以看看、偶尔看看，但未直接确认\n"
+    "- negative = 用户表达了不喜欢、不感兴趣、太难、太无聊\n"
+    "- neutral_deferred = 用户主动要求先放一放：明确说「暂时忽略」「先放着」「稍后再看」「以后再说」\n"
+    "- neutral = 态度不明确、还在犹豫、没想好（如「不确定」「再看看」「不好说」）\n\n"
+    "方向与用户发言见 user 消息。\n"
+)
+
+
+def build_probe_sentiment_prompt(
+    *,
+    domain: str,
+    user_message: str,
+) -> list[dict[str, str]]:
+    """Build the probe-chat sentiment classification prompt.
+
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level constant
+    ``_PROBE_SENTIMENT_SYSTEM_PROMPT`` (100% static). The direction and the
+    user's message live in ``user_prompt``.
+    """
+    user_prompt = f"方向：{domain}\n用户：{user_message}"
+    return [
+        {"role": "system", "content": _PROBE_SENTIMENT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -1909,6 +1985,53 @@ _CATEGORY_MAPPING_SYSTEM_PROMPT = (
 # platform (it describes where each platform structurally has good content,
 # never anything about *this* user), so it belongs in the system constant and
 # the call-invariance test still holds.
+PLATFORM_SUPPLY_ADVANTAGES: dict[str, str] = {
+    "bilibili": (
+        "学习区 / 知识科普 / 深度长视频 / 梗文化 / 技术。把兴趣做成"
+        "主题 + 风格词(盘点 / 入门 / 测评 / 教程 / 整活)。"
+    ),
+    "xiaohongshu": (
+        "生活方式 / 好物种草 / 教程攻略 / 美妆 / 体验分享。具象、带场景的"
+        "长尾(教程 / 攻略 / vlog / 踩坑 / 真实体验),避免裸类目词。"
+    ),
+    "douyin": "短视频 / 娱乐 / 热点 / 搞笑 / 才艺。短平快、口语、跟得上当下热度。",
+    "youtube": ("英文长内容 / 纪录片 / 讲座 / 国际视角。2-4 词,中英文按话题选最常见的搜索语言。"),
+    "twitter": (
+        "实时讨论 / 英文技术 / 观点 / 资讯。1-4 词,技术 / 小众话题尤其优先英文,华语圈话题可用中文。"
+    ),
+    "zhihu": (
+        "知乎中文问答 / 深度回答 / 经验复盘 / 专业解释 / 观点辨析。适合"
+        "问题式、场景式或概念 + 经验词的中文关键词。"
+    ),
+    "reddit": (
+        "subreddit 经验讨论 / 技术问答 / 开源项目 / 长帖复盘 / 社区观点。"
+        "优先英文关键词,1-5 词,可带 subreddit 或社区语境词。"
+    ),
+    "bangumi": (
+        "动画 / 书籍 / 游戏 / 音乐 / 三次元作品目录。优先作品题材、IP、原作、"
+        "作者、监督、制作公司、游戏平台等可检索实体,避免社媒热词。"
+    ),
+}
+
+
+def platform_supply_advantage(platform: str) -> str:
+    """Return the static supply advantage text for one discovery platform."""
+
+    return PLATFORM_SUPPLY_ADVANTAGES.get(str(platform or "").strip().lower(), "")
+
+
+def render_platform_supply_advantages(platforms: list[str] | tuple[str, ...] | None = None) -> str:
+    """Render static platform supply advantages for prompts."""
+
+    selected = tuple(platforms) if platforms is not None else tuple(PLATFORM_SUPPLY_ADVANTAGES)
+    lines: list[str] = []
+    for platform in selected:
+        guide = platform_supply_advantage(platform)
+        if guide:
+            lines.append(f"  - {platform}:{guide}")
+    return "\n".join(lines)
+
+
 _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<task>\n"
     "你要为多个平台的内容发现一次性生成搜索关键词。\n"
@@ -1927,24 +2050,13 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<supply_advantage>\n"
     "每个平台结构性擅长的内容方向不同(下面是平台的固有供给优势,与具体用户无关)。"
     "请把用户画像里的兴趣,映射到该平台真正有好内容的形态上:\n"
-    "  - bilibili:学习区 / 知识科普 / 深度长视频 / 梗文化 / 技术。把兴趣做成"
-    "主题 + 风格词(盘点 / 入门 / 测评 / 教程 / 整活)。\n"
-    "  - xiaohongshu:生活方式 / 好物种草 / 教程攻略 / 美妆 / 体验分享。具象、带场景的"
-    "长尾(教程 / 攻略 / vlog / 踩坑 / 真实体验),避免裸类目词。\n"
-    "  - douyin:短视频 / 娱乐 / 热点 / 搞笑 / 才艺。短平快、口语、跟得上当下热度。\n"
-    "  - youtube:英文长内容 / 纪录片 / 讲座 / 国际视角。2-4 词,中英文按话题选最常见的"
-    "搜索语言。\n"
-    "  - twitter:实时讨论 / 英文技术 / 观点 / 资讯。1-4 词,技术 / 小众话题尤其优先英文,"
-    "华语圈话题可用中文。\n"
-    "  - zhihu:知乎中文问答 / 深度回答 / 经验复盘 / 专业解释 / 观点辨析。适合"
-    "问题式、场景式或概念 + 经验词的中文关键词。\n"
-    "  - reddit:subreddit 经验讨论 / 技术问答 / 开源项目 / 长帖复盘 / 社区观点。"
-    "优先英文关键词,1-5 词,可带 subreddit 或社区语境词。\n"
+    f"{render_platform_supply_advantages()}\n"
     "</supply_advantage>\n\n"
     "<rules>\n"
     "1. 输出必须是严格 JSON 对象,不要附带解释。\n"
     "2. JSON 的 key 必须是 <platforms> 里出现的 platform 标识符"
-    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit),每个 key 的值是一个"
+    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi),"
+    "每个 key 的值是一个"
     "字符串数组。**只输出本轮 <platforms> 里给到的平台**,不要凭空加平台。"
     "唯一例外:只有 user 消息含 <explore_domains> 时,才可以额外输出"
     "`explore_domains` 数组。\n"
@@ -1982,6 +2094,7 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     '  "twitter": ["rust async runtime", "llm agents discussion"],\n'
     '  "zhihu": ["AI 工具 经验", "城市规划 问答"],\n'
     '  "reddit": ["local LLM agents", "open source AI tooling"],\n'
+    '  "bangumi": ["赛博朋克 动画", "时间循环 独立游戏"],\n'
     '  "explore_domains": [\n'
     '    {"domain": "城市声音采样", "novelty_level": 0.84, '
     '"queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"]}\n'
@@ -1989,6 +2102,126 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "}\n"
     "</output_schema>"
 )
+
+
+_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT = """
+You are the keyword-inspiration axis planner for OpenBiliClaw discovery.
+
+Return ONLY a strict JSON object with exactly this shape:
+{
+  "axes": [
+    {
+      "interest": "string",
+      "axis_label": "string",
+      "axis_kind": "subgenre|creator_lens|method|artifact|community_language|debate|other",
+      "example_terms": ["string"],
+      "evidence_refs": ["url or evidence id"],
+      "time_sensitive": false
+    }
+  ],
+  "keywords": [
+    {
+      "interest": "string",
+      "axis_id_or_label": "existing axis_id or exact axis_label",
+      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit|bangumi",
+      "core_concept": "short searchable concept",
+      "decoration": "optional style marker",
+      "recency_sensitivity": "low|medium|high"
+    }
+  ]
+}
+
+Rules:
+1. Generate axes and platform-native keyword candidates in one response.
+2. For each interest, keywords must span at least allocation_targets.min_axes different axes.
+3. Over-generate: produce at least two keyword candidates for every interest-platform allocation
+   slot when the evidence supports it.
+4. If an output axis is semantically the same as an existing axis, reuse the existing axis_id or
+   axis_label verbatim in keywords. Do not rename or paraphrase same-meaning existing axes.
+5. Output core_concept, decoration, and recency_sensitivity as separate fields. Do not merge
+   decoration words into core_concept unless they are part of the actual search concept.
+6. core_concept MUST anchor on a specific entity, event, work, person, or mechanism taken from
+   fresh_evidence (a proper noun, title, named controversy, or concrete mechanic). Do NOT restate
+   the interest or the axis_label as the core_concept. Example: when interest is "游戏资讯与推荐",
+   a core_concept like "新游推荐" or "游戏资讯" that just echoes the topic name is UNACCEPTABLE;
+   anchor on something concrete instead, e.g. "士官长 登陆PS5" or "腾讯网易 新游发布". Only when a
+   slot's fresh_evidence truly has no specific anchor may you fall back to a topic-level
+   core_concept — treat that as the exception, and never invent proper nouns that are not in the
+   evidence.
+7. When the user message includes an explore_request block, this is a cross-domain exploration
+   round: every core_concept MUST anchor on a specific entity/event/work/person/mechanism from a
+   DIFFERENT domain than the user's usual interests — something currently uncovered but plausibly
+   relevant — and MUST avoid every topic listed in explore_request.avoid_covered. Example: for a
+   user already saturated on 游戏, a core_concept like 游戏新作 (still the covered domain) is
+   UNACCEPTABLE; anchor on an uncovered but adjacent concrete thing such as 詹姆斯韦伯 深空图像
+   (from 天文, uncovered) instead. When there is no explore_request block, ignore this rule.
+8. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
+   for time-sensitive topics instead.
+9. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
+   appear in allocation_targets.
+10. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
+   evidence identifier when available.
+11. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
+""".strip()
+
+
+def build_inspiration_axis_keyword_prompt(
+    *,
+    profile_digest: object,
+    platform_guides: object,
+    selected_interests: object,
+    existing_axes: object,
+    fresh_evidence: object,
+    allocation_targets: object,
+    explore_request: object | None = None,
+) -> list[dict[str, str]]:
+    """Build the merged axis-plus-keyword inspiration prompt.
+
+    Cache-friendly per CLAUDE.md: ``system_prompt`` is the module-level
+    ``_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT`` constant (100% static). All
+    per-call data lives in ``user_prompt`` blocks ordered most-stable
+    (profile_digest) → most-variable (allocation_targets), serialized with
+    ``ensure_ascii=False, indent=2, sort_keys=True``.
+
+    ``explore_request`` is an optional per-call block (Phase 2.3, E2): when
+    provided it flags a cross-domain exploration round and carries
+    ``avoid_covered``. It lives ONLY in the user message — the static explore
+    rule is always present in the system prompt — so the system prefix stays
+    byte-identical with or without it (prompt-cache invariant).
+    """
+
+    user_blocks = [
+        "<profile_digest>",
+        json.dumps(profile_digest, ensure_ascii=False, indent=2, sort_keys=True),
+        "</profile_digest>",
+        "<platform_guides>",
+        json.dumps(platform_guides, ensure_ascii=False, indent=2, sort_keys=True),
+        "</platform_guides>",
+        "<selected_interests>",
+        json.dumps(selected_interests, ensure_ascii=False, indent=2, sort_keys=True),
+        "</selected_interests>",
+        "<existing_axes>",
+        json.dumps(existing_axes, ensure_ascii=False, indent=2, sort_keys=True),
+        "</existing_axes>",
+        "<fresh_evidence>",
+        json.dumps(fresh_evidence, ensure_ascii=False, indent=2, sort_keys=True),
+        "</fresh_evidence>",
+        "<allocation_targets>",
+        json.dumps(allocation_targets, ensure_ascii=False, indent=2, sort_keys=True),
+        "</allocation_targets>",
+    ]
+    if explore_request is not None:
+        user_blocks.extend(
+            [
+                "<explore_request>",
+                json.dumps(explore_request, ensure_ascii=False, indent=2, sort_keys=True),
+                "</explore_request>",
+            ]
+        )
+    return [
+        {"role": "system", "content": _INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(user_blocks)},
+    ]
 
 
 def _category_tag_count(category: dict[str, object]) -> int:

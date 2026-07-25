@@ -15,8 +15,61 @@ import {
   executeTask,
   handleTaskResult,
   isValidTask,
+  pollXhsTaskOnce,
+  postXhsNativeSaveResult,
   type XhsTask,
 } from "../src/background/xhs-task-dispatcher.ts";
+import type { NativeSaveResult, NativeSaveTask } from "../src/shared/native-save.ts";
+
+const nativeTask: NativeSaveTask = {
+  id: "123e4567-e89b-42d3-a456-426614174011",
+  type: "native_save",
+  platform: "xiaohongshu",
+  platform_slug: "xhs",
+  item_key: "xiaohongshu:66aabbcc000000001e00dead",
+  content_id: "66aabbcc000000001e00dead",
+  content_url: "https://www.xiaohongshu.com/explore/66aabbcc000000001e00dead",
+  content_type: "note",
+  requested_action: "favorite",
+  resolved_action: "favorite",
+  target_label: "小红书收藏",
+};
+
+test("xhs task native_save union and dispatcher close through the exact authenticated result contract", async () => {
+  assert.equal(isValidTask(nativeTask), true);
+  assert.equal(isValidTask({ ...nativeTask, platform: "douyin", platform_slug: "dy" }), false);
+  assert.equal(buildTaskUrl(nativeTask), nativeTask.content_url);
+  const result: NativeSaveResult = {
+    task_id: nativeTask.id,
+    item_key: nativeTask.item_key,
+    status: "synced",
+    error_code: "",
+    error_message: "",
+  };
+  const calls: unknown[] = [];
+  await executeTask(nativeTask, {
+    run: async (receivedTask, slug, postResult) => {
+      calls.push([receivedTask, slug]);
+      await postResult(result);
+    },
+    postResult: async (received) => { calls.push(received); },
+  });
+  assert.deepEqual(calls, [[nativeTask, "xhs"], result]);
+
+  const requests: unknown[] = [];
+  await postXhsNativeSaveResult(result, {
+    resolveUrl: async (path) => `http://127.0.0.1:8420/api${path}`,
+    fetch: async (input, init) => { requests.push([input, init]); },
+  });
+  assert.deepEqual(requests, [[
+    "http://127.0.0.1:8420/api/sources/xhs/task-result",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result),
+    },
+  ]]);
+});
 
 test("buildTaskUrl encodes keyword search URL", () => {
   const task: XhsTask = { id: "t1", type: "search", keyword: "机械键盘" };
@@ -238,6 +291,17 @@ async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 }
+
+test("concurrent XHS poll triggers share one task claim", async () => {
+  const state = installChromeMock();
+
+  await Promise.all([pollXhsTaskOnce(), pollXhsTaskOnce()]);
+
+  assert.equal(
+    state.fetchCalls.filter((call) => call.url.endsWith("/sources/xhs/next-task")).length,
+    1,
+  );
+});
 
 test("executeTask sends XHS_TASK_EXECUTE once the tab finishes loading", async () => {
   const state = installChromeMock();

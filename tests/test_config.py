@@ -1,5 +1,6 @@
 """Tests for configuration management."""
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,14 @@ from openbiliclaw.config import (
     DiscoveryConfig,
     LLMConfig,
     LLMProviderConfig,
+    NetworkConfig,
     SchedulerConfig,
     SoulConfig,
     SoulPreferenceConfig,
     _build_config,
     load_config,
     load_config_with_diagnostics,
+    normalize_outbound_proxy,
     save_config,
     validate_runtime_config,
 )
@@ -84,14 +87,64 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 3
+        assert config.llm.concurrency == 4
         assert config.bilibili.auth_method == "cookie"
+        assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
         assert config.scheduler.discovery_cron == "0 */8 * * *"
         assert config.scheduler.pool_target_count == 300
         assert isinstance(config.autostart, AutostartConfig)
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
+        assert config.api.auth.extension_access_enabled is False
+        assert config.api.auth.extension_access_keys == []
+        assert config.api.auth.extension_token_ttl_hours == 24
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("", False), ("0", False), ("false", False), ("1", True), ("true", True)],
+    )
+    def test_scheduler_enabled_env_override_is_always_a_bool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str,
+        expected: bool,
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[scheduler]\nenabled = true\n", encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_SCHEDULER_ENABLED", raw)
+
+        config = load_config(config_path)
+
+        assert config.scheduler.enabled is expected
+        assert type(config.scheduler.enabled) is bool
+
+    def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
+        from openbiliclaw.llm.concurrency import background_llm_concurrency
+
+        config = Config(llm=LLMConfig(concurrency=3))
+
+        assert config.llm.concurrency == 3
+        assert background_llm_concurrency(config.llm.concurrency) == 2
+
+    def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
+        config = Config()
+        assert config.saved_sync.auto_sync_enabled is False
+
+        config.saved_sync.auto_sync_enabled = True
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        assert load_config(config_path).saved_sync.auto_sync_enabled is True
+
+    def test_example_config_disables_saved_auto_sync(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["saved_sync"] == {"auto_sync_enabled": False}
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -109,6 +162,7 @@ class TestConfigDefaults:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -188,6 +242,18 @@ manage_ollama = true
         assert "port = 19090" in rendered
         assert loaded.api.host == "127.0.0.1"
         assert loaded.api.port == 19090
+
+    def test_bilibili_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.bilibili.proxy = "http://127.0.0.1:7890"
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert 'proxy = "http://127.0.0.1:7890"' in rendered
+        assert loaded.bilibili.proxy == "http://127.0.0.1:7890"
 
     def test_data_path_relative(self) -> None:
         config = Config(data_dir="data")
@@ -478,6 +544,49 @@ def test_build_config_supports_openai_compatible_provider() -> None:
     assert config.llm.openai.api_key == "real-openai-key"
 
 
+def test_openai_compatible_legacy_config_does_not_opt_into_reasoning_field() -> None:
+    config = _build_config(
+        {
+            "llm": {
+                "default_provider": "openai_compatible",
+                "openai_compatible": {
+                    "api_key": "sk-relay",
+                    "model": "relay-model",
+                    "base_url": "https://relay.example/v1",
+                    # Older save_config versions materialized this inherited
+                    # default even though the adapter ignored it.
+                    "reasoning_effort": "medium",
+                },
+            }
+        }
+    )
+
+    assert config.llm.openai_compatible.reasoning_effort == ""
+
+
+def test_openai_compatible_native_instance_explicit_reasoning_effort_is_preserved() -> None:
+    config = _build_config(
+        {
+            "llm": {
+                "routing_version": 2,
+                "default_chain": ["relay-main"],
+                "instances": {
+                    "relay-main": {
+                        "name": "Relay",
+                        "provider_type": "openai_compatible",
+                        "api_key": "sk-relay",
+                        "model": "relay-model",
+                        "base_url": "https://relay.example/v1",
+                        "reasoning_effort": "medium",
+                    }
+                },
+            }
+        }
+    )
+
+    assert config.llm.instances["relay-main"].reasoning_effort == "medium"
+
+
 def test_save_config_round_trips_openai_compatible(tmp_path: Path) -> None:
     """[llm.openai_compatible] must survive a save/load cycle so popup
     edits don't get silently dropped on backend restart."""
@@ -591,6 +700,74 @@ def test_collect_issues_flags_missing_base_url_for_openai_compatible() -> None:
     issues = _collect_config_issues(config)
     fields = [i.field for i in issues]
     assert "llm.openai_compatible.base_url" in fields
+
+
+def test_save_config_round_trips_claude_base_url(tmp_path: Path) -> None:
+    """issue #72 — [llm.claude].base_url must be written back by
+    save_config; it used to be dropped by the provider-section whitelist."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.claude.api_key = "sk-ant-test"
+    config.llm.claude.base_url = "https://relay.example.com/api"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.claude.base_url == "https://relay.example.com/api"
+
+
+def test_save_config_round_trips_api_flavor(tmp_path: Path) -> None:
+    """issue #72 — api_flavor survives a save/load cycle for the
+    OpenAI-protocol family."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.openai.api_flavor = "responses"
+    config.llm.openai_compatible.api_key = "sk-relay"
+    config.llm.openai_compatible.base_url = "https://relay.example.com/v1"
+    config.llm.openai_compatible.api_flavor = "responses"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.openai.api_flavor == "responses"
+    assert loaded.llm.openai_compatible.api_flavor == "responses"
+
+
+def test_collect_issues_blocks_invalid_api_flavor() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                base_url="https://relay.example.com/v1",
+                api_flavor="banana",
+            ),
+        )
+    )
+
+    issues = _collect_config_issues(config)
+    flavor_issues = [i for i in issues if i.field == "llm.openai_compatible.api_flavor"]
+    assert flavor_issues and flavor_issues[0].severity == "blocking"
+
+
+def test_collect_issues_allows_responses_api_flavor() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                base_url="https://relay.example.com/v1",
+                api_flavor="responses",
+            ),
+        )
+    )
+
+    fields = [i.field for i in _collect_config_issues(config)]
+    assert "llm.openai_compatible.api_flavor" not in fields
 
 
 def test_build_config_supports_gemini_provider() -> None:
@@ -818,6 +995,22 @@ def test_load_config_defaults_invalid_scheduler_runtime_fields(
     assert getattr(config.scheduler, field) == expected
 
 
+@pytest.mark.parametrize("literal", ["0", "-1", '"invalid"'])
+def test_load_config_clamps_invalid_auto_update_interval_to_at_least_one_hour(
+    tmp_path: Path,
+    literal: str,
+) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        f"[scheduler]\nauto_update_check_interval_hours = {literal}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert config.scheduler.auto_update_check_interval_hours >= 1
+
+
 def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config = Config()
@@ -874,6 +1067,7 @@ youtube = 3
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -964,6 +1158,79 @@ def test_sources_reddit_defaults() -> None:
     assert config.sources.reddit.daily_related_budget == 300
     assert config.sources.reddit.request_interval_seconds == 3
     assert config.sources.reddit.min_interval_minutes == 60
+
+
+def test_sources_bangumi_defaults() -> None:
+    config = Config()
+
+    assert config.sources.bangumi.enabled is False
+    assert config.sources.bangumi.username == ""
+    assert config.sources.bangumi.access_token == ""
+    assert config.sources.bangumi.subject_types == ("anime", "book", "game")
+    assert config.sources.bangumi.source_modes == ("search", "ranked", "latest")
+    assert config.sources.bangumi.daily_search_budget == 300
+    assert config.sources.bangumi.daily_ranked_budget == 100
+    assert config.sources.bangumi.daily_latest_budget == 100
+    assert config.sources.bangumi.request_interval_seconds == 1
+    assert config.sources.bangumi.min_interval_minutes == 60
+    assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_save_config_round_trips_sources_bangumi(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.bangumi.enabled = True
+    config.sources.bangumi.username = "sai"
+    config.sources.bangumi.access_token = "tok-abc123"
+    config.sources.bangumi.subject_types = ("anime", "music")
+    config.sources.bangumi.source_modes = ("search", "ranked")
+    config.sources.bangumi.daily_search_budget = 42
+    config.sources.bangumi.daily_ranked_budget = 21
+    config.sources.bangumi.daily_latest_budget = 11
+    config.sources.bangumi.request_interval_seconds = 2
+    config.sources.bangumi.min_interval_minutes = 45
+    config.sources.bangumi.bootstrap_limit = 123
+    config.scheduler.pool_source_shares["bangumi"] = 2
+
+    target = tmp_path / "config.toml"
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.sources.bangumi == config.sources.bangumi
+    assert loaded.scheduler.pool_source_shares["bangumi"] == 2
+
+
+def test_save_config_rejects_invalid_bangumi_username(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.username = "bad/name"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.username" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
+
+
+def test_save_config_rejects_invalid_bangumi_access_token(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.access_token = "bad token\nwith newline"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.access_token" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
 
 
 def test_build_config_supports_sources_xiaohongshu(tmp_path: Path) -> None:
@@ -1158,6 +1425,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
     save_config(config, config_path)
@@ -1171,6 +1439,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
 
@@ -1229,7 +1498,6 @@ def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
     config.data_dir = "runtime-data"
     config.llm.default_provider = "gemini"
     config.llm.concurrency = 6
-    config.llm.fallback_enabled = True
     config.llm.fallback_provider = "openai"
     config.llm.gemini.api_key = "gemini-test-key"
     config.llm.gemini.model = "gemini-2.5-flash"
@@ -1243,7 +1511,6 @@ def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
     assert loaded.data_dir == "runtime-data"
     assert loaded.llm.default_provider == "gemini"
     assert loaded.llm.concurrency == 6
-    assert loaded.llm.fallback_enabled is True
     assert loaded.llm.fallback_provider == "openai"
     assert loaded.llm.gemini.api_key == "gemini-test-key"
     assert loaded.llm.gemini.model == "gemini-2.5-flash"
@@ -1264,10 +1531,39 @@ def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path)
     assert loaded.llm.deepseek.reasoning_effort == ""
 
 
+def test_save_config_round_trips_supported_provider_reasoning_efforts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.openai.reasoning_effort = "low"
+    config.llm.claude.reasoning_effort = "high"
+    config.llm.gemini.reasoning_effort = "minimal"
+    config.llm.openrouter.reasoning_effort = "max"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.openai.reasoning_effort == "low"
+    assert loaded.llm.claude.reasoning_effort == "high"
+    assert loaded.llm.gemini.reasoning_effort == "minimal"
+    assert loaded.llm.openrouter.reasoning_effort == "max"
+
+
+def test_supported_provider_reasoning_effort_defaults_to_medium() -> None:
+    config = Config()
+
+    assert config.llm.openai.reasoning_effort == "medium"
+    assert config.llm.claude.reasoning_effort == "medium"
+    assert config.llm.gemini.reasoning_effort == "medium"
+    assert config.llm.deepseek.reasoning_effort == "medium"
+    assert config.llm.openrouter.reasoning_effort == "medium"
+
+
 def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
     config = Config()
 
-    assert config.llm.fallback_enabled is False
+    # Chat side: a non-empty fallback_provider IS the enable switch — the
+    # legacy [llm].fallback_enabled bool has been removed entirely.
+    assert not hasattr(config.llm, "fallback_enabled")
     assert config.llm.fallback_provider == ""
     assert config.llm.embedding.fallback_enabled is False
     assert config.llm.embedding.fallback_provider == ""
@@ -1709,6 +2005,53 @@ def test_save_config_does_not_bake_in_config_local_auth_overrides(
     assert reloaded.api.auth.session_ttl_hours == 5
 
 
+def test_extension_access_config_round_trips_and_preserves_local_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    base = tmp_path / "config.toml"
+    base_record = "base:" + "a" * 64
+    local_records = ["local-a:" + "b" * 64, "local-b:" + "c" * 64]
+    base.write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = false\n"
+        f'extension_access_keys = ["{base_record}"]\n'
+        "extension_token_ttl_hours = 12\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.local.toml").write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = true\n"
+        f'extension_access_keys = ["{local_records[0]}", "{local_records[1]}"]\n'
+        "extension_token_ttl_hours = 48\n",
+        encoding="utf-8",
+    )
+
+    merged = load_config()
+    assert merged.api.auth.extension_access_enabled is True
+    assert merged.api.auth.extension_access_keys == local_records
+    assert merged.api.auth.extension_token_ttl_hours == 48
+
+    save_config(merged)
+    rendered = base.read_text(encoding="utf-8")
+    assert "extension_access_enabled = false" in rendered
+    assert f'extension_access_keys = ["{base_record}"]' in rendered
+    assert "extension_token_ttl_hours = 12" in rendered
+
+    (tmp_path / "config.local.toml").unlink()
+    reloaded = load_config()
+    assert reloaded.api.auth.extension_access_enabled is False
+    assert reloaded.api.auth.extension_access_keys == [base_record]
+    assert reloaded.api.auth.extension_token_ttl_hours == 12
+
+
+@pytest.mark.parametrize("value", [0, 169, "not-a-number"])
+def test_extension_access_token_ttl_normalizes_invalid_values_to_default(value: object) -> None:
+    config = _build_config({"api": {"auth": {"extension_token_ttl_hours": value}}})
+
+    assert config.api.auth.extension_token_ttl_hours == 24
+
+
 def test_save_config_does_not_bake_in_config_local_password(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1958,7 +2301,17 @@ class TestDiscoveryConfig:
         assert config.discovery.planner_poll_seconds == 120
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
@@ -1971,6 +2324,15 @@ class TestDiscoveryConfig:
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
 
@@ -2005,7 +2367,12 @@ claim_lease_minutes = 15
 planner_poll_seconds = 90
 plan_ttl_hours = 6
 admission_min_score = 0.72
+inspiration_search_enabled = true
+inspiration_replace_merged_keywords = true
+inspiration_search_backends = ["platform_sources", "exa", "you"]
+inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
+candidate_eval_concurrency = 3
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
 multimodal_image_quality = 80
@@ -2027,7 +2394,12 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.planner_poll_seconds == 90
         assert config.discovery.plan_ttl_hours == 6
         assert config.discovery.admission_min_score == 0.72
+        assert config.discovery.inspiration_search_enabled is True
+        assert config.discovery.inspiration_replace_merged_keywords is True
+        assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
         assert config.discovery.multimodal_image_quality == 80
@@ -2049,6 +2421,31 @@ multimodal_image_timeout_seconds = 10
         )
 
     @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            # Scheduler integer settings fall back to their default when a
+            # persisted value exceeds the documented ceiling; they do not
+            # silently retain an unsafe value.
+            (8, 3),
+        ],
+    )
+    def test_discovery_candidate_eval_concurrency_is_limited_to_three(
+        self, tmp_path: Path, configured: int, expected: int
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            f"[discovery]\ncandidate_eval_concurrency = {configured}\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.candidate_eval_concurrency == expected
+
+    @pytest.mark.parametrize(
         ("field", "literal", "expected"),
         [
             ("kw_cache_high", "0", 30),
@@ -2061,6 +2458,8 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("candidate_eval_concurrency", "0", 3),
+            ("candidate_eval_concurrency", "4", 3),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),
@@ -2169,6 +2568,10 @@ admission_min_score = {literal}
         config.discovery.planner_poll_seconds = 100
         config.discovery.plan_ttl_hours = 8
         config.discovery.admission_min_score = 0.72
+        config.discovery.inspiration_search_enabled = True
+        config.discovery.inspiration_replace_merged_keywords = True
+        config.discovery.inspiration_search_backends = ("you",)
+        config.discovery.inspiration_breadth = "low"
         config.discovery.multimodal_evaluation_enabled = True
         config.discovery.multimodal_batch_size = 4
         config.discovery.multimodal_image_max_px = 512
@@ -2189,6 +2592,10 @@ admission_min_score = {literal}
         assert loaded.discovery.planner_poll_seconds == 100
         assert loaded.discovery.plan_ttl_hours == 8
         assert loaded.discovery.admission_min_score == 0.72
+        assert loaded.discovery.inspiration_search_enabled is True
+        assert loaded.discovery.inspiration_replace_merged_keywords is True
+        assert loaded.discovery.inspiration_search_backends == ("you",)
+        assert loaded.discovery.inspiration_breadth == "low"
         assert loaded.discovery.multimodal_evaluation_enabled is True
         assert loaded.discovery.multimodal_batch_size == 4
         assert loaded.discovery.multimodal_image_max_px == 512
@@ -2205,6 +2612,514 @@ admission_min_score = {literal}
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered
         assert "admission_min_score = 0.6" in rendered
+        assert "inspiration_search_enabled = false" in rendered
+        assert "inspiration_replace_merged_keywords = false" in rendered
+        assert (
+            'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'
+            in rendered
+        )
+        assert 'inspiration_breadth = "high"' in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered
+
+
+def test_collect_issues_blocks_unknown_embedding_provider() -> None:
+    """A browser page-translator once rewrote value-less <option> text into
+    config ('奥拉玛'), silently disabling the embedding service. Unknown
+    embedding provider names must block the save instead of persisting."""
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.llm.embedding.provider = "奥拉玛"
+    config.llm.embedding.fallback_provider = "双子座"
+
+    issues = _collect_config_issues(config)
+
+    fields = {issue.field for issue in issues if issue.severity == "blocking"}
+    assert "llm.embedding.provider" in fields
+    assert "llm.embedding.fallback_provider" in fields
+
+    # Legit values (any case) and empty stay clean.
+    config.llm.embedding.provider = "Ollama"
+    config.llm.embedding.fallback_provider = ""
+    issues = _collect_config_issues(config)
+    assert not any(issue.field.startswith("llm.embedding.") for issue in issues)
+
+
+def _llm_fallback_issues(config: Config) -> list[ConfigIssue]:
+    from openbiliclaw.config import _collect_config_issues
+
+    issues = _collect_config_issues(config)
+    return [issue for issue in issues if issue.field == "llm.fallback_provider"]
+
+
+def test_collect_issues_blocks_unknown_llm_fallback_provider() -> None:
+    """`_fallback_order()` silently drops an unknown fallback name (e.g. a
+    browser-translated '奥拉玛'), so the save must block with the same
+    translation hint as the embedding-provider check."""
+    config = Config()
+    config.llm.default_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-x"
+    config.llm.fallback_provider = "奥拉玛"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "网页翻译" in issues[0].message
+
+
+def test_collect_issues_blocks_llm_fallback_even_when_default_is_unknown() -> None:
+    """The fallback checks must run before the default-provider early return
+    and must not crash when the default provider itself is unknown."""
+    config = Config()
+    config.llm.default_provider = "bogus"
+    config.llm.fallback_provider = "deepseek"  # no api_key -> dead fallback
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+
+
+def test_collect_issues_blocks_same_name_llm_fallback() -> None:
+    """A fallback identical to the default provider would never fire —
+    comparison is normalized (strip/lower)."""
+    config = Config()
+    config.llm.default_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-x"
+    config.llm.fallback_provider = " DeepSeek "
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "永远不会生效" in issues[0].message
+
+
+def test_collect_issues_blocks_llm_fallback_missing_api_key() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "deepseek"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "llm.deepseek.api_key" in issues[0].message
+
+
+def test_collect_issues_blocks_openai_compatible_llm_fallback_without_base_url() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "openai_compatible"
+    config.llm.openai_compatible.api_key = "sk-gateway"
+    config.llm.openai_compatible.base_url = ""
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "base_url" in issues[0].message
+
+
+def test_collect_issues_blocks_ollama_llm_fallback_without_model() -> None:
+    """An Ollama server URL cannot identify which local chat model to use."""
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "ollama"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+    assert _llm_fallback_issues(config)
+
+    config.llm.ollama.model = "llama3"
+    assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_blocks_default_ollama_without_model() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+
+    issues = _collect_config_issues(config)
+
+    assert any(
+        issue.field == "llm.ollama.model" and issue.severity == "blocking" for issue in issues
+    )
+
+
+def test_collect_issues_allows_gemini_llm_fallback_with_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "gemini"
+
+    assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = ""
+
+    assert _llm_fallback_issues(config) == []
+
+    config.llm.fallback_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-fallback"
+
+    assert _llm_fallback_issues(config) == []
+
+
+# ── Phase 2 Task 4: inspiration config collapse (13 → 4) ────────────────
+
+
+class TestInspirationBreadth:
+    """Breadth tier validation, derivation tables, and removed-key notices."""
+
+    def test_medium_breadth_derivation_matches_precollapse_defaults(self) -> None:
+        """Table-driven zero-drift guard: medium == the pre-collapse
+        `_DEFAULT_INSPIRATION_*` values, item by item (Spec Part C)."""
+        params = config_module.derive_inspiration_breadth_params("medium")
+
+        expected = {
+            "aspect_window_size": 32,
+            "interest_sample_size": 6,
+            "max_probe_searches_per_stage": 12,
+            "platforms_per_probe": 2,
+            "riskcontrolled_probe_budget": 4,
+            "search_pages_per_probe": 1,
+            "search_results_per_query": 5,
+            "max_seeds_per_aspect": 3,
+            "max_keywords_per_platform": 12,
+        }
+        for field, value in expected.items():
+            assert getattr(params, field) == value, field
+        # And item-identical to the module constants the old fields defaulted to.
+        constant_by_field = {
+            "aspect_window_size": config_module._DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+            "interest_sample_size": config_module._DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+            "max_probe_searches_per_stage": (
+                config_module._DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE
+            ),
+            "platforms_per_probe": config_module._DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+            "riskcontrolled_probe_budget": (
+                config_module._DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET
+            ),
+            "search_pages_per_probe": config_module._DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+            "search_results_per_query": (
+                config_module._DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY
+            ),
+            "max_seeds_per_aspect": config_module._DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+            "max_keywords_per_platform": (
+                config_module._DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM
+            ),
+        }
+        for field, constant in constant_by_field.items():
+            assert getattr(params, field) == constant, field
+
+    @pytest.mark.parametrize(
+        ("tier", "expected"),
+        [
+            (
+                "low",
+                {
+                    "aspect_window_size": 16,
+                    "interest_sample_size": 3,
+                    "max_probe_searches_per_stage": 6,
+                    "platforms_per_probe": 1,
+                    "riskcontrolled_probe_budget": 2,
+                    "search_pages_per_probe": 1,
+                    "search_results_per_query": 3,
+                    "max_seeds_per_aspect": 2,
+                    "max_keywords_per_platform": 8,
+                },
+            ),
+            (
+                "high",
+                {
+                    "aspect_window_size": 48,
+                    "interest_sample_size": 8,
+                    "max_probe_searches_per_stage": 20,
+                    "platforms_per_probe": 3,
+                    "riskcontrolled_probe_budget": 8,
+                    "search_pages_per_probe": 2,
+                    "search_results_per_query": 8,
+                    "max_seeds_per_aspect": 5,
+                    "max_keywords_per_platform": 16,
+                },
+            ),
+        ],
+    )
+    def test_low_and_high_breadth_derivation_tables(
+        self, tier: str, expected: dict[str, int]
+    ) -> None:
+        params = config_module.derive_inspiration_breadth_params(tier)
+
+        for field, value in expected.items():
+            assert getattr(params, field) == value, field
+
+    def test_breadth_tier_is_case_insensitive_and_trimmed(self) -> None:
+        config = _build_config({"discovery": {"inspiration_breadth": "  HIGH "}})
+
+        assert config.discovery.inspiration_breadth == "high"
+
+    def test_invalid_breadth_tier_raises_config_error(self) -> None:
+        with pytest.raises(ConfigError, match="inspiration_breadth"):
+            _build_config({"discovery": {"inspiration_breadth": "ultra"}})
+        with pytest.raises(ConfigError, match="inspiration_breadth"):
+            config_module.derive_inspiration_breadth_params("")
+
+    def test_removed_inspiration_keys_surface_diagnostics_and_are_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            """
+[discovery]
+inspiration_max_keywords_per_platform = 99
+inspiration_interest_sample_size = 42
+inspiration_breadth = "low"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config, diagnostics = load_config_with_diagnostics(toml_path, ensure_default_file=False)
+
+        removal_fields = {
+            issue.field
+            for issue in diagnostics.issues
+            if "inspiration_breadth" in issue.message and "已移除" in issue.message
+        }
+        assert "discovery.inspiration_max_keywords_per_platform" in removal_fields
+        assert "discovery.inspiration_interest_sample_size" in removal_fields
+        # Values ignored (no fail-fast); the kept key still applies.
+        assert config.discovery.inspiration_breadth == "low"
+        assert not hasattr(config.discovery, "inspiration_max_keywords_per_platform")
+
+    def test_clean_config_gets_no_removed_key_notice(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text('[discovery]\ninspiration_breadth = "medium"', encoding="utf-8")
+
+        _config, diagnostics = load_config_with_diagnostics(toml_path, ensure_default_file=False)
+
+        assert not any("已移除" in issue.message for issue in diagnostics.issues)
+
+    def test_rendered_toml_contains_only_four_inspiration_keys(self) -> None:
+        rendered = config_module._render_config_toml(Config())
+
+        inspiration_lines = [
+            line.strip()
+            for line in rendered.splitlines()
+            if line.strip().startswith("inspiration_")
+        ]
+        assert sorted(line.split(" = ")[0] for line in inspiration_lines) == [
+            "inspiration_breadth",
+            "inspiration_replace_merged_keywords",
+            "inspiration_search_backends",
+            "inspiration_search_enabled",
+        ]
+        assert 'inspiration_breadth = "high"' in inspiration_lines
+
+
+class TestNetworkProxyConfig:
+    """`[network].proxy` — the overseas-outbound proxy for LLM/YouTube/updater.
+
+    Spec: docs/plans/2026-07-11-network-proxy-config-spec.md. CN-direct clients
+    (bilibili/douyin/ollama) never consume this — that isolation is guarded in
+    tests/test_network_proxy_isolation.py.
+    """
+
+    def test_default_network_proxy_is_empty(self) -> None:
+        config = Config()
+        assert isinstance(config.network, NetworkConfig)
+        assert config.network.proxy == ""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("http://127.0.0.1:7890", "http://127.0.0.1:7890"),
+            ("https://proxy.example.com:443", "https://proxy.example.com:443"),
+            ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("socks5h://127.0.0.1:1080", "socks5h://127.0.0.1:1080"),
+            ("  socks5://127.0.0.1:1080  ", "socks5://127.0.0.1:1080"),
+            ("SOCKS5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("HTTP://Proxy.Example.com:8080", "http://Proxy.Example.com:8080"),
+            ("socks5://user:pass@127.0.0.1:1080", "socks5://user:pass@127.0.0.1:1080"),
+            ("", ""),
+            ("   ", ""),
+        ],
+    )
+    def test_normalize_outbound_proxy_accepts_and_normalizes(self, raw: str, expected: str) -> None:
+        assert normalize_outbound_proxy(raw) == expected
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "ftp://127.0.0.1:1080",
+            "socks4://127.0.0.1:1080",
+            "http://",
+            "socks5://",
+            "not-a-url",
+            "127.0.0.1:1080",
+        ],
+    )
+    def test_normalize_outbound_proxy_rejects_bad_values(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            normalize_outbound_proxy(bad)
+
+    def test_network_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.network.mode = "custom"
+        config.network.proxy = "socks5://127.0.0.1:1080"
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "[network]" in rendered
+        assert 'mode = "custom"' in rendered
+        assert 'proxy = "socks5://127.0.0.1:1080"' in rendered
+        assert loaded.network.mode == "custom"
+        assert loaded.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_network_section_appears_in_rendered_toml(self) -> None:
+        rendered = config_module._render_config_toml(Config())
+        assert "[network]" in rendered
+
+    def test_build_config_normalizes_network_proxy(self) -> None:
+        config = _build_config({"network": {"proxy": "SOCKS5://127.0.0.1:1080"}})
+        assert config.network.mode == "custom"
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    @pytest.mark.parametrize("mode", ["direct", "system", "custom"])
+    def test_build_config_accepts_network_proxy_modes(self, mode: str) -> None:
+        proxy = "socks5://127.0.0.1:1080" if mode == "custom" else ""
+        config = _build_config({"network": {"mode": mode, "proxy": proxy}})
+        assert config.network.mode == mode
+
+    def test_build_config_defaults_missing_network_mode_to_system(self) -> None:
+        """An unconfigured [network].mode inherits env/OS proxies.
+
+        Every consumer of this setting is an overseas-only service, so
+        ``direct`` made the out-of-the-box experience in mainland China an
+        opaque timeout. ``system`` without a proxy configured is identical
+        to a direct connection, so nobody else is affected.
+        """
+        config = _build_config({"network": {}})
+        assert config.network.mode == "system"
+
+    def test_build_config_defaults_absent_network_table_to_system(self) -> None:
+        """No ``[network]`` table at all is the same "never configured" case."""
+        assert _build_config({}).network.mode == "system"
+
+    def test_network_config_dataclass_default_is_system(self) -> None:
+        """The field default and the missing-key branch must not drift apart."""
+        assert config_module.NetworkConfig().mode == "system"
+
+    def test_build_config_keeps_explicitly_configured_direct_mode(self) -> None:
+        """An explicit ``direct`` still means direct after the default moved.
+
+        Only "never configured" takes the new default; a user who wrote
+        ``mode = "direct"`` asked to ignore env/system proxies and keeps
+        doing so.
+        """
+        config = _build_config({"network": {"mode": "direct", "proxy": ""}})
+        assert config.network.mode == "direct"
+
+    def test_build_config_migrates_legacy_nonempty_proxy_to_custom(self) -> None:
+        config = _build_config({"network": {"proxy": "http://127.0.0.1:7897"}})
+        assert config.network.mode == "custom"
+
+    def test_build_config_clamps_custom_without_proxy_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Invalid values clamp to ``direct``, not to the ``system`` default.
+
+        The user did write something here, so the conservative reading wins:
+        a broken value must not silently start routing traffic through an
+        inherited env proxy.
+        """
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "custom", "proxy": ""}})
+        assert config.network.mode == "direct"
+        assert "custom" in caplog.text
+
+    def test_build_config_clamps_unknown_mode_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "auto"}})
+        assert config.network.mode == "direct"
+        assert "mode" in caplog.text.lower()
+
+    def test_build_config_drops_invalid_network_proxy_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"proxy": "ftp://127.0.0.1:1"}})
+        assert config.network.proxy == ""
+        assert any("network" in record.message.lower() for record in caplog.records)
+
+    def test_env_override_sets_network_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_PROXY", "socks5://127.0.0.1:1080")
+        config = load_config(config_path)
+        assert config.network.mode == "custom"
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_env_override_can_explicitly_select_system_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "system")
+        config = load_config(config_path)
+        assert config.network.mode == "system"
+
+    def test_on_disk_explicit_direct_survives_the_new_system_default(self, tmp_path: Path) -> None:
+        """A real config.toml saying ``direct`` still loads as ``direct``.
+
+        The whole-file path, not just ``_build_config``: this is the one
+        guarantee the default change is not allowed to break.
+        """
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[general]\nlanguage = "zh"\n\n[network]\nmode = "direct"\nproxy = ""\n',
+            encoding="utf-8",
+        )
+        assert load_config(config_path).network.mode == "direct"
+
+    def test_env_override_can_explicitly_select_direct_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``OPENBILICLAW_NETWORK_MODE=direct`` is explicit too (Docker opt-out)."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "direct")
+        assert load_config(config_path).network.mode == "direct"
+
+    def test_config_without_network_table_loads_as_system(self, tmp_path: Path) -> None:
+        """A pre-[network] config file takes the new default on upgrade."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        assert load_config(config_path).network.mode == "system"

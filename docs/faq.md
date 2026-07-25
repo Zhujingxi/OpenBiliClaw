@@ -31,6 +31,17 @@ xattr -dr com.apple.quarantine "$APP"
 
 正常。商店版受审核排期影响，通常滞后几天到一两周。想第一时间拿到新功能，从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载 zip 手动安装即可（缺点是需要手动更新）。
 
+### 想用 Docker 部署后端？
+
+不需要克隆源码：下载一个 compose 文件启动预构建镜像（自带 Ollama embedding sidecar），再打开 `http://127.0.0.1:8420/setup/` 完成初始化：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+```
+
+升级到最新版：`docker compose -f docker-compose.prebuilt.yml pull` 再 `up -d`。源码构建、代理与排查见 [Docker 部署指南](docker-deployment.md)。
+
 ## 连接与初始化
 
 ### 插件显示「后端还没开张」/ 连不上后端？
@@ -65,6 +76,25 @@ xattr -dr com.apple.quarantine "$APP"
 ### 点「立即应用」提示更新未开始 / 被拒绝？
 
 后端自动更新有安全守卫：本地有未提交改动（`dirty_worktree`）、remote 不受信任（`untrusted_remote`）、分支无法快进（`branch_not_fast_forwardable`）等情况会拒绝更新，插件会展示具体原因。源码安装用户可进仓库目录手动处理后重试（如 `git status` 清理本地改动）。
+
+### 点「立即应用」后显示「更新后依赖安装失败」？
+
+旧更新器会把仓库里存在 `uv.lock` 错当成系统已安装 `uv`：使用官方 pip/venv fallback 安装时，源码已经快进到新 tag，随后却因找不到 `uv` 停在重启前，所以卡片仍显示旧进程版本。包含修复的新版本会先探测真实可用工具，无 `uv` 时自动改用当前虚拟环境的 pip，并在失败时显示工具与退出码摘要。
+
+已卡住的安装需要**人工重启一次后端**加载磁盘上的新源码；若要一次性修复依赖环境，先停止当前后端，再重跑原来的一句话安装命令（`config.toml`、`data/` 与 Cookie 都会保留）。也可在安装目录手动执行：有 uv 时运行 `uv sync`；pip/venv 安装运行 `.venv/bin/python -m pip install -e .`（Windows：`.\.venv\Scripts\python.exe -m pip install -e .`），然后用同一个 Python 执行 `-m openbiliclaw.cli start`。
+
+### 一直提示「git 远端不在允许列表，更新被阻止」？
+
+老版本（≤0.3.153）的允许列表按**精确字符串**匹配 `origin` 地址，`git clone` 时少写 `.git` 后缀、或用了与列表拼法不一致的 HTTPS/SSH 地址都会被永久拦住——而且被拦住的安装无法通过自动更新拿到修复版本，需要一次手动解锁（进入安装目录执行）：
+
+```bash
+git remote -v                      # 先看实际的 origin 地址
+git pull --ff-only                 # 手动拉一次最新代码即可解锁
+# 或者把 origin 改成官方地址后重试自动更新：
+git remote set-url origin https://github.com/whiteguo233/OpenBiliClaw.git
+```
+
+新版本起允许列表按规范化形式比较（`.git` 后缀可省、HTTPS/SSH 拼法等价、大小写不敏感），正常克隆不会再触发；通过 GitHub 镜像克隆的安装把镜像地址加入 `config.toml` 的 `[scheduler] auto_update_allowed_remotes` 即可。被拒绝时后端日志会打出实际的 remote 地址和修复命令。
 
 ### 我的数据存在哪里？会上传吗？
 

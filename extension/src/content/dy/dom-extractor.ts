@@ -236,6 +236,46 @@ export function extractDouyinSearchItemsFromDocument(
   return items;
 }
 
+// A container must overflow its viewport by more than this to count as
+// scrollable — sub-pixel layout rounding can leave scrollHeight a hair
+// above clientHeight on non-scrolling wrappers.
+const SCROLLABLE_OVERFLOW_TOLERANCE_PX = 4;
+
+/**
+ * Find the inner scrollable container that hosts Douyin search results.
+ *
+ * Douyin's search results usually live in a virtualized inner list;
+ * scrolling the window often triggers NO pagination. Walk up from a
+ * /video/-href anchor (the same shape the extractors key on) to the
+ * nearest ancestor that is actually scrollable (overflow-y auto/scroll
+ * AND real overflow). Returns null when none is found — callers fall
+ * back to window scrolling.
+ */
+export function pickSearchScrollTarget(doc: Document): Element | null {
+  const anchor = doc.querySelector<HTMLElement>('a[href*="/video/"]');
+  if (!anchor) return null;
+  const view = doc.defaultView;
+  let node: Element | null = anchor.parentElement;
+  while (node) {
+    if (isScrollableContainer(node, view)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function isScrollableContainer(el: Element, view: Window | null): boolean {
+  let overflowY = "";
+  try {
+    overflowY = view?.getComputedStyle?.(el)?.overflowY ?? "";
+  } catch {
+    return false;
+  }
+  if (overflowY !== "auto" && overflowY !== "scroll") return false;
+  const scrollHeight = Number(el.scrollHeight ?? 0);
+  const clientHeight = Number(el.clientHeight ?? 0);
+  return scrollHeight > clientHeight + SCROLLABLE_OVERFLOW_TOLERANCE_PX;
+}
+
 function extractVideoItems(
   doc: Document,
   scope: DouyinScope,

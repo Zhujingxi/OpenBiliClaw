@@ -25,6 +25,7 @@ from openbiliclaw.discovery.strategies._utils import (
     parse_duration,
     to_int,
 )
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
@@ -256,6 +257,7 @@ class TrendingStrategy(DiscoveryStrategy):
         else:
             topic_key = self._infer_topic_key(item, title)
 
+        published = normalize_published_time(item.get("pubdate") or item.get("publish_time"))
         return DiscoveredContent(
             bvid=bvid,
             title=title,
@@ -278,6 +280,8 @@ class TrendingStrategy(DiscoveryStrategy):
                 source_strategy=self.name,
             ),
             source_strategy=self.name,
+            published_at=published.published_at,
+            published_label=published.published_label,
         )
 
     @staticmethod

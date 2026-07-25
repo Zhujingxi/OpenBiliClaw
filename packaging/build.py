@@ -27,6 +27,8 @@ SPEC_FILE = PROJECT_ROOT / "packaging" / "openbiliclaw.spec"
 MACOS_FIRST_LAUNCH_GUIDE_NAME = "首次打开说明 First Launch.html"
 MACOS_FIRST_LAUNCH_IMAGE_NAME = "首次打开提示 First Launch.png"
 MACOS_DMG_BACKGROUND_NAME = "openbiliclaw-dmg-guide.png"
+MACOS_INSTALLER_COMMAND_NAME = "安装并启动 Install OpenBiliClaw.command"
+MACOS_INSTALLER_COMMAND_SOURCE = PROJECT_ROOT / "packaging" / "install_macos.command"
 
 
 def ensure_pyinstaller() -> None:
@@ -379,10 +381,18 @@ def write_macos_first_launch_guide(stage_dir: Path) -> Path:
   </p>
   <h2>安装</h2>
   <ol>
-    <li>把 <strong>OpenBiliClaw</strong> 拖到 <strong>Applications</strong>。</li>
     <li>
-      首次打开如果提示“无法验证开发者”或“未经安全验证”，请右键 / Control-click 应用图标，
-      选择 <strong>Open / 打开</strong>，再在弹窗中点 <strong>Open / 打开</strong>。
+      推荐：双击 <strong>安装并启动 Install OpenBiliClaw.command</strong>。
+      它会先校验新应用，再退出旧版本、原子替换 Applications 中的 app，并启动刚安装的版本。
+    </li>
+    <li>
+      兼容方式：先从菜单栏退出旧版本，把 <strong>OpenBiliClaw</strong> 拖到
+      <strong>Applications</strong> 并确认替换，然后手动重新打开。
+    </li>
+    <li>
+      首次运行安装助手或应用时如果提示“无法验证开发者”或“未经安全验证”，
+      请右键 / Control-click 对应项目，选择 <strong>Open / 打开</strong>，
+      再在弹窗中点 <strong>Open / 打开</strong>。
     </li>
     <li>
       如果仍被拦截，打开 <strong>System Settings -> Privacy & Security</strong>，
@@ -402,10 +412,20 @@ xattr -dr com.apple.quarantine "$APP"</code></pre>
   <h2>English</h2>
   <p>The current Release is ad-hoc signed, but not notarized.</p>
   <ol>
-    <li>Drag <strong>OpenBiliClaw</strong> into <strong>Applications</strong>.</li>
     <li>
-      If macOS says it cannot verify the developer, use
-      <strong>right-click / Control-click -> Open</strong>,
+      Recommended: double-click
+      <strong>安装并启动 Install OpenBiliClaw.command</strong>.
+      It verifies the new bundle, quits the old version, atomically replaces the app in
+      Applications, and launches the version just installed.
+    </li>
+    <li>
+      Compatibility path: quit the old version from the menu bar, drag
+      <strong>OpenBiliClaw</strong> into <strong>Applications</strong>, confirm Replace,
+      then reopen it manually.
+    </li>
+    <li>
+      If macOS blocks the install helper or the app, use
+      <strong>right-click / Control-click -> Open</strong> on that item,
       then click <strong>Open</strong> in the dialog.
     </li>
     <li>
@@ -424,6 +444,18 @@ xattr -dr com.apple.quarantine "$APP"</code></pre>
         encoding="utf-8",
     )
     return guide_path
+
+
+def stage_macos_installer_command(stage_dir: Path) -> Path:
+    """Stage the DMG's explicit install/restart helper with executable mode."""
+    if not MACOS_INSTALLER_COMMAND_SOURCE.is_file():
+        raise FileNotFoundError(
+            f"macOS installer helper not found: {MACOS_INSTALLER_COMMAND_SOURCE}"
+        )
+    destination = stage_dir / MACOS_INSTALLER_COMMAND_NAME
+    shutil.copy2(MACOS_INSTALLER_COMMAND_SOURCE, destination)
+    destination.chmod(0o755)
+    return destination
 
 
 def _load_dmg_font(size: int, *, bold: bool = False):
@@ -477,18 +509,26 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
     draw.text((78, 82), "OpenBiliClaw macOS 首次打开", fill="#111827", font=title_font)
     draw.text(
         (80, 144),
-        "Drag to Applications, then approve the first launch.",
+        "One-click install + restart, with drag-to-Applications fallback.",
         fill="#4b5563",
         font=subtitle_font,
     )
 
     steps = [
-        ("1", "拖到 Applications", "Drag OpenBiliClaw into Applications."),
-        ("2", "安全阻挡: 右键 / Control-click -> 打开", "Use Open from the context menu first."),
+        (
+            "1",
+            "双击「安装并启动 Install OpenBiliClaw.command」",
+            "Double-click the one-click installer in this DMG.",
+        ),
+        (
+            "2",
+            "自动停旧版、校验替换并启动刚安装的版本",
+            "It quits the old app, verifies the copy, then launches the new one.",
+        ),
         (
             "3",
-            "已损坏: 先看 First Launch.html 里的 xattr 命令",
-            "If macOS says damaged, remove quarantine after verifying source.",
+            "安全阻挡: 右键打开；已损坏: 查看 First Launch.html",
+            "For Gatekeeper help, open the First Launch guide.",
         ),
     ]
     y = 218
@@ -517,11 +557,13 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
 
 
 def make_macos_dmg(*, app_bundle: Path, output_dir: Path, version: str) -> Path:
-    """Build a drag-to-Applications ``.dmg`` from the ``.app`` bundle (macOS only).
+    """Build a helper-assisted ``.dmg`` from the ``.app`` bundle (macOS only).
 
     Uses ``ditto`` (bundle-faithful copy that preserves the in-bundle symlinks)
-    into a staging dir with an ``/Applications`` shortcut, then ``hdiutil`` to a
-    compressed UDZO image — the conventional macOS drag-install experience.
+    into a staging dir with an explicit verified install/restart helper and an
+    ``/Applications`` shortcut, then ``hdiutil`` to a compressed UDZO image.
+    The helper is the reliable upgrade path; conventional drag-install remains
+    available as a compatibility fallback.
     """
     import tempfile
     import time
@@ -536,6 +578,7 @@ def make_macos_dmg(*, app_bundle: Path, output_dir: Path, version: str) -> Path:
     try:
         subprocess.check_call(["ditto", str(app_bundle), str(stage / app_bundle.name)])
         (stage / "Applications").symlink_to("/Applications")
+        stage_macos_installer_command(stage)
         write_macos_first_launch_guide(stage)
         write_macos_dmg_background(stage)
         hdiutil_cmd = [
@@ -720,6 +763,44 @@ def repair_macos_ad_hoc_signature(app_bundle: Path) -> None:
     )
 
 
+def stage_embedding_seed(
+    dist_dir: Path,
+    seed_dir: Path,
+    platform_name: str | None = None,
+) -> list[Path]:
+    """Copy the bge-m3 seed (produced by ``make_model_seed.py``) into the
+    packaged outputs, where ``entry.py`` resolves ``bundled_resources`` — next
+    to the exe (onedir) and ``Contents/Resources`` (macOS ``.app``). This is
+    the ``with-embedding`` variant: the model ships in the installer so a fresh
+    machine reaches embedding-ready fully offline (see
+    docs/plans/2026-07-07-bundled-embedding-model-*)."""
+    resolved = platform_name or platform.system()
+    written: list[Path] = []
+    dests: list[Path] = []
+    onedir = dist_dir / "OpenBiliClaw"
+    if onedir.is_dir():
+        dests.append(onedir / "bge-m3-seed")
+    if resolved == "Darwin":
+        app_resources = dist_dir / "OpenBiliClaw.app" / "Contents" / "Resources"
+        if app_resources.is_dir():
+            dests.append(app_resources / "bge-m3-seed")
+    for dest in dests:
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(seed_dir, dest)
+        written.append(dest)
+    return written
+
+
+def _resolve_model_seed_dir(model_seed_dir: str | None) -> Path | None:
+    candidate = Path(
+        model_seed_dir
+        or os.environ.get("OPENBILICLAW_MODEL_SEED_DIR")
+        or (PROJECT_ROOT / "packaging" / "model-seed")
+    )
+    return candidate if (candidate / "seed.manifest.json").is_file() else None
+
+
 def build(
     *,
     archive_version: str | None = None,
@@ -727,6 +808,8 @@ def build(
     ollama_bin: str | None = None,
     bundle_x: bool = True,
     bundle_reddit: bool = True,
+    bundle_embedding: bool = False,
+    model_seed_dir: str | None = None,
 ) -> None:
     """Run PyInstaller."""
     ensure_pyinstaller()
@@ -794,6 +877,19 @@ def build(
                     "or --ollama-bin); packaged app will fall back to a user-installed ollama"
                 )
 
+        # with-embedding variant: stage the baked bge-m3 seed so the installer
+        # ships the model (offline-ready). Must land before archive creation.
+        if bundle_embedding:
+            seed_dir = _resolve_model_seed_dir(model_seed_dir)
+            if seed_dir is None:
+                print(
+                    "[build] ERROR: --bundle-embedding set but no model seed found "
+                    "(run packaging/make_model_seed.py or set OPENBILICLAW_MODEL_SEED_DIR)"
+                )
+                sys.exit(1)
+            staged = stage_embedding_seed(DIST_DIR, seed_dir)
+            print(f"[build] Staged bge-m3 seed into {len(staged)} target(s): {seed_dir}")
+
         if platform.system() == "Darwin":
             app_bundle = DIST_DIR / "OpenBiliClaw.app"
             if app_bundle.exists():
@@ -817,11 +913,16 @@ def build(
             print(f"    {output / 'OpenBiliClaw'}")
 
         if archive_version:
+            # The with-embedding installer name carries a variant suffix so it
+            # sits next to the lean asset in the Release without clobbering it.
+            asset_version = (
+                f"{archive_version}-with-embedding" if bundle_embedding else archive_version
+            )
             target = detect_target()
             archive_path = create_archive(
                 packaged_root=packaged_root,
                 output_dir=RELEASE_DIR,
-                version=archive_version,
+                version=asset_version,
                 target=target,
             )
             print()
@@ -832,7 +933,7 @@ def build(
                     dmg_path = make_macos_dmg(
                         app_bundle=app_bundle,
                         output_dir=RELEASE_DIR,
-                        version=archive_version,
+                        version=asset_version,
                     )
                     print(f"  Release installer: {dmg_path}")
         print("=" * 60)
@@ -867,7 +968,23 @@ def main() -> None:
         action="store_true",
         help="Do not bundle the Reddit discovery dependency (rdt-cli)",
     )
+    parser.add_argument(
+        "--bundle-embedding",
+        action="store_true",
+        help="Ship the bge-m3 embedding model in the installer (the 'with-embedding' "
+        "variant; also enabled by OPENBILICLAW_BUNDLE_EMBEDDING=1). Needs a seed from "
+        "packaging/make_model_seed.py (or $OPENBILICLAW_MODEL_SEED_DIR).",
+    )
+    parser.add_argument(
+        "--model-seed-dir",
+        help="Path to the bge-m3 seed dir for --bundle-embedding "
+        "(default: $OPENBILICLAW_MODEL_SEED_DIR or packaging/model-seed)",
+    )
     args = parser.parse_args()
+
+    bundle_embedding = args.bundle_embedding or os.environ.get(
+        "OPENBILICLAW_BUNDLE_EMBEDDING", ""
+    ).strip() in ("1", "true", "True")
 
     if args.clean:
         clean()
@@ -877,6 +994,8 @@ def main() -> None:
         ollama_bin=args.ollama_bin,
         bundle_x=not args.no_bundle_x,
         bundle_reddit=not args.no_bundle_reddit,
+        bundle_embedding=bundle_embedding,
+        model_seed_dir=args.model_seed_dir,
     )
 
 

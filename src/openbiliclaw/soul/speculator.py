@@ -8,6 +8,7 @@ Lifecycle: Generate → Active → Promote (confirmed) / Reject + Cooldown (expi
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -31,6 +32,15 @@ logger = logging.getLogger(__name__)
 
 _CHALLENGE_PROBE_MODES = {"lateral", "bridge", "wildcard"}
 _DEFAULT_CHALLENGE_MAX_ACTIVE = 3
+
+# Probe "暂时忽略" (defer/snooze) escalation ladder. Deferring a probe hides it
+# for PROBE_DEFER_DAYS[k-1] days on the k-th defer; the PROBE_MAX_DEFERS-th defer
+# exhausts it into a 30-day cooldown (TTL-expiry style, re-guessable — NOT a
+# durable user-reject). See docs/plans/2026-07-05-probe-defer-spec.md.
+PROBE_DEFER_DAYS: tuple[int, ...] = (7, 14)
+PROBE_MAX_DEFERS: int = 3
+# Cooldown applied when defers are exhausted, matching the explicit-reject window.
+_DEFER_EXHAUSTED_COOLDOWN_DAYS: int = 30
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +87,15 @@ class SpeculativeInterest:
     ttl_days: int = 14
     confirmation_count: int = 0
     confirmation_threshold: int = 3
-    status: str = "active"  # "active" | "confirmed" | "promoted" | "rejected"
+    status: str = "active"  # "active" | "confirmed" | "promoted" | "rejected" | "deferred"
     confirming_events: list[str] = field(default_factory=list)
     specifics: list[SpeculativeSpecific] = field(default_factory=list)
     probe_mode: str = "near"
     confirmation_source: str = ""
     confirmed_at: str = ""
+    deferred_at: str = ""  # ISO ts of the most recent "暂时忽略"
+    deferred_until: str = ""  # ISO ts; tick revives the probe at/after this instant
+    defer_count: int = 0  # lifetime defers; drives the escalation ladder, never reset
 
     @property
     def challenge(self) -> bool:
@@ -107,6 +120,9 @@ class SpeculativeInterest:
             "probe_mode": self.probe_mode,
             "confirmation_source": self.confirmation_source,
             "confirmed_at": self.confirmed_at,
+            "deferred_at": self.deferred_at,
+            "deferred_until": self.deferred_until,
+            "defer_count": self.defer_count,
         }
 
     @classmethod
@@ -133,6 +149,9 @@ class SpeculativeInterest:
             probe_mode=_normalize_probe_mode(data.get("probe_mode")),
             confirmation_source=str(data.get("confirmation_source", "")),
             confirmed_at=str(data.get("confirmed_at", "")),
+            deferred_at=str(data.get("deferred_at", "")),
+            deferred_until=str(data.get("deferred_until", "")),
+            defer_count=int(data.get("defer_count", 0)),
         )
 
 
@@ -208,7 +227,17 @@ class SpeculatorTickResult:
     generated: list[SpeculativeInterest] = field(default_factory=list)
     promoted: list[SpeculativeInterest] = field(default_factory=list)
     rejected: list[SpeculativeInterest] = field(default_factory=list)
+    revived: list[SpeculativeInterest] = field(default_factory=list)
     observed_matches: int = 0
+
+
+@dataclass
+class DeferResult:
+    """Outcome of a user "暂时忽略" (defer) action on a probe."""
+
+    outcome: str = "not_found"  # "deferred" | "exhausted" | "not_found"
+    deferred_until: str = ""
+    defer_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +403,17 @@ def normalize_probe_feedback_history(history: object) -> list[dict[str, object]]
             "created_at",
             "source_mode",
             "source_signal",
+            "deferred_until",
         ):
             text = _string_field(item.get(key))
             if text:
                 record[key] = text[:240] if key == "raw_text_excerpt" else text
+        # defer_count is an int, not a string — preserve it through round-trips
+        # so defer analytics survive persistence (spec §API surface, invariant 11).
+        raw_defer_count = item.get("defer_count")
+        if raw_defer_count is not None and str(raw_defer_count).strip():
+            with contextlib.suppress(ValueError, TypeError):
+                record["defer_count"] = int(raw_defer_count)
         specifics = _specific_names(item.get("specifics"))
         if specifics:
             record["specifics"] = specifics
@@ -636,6 +672,38 @@ def expire_stale(
     return rejected, state
 
 
+def revive_deferred(
+    state: SpeculativeState,
+    now: datetime,
+) -> tuple[list[SpeculativeInterest], SpeculativeState]:
+    """Restore deferred ("暂时忽略") speculations whose snooze window has elapsed.
+
+    Runs as the LAST maintenance step in a tick (after expire/promote), so a
+    freshly-revived probe is never promoted in the same pass. ``created_at`` is
+    reset to ``now`` (fresh TTL window, else ``expire_stale`` would kill it next
+    tick), and a threshold-ready ``confirmation_count`` is clamped below the
+    threshold so the revived probe resurfaces to the user instead of silently
+    auto-promoting. ``defer_count`` is preserved (drives the escalation ladder).
+    """
+    revived: list[SpeculativeInterest] = []
+    for spec in state.active:
+        if spec.status != "deferred":
+            continue
+        try:
+            until = datetime.fromisoformat(spec.deferred_until)
+        except (ValueError, TypeError):
+            continue
+        if now >= until:
+            spec.status = "active"
+            spec.created_at = now.isoformat()
+            spec.deferred_at = ""
+            spec.deferred_until = ""
+            if spec.confirmation_count >= spec.confirmation_threshold:
+                spec.confirmation_count = max(spec.confirmation_threshold - 1, 0)
+            revived.append(spec)
+    return revived, state
+
+
 # ---------------------------------------------------------------------------
 # State persistence
 # ---------------------------------------------------------------------------
@@ -803,7 +871,7 @@ class InterestSpeculator:
                 str(item.domain).strip().lower()
                 for item in state.active
                 if str(item.domain).strip()
-                and item.status in {"active", "confirmed", "user_rejected", "rejected"}
+                and item.status in {"active", "confirmed", "user_rejected", "rejected", "deferred"}
             }
             selected: list[SpeculativeInterest] = []
             for candidate in _select_candidates_for_probe_slots(
@@ -851,6 +919,10 @@ class InterestSpeculator:
             result.rejected = rejected
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
+            # Revive LAST (after promote) so a revived probe is never promoted
+            # in the same pass — it must resurface to the user first (D4/D5).
+            revived, next_state = revive_deferred(next_state, now)
+            result.revived = revived
             return next_state
 
         state = self._update_state(_prepare)
@@ -920,6 +992,10 @@ class InterestSpeculator:
             result.rejected = rejected
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
+            # Revive LAST (after promote) so a revived probe is never promoted
+            # in the same pass — it must resurface to the user first (D4/D5).
+            revived, next_state = revive_deferred(next_state, now)
+            result.revived = revived
             return next_state
 
         state = self._update_state(_prepare)
@@ -1147,6 +1223,60 @@ class InterestSpeculator:
 
         self._update_state(_mutate)
         return found
+
+    def user_defer_speculation(self, domain: str) -> DeferResult:
+        """User chose "暂时忽略" — snooze this probe, escalating on repeat defers.
+
+        The k-th defer hides the probe for ``PROBE_DEFER_DAYS[k-1]`` days
+        (``status="deferred"``, kept in ``state.active`` so ``revive_deferred``
+        can restore it). The ``PROBE_MAX_DEFERS``-th defer exhausts it into a
+        30-day cooldown (TTL-expiry style — ``response`` is recorded as
+        ``defer_exhausted`` by the API layer and stays OUT of the handled set,
+        so it is re-guessable after the cooldown, unlike an explicit reject).
+        """
+        result = DeferResult()
+        now = datetime.now()
+
+        def _mutate(state: SpeculativeState) -> None:
+            nonlocal result
+            remaining: list[SpeculativeInterest] = []
+            for spec in state.active:
+                if spec.domain.lower() == domain.lower() and spec.status == "active":
+                    new_count = spec.defer_count + 1
+                    spec.defer_count = new_count
+                    if new_count >= PROBE_MAX_DEFERS:
+                        spec.status = "rejected"
+                        state.total_rejected += 1
+                        state.cooldown.append(
+                            CooldownEntry(
+                                domain=spec.domain,
+                                category=spec.category,
+                                rejected_at=now.isoformat(),
+                                cooldown_until=(
+                                    now + timedelta(days=_DEFER_EXHAUSTED_COOLDOWN_DAYS)
+                                ).isoformat(),
+                            )
+                        )
+                        result = DeferResult(outcome="exhausted", defer_count=new_count)
+                        # Dropped from active (like reject) — do NOT re-append.
+                    else:
+                        window = PROBE_DEFER_DAYS[min(new_count, len(PROBE_DEFER_DAYS)) - 1]
+                        deferred_until = (now + timedelta(days=window)).isoformat()
+                        spec.status = "deferred"
+                        spec.deferred_at = now.isoformat()
+                        spec.deferred_until = deferred_until
+                        result = DeferResult(
+                            outcome="deferred",
+                            deferred_until=deferred_until,
+                            defer_count=new_count,
+                        )
+                        remaining.append(spec)
+                else:
+                    remaining.append(spec)
+            state.active = remaining
+
+        self._update_state(_mutate)
+        return result
 
     # -- Internal -------------------------------------------------------------
 

@@ -1,9 +1,23 @@
 # GUI 引导初始化 SPEC
 
 **Created:** 2026-06-06
-**Status:** **CONVERGED**（Codex 对抗 review R1–R7;R7 判 **SHIP**,0 spec 级缺陷;轨迹:R1 4 根本 blocker → R2 2 → R4 9 → R5 5 → R6 4 二阶边界 → R7 0)。可进入实现计划。
+**Status:** **IMPLEMENTED + HARDENED**（原始设计轨迹保留在下文；当前实现以“2026-07-15 收口”与 `docs/modules/init.md` 为准）。
 **Scope:** 打包应用(.dmg/.exe)与浏览器插件用户的「首次初始化」改为 GUI 按钮触发 + 前置检查引导,不再要求终端跑 `openbiliclaw init`
 **Depends on / 关联:** `feat/desktop-installer-wizard` 分支(`/setup` 向导、`packaging/entry.py`);与 `docs/plans/2026-06-06-human-install-wizard-design.md`(命令行一句话安装向导)**互补不重叠**——那条线管 CLI 安装路径,本 spec 管 GUI/打包/插件路径。
+
+## 2026-07-15 初始化锁死收口（权威增补）
+
+原 spec 曾保留阶段 3/4 并行和单一 `last_activity` 的设计，这两点已被生产问题证明不够严格，当前契约覆盖下文旧描述：
+
+- 四阶段严格串行：采集并批量落库 → 分析偏好 → 生成、校验并保存完整画像 → 基于该画像做内容发现、个性化评估、推荐文案与 canonical 可用性校验。`profile_ready=true` 可能在阶段 4 期间出现，但 UI 必须以 `running=true` 优先，不能提前进入完成页。
+- 桌面 Web 在上述 `initialized=true && running=true` 窗口转入终态时必须重新读取一次 runtime snapshot，替换初始化前的顶部连接徽标与侧栏库存；这次补水只同步展示，不能成为 `init_completed` 之后的第二完成门槛。
+- 阶段 1 全来源共享 600 秒预算，B 站 240 秒、X 180 秒单来源上限；扩展轮询 collector 支持协作取消。阶段 2 默认按事件分片数和有效 LLM 并发自适应（每个并发执行波次 300 秒 + 固定 300 秒恢复预留；1100 条 B 站启动信号拆成 6 批，在并发 1 / 2 / 3 下分别为 2100 / 1200 / 900 秒，最小单波预算 600 秒），阶段 3 为 360 秒，阶段 4 为 600 秒。阶段 1 总预算耗尽且无信号返回 `collection_timeout`，阶段 4 超时仍按画像已完成的部分成功处理。
+- 状态分为 owner liveness 与业务 progress：`last_heartbeat_at` 证明后台任务仍在，`last_progress_at/progress_sequence` 只在业务里程碑推进；`last_activity` 仅作旧客户端 heartbeat 别名。任务退出但终态写失败会由 done callback / 状态端点立即 reconcile；无 owner 且 heartbeat 超过 120 秒的租约也会回收。
+- `stages[].progress` 支持 `{mode, done, total, note, elapsed_seconds, max_seconds}`。只有 `mode=determinate` 才显示百分比；无法量化的画像 / discovery 调用使用 indeterminate 动画和用时，不伪造“49%”。
+- popup、`/web`、`/setup` 均提供运行中取消、明确的网络错误和有限请求 deadline。轮询失败保留最后已知进度；heartbeat 新鲜但 progress 未变时说明“后台在线，仍在等待当前步骤”，heartbeat 也停止才提示可能断开。
+- run 活跃时 `GET /api/init-status` 只 peek B 站、chat、embedding 与诊断缓存，不发真实探针；热重载取消等待有 1.5 秒硬上限，忽略取消的旧任务保持被 registry 所有且不启动同名重复 loop。
+- 首个完整画像尚未提交时，daemon-owned account-sync / refresh / soul pipeline 同样停在共享 gate，不能在用户点击「开始初始化」之前抢先导入、分析或重复落库 bootstrap 历史；阶段 3 提交后仍由 active run gate 挡到阶段 4 终态。
+- `/setup` 为每个 provider 独立保留 model / Base URL / API flavor，重载会回填当前 provider 的完整非密配置，切换 provider 不得沿用上一家的模型名或残留错误。chat live probe 允许 30 秒覆盖本地 Ollama 冷启动；终态 run 的持久化失败原因优先于随后 prereq 红灯。
 
 ## Goal
 
@@ -11,7 +25,7 @@
 
 - 未初始化时,UI 显示一个明确的「开始初始化」入口,而不是「先跑 `openbiliclaw init`」这种命令行指引。
 - 点初始化前,**清楚列出前置条件并实时显示是否满足**:① 所选平台已登录 ② LLM provider 已配好 ③ 至少勾选一个来源。来源勾选即作为本轮 opt-in,不要求先去设置页开启；前置没满足时按钮置灰,并给出去哪儿补的指引。
-- 初始化是个 2–5 分钟的四阶段重操作,UI 要**显示分阶段进度**,完成后自动进入主界面。
+- 初始化通常是 4–20 分钟的四阶段重操作（历史较多或本地模型可能更久）,UI 要**显示分阶段进度与当前等待性质**,完成后自动进入主界面。
 - 复用既有 `openbiliclaw init` 的核心流水线,**不复制**灵魂引擎/发现池逻辑。
 
 核心原则:**GUI init 只负责「把 CLI init 已有的四阶段流水线搬到界面上触发 + 可视化」**,不新增画像/发现算法,不改 CLI 既有交互安装行为。
@@ -22,7 +36,7 @@
 
 1. **1/4 拉数据**(`asyncio.run(_fetch_all_data())`,约 4360 行):`client.get_user_history` / `get_all_favorites` / `get_following`(B站,需 cookie),可选 xhs/dy/yt bootstrap 入队。历史为空则 `raise typer.Exit(1)`(4361)。
 2. **2/4 分析偏好**:`await soul_engine.analyze_events(events, event_chunk_size=200)`(`soul/engine.py:215`,async)。
-3. **3/4 生成画像 + 4/4 发现首轮池**(并行,`asyncio.run(_run_p3_p4_parallel())`,约 4609):`soul_engine.build_initial_profile(history)`(`soul/engine.py:257`,async,返回 `OnionProfile`)+ `_run_init_discovery_backfill_async(draft_profile, target_pool_count=...)`。
+3. **历史实现：3/4 生成画像 + 4/4 发现首轮池并行**。该实现会让发现读取 draft / 缺省画像，现已由上方 2026-07-15 增补替代：阶段 3 完整落盘后才允许阶段 4 启动。
 - 构建对象:`_prepare_init_runtime()`(`cli.py:2011`)、`_build_bilibili_client()`、`_build_memory_manager()`、`_build_soul_engine()`。常量:历史 300 / 收藏 300 / 关注 100(`cli.py:168-170`)。**注:本 spec 的行号在 R1 校正了几处明显错位(见 Interview Log),实现计划须对全部引用再 grep 核一遍。**
 - **混入大量 CLI 专属交互**:网络绑定 `_ask_network_binding`、`_maybe_setup_password_in_init`、收藏/关注上限、xhs/dy/yt 的 y/n、`_persist_init_source_enabled_flags`。**这些是安装期设置,不属于 init 核心四阶段**,GUI 路径不复刻(网络绑定/密码已由 `/setup` 或设置页单独管)。
 
@@ -126,7 +140,7 @@ async def run_guided_init(
 
 CLI init 独占进程;API init 跑在**活后端**里,后台有连续 refresh、account sync、soul pipeline、事件摄入、**扩展周期同步 cookie** 在并发写 soul/preference/`content_cache`。引入一个 **`InitCoordinator`** 统一协调:
 
-**(a) 持久化状态存储(崩溃安全)** — 新增 SQLite 表 `init_runs`(`storage/database.py`,照该文件既有 schema 风格),列:`run_id` / `status`(`idle|starting|running|completed|failed|cancelled`)/ `stage`(0–4)/ **`stages_json`(各 stage 的 `pending|running|ok|warning|failed` + reason,**崩溃/重连后由它重建 API shape 的 per-stage `status` 与 `warning`**,否则只存 `stage` 无法还原)** / `partial_success` / `started_at` / `updated_at` / `finished_at` / `error_reason` / `sequence`(单调)。阶段切换在 `finally` 落库。**启动 reconciliation**:boot 时把残留 `starting`/`running` 一律改判 `failed`(`error_reason="interrupted"`)——无进程能跨重启存活,杜绝卡死 `running=true`。
+**(a) 持久化状态存储(崩溃安全)** — 新增 SQLite 表 `init_runs`(`storage/database.py`,照该文件既有 schema 风格),列:`run_id` / `status`(`idle|starting|running|completed|failed|cancelled`)/ `stage`(0–4)/ **`stages_json`(各 stage 的 `pending|running|ok|warning|failed` + reason,**崩溃/重连后由它重建 API shape 的 per-stage `status` 与 `warning`**,否则只存 `stage` 无法还原)** / `partial_success` / `started_at` / `updated_at` / `finished_at` / `error_reason` / `error_detail`(v0.3.156+,失败细节:异常摘要 / `GuidedInitError` message,经 init-status 顶层 `detail` 下发供 UI 展示)/ `sequence`(单调)。阶段切换在 `finally` 落库。**启动 reconciliation**:boot 时把残留 `starting`/`running` 一律改判 `failed`(`error_reason="interrupted"`)——无进程能跨重启存活,杜绝卡死 `running=true`。
 
 **(b) TOCTOU-safe 启动序 + 写者二次检查** — `POST /api/init`:① `is_trusted_local` gate(见 API Shape)→ ② **原子**把 `status` 从非 active 置 `starting`(single-flight,已 active → `409 already_running`)→ ③ 同一临界区内 revalidate 前置(B站 cookie + chat 探测)→ ④ 通过则 `ctx.task_registry.track("guided_init", guided_init_coro(...))`(**传协程,别再 `asyncio.create_task` 包一层**——`track` 自己建 task,见 `runtime_context.py:651` 用法)并置 `running`,否则回 `idle` + `409`。**但「先占坑」还不够**:已过校验、side-effect 未执行的 in-flight 写者(cookie 写在 rebuild 前 `app.py:1332`、config 写在 `_CONFIG_SAVE_LOCK` 内 `app.py:5944/5969`)仍可能 rebuild-cancel init。**故每个热重载写者在真正 side-effect 前(含 `_CONFIG_SAVE_LOCK` 内)必须再查一次 `init_active`**。锁顺序固定:先查 `init_active` → 再取 `_CONFIG_SAVE_LOCK` / `_refresh_lock`,不反向嵌套,避免死锁。
 
@@ -140,7 +154,7 @@ CLI init 独占进程;API init 跑在**活后端**里,后台有连续 refresh、
 
 **(d) Stage 4 发现** — **新增** `ContinuousRefreshController.run_init_backfill(profile, target_pool_count, *, fully_parallel=True)`,**自身持 `_refresh_lock`**,复刻 CLI backfill(draft profile + 目标池 + 并行)。现有 `refresh_after_init()` 是兼容强制补货 shim,**复刻不了 stage 4 的目标池 backfill**,故新建。**CLI init 的 stage 4 也改走 `run_init_backfill`**(替换 `cli.py:2058` 直接 `discovery_engine.discover`),CLI/API 走同一持锁路径,锁纪律一致。**不引入单独的 refresh「暂停」态**:连续 refresh tick 在 `init_active` 时自然 skip(见 c),stage 4 持 `_refresh_lock` 串行化;init 崩溃时 `init_active` 经 (a) 启动 reconciliation 自动清除,refresh 自然恢复,无「暂停卡死」。
 
-**(e) `run_guided_init` 纯异步 + 无*编排*副作用** — 全程 API 事件循环内,内部零 `asyncio.run`;**它当然会做领域写**(拉数据 / 写 preference / soul / 发现池——那本就是它的活),但**不做编排副作用**:不自己 publish 事件、不写 `init_runs` 状态库、`on_progress` 之外不旁路。完成/失败经**终态 `on_progress`**(`done=True` / `error=...`)上报,**由调用方 wrapper 落地**——API wrapper 把进度/终态翻成 `init_progress`/`init_completed`/`init_failed` 事件 + 落 `init_runs`;CLI wrapper 打印 console。**stages 3+4 保持并行**(复刻 CLI `_run_p3_p4_parallel`,`cli.py:4564/4576`),勿退化成串行。**并行进度契约**:`stages[]` 为权威(3、4 可同时 `running`);标量 `current_stage` = 仍在跑的**最小** stage 号;两并发阶段的进度 / `sequence` / `init_runs` 写经 InitCoordinator 内**单一 per-run 串行点**原子更新,杜绝并发写状态库与 `sequence` 乱序。CLI 保留唯一外层 `asyncio.run` 包装(见 §1)。
+**(e) `run_guided_init` 纯异步 + 无*编排*副作用** — 全程 API 事件循环内,内部零 `asyncio.run`;它会做必要领域写，但不自己 publish 生命周期事件。当前 stages 3+4 **严格串行**：阶段 3 的 `OnionProfile` 校验、保存和可读性确认是提交屏障，随后阶段 4 才能拿该已提交画像做发现 / 评估 / 文案。`stages[]` 与标量 `current_stage` 因而不会同时把 3、4 标为 running；所有进度 / `sequence` / `init_runs` 写仍经 coordinator 的单一串行点。CLI 保留唯一外层 `asyncio.run` 包装。
 
 **(f) 取消 + 超时 + 协作式取消(配置锁逃生口)** — 机制:`InitCoordinator` 持 `current_task` + `cancel_current_run(run_id)`;`POST /api/init/cancel`(仅本机)调它。**分工**(避免与 §5e「`run_guided_init` 不写状态库」打架):`run_guided_init` 只**协作式响应 `asyncio.CancelledError`**——确保它持有的锁(如 stage 4 的 `_refresh_lock`,在 `run_init_backfill` 自己的 `finally`)被释放,然后 **re-raise,不碰状态库**;**由 API wrapper / `InitCoordinator` 捕获 `CancelledError`/超时,在 `finally` 把 `init_runs` 落 `cancelled`/`failed`**(状态库单一写者)。每 stage 超时即 cancel,走同一路径。热重载豁免(§5c/§5b 的「双保险」)走**同一 `current_task` 句柄**实现——`rebuild_from_config(exclude=current_task)` 或给 `BackgroundTaskRegistry` 加具名豁免/取消语义(`task_registry.py` 现仅有 hot-reload 全量取消,需扩展)。否则「init 中途锁 `PUT /api/config` + v1 不重试」会让用户既改不了配置也退不出。
 
@@ -195,9 +209,11 @@ CLI init 独占进程;API init 跑在**活后端**里,后台有连续 refresh、
 
 **不复用 `POST /api/init-completed` 的副作用**:该端点除广播事件外还会通过 `request_replenishment(reason="init_completed", force=True)` 触发补货；GUI init 的 stage 4 已经做过发现,再触发补货会制造重复补货。所以由 **API wrapper** 在终态 publish `init_completed`(`run_guided_init` 只回调 `on_progress`,见 §5e),**不调**旧端点。
 
+当前响应 additive 下发 `last_heartbeat_at`、`last_progress_at`、`progress_sequence`；每个运行中 stage 可带 `progress={mode,done,total,note,elapsed_seconds,max_seconds}`。旧 `last_activity` 保留但不得再作为“业务有进展”的判断依据。
+
 ## Status Values & Reasons（契约的一部分）
 
-稳定 `reason`:`none` / `local_only` / `bilibili_not_logged_in` / `llm_not_ready` / `already_running` / `already_initialized` / `unsupported_runtime` / `init_failed` / `init_running`(并发写/配置操作被拒)/ `discovery_partial`(stage 4 发现部分失败,非整体失败)/ `not_running`(cancel 时无运行中)。
+稳定 `reason` 还包括 `collection_timeout`（阶段 1 总预算耗尽且无信号）、`empty_signals`、`analyze_failed`、`profile_failed`、`discovery_timeout`、`interrupted` 与 `cancelled`；原有 `none` / `local_only` / `bilibili_not_logged_in` / `llm_not_ready` / `already_running` / `already_initialized` / `unsupported_runtime` / `init_failed` / `init_running` / `discovery_partial` / `not_running` 保持兼容。
 `current_stage`:`0`(未开始)/`1`拉数据/`2`分析/`3`画像/`4`发现池。
 每个 stage 的 `status`:`pending` / `running` / `ok` / `warning`(部分成功,如收藏/关注拉取失败但历史够)/ `failed`。
 `partial_success`:任一 stage 为 `warning`,或画像已生成但发现池「部分完成」时为 `true`(此时 `initialized=true`,推荐池后续靠常规 refresh 补)。
@@ -250,7 +266,7 @@ CLI init 独占进程;API init 跑在**活后端**里,后台有连续 refresh、
 - [ ] 服务器在 init 中途重启 / 热重载后,`GET /api/init-status` 报 `running=false` + 上次 partial/failed,不卡死 `running=true`。
 - [ ] 刚连上的 UI 先拉 `GET /api/init-status` 拿当前 stage + `sequence` 再订阅 WS,不漏连接前进度。
 - [ ] 失效 B站 cookie 不致 `GET /api/init-status` 每次打 B站(命中 TTL 缓存);LLM chat 探测失败 ⇒ `llm_ready=false` 且 `POST /api/init` 拒 `llm_not_ready`。
-- [ ] 画像成功但发现池失败 ⇒ `initialized=true`+`partial_success=true`;B站 历史为空 ⇒ 整体 `failed` + 明确文案;init 失败后端不崩、可重试。
+- [x] 画像成功但发现池失败 ⇒ `initialized=true`+`partial_success=true`;单个来源为空 / 超时会继续其余来源，全部来源无信号才整体失败；init 失败后端不崩、可重试。
 - [ ] grep 全部 extension/web 源(`extension/popup/popup.js`、`extension/popup/popup-helpers.js`、`extension/popup/popup.html`、`src/openbiliclaw/web/js/views/profile.js`、`src/openbiliclaw/web/desktop/assets/js/app.js`)无残留「openbiliclaw init / 先跑 / 先运行」面向用户文案。
 - [ ] Docker 运行时 `POST /api/init` 返回 `unsupported_runtime`(复用 `is_running_in_container()`)。
 - [ ] **TOCTOU**:`POST /api/init` 先原子置 `starting` 再在临界区内 revalidate 前置;并发第二个 `POST` 得 `409 already_running`。

@@ -37,11 +37,14 @@ class OllamaProvider(OpenAIProvider):
     def __init__(
         self,
         api_key: str = "ollama",
-        model: str = "llama3",
-        base_url: str = "http://localhost:11434/v1",
+        model: str = "",
+        base_url: str = "http://127.0.0.1:11434/v1",
         timeout: float = 300.0,
         num_ctx: int = 0,
     ) -> None:
+        model = model.strip()
+        if not model:
+            raise ValueError("Ollama chat model must be explicitly configured.")
         super().__init__(
             api_key=api_key,
             model=model,
@@ -276,10 +279,20 @@ class OllamaProvider(OpenAIProvider):
                         exc_info=True,
                     )
 
+        # Ollama puts the actionable part ("model 'bge-m3' not found",
+        # "out of memory", …) in the response body — without it a bare
+        # "500" is undiagnosable from logs (field log 2026-07-05).
+        body_hint = ""
+        if isinstance(last_exc, httpx.HTTPStatusError):
+            try:
+                body_hint = last_exc.response.text[:200]
+            except Exception:
+                body_hint = ""
         logger.warning(
-            "Ollama embedding failed after 2 attempts (model=%s, url=%s)",
+            "Ollama embedding failed after 2 attempts (model=%s, url=%s)%s",
             model,
             url,
+            f" body={body_hint!r}" if body_hint else "",
             exc_info=last_exc,
         )
         return []

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from .base import DEFAULT_REASONING_EFFORT
 from .openai_provider import OpenAIProvider
 
 
@@ -26,6 +29,9 @@ class OpenRouterProvider(OpenAIProvider):
         http_referer: str = "",
         x_title: str = "",
         timeout: float = 300.0,
+        proxy: str = "",
+        trust_env: bool = True,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -33,6 +39,9 @@ class OpenRouterProvider(OpenAIProvider):
             base_url=base_url,
             provider_name="openrouter",
             timeout=timeout,
+            proxy=proxy,
+            trust_env=trust_env,
+            reasoning_effort=reasoning_effort,
         )
         self._http_referer = http_referer
         self._x_title = x_title
@@ -44,3 +53,25 @@ class OpenRouterProvider(OpenAIProvider):
         if self._x_title.strip():
             headers["X-Title"] = self._x_title
         return headers
+
+    def _extra_body(self, *, reasoning_effort: str | None = None) -> dict[str, Any]:
+        """Use OpenRouter's cross-provider reasoning normalization."""
+
+        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort.strip()
+        if not effort:
+            # OpenRouter exposes whether reasoning is mandatory per model, but
+            # that metadata is not available in this stateless adapter.  Omitting
+            # the field is safer than sending ``none`` to a mandatory model.
+            return {}
+        normalized = effort.lower()
+        if normalized not in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            normalized = DEFAULT_REASONING_EFFORT
+        return {"reasoning": {"effort": normalized}}

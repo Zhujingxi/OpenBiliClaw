@@ -1,13 +1,17 @@
 (() => {
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
+      ping: "/ping",
       health: "/health",
+      qrInfo: "/qr-info",
       initStatus: "/init-status",
       startInit: "/init",
+      cancelInit: "/init/cancel",
       recommendations: "/recommendations",
       refresh: "/recommendations/refresh",
       reshuffle: "/recommendations/reshuffle",
       append: "/recommendations/append",
+      platformAvailability: "/recommendations/platform-availability",
       runtimeStatus: "/runtime-status",
       activityFeed: "/activity-feed",
       notificationPending: "/notifications/pending",
@@ -16,18 +20,21 @@
       delightRespond: "/delight/respond",
       profile: "/profile-summary",
       feedback: "/feedback",
+      events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
-      sourceCredentials: "/sources/credentials?reveal_keys=true",
+      sourceCredentials: "/sources/credentials",
       configProbe: "/config/probe-service",
+      configModelDiscovery: "/config/discover-models",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
-      config: "/config?reveal_keys=true",
+      embeddingRepair: "/embedding/repair",
+      config: "/config",
       watchLater: "/watch-later",
       favorites: "/favorites",
       profileEdit: "/profile/edit",
@@ -45,6 +52,10 @@
       initReason: "",
       initBusy: false,
       initSelectedSources: ["bilibili"],
+      initBangumiUsername: "",
+      initBangumiUsernameTouched: false,
+      initBangumiUsernamePrefilled: false,
+      initBangumiToken: "",
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -54,11 +65,18 @@
       delights: [],
       delightIndex: 0,
       delight: null,
+      degraded: false,
       config: null,
+      llmDraft: null,
+      llmProbeResults: new Map(),
+      llmEditingInstanceId: "",
       sourceStatus: null,
       sourceCredentials: null,
       runtimeStatus: null,
       runtimeSocket: null,
+      // 最近一次「成功」读到的平台可推库存快照 {total_available, by_platform}。
+      // null = 尚未成功读取过（未知态）；读取失败绝不把它改写成 0。
+      platformAvailability: null,
       videos: [],
       messages: [],
       messageListSnapshot: null,
@@ -85,27 +103,43 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit" };
+    // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
+    const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
+    const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
-    ];
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    //
+    // WHICH sources exist comes from the shared roster (/shared/source-status.js,
+    // loaded before this script), the same list the setup wizard and the side
+    // panel build their pickers from — a hardcoded copy here is what let the
+    // three surfaces drift. Labels come from the shared module too, with a local
+    // fallback map so an unrecognised key still renders. defaultChecked stays
+    // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
+    const INIT_SOURCE_LABEL_FALLBACK = {
+      bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+    };
+    const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+    const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+    const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+      ? [..._initSourceStatus.SOURCE_KEYS]
+      : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+    const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+      key,
+      label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+      ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
+    }));
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "当前运行环境不支持图形化初始化，请改用 CLI 初始化入口。",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B 站登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -113,13 +147,22 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+      invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+      bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
+      analyze_failed: "偏好分析未完成。",
+      profile_failed: "画像生成未完成。",
+      discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+      discovery_partial: "画像已生成，但首轮内容池本次未完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
+      interrupted: "上次初始化被打断（后端重启），可重试。",
+      cancelled: "初始化已取消。",
+      collection_timeout: "数据采集达到总等待上限，已停止继续等待平台或扩展。",
       none: ""
     };
     const INIT_STATUS_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_STATUS_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STATUS_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
-    const INIT_FIRST_POOL_WAIT_TEXT = "画像已生成，正在整理首轮内容池；等第一批内容可刷后才算初始化完成。";
     const CHAT_PLACEHOLDERS = [
       "说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。",
       "比如：我喜欢慢慢讲清楚的长视频，讨厌标题党和故意搞悬念的。",
@@ -141,6 +184,21 @@
     let activityPageRefreshTimer = null;
     let activityPageRefreshInFlight = false;
     let activityPageRefreshPending = false;
+    const DESKTOP_RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+    let desktopRecommendationLoadState = "idle";
+    let desktopRuntimeLoadState = "idle";
+    let desktopRecommendationRecoveryAttempt = 0;
+    let desktopRuntimeRecoveryAttempt = 0;
+    let desktopRecommendationRecoveryTimer = null;
+    let desktopRuntimeRecoveryTimer = null;
+    let desktopRecommendationRecoveryInFlight = false;
+    let desktopRuntimeRecoveryInFlight = false;
+    let desktopRuntimeGeneration = 0;
+    let degradedRecoveryPresented = false;
+    const DESKTOP_RESUME_HYDRATE_TTL_MS = 15000;
+    let desktopBackendSessionInFlight = false;
+    let desktopLastHydratedAt = 0;
+    let desktopRuntimeReconnectTimer = null;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -162,7 +220,69 @@
 
     const scheduleDelightQueueRefresh = debounceAsync(() => fetchDelightQueue(), 1000);
 
+    // 库存变化事件可能成串到达（补货一轮会连发多条），去抖 + 单飞（合并 pending
+    // 调用）避免把只读快照接口打成风暴。debounceAsync 已实现这两点。
+    const schedulePlatformAvailabilityRefresh = debounceAsync(() => refreshPlatformAvailability(), 600);
+
+    let platformAvailabilityRetryAttempt = 0;
+    let platformAvailabilityRetryTimer = null;
+
+    function normalizePlatformAvailability(payload) {
+      const total = Number(payload?.total_available);
+      if (!Number.isFinite(total)) return null;
+      const byPlatform = {};
+      const raw = payload?.by_platform;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [key, value] of Object.entries(raw)) {
+          const slug = canonicalPlatformSlug(key);
+          const count = Number(value);
+          if (!slug || !Number.isFinite(count) || count <= 0) continue;
+          byPlatform[slug] = (byPlatform[slug] || 0) + Math.trunc(count);
+        }
+      }
+      return { total_available: Math.max(0, Math.trunc(total)), by_platform: byPlatform };
+    }
+
+    // 首次读取失败后的有界恢复；成功过一次就不再重试（后续由库存事件驱动）。
+    function schedulePlatformAvailabilityRetry() {
+      if (document.hidden) return;
+      if (state.platformAvailability) return;
+      if (platformAvailabilityRetryTimer !== null) return;
+      if (platformAvailabilityRetryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) return;
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[platformAvailabilityRetryAttempt];
+      platformAvailabilityRetryAttempt += 1;
+      platformAvailabilityRetryTimer = window.setTimeout(() => {
+        platformAvailabilityRetryTimer = null;
+        void refreshPlatformAvailability();
+      }, delayMs);
+    }
+
+    async function refreshPlatformAvailability() {
+      try {
+        const snapshot = normalizePlatformAvailability(
+          await requestJsonStrict(ENDPOINTS.platformAvailability, { timeoutMs: 15000, cache: "no-store" })
+        );
+        if (!snapshot) throw new Error("platform availability unavailable");
+        // 只有成功 snapshot 才覆盖旧值。
+        state.platformAvailability = snapshot;
+        platformAvailabilityRetryAttempt = 0;
+        // 库存更新只允许重绘 Tab / 空态与自动续页 gate；已经 append 的推荐卡片
+        // 不重建、不覆盖（renderVideos 只在当前就是空态或 Tab 被迫回退时才跑）。
+        const previousFilter = state.filter;
+        renderFilters();
+        if (state.filter !== previousFilter || grid?.querySelector(".empty-state")) renderVideos();
+        maybeAutoLoadAfterPoolRefill();
+      } catch {
+        // 读取失败保留上一次成功的数字；"失败即全零" 是明确禁止的。
+        schedulePlatformAvailabilityRetry();
+      }
+    }
+
     async function runBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationInFlight) {
         backendHydrationPending = true;
         return;
@@ -183,11 +303,213 @@
     }
 
     function scheduleBackendHydration() {
+      if (document.hidden) {
+        backendHydrationPending = true;
+        return;
+      }
       if (backendHydrationTimer !== null) window.clearTimeout(backendHydrationTimer);
       backendHydrationTimer = window.setTimeout(() => {
         backendHydrationTimer = null;
         void runBackendHydration();
       }, 1000);
+    }
+
+    async function readRecommendationSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.recommendations, { timeoutMs: 15000 });
+      return Array.isArray(payload) ? payload : asArray(payload?.items);
+    }
+
+    async function readRuntimeStatusSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000, cache: "no-store" });
+      return payload?.status || payload;
+    }
+
+    function clearDesktopRecommendationRecovery(nextState) {
+      if (desktopRecommendationRecoveryTimer !== null) {
+        window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+      }
+      desktopRecommendationRecoveryAttempt = 0;
+      desktopRecommendationLoadState = nextState;
+    }
+
+    function clearDesktopRuntimeRecovery(nextState = "ready") {
+      if (desktopRuntimeRecoveryTimer !== null) {
+        window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+      }
+      desktopRuntimeRecoveryAttempt = 0;
+      desktopRuntimeLoadState = nextState;
+      const poolAvailable = $("#poolAvailable");
+      if (poolAvailable) {
+        poolAvailable.onclick = null;
+        poolAvailable.onkeydown = null;
+        poolAvailable.removeAttribute("role");
+        poolAvailable.removeAttribute("tabindex");
+        poolAvailable.removeAttribute("aria-label");
+      }
+    }
+
+    function applyDesktopRecommendationSnapshot(items, { replace = false } = {}) {
+      const normalized = normalizeRecommendationList(items);
+      if (normalized.length > 0) {
+        desktopRecommendationLoadState = "ready";
+      } else {
+        desktopRecommendationLoadState = "empty-success";
+      }
+      clearDesktopRecommendationRecovery(desktopRecommendationLoadState);
+      if (!replace && state.videos.length > 0) return;
+      state.videos = normalized;
+    }
+
+    function applyDesktopRuntimeSnapshot(payload, requestGeneration) {
+      if (requestGeneration !== desktopRuntimeGeneration) return false;
+      if (!payload) throw new Error("runtime status unavailable");
+      desktopRuntimeGeneration += 1;
+      clearDesktopRuntimeRecovery();
+      applyRuntimeStatus(payload);
+      return true;
+    }
+
+    function renderDesktopRuntimeFailure() {
+      if (desktopRuntimeLoadState !== "failed" && desktopRuntimeLoadState !== "failed-exhausted") return;
+      const exhausted = desktopRuntimeLoadState === "failed-exhausted";
+      if (!state.runtimeStatus) {
+        $("#metricPool").textContent = "—";
+        $("#poolAvailable").textContent = exhausted ? "同步失败，点击重试" : "同步失败，正在重试";
+        $("#runtimeSummary").textContent = "库存状态读取失败；这不代表候选池真的为空。";
+      } else {
+        $("#runtimeSummary").textContent = exhausted
+          ? "库存状态同步失败；当前显示的是上次成功读取的库存，点击库存数可重试。"
+          : "库存状态同步失败，正在重试；当前显示的是上次成功读取的库存。";
+      }
+      $("#poolRefreshState").textContent = exhausted ? "同步失败，点击库存重试" : "状态重试中";
+      if (exhausted) {
+        const poolAvailable = $("#poolAvailable");
+        poolAvailable.setAttribute("role", "button");
+        poolAvailable.setAttribute("tabindex", "0");
+        poolAvailable.setAttribute("aria-label", "库存状态同步失败，重新加载");
+        poolAvailable.onclick = restartDesktopFailedRecoveries;
+        poolAvailable.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            restartDesktopFailedRecoveries();
+          }
+        };
+      }
+    }
+
+    function scheduleDesktopRecommendationRecovery() {
+      if (document.hidden) return;
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed") return;
+      if (desktopRecommendationRecoveryInFlight || desktopRecommendationRecoveryTimer !== null) return;
+      if (desktopRecommendationRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRecommendationLoadState = "failed-exhausted";
+        renderVideos();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRecommendationRecoveryAttempt];
+      desktopRecommendationRecoveryTimer = window.setTimeout(() => {
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt += 1;
+        void runDesktopRecommendationRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRecommendationRecovery() {
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed" || desktopRecommendationRecoveryInFlight) return;
+      desktopRecommendationRecoveryInFlight = true;
+      try {
+        applyDesktopRecommendationSnapshot(await readRecommendationSnapshot());
+      } catch {
+        desktopRecommendationLoadState = "failed";
+      } finally {
+        desktopRecommendationRecoveryInFlight = false;
+        renderVideos();
+        scheduleDesktopRecommendationRecovery();
+      }
+    }
+
+    function scheduleDesktopRuntimeRecovery() {
+      if (document.hidden) return;
+      if (desktopRuntimeLoadState !== "failed") return;
+      if (desktopRuntimeRecoveryInFlight || desktopRuntimeRecoveryTimer !== null) return;
+      if (desktopRuntimeRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRuntimeLoadState = "failed-exhausted";
+        renderDesktopRuntimeFailure();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRuntimeRecoveryAttempt];
+      desktopRuntimeRecoveryTimer = window.setTimeout(() => {
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt += 1;
+        void runDesktopRuntimeRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRuntimeRecovery() {
+      if (desktopRuntimeLoadState !== "failed" || desktopRuntimeRecoveryInFlight) return;
+      desktopRuntimeRecoveryInFlight = true;
+      const requestGeneration = desktopRuntimeGeneration;
+      try {
+        const applied = applyDesktopRuntimeSnapshot(
+          await readRuntimeStatusSnapshot(),
+          requestGeneration
+        );
+        // Initial recommendation and runtime reads recover independently. If
+        // recommendations recover first, the guided-init gate remains in the
+        // grid until the runtime snapshot proves the first pool is ready.
+        // Refresh only that gate; do not rebuild healthy, interactive cards.
+        if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+      } catch {
+        if (requestGeneration !== desktopRuntimeGeneration) return;
+        desktopRuntimeLoadState = "failed";
+      } finally {
+        desktopRuntimeRecoveryInFlight = false;
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
+    }
+
+    function restartDesktopFailedRecoveries() {
+      let recommendationRestarted = false;
+      let runtimeRestarted = false;
+      if (
+        state.videos.length === 0 &&
+        (desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted")
+      ) {
+        if (desktopRecommendationRecoveryTimer !== null) window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+        recommendationRestarted = true;
+      }
+      if (desktopRuntimeLoadState === "failed" || desktopRuntimeLoadState === "failed-exhausted") {
+        if (desktopRuntimeRecoveryTimer !== null) window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt = 0;
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+        runtimeRestarted = true;
+      }
+      if (recommendationRestarted) renderVideos();
+      if (runtimeRestarted) renderDesktopRuntimeFailure();
+      // 用户重试也重开一次库存快照读取（首次失败后的 Tab 计数仍是未知态）。
+      if (!state.platformAvailability) {
+        if (platformAvailabilityRetryTimer !== null) window.clearTimeout(platformAvailabilityRetryTimer);
+        platformAvailabilityRetryTimer = null;
+        platformAvailabilityRetryAttempt = 0;
+        schedulePlatformAvailabilityRefresh();
+      }
     }
 
     async function runActivityPageRefresh() {
@@ -211,6 +533,10 @@
     }
 
     function scheduleActivityPageRefresh() {
+      if (document.hidden) {
+        activityPageRefreshPending = true;
+        return;
+      }
       if (activityPageRefreshTimer !== null) window.clearTimeout(activityPageRefreshTimer);
       activityPageRefreshTimer = window.setTimeout(() => {
         activityPageRefreshTimer = null;
@@ -251,8 +577,38 @@
       console.error(context, error);
     }
 
-    window.addEventListener("error", (event) => showFatal(event.error || event.message, "页面脚本"));
-    window.addEventListener("unhandledrejection", (event) => showFatal(event.reason, "异步加载"));
+    const FOREIGN_SCRIPT_URL_RE = /\b(?:chrome-extension|moz-extension|safari-web-extension|safari-extension|user-script|greasemonkey-script):/i;
+
+    function isForeignScriptError(event) {
+      const filename = event?.filename || "";
+      // 跨域脚本的错误会被浏览器脱敏成空 filename + "Script error."，本站资源不会
+      if (!filename) return true;
+      try {
+        return new URL(filename, window.location.href).origin !== window.location.origin;
+      } catch {
+        return true;
+      }
+    }
+
+    function isForeignRejection(reason) {
+      const stack = typeof reason?.stack === "string" ? reason.stack : "";
+      return FOREIGN_SCRIPT_URL_RE.test(stack) && !stack.includes(window.location.origin);
+    }
+
+    window.addEventListener("error", (event) => {
+      if (isForeignScriptError(event)) {
+        console.warn("已忽略非本站脚本错误（通常来自浏览器扩展/油猴脚本）:", event.filename || "(跨域)", event.message);
+        return;
+      }
+      showFatal(event.error || event.message, "页面脚本");
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      if (isForeignRejection(event.reason)) {
+        console.warn("已忽略非本站脚本 Promise 错误（通常来自浏览器扩展/油猴脚本）:", event.reason);
+        return;
+      }
+      showFatal(event.reason, "异步加载");
+    });
 
     function storageGet(key) {
       try { return window.localStorage?.getItem(key) || ""; } catch { return ""; }
@@ -262,14 +618,64 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
-    const DISMISS_ON_RESHUFFLE_KEY = "openbiliclaw.dismissOnReshuffle";
-    state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
+    const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
+    const AUTO_LOAD_COOLDOWN_MS = 8000;
+    // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
+    // 自动加载会在最后一行(最多 4 张)还没滚进视口时就追加新卡片，用户永远看不全
+    // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
+    // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
+    const AUTO_LOAD_ROOT_MARGIN_PX = 50;
+    const DESKTOP_EAGER_COVER_COUNT = 4;
+    state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
+    const THEME_STORAGE_KEY = "obc.theme";
+    const THEME_HUE_STORAGE_KEY = "obc.themeHue";
+    const THEME_OPTIONS = ["auto", "light", "dark"];
+    const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
+    const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
+    state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
+    const _storedHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10);
+    // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
+    state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
+    const ACCENT_STORAGE_KEY = "obc.accentStyle";
+    const ACCENT_OPTIONS = ["modern", "classic"];
+    const THEME_NOTICE_DISMISSED_KEY = "obc.noticeDismissed";
+    // 8 秒覆盖约 55 个中文字的阅读与按钮扫视；hover / focus 会暂停。
+    // 校准：2026-07-15 桌面端人工走查，兼顾可读性与不长期遮挡内容。
+    const THEME_NOTICE_DURATION_MS = 8000;
+    // 迁移：已有自定义色相的老用户默认 modern，保留色相；新用户默认 classic
+    const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== "";
+    const _storedAccent = storageGet(ACCENT_STORAGE_KEY);
+    state.accentStyle = ACCENT_OPTIONS.includes(_storedAccent)
+      ? _storedAccent
+      : _hasCustomHue ? "modern" : "classic";
+    if (!ACCENT_OPTIONS.includes(_storedAccent)) {
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+    }
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
     const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
+    // 加载更多一次向后端请求的条数（后端 append 端点固定 limit=10）；
+    // 返回少于这个数说明候选池当轮见底，据此切换文案并等待补货重试。
+    const APPEND_BATCH_SIZE = 10;
+    const APPEND_SKELETON_COUNT = 4;
+    let autoLoadObserver = null;
+    let autoLoadCheckRaf = 0;
+    let autoLoadCheckFallbackTimer = 0;
+    let autoLoadCooldownTimer = 0;
+    let appendMoreInFlight = false;
+    let lastAutoLoadAt = 0;
+    let sentinelInView = false;
+    let _cachedLanIp = "";
+    // 惊喜卡自动轮播间隔。原值 4s 是初版占位，实测太快：一张卡的标题 + 推荐理由 + 正文
+    // 摘录读下来就要十几秒，还没看清就被换走。60s 给足阅读时间，想快进有拖拽和上一条 /
+    // 下一条。与移动端 web/js/views/recommend.js 的同名常量保持一致。
+    const DELIGHT_AUTO_ADVANCE_MS = 60000;
+    let _delightAutoTimer = null;
+    let _delightSwipeStartX = 0;
+    const _delightStatusCache = new Map();
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -397,16 +803,29 @@
       const configuredLimit = config.scheduler?.delight_queue_limit;
       const limit = configuredLimit || storageGet(DELIGHT_QUEUE_LIMIT_KEY) || "20";
       setInput("delightQueueLimit", String(limit));
-      renderReshuffleToggle();
+      applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
+      renderThemeHueControls();
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
     }
 
     function persistFrontendSettings() {
       const limit = getDelightQueueLimit();
       setInput("delightQueueLimit", String(limit));
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
-      storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
-      renderReshuffleToggle();
-      return { delightQueueLimit: limit, dismissOnReshuffle: state.dismissOnReshuffle };
+      storageSet(THEME_STORAGE_KEY, state.themeMode);
+      storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+      storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
+      renderThemeHueControls();
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -470,16 +889,26 @@
     }
 
     async function fetchAuthStatus() {
+      const base = getApiBase() || DEFAULT_API_BASE;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 5000);
       try {
-        const base = getApiBase() || DEFAULT_API_BASE;
         const res = await fetch(`${base}/auth/status`, {
           credentials: "same-origin",
           headers: withBearer(),
+          signal: controller.signal,
         });
-        if (!res.ok) return { enabled: false, authenticated: true };
-        return await res.json();
-      } catch {
-        return { enabled: false, authenticated: true };
+        if (!res.ok) throw new Error(`/auth/status 请求失败：HTTP ${res.status}`);
+        const status = await res.json();
+        if (!status || typeof status !== "object" || Array.isArray(status)) {
+          throw new Error("/auth/status 返回了无效数据。");
+        }
+        return status;
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error("/auth/status 请求超时，请稍后重试。");
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 
@@ -493,21 +922,17 @@
       _authOverlayShown = true;
       const overlay = document.createElement("div");
       overlay.id = "authOverlay";
+      overlay.className = "auth-overlay";
       overlay.setAttribute("role", "dialog");
       overlay.setAttribute("aria-modal", "true");
-      overlay.style.cssText =
-        "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;" +
-        "background:rgba(20,28,46,0.55);backdrop-filter:blur(4px);";
       overlay.innerHTML =
-        '<form id="authForm" autocomplete="off" style="width:min(360px,90vw);display:flex;flex-direction:column;gap:14px;' +
-        'padding:28px 24px;background:#fff;border-radius:18px;box-shadow:0 18px 48px rgba(0,0,0,.22);">' +
-        '<h2 style="margin:0;font-size:20px;color:#fb7299;text-align:center;">OpenBiliClaw</h2>' +
-        '<p style="margin:0;font-size:14px;color:#60708c;text-align:center;">请输入访问密码</p>' +
+        '<form id="authForm" class="auth-form" autocomplete="off">' +
+        '<h2 class="auth-title">OpenBiliClaw</h2>' +
+        '<p class="auth-copy">请输入访问密码</p>' +
         '<input id="authPassword" type="password" placeholder="密码" autocomplete="current-password" ' +
-        'aria-label="访问密码" style="padding:12px 14px;font-size:15px;border:1px solid #e2e6ef;border-radius:10px;">' +
-        '<button type="submit" style="padding:12px;font-size:15px;font-weight:600;color:#fff;background:#fb7299;' +
-        'border:none;border-radius:10px;cursor:pointer;">登录</button>' +
-        '<p id="authError" role="alert" hidden style="margin:0;font-size:13px;color:#ef4444;text-align:center;"></p>' +
+        'aria-label="访问密码" class="auth-input">' +
+        '<button class="auth-submit" type="submit">登录</button>' +
+        '<p id="authError" class="auth-error" role="alert" hidden></p>' +
         "</form>";
       document.body.appendChild(overlay);
       const input = overlay.querySelector("#authPassword");
@@ -620,21 +1045,93 @@
       return explicit || "bilibili";
     }
 
+    function formatDuration(seconds) {
+      const total = Math.floor(Number(seconds) || 0);
+      if (total <= 0) return "";
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secondsPart = total % 60;
+      if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(secondsPart).padStart(2, "0")}`;
+      }
+      return `${minutes}:${String(secondsPart).padStart(2, "0")}`;
+    }
+
+    function formatCountCn(n) {
+      const value = Math.floor(Number(n) || 0);
+      if (value <= 0) return "";
+      if (value >= 100000000) {
+        return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+      }
+      if (value >= 10000) {
+        return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+      }
+      return String(value);
+    }
+
+    function formatPublishedTime(item, now = Date.now()) {
+      const parsed = Date.parse(String(item?.published_at || ""));
+      if (Number.isFinite(parsed)) {
+        const diff = now - parsed;
+        if (diff >= -300_000 && diff < 60_000) return "刚刚";
+        if (diff >= 0 && diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+        if (diff >= 0 && diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+        const date = new Date(parsed);
+        const current = new Date(now);
+        if (date.getFullYear() === current.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+      return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+    }
+
+    // Legacy content_cache rows persisted before issue #79 still carry raw
+    // `answer_<id>` / `zhihu_<id>` titles. Derive something readable from the
+    // body text (first sentence), else a generic label, so the card header is
+    // never a bare ID even without re-fetching.
+    const ID_TITLE_RE = /^(answer|article|question|zhihu)_\S+$/;
+    const ZHIHU_TITLE_PLACEHOLDERS = { answer: "来自知乎的回答", article: "来自知乎的文章", question: "来自知乎的提问" };
+    function displayRecommendationTitle(rawTitle, bodyText, contentType) {
+      const title = String(rawTitle || "").trim();
+      if (title && !ID_TITLE_RE.test(title)) return title;
+      const body = String(bodyText || "").trim();
+      if (body) {
+        const first = (body.split(/[。！？!?\n]/, 1)[0] || "").trim() || body;
+        return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+      }
+      return ZHIHU_TITLE_PLACEHOLDERS[contentType] || (title || "未命名内容");
+    }
+
     function normalizeRecommendation(item) {
-      const contentId = String(item?.content_id ?? item?.bvid ?? "");
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const contentId = canonical.content_id;
+      const contentType = canonical.content_type.toLowerCase();
+      const bodyText = decodeHtmlEntities(item?.body_text ?? "");
       return {
         id: Number(item?.id ?? Date.now()),
         bvid: String(item?.bvid ?? contentId),
+        item_key: canonical.item_key,
         content_id: contentId,
-        title: decodeHtmlEntities(item?.title ?? "未命名内容"),
-        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
+        title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
+        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? (canonical.source_platform === "bangumi" ? "" : "未知创作者")),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
-        content_url: String(item?.content_url ?? ""),
+        content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
-        platform: normalizeSourcePlatform(item),
-        content_type: String(item?.content_type ?? "video").trim().toLowerCase() || "video",
-        body_text: decodeHtmlEntities(item?.body_text ?? ""),
-        duration: String(item?.duration ?? ""),
+        platform: canonical.source_platform,
+        source_platform: canonical.source_platform,
+        content_type: contentType,
+        body_text: bodyText,
+        duration: Number(item?.duration ?? 0) || 0,
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
+        up_mid: Number(item?.up_mid ?? 0) || 0,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
         pool_status: String(item?.pool_status ?? item?.status ?? ""),
@@ -706,7 +1203,7 @@
     function configErrorMessage(details) {
       if (!details) return "";
       if (typeof details === "string") return details;
-      const issues = details.config?.issues || details.detail?.config?.issues;
+      const issues = details.issues || details.config?.issues || details.detail?.config?.issues;
       if (Array.isArray(issues) && issues.length) {
         return issues.map((issue) => `${issue.severity || "warning"}: ${issue.message || issue.code || JSON.stringify(issue)}`).join("\n");
       }
@@ -716,16 +1213,169 @@
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
     }
 
-    function showToast(message) {
-      const toast = $("#toast");
-      toast.textContent = message;
-      toast.classList.add("is-open");
-      window.setTimeout(() => toast.classList.remove("is-open"), 2600);
+    function presentDegradedConfigRecovery(snapshot) {
+      if (snapshot?.degraded !== true) return;
+      state.degraded = true;
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const diagnostic = configErrorMessage(snapshot);
+      const configStatus = $("#configStatus");
+      if (configStatus) {
+        configStatus.setAttribute("role", "alert");
+        configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
+      }
+      $("#statusLabel").textContent = "模型配置待修复";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
+      if (degradedRecoveryPresented) return;
+      degradedRecoveryPresented = true;
+      openSettingsPage("models");
+      showToast("模型配置不可用，已打开恢复设置");
     }
+
+    const toastManager = {
+      items: [], gap: 8, container: null,
+      init() {
+        this.container = document.getElementById("toastContainer");
+        if (!this.container) {
+          this.container = document.createElement("div");
+          this.container.className = "toast-container";
+          document.body.appendChild(this.container);
+        }
+      },
+      showToast(msg, { duration = 2600 } = {}) {
+        const el = document.createElement("div");
+        el.className = "toast-item entering";
+        el.textContent = msg;
+        el.addEventListener("click", (e) => this.dismiss(el));
+        el.addEventListener("mouseenter", () => { const i = this.items.find(it => it.el === el); if (i) this._pause(i); });
+        el.addEventListener("mouseleave", () => { const i = this.items.find(it => it.el === el); if (i) this._resume(i); });
+        this.container.appendChild(el);
+        const item = { el, timer: null, remaining: duration, started: Date.now(), paused: false, exiting: false };
+        this.items.push(item);
+        this._reposition();
+        void el.offsetHeight;
+        el.classList.remove("entering");
+        return item;
+      },
+      _reposition() {
+        let bottom = 0;
+        for (const item of this.items) {
+          if (item.exiting) continue;
+          const first = bottom === 0;
+          item.el.style.bottom = bottom + "px";
+          if (first && !item.reachedBottom) {
+            item.reachedBottom = true;
+            const elapsed = Date.now() - item.started;
+            const actual = Math.max(0, item.remaining - elapsed);
+            if (actual < 2000) item.remaining = actual + 2000;
+            if (!item.paused) this._startTimer(item);
+          }
+          bottom += item.el.offsetHeight + this.gap;
+        }
+      },
+      dismiss(el) {
+        const item = this.items.find((i) => i.el === el);
+        if (!item || item.exiting) return;
+        item.exiting = true;
+        this._clearTimer(item);
+        el.classList.add("exiting");
+        el.addEventListener("transitionend", () => {
+          const idx = this.items.indexOf(item);
+          if (idx >= 0) this.items.splice(idx, 1);
+          el.remove();
+          this._reposition();
+        }, { once: true });
+      },
+      _startTimer(item) {
+        this._clearTimer(item);
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), item.remaining);
+      },
+      _clearTimer(item) {
+        if (item.timer) { clearTimeout(item.timer); item.timer = null; }
+      },
+      _pause(item) {
+        if (item.paused || item.exiting || !item.reachedBottom) return;
+        this._clearTimer(item);
+        item.remaining -= Date.now() - item.started;
+        item.paused = true;
+      },
+      _resume(item) {
+        if (!item.paused || item.exiting || !item.reachedBottom) return;
+        item.paused = false;
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), Math.max(item.remaining, 2000));
+      }
+    };
+
+    function setupThemeNotice() {
+      if (state.accentStyle !== "classic" || storageGet(THEME_NOTICE_DISMISSED_KEY) === "1") return;
+      const notice = $("#themeNotice");
+      const dismissButton = $("#themeNoticeDismiss");
+      const settingsButton = $("#themeNoticeSettings");
+      if (!notice || !dismissButton || !settingsButton || notice.dataset.bound === "1") return;
+      notice.dataset.bound = "1";
+      let timer = 0;
+
+      const clearTimer = () => {
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+      };
+      const dismiss = () => {
+        clearTimer();
+        storageSet(THEME_NOTICE_DISMISSED_KEY, "1");
+        notice.classList.remove("is-visible");
+        window.setTimeout(() => { notice.hidden = true; }, 200);
+      };
+      const scheduleDismiss = () => {
+        clearTimer();
+        timer = window.setTimeout(dismiss, THEME_NOTICE_DURATION_MS);
+      };
+
+      dismissButton.addEventListener("click", dismiss);
+      settingsButton.addEventListener("click", () => {
+        dismiss();
+        openSettingsPage("frontend");
+      });
+      notice.addEventListener("mouseenter", clearTimer);
+      notice.addEventListener("mouseleave", scheduleDismiss);
+      notice.addEventListener("focusin", clearTimer);
+      notice.addEventListener("focusout", (event) => {
+        if (!notice.contains(event.relatedTarget)) scheduleDismiss();
+      });
+      notice.hidden = false;
+      window.requestAnimationFrame(() => notice.classList.add("is-visible"));
+      scheduleDismiss();
+    }
+    function showToast(message) { toastManager.showToast(message); }
+    window.showToast = showToast;// 用于终端测试ToastNotice
+
+    const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
+      windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
+      onCommitError: (error) => {
+        const detail = configErrorMessage(error?.details) || error?.message || "反馈提交失败";
+        showToast(`${detail}，已恢复原状态。`);
+      }
+    });
+    window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });
 
     function describeInitReason(reason) {
       if (!reason || reason === "none") return "";
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
+    }
+
+    function initStatusReasonText(status) {
+      const reason = String(status?.reason || "");
+      const detail = String(status?.detail || "").trim();
+      const detailFirst = new Set([
+        "analyze_failed",
+        "profile_failed",
+        "discovery_timeout",
+        "discovery_partial"
+      ]);
+      // account-sync keeps llm_not_ready while the live probe is still red,
+      // but its detail contains the actual profile-analysis failure.
+      if (detail && (detailFirst.has(reason) || detail.startsWith("画像分析失败："))) return detail;
+      return describeInitReason(reason) || detail;
     }
 
     function initEnabledPlatforms(status) {
@@ -738,6 +1388,22 @@
       return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
     }
 
+    function embeddingPhaseHint(prereq) {
+      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+    }
+
+    function embeddingPullProgressView(status) {
+      const prereq = status?.prerequisites || {};
+      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
+      const completed = Number(prereq.embedding_repair_completed || 0);
+      const total = Number(prereq.embedding_repair_total || 0);
+      const pct = total > 0
+        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+        : active ? 1 : 0;
+      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
+      return { active, pct, label };
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = initEnabledPlatforms(status);
@@ -745,13 +1411,27 @@
       // B 站登录只在勾选了 B 站时才是硬前置。
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      const embeddingHint = [
+        embeddingPhaseHint(prereq),
+        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim()
+      ].filter(Boolean).join(" ");
+      const embeddingCheck = String(prereq.embedding_check || "");
+      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
+      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
+      // label 必须反映探测的真实结果——固定写“已登录”的条目名一旦不再是红 ✗，
+      // 用户就会把它读成“已经登录了”。
+      const biliOk = Boolean(prereq.bilibili_logged_in);
+      const biliState = biliOk ? "B 站已登录" : "B 站登录检测未通过";
+      const biliDetail = String(prereq.bilibili_detail || "").trim();
       return [
         {
           key: "bilibili",
-          label: biliSelected ? "B 站已登录" : "B 站已登录（未勾选 B 站，可跳过）",
-          ok: Boolean(prereq.bilibili_logged_in),
+          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
+          ok: biliOk,
           hard: biliSelected,
-          hint: "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
+          hint:
+            (biliDetail ? `${biliDetail} ` : "") +
+            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
         },
         {
           key: "llm",
@@ -765,9 +1445,20 @@
           label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
           hard: embeddingRequired,
-          hint: embeddingRequired
-            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"
+          // Backend-classified cause (embedding_detail, v0.3.155+):
+          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
+          // detail 带实时百分比，3s 轮询自动刷新）。
+          hint:
+            embeddingHint ||
+            (embeddingRequired
+              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
+          // One-click server-side `ollama pull`; hidden while repairing (the
+          // hint already shows live percent).
+          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
+          repairLabel: embeddingCheck === "model_path_encoding"
+            ? "迁移模型目录并修复"
+            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型"
         },
         {
           key: "platforms",
@@ -783,45 +1474,213 @@
       ];
     }
 
-    function initProgressView(status) {
+    // ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──
+    // MIRROR of the reference implementation in
+    // extension/popup/popup-init-control.js — the three GUI surfaces share no
+    // module system, so keep the formulas in lock-step when editing either.
+    const STAGE_FRACTION_CAP = 0.95;
+    // A stage with no real done/total contributes NOTHING to the bar. It used
+    // to contribute a flat half-step (0.5), which implied a progress the stage
+    // had not made; such stages now render indeterminate instead.
+    const STAGE_FRACTION_UNKNOWN = 0;
+    // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
+    // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+    const INIT_STALL_THRESHOLD_SECONDS = 90;
+    // Work-unit stall floor + adaptive slack. The heartbeat period says
+    // nothing about how long ONE unit of work legitimately takes: an analysis
+    // batch on a slow/remote chat model routinely runs minutes (field report
+    // 2026-07-20: 280s per batch — healthy, yet the shared 90s threshold cried
+    // "stalled" throughout). Floor generously, then adapt to this run's own
+    // cadence. Keep in lock-step with popup-init-control.js.
+    const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+    const PROGRESS_STALL_SLACK = 1.5;
+    function _progressStallThreshold(st, stage) {
+      const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+      const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+      const maxSeconds = Number(stage?.progress?.max_seconds || 0);
+      return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+    }
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成。总耗时差别很大——取决于你勾了几个平台、拉到多少历史，也取决于 AI 服务的快慢，所以这里不预估时间；运行时会实时显示每一步的已用时和已完成的量。期间可离开此页面，进度会保留。";
+    // Said ONCE while the user waits, not repeated on every stage row.
+    const INIT_RUNNING_HINT = "只要还在出结果就不会被打断，慢一些是正常的。期间可离开此页面，进度会保留。";
+
+    const _runViewState = new Map();
+
+    function _viewState(runId) {
+      let st = _runViewState.get(runId);
+      if (!st) {
+        st = {
+          maxPct: 0,
+          lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
+          lastProgressMark: null, lastProgressChangeMs: 0,
+          slowestProgressIntervalSeconds: 0
+        };
+        _runViewState.set(runId, st);
+        if (_runViewState.size > 8) {
+          const oldest = _runViewState.keys().next().value;
+          if (oldest !== runId) _runViewState.delete(oldest);
+        }
+      }
+      return st;
+    }
+
+    // Only REAL sub-progress moves the bar. The old elapsed/eta pseudo-progress
+    // (1 - e^-t/eta) is gone with the forecasts that fed it: faking a moving
+    // bar from a made-up duration is the same lie in another shape. A stage
+    // without done/total contributes nothing and renders indeterminate.
+    function _runningStageFraction(stage) {
+      const total = Number(stage?.progress?.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(stage?.progress?.done || 0), total));
+        return Math.min(STAGE_FRACTION_CAP, done / total);
+      }
+      return STAGE_FRACTION_UNKNOWN;
+    }
+
+    // A waiting user needs EVIDENCE OF PROGRESS, not a forecast. A predicted
+    // duration we cannot honour is worse than none: every wrong estimate reads
+    // as "it broke" (field report 2026-07-20 — stage 2 announced 3 minutes and
+    // stage 4 announced 5, both legitimately ran far longer). So the running
+    // row reports only observed facts the backend already publishes: how long
+    // this stage has been running, and real sub-progress counts when they
+    // exist. No estimate, no ceiling, no extrapolation.
+    function formatElapsedText(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      return s < 60 ? "已用时不到 1 分钟" : `已用时 ${Math.floor(s / 60)} 分钟`;
+    }
+
+    function stageDetailText(stage) {
+      const prog = stage?.progress;
+      if (!prog) return "";
+      const parts = [];
+      const elapsed = Number(prog.elapsed_seconds || 0);
+      if (elapsed > 0) parts.push(formatElapsedText(elapsed));
+      const total = Number(prog.total || 0);
+      if (total > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), total));
+        parts.push(`已完成 ${done}/${total}`);
+      }
+      return parts.join(" · ");
+    }
+
+    // Split connection liveness from substantive work progress. A healthy 30s
+    // heartbeat must not disguise a provider call that stopped advancing.
+    function stalenessView(status, nowMs = Date.now()) {
+      if (!status?.running) return { fresh: true, staleSeconds: 0, text: "" };
+      const runId = status.run_id ? String(status.run_id) : "";
+      const heartbeatAt = status.last_heartbeat_at || status.last_activity;
+      const progressAt = status.last_progress_at || status.last_activity;
+      if (!runId || !heartbeatAt) {
+        return { fresh: true, staleSeconds: 0, text: "● 后端已接单 · 正在建立进度" };
+      }
+      const st = _viewState(runId);
+      const heartbeatMark = `${status.sequence ?? ""}|${heartbeatAt}`;
+      if (st.lastHeartbeatMark !== heartbeatMark) {
+        st.lastHeartbeatMark = heartbeatMark;
+        st.lastHeartbeatChangeMs = nowMs;
+      }
+      const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
+      if (st.lastProgressMark !== progressMark) {
+        // Learn this run's pace from every completed unit (skip the first
+        // mark, which measures "since we started watching").
+        if (st.lastProgressMark != null && st.lastProgressChangeMs) {
+          const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+          st.slowestProgressIntervalSeconds = Math.max(
+            st.slowestProgressIntervalSeconds || 0,
+            interval,
+          );
+        }
+        st.lastProgressMark = progressMark;
+        st.lastProgressChangeMs = nowMs;
+      }
+      const heartbeatStale = Math.max(0, Math.round((nowMs - st.lastHeartbeatChangeMs) / 1000));
+      const progressStale = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+      if (heartbeatStale > INIT_STALL_THRESHOLD_SECONDS) {
+        const minutes = Math.max(1, Math.round(heartbeatStale / 60));
+        return {
+          fresh: false,
+          staleSeconds: heartbeatStale,
+          text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`
+        };
+      }
+      const runningStage = Array.isArray(status.stages)
+        ? status.stages.find((stage) => stage?.status === "running")
+        : null;
+      if (progressStale > _progressStallThreshold(st, runningStage)) {
+        const minutes = Math.max(1, Math.round(progressStale / 60));
+        return {
+          fresh: false,
+          staleSeconds: progressStale,
+          text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`
+        };
+      }
+      return { fresh: true, staleSeconds: progressStale, text: "● 后端在线 · 正在处理" };
+    }
+
+    function initProgressView(status, nowMs = Date.now()) {
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const doneCount = stages.filter((stage) => stage.status === "ok").length;
       const running = Boolean(status?.running);
+      const runId = status?.run_id ? String(status.run_id) : "";
+      const st = runId ? _viewState(runId) : null;
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
-      const rawPct = ((doneCount + (running ? 0.5 : 0)) / total) * 100;
-      const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+      // Indeterminate covers both the backend's explicit flag and any
+      // running stage with no real done/total — with the eta gone there is
+      // nothing honest left to fill such a bar with.
+      const indeterminate = Boolean(
+        running &&
+          currentStage &&
+          (currentStage.progress?.mode === "indeterminate" ||
+            !(Number(currentStage.progress?.total || 0) > 0)),
+      );
+      let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
+      const note = currentStage?.progress?.note;
+      if (stageLabel && note) stageLabel += ` · ${note}`;
+      const runningStages = stages.filter((stage) => stage.status === "running");
+      const inFlight = runningStages.length
+        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage), 0) /
+          runningStages.length
+        : 0;
+      const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
+      let pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+      if (running) pct = Math.max(pct, 1);
+      if (st) {
+        st.maxPct = Math.max(st.maxPct, pct);
+        pct = st.maxPct;
+      }
       return {
         active: running,
         failed: Boolean(failedStage),
-        pct: running ? Math.max(pct, 1) : pct,
-        stageLabel: currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "",
+        indeterminate,
+        pct,
+        stageLabel,
+        stageDetailText: running ? stageDetailText(currentStage) : "",
         failedReason: failedStage?.reason || ""
       };
     }
 
-    function initContentReadyFromRuntime(status = state.runtimeStatus) {
-      const runtime = normalizeRuntimeStatus(status);
-      return Boolean(runtime) && (
-        runtime.pool_available_count > 0 ||
-        runtime.recommendation_count > 0
-      );
-    }
-
-    function initWaitingForFirstPool(status = state.initStatus) {
-      return Boolean(status?.initialized) && !initContentReadyFromRuntime(state.runtimeStatus);
-    }
-
-    async function refreshRuntimeStatusForInitContent() {
-      try {
-        const runtime = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 60000 });
-        state.runtimeStatus = normalizeRuntimeStatus(runtime);
-      } catch {
-        // Keep the last runtime snapshot; the init poll will retry.
-      }
-      return initContentReadyFromRuntime(state.runtimeStatus);
+    // Human text for a failed/cancelled run. ``status.detail`` carries the
+    // backend's stored failure specifics (exception summary / GuidedInitError
+    // message, v0.3.156+) — append it so internal_error is diagnosable from
+    // the UI instead of only the generic "请稍后重试".
+    function initFailureText(status, progress) {
+      const base = describeInitReason(status?.reason) || "";
+      const detail = String(status?.detail || "").trim();
+      const reason = String(status?.reason || "");
+      if (
+        detail &&
+        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+          detail.startsWith("画像分析失败："))
+      ) return detail;
+      // Unmapped codes (empty_history / empty_signals / profile_failed …)
+      // carry their authoritative human message in detail — show it alone
+      // instead of "未知初始化状态：code（message）".
+      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
+      if (base && detail) return `${base}（${detail}）`;
+      return base || progress?.failedReason || "初始化未完成，请稍后重试。";
     }
 
     function selectedInitSourcesFromDom() {
@@ -834,13 +1693,45 @@
       if (!status) {
         return '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>';
       }
+      // Post-init the pre-init checklist is irrelevant, and the backend no
+      // longer live-probes services for already-initialized status reads —
+      // the cached values could read stale-red here (e.g. right after a
+      // backend restart while the first pool is still filling). Hide it.
+      if (status.initialized) return "";
       return buildInitChecklist(status, selected)
         .map((row) => {
           const mark = row.ok ? "✓" : row.hard ? "✗" : "•";
           const hint = !row.ok && row.hint ? `<p class="init-hint">${escapeHtml(row.hint)}</p>` : "";
-          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}</li>`;
+          const repair = !row.ok && row.repairable
+            ? `<button class="small-btn init-repair-btn" type="button" data-embedding-repair>${escapeHtml(row.repairLabel || "自动下载向量模型")}</button>`
+            : "";
+          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}${repair}</li>`;
         })
         .join("");
+    }
+
+    // Kick the server-side model pull; the 3s init-status poll then renders
+    // live percent on the checklist row (embedding_check="repairing"). The
+    // checklist is re-rendered per poll, so the handler is DELEGATED from the
+    // <ul> (bound once in renderInitOnboarding) instead of per-button.
+    async function handleEmbeddingRepairClick(btn) {
+      const originalLabel = btn.textContent || "自动下载向量模型";
+      btn.disabled = true;
+      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
+      try {
+        await requestJsonStrict(ENDPOINTS.embeddingRepair, { method: "POST" });
+      } catch (error) {
+        // 409 already_running means a pull is in flight — that's the goal
+        // state; every other error re-enables the button with the reason.
+        if (error?.status !== 409 || error?.details?.error !== "already_running") {
+          btn.disabled = false;
+          btn.textContent = originalLabel;
+          state.initReason = error?.details?.detail || error?.message || "向量模型修复启动失败。";
+          renderInitOnboarding();
+          return;
+        }
+      }
+      void refreshInitStatus({ schedule: true });
     }
 
     function initSourcesMarkup() {
@@ -852,13 +1743,22 @@
         const label = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
         return `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(opt.key)}" data-init-source="${escapeHtml(opt.key)}"${checked}><span>${escapeHtml(label)}</span></label>`;
       }).join("");
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      const bangumiDisabled = selected.has("bangumi") ? "" : " disabled";
+      const bangumiUsername = state.initBangumiUsernameTouched
+        ? state.initBangumiUsername
+        : state.config?.sources?.bangumi?.username || state.initBangumiUsername || "";
+      const bangumiInput = `<label class="init-source-row"><span>Bangumi 公开用户名（可留空，仅启用发现）</span><input id="initBangumiUsername" maxlength="128" autocomplete="off" value="${escapeHtml(bangumiUsername)}"${bangumiDisabled}></label>`;
+      // Optional personal access token: identifies the account via /v0/me and
+      // reads private collections; when set, the username above is auto-resolved.
+      const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
+      const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
       if (state.initBusy) return "busy";
-      if (Boolean(status?.initialized)) return initContentReadyFromRuntime(state.runtimeStatus) ? "completed" : "running";
       if (Boolean(status?.running)) return "running";
+      if (Boolean(status?.initialized)) return "completed";
       if (progress.failed) return "failed";
       return "idle";
     }
@@ -870,13 +1770,36 @@
       const progressFill = section.querySelector(".init-progress-fill");
       const progressText = progressBox?.querySelector("p");
       const progressLabel = progress.failed
-        ? (describeInitReason(status?.reason) || progress.failedReason || "初始化未完成，请稍后重试。")
+        ? initFailureText(status, progress)
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.label || (progress.indeterminate
+            ? progress.stageLabel || "正在初始化"
+            : `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`)
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
-      if (progressFill) progressFill.style.width = `${progress.pct}%`;
-      if (progressText) progressText.textContent = progressLabel;
+      if (progressFill) {
+        progressFill.style.width = progress.indeterminate ? "100%" : `${progress.pct}%`;
+      }
+      if (progressFill) progressFill.classList.toggle("indeterminate", Boolean(progress.indeterminate));
+      if (progressText) {
+        progressText.textContent = progressLabel;
+        progressText.setAttribute("role", progress.failed ? "alert" : "status");
+        progressText.setAttribute("aria-live", progress.failed ? "assertive" : "polite");
+      }
+      // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
+      // keeps writing; amber stall copy after >90s of silence.
+      const stallHint = section.querySelector(".init-stall-hint");
+      if (stallHint) {
+        const staleness = stalenessView(status);
+        const stallText = Boolean(status?.running)
+          ? staleness.fresh
+            ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
+            : staleness.text
+          : "";
+        stallHint.textContent = stallText;
+        stallHint.classList.toggle("stale", Boolean(status?.running) && !staleness.fresh);
+        stallHint.hidden = !stallText;
+      }
       const reasonText = section.querySelector(".init-reason");
       if (reasonText) {
         reasonText.hidden = !reason;
@@ -887,6 +1810,11 @@
         startButton.disabled = buttonDisabled;
         startButton.textContent = buttonLabel;
       }
+      const cancelButton = section.querySelector('[data-init-action="cancel"]');
+      if (cancelButton) {
+        cancelButton.hidden = !status?.running;
+        cancelButton.disabled = !status?.running;
+      }
     }
 
     function renderInitOnboarding() {
@@ -894,28 +1822,40 @@
       const status = state.initStatus;
       const progress = initProgressView(status);
       const isRunning = Boolean(status?.running);
-      const waitingForFirstPool = initWaitingForFirstPool(status);
-      const displayProgress = waitingForFirstPool
-        ? { ...progress, active: true, failed: false, pct: 95, stageLabel: "4/4 整理首轮内容池" }
+      const embeddingPull = embeddingPullProgressView(status);
+      const displayProgress = embeddingPull.active && !isRunning
+          ? { active: true, failed: false, pct: embeddingPull.pct, label: embeddingPull.label, stageLabel: "" }
         : progress;
-      const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
-      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool;
-      const reason = waitingForFirstPool
-        ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
-        : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
+      const alreadyInitialized = Boolean(status?.initialized);
+      const showProgress = isRunning || displayProgress.failed || embeddingPull.active;
+      const reason = displayProgress.failed
+          ? (state.initReason || initFailureText(status, displayProgress))
+          : (state.initReason || initStatusReasonText(status) || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
         : isRunning
           ? "初始化进行中…"
-          : waitingForFirstPool
-            ? "整理首轮内容…"
           : alreadyInitialized
-            ? "已初始化"
+            ? status?.partial_success ? "画像已就绪，后台补池中" : "已初始化"
             : displayProgress.failed
               ? "重试初始化"
               : "开始初始化";
-      const buttonDisabled = state.initBusy || isRunning || waitingForFirstPool || alreadyInitialized;
+      const buttonDisabled = state.initBusy || isRunning || alreadyInitialized;
+      const staleness = stalenessView(status);
+      const stallText = isRunning
+        ? staleness.fresh
+          ? [staleness.text, displayProgress.stageDetailText].filter(Boolean).join(" · ")
+          : staleness.text
+        : "";
+      // Expectation management near the start button while a run can begin.
+      // Idle: orient the user about variability. Running: the one
+      // reassurance that is literally true after v0.3.180.
+      const expectationText = isRunning
+        ? INIT_RUNNING_HINT
+        : alreadyInitialized
+          ? ""
+          : INIT_EXPECTATION_HINT;
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);
@@ -928,17 +1868,20 @@
           <div class="init-onboarding-copy">
             <p class="eyebrow">Guided init</p>
             <h3>还没完成初始化</h3>
-            <p class="video-meta">先检查 AI 服务和所选平台登录，通过后在这里一步步拉取数据、生成画像、补齐首轮内容池。B 站默认勾选但可取消，至少保留一个来源。</p>
+            <p class="video-meta">先检查 AI 服务和所选平台登录，再依次拉取数据、分析偏好、保存完整画像，最后严格基于这份画像生成首轮可用推荐。B 站默认勾选但可取消，至少保留一个来源。</p>
           </div>
           ${isRunning ? "" : initSourcesMarkup()}
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
-            <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? (describeInitReason(status?.reason) || displayProgress.failedReason || "初始化未完成，请稍后重试。") : displayProgress.active ? `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <div class="init-progress-track"><div class="init-progress-fill${displayProgress.indeterminate ? " indeterminate" : ""}" style="width:${displayProgress.indeterminate ? 100 : displayProgress.pct}%"></div></div>
+            <p role="${displayProgress.failed ? "alert" : "status"}" aria-live="${displayProgress.failed ? "assertive" : "polite"}" aria-atomic="true">${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || (displayProgress.indeterminate ? displayProgress.stageLabel || "正在初始化" : `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）`) : "等待开始")}</p>
           </div>
-          <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
+          <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
+          <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
+          <p class="init-reason" role="status" aria-live="polite" aria-atomic="true"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
+            <button class="small-btn" type="button" data-init-action="cancel"${isRunning ? "" : " hidden"}>取消初始化</button>
             <button class="small-btn" type="button" data-init-action="settings">打开设置</button>
           </div>
         </section>`;
@@ -947,12 +1890,26 @@
       grid.querySelector('[data-init-action="start"]')?.addEventListener("click", () => {
         void handleDesktopStartInitClick();
       });
+      grid.querySelector('[data-init-action="cancel"]')?.addEventListener("click", (event) => {
+        void handleDesktopCancelInitClick(event.currentTarget);
+      });
       grid.querySelector('[data-init-action="settings"]')?.addEventListener("click", () => {
         openSettingsPage("sources");
+      });
+      // Delegated: the checklist's innerHTML is replaced on every status
+      // poll, so listeners on the buttons themselves would be lost.
+      grid.querySelector(".init-onboarding .init-checklist")?.addEventListener("click", (event) => {
+        const btn = event.target.closest?.("[data-embedding-repair]");
+        if (btn) void handleEmbeddingRepairClick(btn);
       });
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
           state.initSelectedSources = selectedInitSourcesFromDom();
+          const bangumiChecked = state.initSelectedSources.includes("bangumi");
+          const bangumiUsername = grid.querySelector("#initBangumiUsername");
+          if (bangumiUsername) bangumiUsername.disabled = !bangumiChecked;
+          const bangumiToken = grid.querySelector("#initBangumiToken");
+          if (bangumiToken) bangumiToken.disabled = !bangumiChecked;
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -960,6 +1917,13 @@
             checklist.innerHTML = initChecklistMarkup(state.initStatus, state.initSelectedSources);
           }
         });
+      });
+      grid.querySelector("#initBangumiUsername")?.addEventListener("input", (event) => {
+        state.initBangumiUsername = event.currentTarget.value || "";
+        state.initBangumiUsernameTouched = true;
+      });
+      grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
+        state.initBangumiToken = event.currentTarget.value || "";
       });
     }
 
@@ -972,6 +1936,7 @@
 
     function scheduleInitStatusRefresh(delayMs = INIT_STATUS_POLL_MS) {
       clearInitPolling();
+      if (document.hidden) return;
       initPollTimer = window.setTimeout(() => {
         initPollTimer = null;
         void refreshInitStatus();
@@ -985,36 +1950,44 @@
       }
       initRefreshInFlight = true;
       clearInitPolling();
-      const wasInitialized = Boolean(state.initStatus?.initialized) && initContentReadyFromRuntime(state.runtimeStatus);
+      const wasInitialized = Boolean(state.initStatus?.initialized);
+      const wasRunning = Boolean(state.initStatus?.running);
       try {
         const status = await requestJsonStrict(ENDPOINTS.initStatus, { timeoutMs: 60000 });
         state.initStatus = status;
         state.initReason = "";
+        if (status?.running) {
+          renderAll();
+          scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
+          return;
+        }
         if (status?.initialized) {
-          if (!(await refreshRuntimeStatusForInitContent())) {
-            state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
-            renderAll();
-            scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
-            return;
-          }
           renderAll();
           clearInitPolling();
           initRefreshPending = false;
-          if (!wasInitialized) {
+          // Stage 3 makes initialized=true while stage 4 still owns the run.
+          // Rehydrate runtime inventory on the running -> terminal edge too;
+          // otherwise the recommendation grid can finish while the header and
+          // pool rail keep the pre-init runtime snapshot until a page reload.
+          if (!wasInitialized || wasRunning) {
             scheduleBackendHydration();
-            showToast("初始化完成，正在加载推荐");
+            showToast(
+              status?.partial_success
+                ? "完整画像已就绪；首轮推荐将在后台继续补齐"
+                : "初始化完成，正在加载推荐"
+            );
           }
           return;
         }
         renderAll();
-        if (status?.running) {
+        if (embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
           clearInitPolling();
         }
       } catch (error) {
         scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
-        state.initReason = error?.message || "初始化状态读取失败。";
+        state.initReason = `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`;
         renderAll();
       } finally {
         initRefreshInFlight = false;
@@ -1041,23 +2014,18 @@
         renderAll();
         return;
       }
-      if (status.initialized) {
-        state.initBusy = false;
-        if (await refreshRuntimeStatusForInitContent()) {
-          state.initReason = "";
-          scheduleBackendHydration();
-        } else {
-          state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
-          scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
-        }
-        renderAll();
-        return;
-      }
       if (status.running) {
         state.initBusy = false;
         renderAll();
         clearInitPolling();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
+        return;
+      }
+      if (status.initialized) {
+        state.initBusy = false;
+        state.initReason = status?.partial_success ? initStatusReasonText(status) : "";
+        scheduleBackendHydration();
+        renderAll();
         return;
       }
       if (!selected.length) {
@@ -1066,6 +2034,26 @@
         renderAll();
         return;
       }
+      const bangumiUsername = String(
+        $("#initBangumiUsername")?.value || state.initBangumiUsername || ""
+      ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        state.initBangumiUsernameTouched &&
+        (bangumiUsername !== "" || state.initBangumiUsernamePrefilled);
+      const bangumiToken = String(
+        $("#initBangumiToken")?.value || state.initBangumiToken || ""
+      ).trim();
+      // No client-side Bangumi-only admission check here on purpose. The
+      // backend owns a THREE-tier account ladder (token → explicit username →
+      // browser-extension-reported identity); a local "username or token
+      // required" copy of it can't see the third tier and silently blocked
+      // zero-config extension users from ever reaching /api/init. The backend
+      // answers 409 no_profile_signal_sources when all three are genuinely
+      // missing, and the catch below renders it.
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         state.initReason = "还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。";
         state.initBusy = false;
@@ -1073,21 +2061,37 @@
         return;
       }
       if (!status.can_start) {
-        state.initReason = describeInitReason(status.reason) || status.detail || "以下条件未满足，无法开始初始化。";
+        state.initReason = initStatusReasonText(status) || "以下条件未满足，无法开始初始化。";
         state.initBusy = false;
         renderAll();
         return;
       }
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
+          const bangumi = {};
+          if (sendBangumiUsername) bangumi.username = bangumiUsername;
+          // Only send a token the user actually typed; omit otherwise so the
+          // backend keeps any configured token.
+          if (bangumiToken) bangumi.access_token = bangumiToken;
+          payload.source_options = { bangumi };
+        }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
           timeoutMs: 60000
         });
         state.initStatus = { ...(state.initStatus || {}), ...started };
         state.initBusy = false;
-        showToast("初始化已开始");
+        // The 202 response may carry backend warnings (e.g. Bangumi selected
+        // without a public username → discovery-only). Surface them in the
+        // onboarding reason and the toast instead of a bare "已开始".
+        const startWarnings = Array.isArray(started?.warnings)
+          ? started.warnings.filter((text) => typeof text === "string" && text.trim())
+          : [];
+        state.initReason = startWarnings.join(" ");
+        showToast(startWarnings.length ? startWarnings.join(" ") : "初始化已开始");
         renderAll();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
@@ -1098,14 +2102,69 @@
       }
     }
 
-    function openPanel(id) { document.getElementById(id)?.classList.add("is-open"); }
+    async function handleDesktopCancelInitClick(button) {
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+        button.textContent = "正在取消…";
+      }
+      try {
+        await requestJsonStrict(ENDPOINTS.cancelInit, { method: "POST", timeoutMs: 15000 });
+        showToast("已发送取消请求，正在安全结束当前步骤");
+        scheduleInitStatusRefresh(300);
+      } catch (error) {
+        if (error?.status !== 409) {
+          state.initReason = error?.details?.detail || error?.message || "取消请求失败。";
+          renderAll();
+        } else {
+          scheduleInitStatusRefresh(300);
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement && button.isConnected) {
+          button.textContent = "取消初始化";
+          button.disabled = false;
+        }
+      }
+    }
+
+    function openPanel(id) {
+      const panel = document.getElementById(id);
+      if (!panel) return;
+      if (panel._closeTimer) {
+        window.clearTimeout(panel._closeTimer);
+        panel._closeTimer = null;
+      }
+      if (panel._closeHandler) {
+        panel.removeEventListener("animationend", panel._closeHandler);
+        panel._closeHandler = null;
+      }
+      panel.classList.remove("is-closing");
+      panel.classList.add("is-open");
+    }
+
     function closePanel(id) {
       const panel = document.getElementById(id);
-      panel?.classList.remove("is-open", "from-mobile-menu");
-      if (id === "messagesDrawer") {
-        state.messageListSnapshot = null;
-        state.messageListDomLocked = false;
-      }
+      if (!panel || !panel.classList.contains("is-open") || panel.classList.contains("is-closing")) return;
+
+      const finishClose = () => {
+        if (panel._closeTimer) {
+          window.clearTimeout(panel._closeTimer);
+          panel._closeTimer = null;
+        }
+        if (panel._closeHandler) {
+          panel.removeEventListener("animationend", panel._closeHandler);
+          panel._closeHandler = null;
+        }
+        panel.classList.remove("is-open", "is-closing", "from-mobile-menu");
+        if (id === "messagesDrawer") {
+          state.messageListSnapshot = null;
+          state.messageListDomLocked = false;
+        }
+      };
+
+      panel._closeHandler = finishClose;
+      panel.classList.add("is-closing");
+      panel.addEventListener("animationend", finishClose, { once: true });
+      panel._closeTimer = window.setTimeout(finishClose, 220);
     }
 
     const MAIN_PAGE_IDS = ["homePage", "watchLaterPage", "favoritesPage", "profilePage", "chatPage", "settingsPage"];
@@ -1146,6 +2205,7 @@
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
       showMainPage("chatPage");
+      renderChat();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
       window.setTimeout(() => input?.focus(), 100);
@@ -1157,8 +2217,10 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -1167,12 +2229,117 @@
     // ── Saved pages: 稍后再看 (watch-later) & 收藏 (favorites) ──────
     // The two are independent backend collections sharing one list UI.
 
-    function watchLaterStatus(bvid) {
-      return requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`);
+    const SAVED_SYNC_PRESENTATION = {
+      pending: ["待同步", "neutral", false], syncing: ["同步中", "info", false],
+      synced: ["已同步", "success", false], already_synced: ["已同步", "success", false],
+      login_required: ["需要登录", "warning", true], unsupported: ["仅本地保存", "neutral", false],
+      rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
+      failed: ["同步失败", "error", true]
+    };
+    function safeSavedText(value, maxLength = 240) {
+      return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
     }
 
-    function favoriteStatus(bvid) {
-      return requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`);
+    function desktopSavedItem(itemOrBvid = {}) {
+      const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      return {
+        ...item,
+        item_key: safeSavedText(canonical.item_key, 2048),
+        source_platform: safeSavedText(canonical.source_platform, 64),
+        content_id: safeSavedText(canonical.content_id, 2048),
+        content_url: safeSavedText(canonical.content_url, 2048),
+        content_type: safeSavedText(canonical.content_type, 128),
+        title: safeSavedText(item.title || canonical.content_id),
+        author_name: safeSavedText(item.author_name || item.up_name),
+        cover_url: safeSavedText(item.cover_url, 2048),
+        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : (item.sync_status ? "failed" : ""),
+        resolved_target: safeSavedText(item.resolved_target),
+        error_code: safeSavedText(item.error_code, 96),
+        error_message: safeSavedText(item.error_message)
+      };
+    }
+
+    const desktopSavedApi = window.OpenBiliClawSavedSync.createStrictSavedApi(requestJsonStrict);
+    const desktopSavedMutations = window.OpenBiliClawSavedSync.createSavedMutationRegistry();
+    const desktopSavedListStates = {
+      watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
+      favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
+    };
+    const desktopSyncingKeys = {
+      watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
+      favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
+    };
+    const desktopSavedPendingFocus = { watch_later: null, favorite: null };
+    function createDesktopSavedTaskRuntime() {
+      const tracker = window.OpenBiliClawSavedSync.createDurableTaskTracker({
+        poll: (taskId) => desktopSavedApi.pollTask(taskId),
+        isVisible: () => !document.hidden
+      });
+      return {
+        tracker,
+        coordinator: window.OpenBiliClawSavedSync.createSavedTaskCoordinator({
+          tracker,
+          fetchTask: (taskId) => desktopSavedApi.pollTask(taskId)
+        })
+      };
+    }
+    const desktopSavedTaskRuntimes = {
+      watch_later: createDesktopSavedTaskRuntime(),
+      favorite: createDesktopSavedTaskRuntime()
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        pauseDesktopBackendSession();
+        return;
+      }
+      for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      restartDesktopFailedRecoveries();
+      if (initRefreshPending || state.initStatus?.running) {
+        scheduleInitStatusRefresh(0);
+      }
+      void startDesktopBackendSession();
+    });
+    window.addEventListener("pagehide", () => {
+      pauseDesktopBackendSession();
+      for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
+    }, { once: true });
+    function saveDesktopItem(listKind, item) {
+      return desktopSavedApi.save(listKind, desktopSavedItem(item));
+    }
+    function removeDesktopSavedItem(listKind, itemKey) {
+      return desktopSavedApi.remove(listKind, itemKey);
+    }
+    function savedStatus(listKind, itemOrBvid) {
+      const itemKey = desktopSavedItem(itemOrBvid).item_key;
+      return desktopSavedApi.status(listKind, itemKey);
+    }
+    function watchLaterStatus(itemOrBvid) { return savedStatus("watch_later", itemOrBvid); }
+    function favoriteStatus(itemOrBvid) { return savedStatus("favorite", itemOrBvid); }
+    function fetchDesktopSaved(listKind) { return desktopSavedApi.list(listKind); }
+    function syncDesktopSaved(listKind, itemKeys) {
+      return desktopSavedApi.sync(listKind, itemKeys);
+    }
+
+    function summarizeDesktopSavedTask(items) {
+      const groups = new Map();
+      for (const item of items) {
+        const slug = item.item_key.split(":", 1)[0] || "unknown";
+        const group = groups.get(slug) || [0, 0];
+        group[1] += 1;
+        if (["synced", "already_synced"].includes(item.status)) group[0] += 1;
+        groups.set(slug, group);
+      }
+      return Array.from(groups, ([slug, [success, total]]) => `${platformName(slug)} ${success}/${total}`).join(" · ");
+    }
+
+    function savedSyncEligible(item, listKind = "") {
+      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(
+        item.sync_status,
+        item.error_code,
+        item.sync_task_id
+      )
+        && !desktopSavedTaskRuntimes[listKind]?.coordinator.owns(item.item_key);
     }
 
     function updateSavedBadge(badgeId, total) {
@@ -1188,79 +2355,234 @@
       }
     }
 
-    function renderSavedList(listId, emptyId, items, onRemove) {
+    function renderSavedList(listKind, listId, emptyId, items, reload) {
       const grid = document.getElementById(listId);
       const empty = document.getElementById(emptyId);
       if (!grid) return;
+      const focusRoot = grid.closest(".saved-page") || grid;
+      const focusToken = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot)
+        || desktopSavedPendingFocus[listKind];
       const rows = Array.isArray(items) ? items : [];
       if (!rows.length) {
         grid.replaceChildren();
         if (empty) empty.removeAttribute("hidden");
+        if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+          desktopSavedPendingFocus[listKind] = null;
+        }
         return;
       }
       if (empty) empty.setAttribute("hidden", "");
       grid.replaceChildren(...rows.map((item) => {
+        item = desktopSavedItem(item);
+        if (desktopSyncingKeys[listKind].has(item.item_key)
+          || desktopSavedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+          item.sync_status = "syncing";
+        }
+        const syncPresentation = window.OpenBiliClawSavedSync.getSavedSyncPresentation(item);
         const card = document.createElement("article");
         card.className = "video-card saved-card";
+        card.dataset.itemKey = item.item_key;
         const url = contentUrl(item);
-        card.innerHTML = `
-          <button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">
+        const coverContent = `
             ${coverImg(item)}
-            <span class="platform">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
-          </button>
+            <span class="platform" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
+          `;
+        card.innerHTML = `
+          ${url
+            ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
+            : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
-            <p class="video-title">${escapeHtml(item.title || item.bvid)}</p>
-            <p class="video-meta">${escapeHtml(item.up_name || "")}</p>
+            <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
+            <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
+            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(syncPresentation.tone)}">${escapeHtml(syncPresentation.label)}</span><span>${escapeHtml(syncPresentation.detail)}</span></p>
           </div>
+${savedCardFeedbackBarHtml(listKind)}
           <div class="card-actions saved-card-actions">
-            <button class="small-btn saved-remove" type="button">移除</button>
+            ${syncPresentation.actionable || syncPresentation.busy ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button" aria-disabled="${syncPresentation.busy}" aria-label="${escapeHtml(syncPresentation.busy ? `${syncPresentation.label}，请稍候` : syncPresentation.actionLabel)}" ${syncPresentation.busy ? "disabled" : ""}>${escapeHtml(syncPresentation.actionLabel)}</button>` : ""}
+            <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
           </div>`;
-        card.querySelector(".cover").addEventListener("click", () => {
-          if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => {
+          if (url) trackRecommendationClick(item);
+        });
+        cover.addEventListener("auxclick", (event) => {
+          if (url && event.button === 1) trackRecommendationClick(item);
+        });
+        card.querySelector(".saved-sync-one")?.addEventListener("click", (e) => {
+          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, e.currentTarget);
+          void runDesktopSavedSync(listKind, [item], e.currentTarget, reload);
         });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
+          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, btn);
           btn.disabled = true;
           try {
-            await onRemove(item.bvid);
-            card.remove();
-          } catch {
+            await removeDesktopSavedItem(listKind, item.item_key);
+            await reload();
+          } catch (error) {
             btn.disabled = false;
+            const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+            if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地移除失败，请重试。"; }
           }
         });
+        wireSavedCardFeedback(card, item, listKind);
         return card;
       }));
+      if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+        desktopSavedPendingFocus[listKind] = null;
+      }
+    }
+
+    async function runDesktopSavedSync(listKind, selected, activeButton, reload, confirmBatch = false) {
+      const coordinator = desktopSavedTaskRuntimes[listKind].coordinator;
+      const eligible = selected.filter((item) => savedSyncEligible(item, listKind)
+        && !desktopSyncingKeys[listKind].has(item.item_key));
+      if (!eligible.length || activeButton?.disabled) return;
+      const platforms = Array.from(new Set(eligible.map((item) => platformName(item.source_platform))));
+      if (confirmBatch && !window.confirm(`将同步 ${eligible.length} 项到 ${platforms.join("、")}，继续吗？`)) return;
+      const eligibleKeys = eligible.map((item) => item.item_key);
+      if (!desktopSyncingKeys[listKind].claim(eligibleKeys)) return;
+      const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+      let submitted = false;
+      if (activeButton) {
+        const focusRoot = activeButton.closest(".saved-page") || activeButton.parentElement;
+        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, activeButton)
+          || { kind: "list", action: "sync-all" };
+        activeButton.disabled = true;
+        activeButton.setAttribute("aria-disabled", "true");
+        activeButton.setAttribute("aria-busy", "true");
+        activeButton.textContent = "同步中…";
+      }
+      if (status) { status.removeAttribute("role"); status.textContent = `正在同步 ${eligible.length} 项…`; }
+      try {
+        const task = await syncDesktopSaved(listKind, eligibleKeys);
+        const taskId = safeSavedText(task?.task_id, 64);
+        if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
+        coordinator.track(task, eligibleKeys, {
+          onProgress: () => { if (status) status.textContent = `正在同步 ${eligible.length} 项…`; },
+          onBackground: () => { if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。"; },
+          onPollError: () => { if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。"; },
+          onTerminal: (terminalTask) => {
+            if (status) status.textContent = summarizeDesktopSavedTask(terminalTask.items) || "同步已完成";
+            void reload();
+          }
+        });
+        submitted = true;
+        if (status) status.textContent = `同步任务已提交 · ${eligible.length} 项`;
+      } catch (error) {
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "同步失败，请重试。"; }
+      } finally {
+        desktopSyncingKeys[listKind].release(eligibleKeys);
+        if (!submitted && activeButton) {
+          activeButton.disabled = false;
+          activeButton.setAttribute("aria-disabled", "false");
+          activeButton.removeAttribute("aria-busy");
+        }
+        await reload();
+      }
+    }
+
+    function bindDesktopSavedBatch(listKind, items, reload) {
+      const id = listKind === "watch_later" ? "watchLaterSyncAll" : "favoritesSyncAll";
+      const button = document.getElementById(id);
+      if (!button) return;
+      const count = items.filter((item) => savedSyncEligible(item, listKind)
+        && !desktopSyncingKeys[listKind].has(item.item_key)).length;
+      button.textContent = `同步未同步内容（${count}）`;
+      window.OpenBiliClawSavedSync.updateSavedBatchButtonState(button, count);
+      button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
+    }
+
+    function showDesktopSavedLoadError(listKind, status, state, reload) {
+      if (!status) return;
+      status.setAttribute("role", "alert");
+      status.dataset.loadError = "true";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "small-btn saved-load-retry";
+      retry.dataset.savedListAction = "retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", (event) => {
+        const focusRoot = status.closest(".saved-page") || status.parentElement;
+        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(
+          focusRoot,
+          event.currentTarget,
+        ) || { kind: "list", action: "retry" };
+        void reload();
+      });
+      status.replaceChildren(document.createTextNode(`${state.snapshot().error} `), retry);
+    }
+
+    function desktopRecoveredTaskCallbacks(listKind, reload) {
+      const status = document.getElementById(
+        listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus",
+      );
+      return {
+        onProgress: () => { if (status) status.textContent = "正在同步已恢复的任务…"; },
+        onBackground: () => {
+          if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+        },
+        onPollError: () => {
+          if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
+        },
+        onTerminal: (task) => {
+          if (status) status.textContent = summarizeDesktopSavedTask(task.items) || "同步已完成";
+          void reload();
+        },
+      };
     }
 
     async function refreshWatchLater() {
-      const data = await requestJson(`${ENDPOINTS.watchLater}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("watchLaterList", "watchLaterEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshWatchLater();
-        syncWatchLaterButtons();
-      });
-      updateSavedBadge("watchLaterCountBadge", data?.total);
+      const retained = desktopSavedListStates.watch_later;
+      try {
+        const data = await fetchDesktopSaved("watch_later");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
+        await desktopSavedTaskRuntimes.watch_later.coordinator.recover(
+          retained.snapshot().items,
+          desktopRecoveredTaskCallbacks("watch_later", refreshWatchLater),
+        );
+        const status = document.getElementById("watchLaterSyncStatus");
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError("watch_later", document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
+      }
+      const { items, total } = retained.snapshot();
+      renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
+      bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
+      updateSavedBadge("watchLaterCountBadge", total);
     }
 
     async function refreshFavorites() {
-      const data = await requestJson(`${ENDPOINTS.favorites}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("favoritesList", "favoritesEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshFavorites();
-        syncFavoriteButtons();
-      });
-      updateSavedBadge("favoritesCountBadge", data?.total);
+      const retained = desktopSavedListStates.favorite;
+      try {
+        const data = await fetchDesktopSaved("favorite");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
+        await desktopSavedTaskRuntimes.favorite.coordinator.recover(
+          retained.snapshot().items,
+          desktopRecoveredTaskCallbacks("favorite", refreshFavorites),
+        );
+        const status = document.getElementById("favoritesSyncStatus");
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError("favorite", document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
+      }
+      const { items, total } = retained.snapshot();
+      renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
+      bindDesktopSavedBatch("favorite", items, refreshFavorites);
+      updateSavedBadge("favoritesCountBadge", total);
     }
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
     function syncWatchLaterButtons() {
-      requestJson(`${ENDPOINTS.watchLater}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("watch_later").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("watchLaterCountBadge", data?.total);
@@ -1268,13 +2590,13 @@
     }
 
     function syncFavoriteButtons() {
-      requestJson(`${ENDPOINTS.favorites}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("favorite").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("favoritesCountBadge", data?.total);
@@ -1301,7 +2623,6 @@
       const drawer = document.getElementById("sideDrawer");
       drawer?.classList.toggle("is-open", open);
       drawer?.setAttribute("aria-hidden", open ? "false" : "true");
-      document.body.classList.toggle("side-drawer-open", open);
       const button = document.getElementById("sideDrawerBtn");
       if (button) {
         button.setAttribute("aria-expanded", open ? "true" : "false");
@@ -1376,6 +2697,86 @@
       return platformLabel[String(value || "").toLowerCase()] || String(value || "").trim();
     }
 
+    // 别名只在这里归一化：引擎与库存快照只认 canonical slug。未知平台原样保留
+    // （小写），这样后端新增来源时 Tab 仍能显示而不是被悄悄吞掉。
+    function canonicalPlatformSlug(value) {
+      const raw = String(value || "").trim().toLowerCase();
+      if (!raw) return "";
+      return platformAliases[raw] || raw;
+    }
+
+    function recommendationPlatformSlug(item) {
+      return canonicalPlatformSlug(item?.platform ?? item?.source_platform);
+    }
+
+    // Tab 用中文标签做本地过滤，后端只认 canonical slug。"全部" 映射成空串，
+    // 调用方据此决定「不带 source_platform」（保持旧请求形状）。
+    function platformSlugForFilterLabel(label) {
+      const name = String(label || "").trim();
+      if (!name || name === "全部") return "";
+      const known = sourceFilterDefinitions.find((source) => source.label === name);
+      if (known) return known.key;
+      return canonicalPlatformSlug(name);
+    }
+
+    function activePlatformSlug() {
+      return platformSlugForFilterLabel(state.filter);
+    }
+
+    // 返回该平台「可立即推荐」的剩余数量；null = 未知（尚无成功快照）。
+    // 已启用但快照里缺键的平台按 0 处理（后端允许省略零库存平台）。
+    function platformAvailableCount(slug) {
+      const snapshot = state.platformAvailability;
+      if (!snapshot) return null;
+      if (!slug) return Number(snapshot.total_available) || 0;
+      const count = Number(snapshot.by_platform?.[slug]);
+      return Number.isFinite(count) && count > 0 ? count : 0;
+    }
+
+    function activePlatformAvailableCount() {
+      return platformAvailableCount(activePlatformSlug());
+    }
+
+    // 库存 snapshot 中数量大于 0 的平台也要出 Tab（配置里没启用、本会话也没
+    // 加载过卡片时同样成立）。
+    function availablePlatformSlugs() {
+      const byPlatform = state.platformAvailability?.by_platform || {};
+      return Object.keys(byPlatform).filter((slug) => Number(byPlatform[slug]) > 0);
+    }
+
+    // 平台定向换一批只替换该平台的卡片：其它平台本会话已加载的卡片必须原样保留，
+    // 新批次插在该平台原本第一张卡的位置，保持混合列表的相对交错。
+    function replacePlatformCards(videos, platform, fresh) {
+      const next = [];
+      let inserted = false;
+      for (const item of videos) {
+        if (recommendationPlatformSlug(item) === platform) {
+          if (!inserted) {
+            next.push(...fresh);
+            inserted = true;
+          }
+          continue;
+        }
+        next.push(item);
+      }
+      if (!inserted) next.push(...fresh);
+      return next;
+    }
+
+    // 平台定向请求返回跨平台内容 = 后端契约破坏。前端如实上报并放弃这一批，
+    // 绝不静默过滤后假装成功（设计文档 §8）。
+    function reportPlatformScopeLeak(action, requestPlatform, items) {
+      const leaked = items.filter((item) => recommendationPlatformSlug(item) !== requestPlatform);
+      if (!leaked.length) return false;
+      console.error("[openbiliclaw] platform-scoped recommendation leak", {
+        action,
+        requested: requestPlatform,
+        leaked: leaked.map((item) => ({ key: recommendationKey(item), platform: recommendationPlatformSlug(item) }))
+      });
+      showToast(`后端返回了 ${leaked.length} 条非「${platformName(requestPlatform)}」内容，已放弃这批${action}结果`);
+      return true;
+    }
+
     function configuredSourceFilterLabels() {
       const sources = state.config?.sources;
       const shares = state.config?.scheduler?.pool_source_shares || {};
@@ -1390,8 +2791,14 @@
         .map((source) => source.label);
     }
 
+    // Tab 集合 = 已启用配置 ∪ 库存快照中数量>0 的平台 ∪ 本会话已加载卡片的平台。
+    // 已知平台沿用 sourceFilterDefinitions 顺序，其它值按稳定字典序，"全部"恒居首。
     function buildFilters() {
       const sourceSet = new Set(configuredSourceFilterLabels());
+      for (const slug of availablePlatformSlugs()) {
+        const label = platformName(slug);
+        if (label) sourceSet.add(label);
+      }
       for (const item of state.videos) {
         const label = platformName(item.platform);
         if (label) sourceSet.add(label);
@@ -1411,34 +2818,354 @@
       });
     }
 
-    function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
-      state.dismissOnReshuffle = Boolean(enabled);
-      if (persist) storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
-      renderReshuffleToggle();
-      if (toast) showToast(state.dismissOnReshuffle ? "换一批前会忽略当前显示的推荐" : "换一批不会自动忽略当前推荐");
+    function normalizeThemeMode(value) {
+      return THEME_OPTIONS.includes(value) ? value : "auto";
     }
 
-    function renderReshuffleToggle() {
-      const toggles = [$("#dismissOnReshuffleToggle"), $("#dismissOnReshuffleSetting")];
-      toggles.forEach((toggle) => {
-        if (toggle && toggle.checked !== state.dismissOnReshuffle) toggle.checked = state.dismissOnReshuffle;
+    function applyThemeMode(mode = state.themeMode) {
+      state.themeMode = normalizeThemeMode(mode);
+      if (state.themeMode === "auto") {
+        document.documentElement.removeAttribute("data-theme");
+      } else {
+        document.documentElement.dataset.theme = state.themeMode;
+      }
+      renderThemeControls();
+    }
+
+    function applyThemeHue(hue = state.themeHue) {
+      state.themeHue = hue;
+      document.documentElement.style.setProperty("--hue-primary", hue);
+    }
+
+    function setThemeHue(hue, { persist = true, toast = false, render = true } = {}) {
+      applyThemeHue(hue);
+      if (render) renderThemeHueControls();
+      if (persist) storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      if (toast) {
+        const names = { 20: "暖陶土", 210: "极客蓝", 340: "元气粉", 150: "自然绿", 280: "暗夜紫", 45: "活力橙" };
+        showToast(`主题色相已切换为${names[state.themeHue] || state.themeHue}`);
+      }
+    }
+
+    function setThemeMode(mode, { persist = true, toast = false } = {}) {
+      applyThemeMode(mode);
+      if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
+      if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
+    }
+
+    function cycleThemeMode() {
+      const index = THEME_OPTIONS.indexOf(normalizeThemeMode(state.themeMode));
+      setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
+    }
+
+    function bindRovingChoiceGroup(selector, onChoose) {
+      const buttons = Array.from(document.querySelectorAll(selector));
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => onChoose(button));
+        button.addEventListener("keydown", (event) => {
+          if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+          const enabled = buttons.filter((candidate) => !candidate.disabled);
+          if (!enabled.length) return;
+          const current = Math.max(0, enabled.indexOf(button));
+          let next = current;
+          if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = enabled.length - 1;
+          else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + enabled.length) % enabled.length;
+          else next = (current + 1) % enabled.length;
+          event.preventDefault();
+          enabled[next].focus();
+          enabled[next].click();
+        });
       });
-      const settingText = $("#dismissOnReshuffleSettingText");
-      if (settingText) settingText.textContent = state.dismissOnReshuffle ? "开启" : "关闭";
+    }
+
+    function applyAccentStyle(style = state.accentStyle) {
+      state.accentStyle = ACCENT_OPTIONS.includes(style) ? style : "classic";
+      if (state.accentStyle === "classic") {
+        document.documentElement.dataset.accent = "classic";
+      } else {
+        document.documentElement.removeAttribute("data-accent");
+      }
+      renderThemeAccentControls();
+    }
+
+    function setAccentStyle(style, { persist = true, toast = false } = {}) {
+      applyAccentStyle(style);
+      if (persist) storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+      if (toast) showToast(state.accentStyle === "classic" ? "已切换为经典配色，使用固定色板" : "已切换为动态主题色，可自定义色相");
+    }
+
+    function renderThemeAccentControls() {
+      document.querySelectorAll("[data-accent-choice]").forEach((button) => {
+        const isActive = button.dataset.accentChoice === state.accentStyle;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const hueSection = document.querySelector(".settings-hue-field");
+      if (!hueSection) return;
+      const isClassic = state.accentStyle === "classic";
+      hueSection.classList.toggle("is-disabled", isClassic);
+      hueSection.querySelectorAll("button, input").forEach((el) => {
+        if (el.matches("[data-accent-choice]")) return;
+        el.disabled = isClassic;
+        el.setAttribute("aria-disabled", isClassic ? "true" : "false");
+      });
+      const hint = hueSection.querySelector(".settings-hue-hint");
+      if (hint) hint.hidden = !isClassic;
+    }
+
+    function renderThemeControls() {
+      const mode = normalizeThemeMode(state.themeMode);
+      const label = THEME_LABELS[mode];
+      const toggle = $("#themeToggleBtn");
+      if (toggle) {
+        toggle.title = `主题：${label}`;
+        toggle.setAttribute("aria-label", `主题：${label}`);
+      }
+      const glyph = $("#themeToggleGlyph");
+      if (glyph) glyph.textContent = THEME_GLYPHS[mode];
+      document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+        const isActive = button.dataset.themeChoice === mode;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+    }
+
+    function renderThemeHueControls() {
+      // Number.isFinite so hue 0 (烈焰红) renders as active instead of falling back to 20.
+      const hue = Number.isFinite(state.themeHue) ? state.themeHue : 20;
+      const buttons = Array.from(document.querySelectorAll("[data-hue]"));
+      const activeIndex = buttons.findIndex((button) => parseInt(button.dataset.hue, 10) === hue);
+      buttons.forEach((button, index) => {
+        const isActive = parseInt(button.dataset.hue, 10) === hue;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive || (activeIndex < 0 && index === 0) ? 0 : -1;
+      });
+      const slider = $("#hueSlider");
+      if (slider) slider.value = hue;
+      const hueInput = $("#hueValueInput");
+      if (hueInput) hueInput.value = hue;
+    }
+
+    function setAutoLoadOnScroll(enabled, { persist = true, toast = false } = {}) {
+      state.autoLoadOnScroll = Boolean(enabled);
+      if (persist) storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      if (toast) showToast(state.autoLoadOnScroll ? "滚动到底会自动加载推荐" : "已关闭滚动自动加载");
+    }
+
+    function renderAutoLoadOnScrollToggle() {
+      const toggle = $("#autoLoadOnScrollSetting");
+      if (toggle && toggle.checked !== state.autoLoadOnScroll) toggle.checked = state.autoLoadOnScroll;
+      const settingText = $("#autoLoadOnScrollSettingText");
+      if (settingText) settingText.textContent = state.autoLoadOnScroll ? "开启" : "关闭";
+    }
+
+    function isAutoLoadSentinelInView() {
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel || typeof sentinel.getBoundingClientRect !== "function") return false;
+      const rect = sentinel.getBoundingClientRect();
+      const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 0;
+      return rect.top <= viewportHeight + AUTO_LOAD_ROOT_MARGIN_PX && rect.bottom >= -AUTO_LOAD_ROOT_MARGIN_PX;
+    }
+
+    function refreshAutoLoadSentinelVisibility() {
+      sentinelInView = isAutoLoadSentinelInView();
+      return sentinelInView;
+    }
+
+    function scheduleAutoLoadCheck() {
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf || autoLoadCheckFallbackTimer) return;
+      let settled = false;
+      const run = () => {
+        if (settled) return;
+        settled = true;
+        const rafId = autoLoadCheckRaf;
+        const fallbackTimer = autoLoadCheckFallbackTimer;
+        autoLoadCheckRaf = 0;
+        autoLoadCheckFallbackTimer = 0;
+        if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        if (!refreshAutoLoadSentinelVisibility()) return;
+        void autoLoadMoreIfNeeded().catch(() => {});
+      };
+      if (typeof requestAnimationFrame === "function") {
+        autoLoadCheckRaf = requestAnimationFrame(run);
+        // Intersection/scroll loading is functional work, not just paint polish.
+        // A backgrounded or busy browser may throttle rAF indefinitely, so keep
+        // a short watchdog that runs the same coalesced geometry check once.
+        autoLoadCheckFallbackTimer = setTimeout(run, 120);
+      } else {
+        autoLoadCheckFallbackTimer = setTimeout(run, 0);
+      }
+    }
+
+    function syncAutoLoadObserver() {
+      if (autoLoadObserver) {
+        autoLoadObserver.disconnect();
+        autoLoadObserver = null;
+      }
+      clearAutoLoadCooldownRecheck();
+      sentinelInView = false;
+      if (!state.autoLoadOnScroll) return;
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel) return;
+      if (typeof IntersectionObserver !== "undefined") {
+        autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: `${AUTO_LOAD_ROOT_MARGIN_PX}px`, threshold: 0 });
+        autoLoadObserver.observe(sentinel);
+      }
+      scheduleAutoLoadCheck();
+    }
+
+    function handleAutoLoadIntersect(entries) {
+      sentinelInView = entries.some((entry) => entry.isIntersecting);
+      if (!sentinelInView && !refreshAutoLoadSentinelVisibility()) return;
+      scheduleAutoLoadCheck();
+    }
+
+    // 观察器可能已经处于相交状态，运行时库存或渲染状态变化后要补一脚几何检查。
+    function maybeAutoLoadAfterPoolRefill() {
+      scheduleAutoLoadCheck();
+    }
+
+    // Returns the reason auto-load is currently blocked, or "" when a load
+    // should proceed. The cooldown is evaluated LAST so a "cooldown" reason
+    // guarantees every other precondition (pool available, button shown, cards
+    // present, on home) is already satisfied — the caller uses that to re-arm.
+    function autoLoadBlockReason(now) {
+      if (!state.autoLoadOnScroll) return "disabled";
+      if (appendMoreInFlight) return "in-flight";
+      // 库存 gate 用「当前平台」的可推数量：全局还有货不代表当前 Tab 有货，否则
+      // 0 库存平台会被反复空请求。库存未知（首次快照尚未成功 / 后端还没有这个
+      // 接口）时回退到全局 pool_available_count，保持既有行为。
+      const scopedAvailable = activePlatformAvailableCount();
+      const hasStock = scopedAvailable === null
+        ? state.runtimeStatus?.pool_available_count > 0
+        : scopedAvailable > 0;
+      if (!hasStock) return "pool-empty";
+      const homePage = $("#homePage");
+      if (!homePage || homePage.hidden) return "not-home";
+      const loadMore = $("#loadMoreBtn");
+      if (!loadMore || loadMore.hidden) return "no-button";
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return "no-cards";
+      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return "cooldown";
+      return "";
+    }
+
+    function shouldAutoLoadMore(now) {
+      return autoLoadBlockReason(now) === "";
+    }
+
+    // When the only thing standing between us and a load is the cooldown, and the
+    // sentinel is still in view (user parked at the bottom with no further scroll
+    // or intersection events to re-invoke us), schedule a one-shot re-check for
+    // when the cooldown lapses so loading resumes without needing a manual nudge.
+    function armAutoLoadCooldownRecheck(now) {
+      if (autoLoadCooldownTimer) return;
+      const wait = AUTO_LOAD_COOLDOWN_MS - (now - lastAutoLoadAt);
+      if (wait <= 0) return;
+      autoLoadCooldownTimer = setTimeout(() => {
+        autoLoadCooldownTimer = 0;
+        scheduleAutoLoadCheck();
+      }, wait + 50);
+    }
+
+    function clearAutoLoadCooldownRecheck() {
+      if (!autoLoadCooldownTimer) return;
+      clearTimeout(autoLoadCooldownTimer);
+      autoLoadCooldownTimer = 0;
+    }
+
+    async function autoLoadMoreIfNeeded() {
+      const now = Date.now();
+      const blockReason = autoLoadBlockReason(now);
+      if (blockReason) {
+        if (blockReason === "cooldown" && sentinelInView) armAutoLoadCooldownRecheck(now);
+        return;
+      }
+      lastAutoLoadAt = now;
+      const button = $("#loadMoreBtn");
+      const previousText = button?.textContent || "加载更多推荐";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "正在自动加载…";
+      }
+      try {
+        await appendMore();
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      }
+    }
+
+    // 切换 Tab 只改变视图，不发任何推荐请求（设计文档 §5.2）。自动激活后 chip 会
+    // 被重建，所以键盘路径需要把 focus 还给新的同名 chip。
+    function setActiveFilter(name, { restoreFocus = false } = {}) {
+      state.filter = name;
+      renderAll();
+      if (!restoreFocus) return;
+      const chips = Array.from(document.querySelectorAll("#filterRow .chip"));
+      chips.find((chip) => chip.dataset.filter === name)?.focus();
+    }
+
+    function handleFilterChipKeydown(event, filters, index) {
+      const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      let next = index;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = filters.length - 1;
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + filters.length) % filters.length;
+      else next = (index + 1) % filters.length;
+      setActiveFilter(filters[next], { restoreFocus: true });
     }
 
     function renderFilters() {
       const row = $("#filterRow");
       const filters = buildFilters();
       if (!filters.includes(state.filter)) state.filter = "全部";
-      row.replaceChildren(...filters.map((name) => {
+      // 整排 chip 每次都被替换掉：先记住焦点原本落在哪个 Tab 上，重建后还回去，
+      // 否则点一下 Tab 就把键盘焦点丢回 <body>，方向键再也走不动。
+      const focusedFilter = row.contains(document.activeElement) ? String(document.activeElement.dataset.filter || "") : "";
+      row.replaceChildren(...filters.map((name, index) => {
         const btn = document.createElement("button");
-        btn.className = `chip${state.filter === name ? " is-active" : ""}`;
+        const selected = state.filter === name;
+        const slug = platformSlugForFilterLabel(name);
+        const count = platformAvailableCount(slug);
+        btn.className = `chip${selected ? " is-active" : ""}`;
         btn.type = "button";
-        btn.textContent = name;
-        btn.addEventListener("click", () => { state.filter = name; renderAll(); });
+        btn.dataset.filter = name;
+        btn.dataset.platform = slug;
+        // role=tab + aria-selected：选中态不能只靠颜色表达，AT 也要能读到。
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", selected ? "true" : "false");
+        btn.setAttribute("aria-label", `${name}，可推荐 ${count === null ? PLATFORM_COUNT_UNKNOWN_LABEL : `${count} 条`}`);
+        btn.tabIndex = selected ? 0 : -1;
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "chip-label";
+        labelSpan.textContent = name;
+        const countSpan = document.createElement("span");
+        countSpan.className = "chip-count";
+        countSpan.dataset.state = count === null ? "unknown" : "known";
+        countSpan.textContent = count === null ? PLATFORM_COUNT_UNKNOWN_TEXT : String(count);
+        countSpan.setAttribute("aria-hidden", "true");
+        btn.replaceChildren(labelSpan, countSpan);
+        btn.addEventListener("click", () => setActiveFilter(name));
+        btn.addEventListener("keydown", (event) => handleFilterChipKeydown(event, filters, index));
         return btn;
       }));
+      if (focusedFilter) {
+        const chips = Array.from(row.querySelectorAll(".chip"));
+        const restored = chips.find((chip) => chip.dataset.filter === focusedFilter)
+          || chips.find((chip) => chip.dataset.filter === state.filter);
+        restored?.focus();
+      }
       const resetButton = $("#resetFiltersBtn");
       if (resetButton) resetButton.hidden = state.filter === "全部" && !String(state.query || "").trim();
     }
@@ -1473,13 +3200,10 @@
       return isCrossOriginBase() ? ' crossorigin="anonymous"' : "";
     }
 
-    function coverImg(item) {
+    function coverImg(item, { eager = true } = {}) {
       const url = imageProxyUrl(item.cover_url);
       if (!url) return "";
-      // loading="eager" (not lazy): cover starts fetching the moment the card is
-      // in the DOM, so a card scrolled into view never shows the gradient
-      // placeholder while a native lazy <img> defers its fetch ("白一下再出来").
-      return `<img src="${escapeHtml(url)}"${imgCrossOriginAttr()} alt="${escapeHtml(item.title)} 的封面" loading="eager" fetchpriority="auto" decoding="async" referrerpolicy="no-referrer">`;
+      return `<img src="${escapeHtml(url)}"${imgCrossOriginAttr()} alt="${escapeHtml(item.title)} 的封面" loading="${eager ? "eager" : "lazy"}" fetchpriority="${eager ? "high" : "low"}" decoding="async" referrerpolicy="no-referrer">`;
     }
 
     // Warm the browser cache for a batch of cover images before their cards are
@@ -1511,11 +3235,13 @@
     }
 
     function contentUrl(item) {
+      const platform = item.platform || item.source_platform;
       if (item.content_url) return item.content_url;
-      if (item.platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
-      if (item.platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "reddit") return "";
+      if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
+      if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
+      if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "bangumi" && item.content_id) return `https://bgm.tv/subject/${encodeURIComponent(item.content_id)}`;
+      if (platform === "reddit") return "";
       return "";
     }
 
@@ -1528,15 +3254,29 @@
       return textCardContentTypes.has(String(item.content_type || "").toLowerCase()) || !hasCover;
     }
 
-    function recommendationCoverClass(item) {
-      return recommendationIsTextCard(item) ? " is-text-card" : "";
+    // A text card that still carries a cover (e.g. a Zhihu answer with an
+    // extracted thumbnail) renders the cover as a blurred backdrop behind the
+    // excerpt — issue #79 §2: glassmorphism unifies covered and cover-less
+    // cards instead of the flat gradient reading as a different visual style.
+    function recommendationTextCardBackdrop(item) {
+      return recommendationIsTextCard(item) ? imageProxyUrl(item.cover_url) : "";
     }
 
-    function recommendationMediaHtml(item) {
+    function recommendationCoverClass(item) {
+      if (!recommendationIsTextCard(item)) return "";
+      return recommendationTextCardBackdrop(item) ? " is-text-card has-backdrop" : " is-text-card";
+    }
+
+    function recommendationMediaHtml(item, index = 0) {
+      const eager = index < DESKTOP_EAGER_COVER_COUNT;
       if (recommendationIsTextCard(item)) {
-        return `<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
+        const backdrop = recommendationTextCardBackdrop(item);
+        const backdropHtml = backdrop
+          ? `<img class="cover-backdrop" src="${escapeHtml(backdrop)}"${imgCrossOriginAttr()} alt="" aria-hidden="true" loading="${eager ? "eager" : "lazy"}" fetchpriority="${eager ? "high" : "low"}" decoding="async" referrerpolicy="no-referrer">`
+          : "";
+        return `${backdropHtml}<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
       }
-      return coverImg(item);
+      return coverImg(item, { eager });
     }
 
     function recommendationMeta(item) {
@@ -1546,38 +3286,77 @@
         .join(" · ");
     }
 
-    function renderVideos() {
-      if (shouldShowInitOnboarding(state.runtimeStatus)) {
-        renderInitOnboarding();
-        return;
+    function recommendationMetaHtml(item) {
+      const up = String(item.up || "").trim();
+      const topic = String(item.topic || "").trim();
+      const published = formatPublishedTime(item);
+      const parts = [];
+      if (up) {
+        const upHtml = item.platform === "bilibili" && item.up_mid > 0
+          ? `<a class="up-link" href="https://space.bilibili.com/${item.up_mid}" target="_blank" rel="noopener noreferrer">${escapeHtml(up)}</a>`
+          : escapeHtml(up);
+        parts.push(upHtml);
       }
-      const loadMore = $("#loadMoreBtn");
-      if (loadMore) loadMore.hidden = false;
-      const items = filteredVideos();
-      if (!items.length) {
-        const message = state.query.trim()
-          ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
-          : state.videos.length
-            ? "当前筛选下没有推荐。"
-            : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
-        grid.innerHTML = `<div class="empty-state">${message}</div>`;
-        return;
+      if (topic) parts.push(escapeHtml(topic));
+      if (published) {
+        const exactTitle = Number.isFinite(Date.parse(item.published_at))
+          ? new Date(item.published_at).toLocaleString()
+          : "";
+        const title = exactTitle ? ` title="${escapeHtml(exactTitle)}"` : "";
+        parts.push(`<span class="published-time"${title}>${escapeHtml(published)}</span>`);
       }
-      grid.replaceChildren(...items.map((item) => {
-        const card = document.createElement("article");
-        card.className = "video-card";
-        card.dataset.bvid = item.bvid || item.id;
-        card.innerHTML = `
-          <button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item)}
-            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
-          </button>
-          <div>
-            <p class="video-title">${escapeHtml(item.title)}</p>
-            <p class="video-meta">${escapeHtml(recommendationMeta(item))}</p>
-          </div>
-          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
-          <div class="card-actions" aria-label="推荐反馈操作">
+      return parts.join(" · ");
+    }
+
+    function recommendationStats(item) {
+      const segments = [];
+      const sourceRank = Math.trunc(Number(item.source_rank) || 0);
+      if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+      if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+      if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+      if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+      if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      if (item.rating_score > 0) segments.push(`评分 ${item.rating_score.toFixed(1)}`);
+      if (item.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+      if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
+      return segments.join(" · ");
+    }
+
+    function makeSkeletonCard() {
+      const card = document.createElement("article");
+      card.className = "video-card is-skeleton";
+      card.setAttribute("aria-hidden", "true");
+      card.innerHTML = `
+        <div class="cover skeleton-shimmer"></div>
+        <div>
+          <p class="video-title skeleton-line skeleton-shimmer"></p>
+          <p class="video-meta skeleton-line skeleton-shimmer short"></p>
+        </div>
+        <p class="reason skeleton-line skeleton-shimmer"></p>`;
+      return card;
+    }
+
+    function showAppendSkeletons(count = APPEND_SKELETON_COUNT) {
+      removeAppendSkeletons();
+      if (grid.querySelector(".empty-state")) grid.replaceChildren();
+      for (let i = 0; i < count; i += 1) grid.appendChild(makeSkeletonCard());
+    }
+
+    function removeAppendSkeletons() {
+      grid.querySelectorAll(".video-card.is-skeleton").forEach((el) => el.remove());
+    }
+
+    // ---- issue #111: recommendation-style feedback actions on saved cards ----
+    const SAVED_FEEDBACK_COPY = {
+      like: { saving: "正在记录喜欢…", done: "已记录喜欢，会用于优化画像。", toast: "已记录喜欢" },
+      dislike: { saving: "正在记录不感兴趣…", done: "已记录不感兴趣，会用于优化画像。", toast: "已记录不感兴趣" },
+      dismiss: { saving: "正在记录忽略…", done: "已记录忽略，会用于优化画像。", toast: "已记录忽略" },
+      comment: { saving: "正在提交聊天线索…", done: "已提交聊天线索。", toast: "已提交聊天线索" }
+    };
+
+    // Shared recommendation-card feedback action bar markup.
+    function cardFeedbackBarHtml() {
+      return `          <div class="card-actions" aria-label="推荐反馈操作">
             <div class="card-feedback-icons" aria-label="喜欢或不感兴趣">
               <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
@@ -1603,7 +3382,246 @@
             <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
             <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
           </div>
-          <p class="status-line"></p>`;
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    function savedCardFeedbackBarHtml(listKind) {
+      const crossIsFavorite = listKind === "watch_later";
+      const crossAction = crossIsFavorite ? "favorite" : "watch-later";
+      const crossClass = crossIsFavorite ? "favorite-btn" : "watch-later-btn";
+      const crossLabel = crossIsFavorite ? "收藏" : "稍后再看";
+      const crossIcon = crossIsFavorite
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+      return `          <div class="card-actions saved-feedback-bar" aria-label="反馈与保存操作">
+            <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="saved-comment" type="button" aria-label="聊一聊" title="聊一聊">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+            </button>
+            <button class="feedback-icon-btn cross-toggle ${crossClass}" data-action="${crossAction}" type="button" aria-label="${crossLabel}" title="${crossLabel}" aria-pressed="false">
+              ${crossIcon}
+            </button>
+          </div>
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    // Saved-list items carry no recommendation_id, so the recommendation-scoped
+    // /api/feedback (which 404s without one) cannot record like/dislike/dismiss/
+    // comment for them. Mirror the extension's content-based signal path instead:
+    // post a feedback behavior event to /api/events keyed on content_id, shaped
+    // exactly like the recommendation feedback event (event_type=feedback +
+    // metadata.feedback_type + metadata.bvid) so the soul engine treats it the same.
+    function postSavedContentFeedback(item, feedbackType, note = "") {
+      const saved = desktopSavedItem(item);
+      const contentId = saved.content_id || item.bvid || "";
+      return requestJsonStrict(ENDPOINTS.events, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          events: [{
+            type: "feedback",
+            source_platform: saved.source_platform || "bilibili",
+            title: saved.title || "",
+            url: saved.content_url || "",
+            timestamp: Date.now(),
+            metadata: {
+              feedback_type: feedbackType,
+              bvid: contentId,
+              content_id: contentId,
+              feedback_note: note,
+              saved_feedback: true
+            }
+          }]
+        }),
+        timeoutMs: 30000
+      }).then((res) => {
+        if (!res || res.accepted < 1) {
+          const reason = res && res.rejected && res.rejected[0] && res.rejected[0].reason;
+          throw new Error(reason === "not_initialized"
+            ? "画像尚未就绪，暂时无法记录反馈。"
+            : "反馈未被接受，请稍后重试。");
+        }
+        return res;
+      });
+    }
+
+    async function handleSavedCardFeedback(action, item, card) {
+      const status = card.querySelector(".status-line");
+      const copy = SAVED_FEEDBACK_COPY[action];
+      const buttons = [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+      const clicked = card.querySelector(`[data-action="${action}"]`);
+      const snapshot = buttons.map((b) => ({ b, pressed: b.getAttribute("aria-pressed"), active: b.classList.contains("is-active") }));
+      buttons.forEach((b) => { b.setAttribute("aria-pressed", "false"); b.classList.remove("is-active"); });
+      if (clicked) { clicked.setAttribute("aria-pressed", "true"); clicked.classList.add("is-active"); }
+      if (status) { status.removeAttribute("role"); status.textContent = copy.saving; }
+      try {
+        await postSavedContentFeedback(item, action, "");
+        if (status) status.textContent = copy.done;
+        showToast(copy.toast);
+      } catch (error) {
+        snapshot.forEach(({ b, pressed, active }) => {
+          if (pressed == null) b.removeAttribute("aria-pressed"); else b.setAttribute("aria-pressed", pressed);
+          b.classList.toggle("is-active", active);
+        });
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+        showToast("反馈提交失败");
+      }
+    }
+
+    // Saved cards expose content feedback plus only the other list's save toggle;
+    // membership in the list currently being viewed is managed by 移除.
+    function wireSavedCardFeedback(card, item, listKind) {
+      const savedItem = desktopSavedItem(item);
+      const status = card.querySelector(".status-line");
+      const crossKind = listKind === "watch_later" ? "favorite" : "watch_later";
+
+      card.querySelectorAll('[data-action="like"], [data-action="dislike"]').forEach((btn) => {
+        btn.addEventListener("click", () => handleSavedCardFeedback(btn.dataset.action, item, card));
+      });
+
+      const commentBtn = card.querySelector('[data-action="saved-comment"]');
+      commentBtn?.addEventListener("click", async () => {
+        const draft = window.prompt("想围绕这条聊什么？");
+        if (draft === null) return;
+        const note = String(draft).trim();
+        if (!note) {
+          if (status) { status.removeAttribute("role"); status.textContent = "先写一句想聊的内容，再提交这条反馈。"; }
+          return;
+        }
+        commentBtn.disabled = true;
+        if (status) { status.removeAttribute("role"); status.textContent = SAVED_FEEDBACK_COPY.comment.saving; }
+        try {
+          await postSavedContentFeedback(item, "comment", note);
+          if (status) status.textContent = SAVED_FEEDBACK_COPY.comment.done;
+          showToast(SAVED_FEEDBACK_COPY.comment.toast);
+        } catch (error) {
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+          showToast("反馈提交失败");
+        } finally {
+          commentBtn.disabled = false;
+        }
+      });
+
+      const crossBtn = card.querySelector(".cross-toggle");
+      if (!crossBtn) return;
+      const crossIsFavorite = crossKind === "favorite";
+      const setCrossState = (saved) => {
+        const label = crossIsFavorite
+          ? (saved ? "取消收藏" : "收藏")
+          : (saved ? "取消稍后再看" : "稍后再看");
+        crossBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+        crossBtn.setAttribute("aria-label", label);
+        crossBtn.title = label;
+      };
+      crossBtn.addEventListener("click", async () => {
+        if (crossBtn.disabled || desktopSavedMutations.isBusy(crossKind, savedItem.item_key)) return;
+        const wasSaved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+        crossBtn.disabled = true;
+        setCrossState(!wasSaved);
+        if (status) {
+          status.removeAttribute("role");
+          status.textContent = crossIsFavorite
+            ? (wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…")
+            : (wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
+        }
+        try {
+          await desktopSavedMutations.toggle(crossKind, savedItem.item_key, {
+            add: () => saveDesktopItem(crossKind, item),
+            remove: () => removeDesktopSavedItem(crossKind, savedItem.item_key)
+          });
+          const saved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+          setCrossState(saved);
+          if (status) {
+            status.textContent = crossIsFavorite
+              ? (saved ? "已加入本地收藏。" : "已从本地收藏移除；平台记录不变。")
+              : (saved ? "已加入本地稍后再看。" : "已从本地稍后再看移除；平台记录不变。");
+          }
+        } catch (error) {
+          setCrossState(wasSaved);
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存操作失败，请重试。"; }
+        } finally {
+          crossBtn.disabled = false;
+        }
+      });
+      void desktopSavedMutations.hydrate(
+        crossKind,
+        savedItem.item_key,
+        () => savedStatus(crossKind, savedItem)
+      ).then(() => setCrossState(desktopSavedMutations.isSaved(crossKind, savedItem.item_key)));
+    }
+
+    function renderVideos() {
+      if (shouldShowInitOnboarding(state.runtimeStatus)) {
+        renderInitOnboarding();
+        return;
+      }
+      const loadMore = $("#loadMoreBtn");
+      if (loadMore) loadMore.hidden = false;
+      const items = filteredVideos();
+      if (!items.length) {
+        // 平台 Tab 的空态要区分「本会话还没装入」和「该平台暂时没有新候选」，
+        // 用的是同一份可推库存快照，不是 DOM 卡片数。
+        const activePlatform = activePlatformSlug();
+        const activePlatformCount = platformAvailableCount(activePlatform);
+        const loadFailed = desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted";
+        const platformMessage = activePlatform && !loadFailed
+          ? activePlatformCount === null
+            ? `${escapeHtml(platformName(activePlatform))}还没有装入推荐，可以点「加载更多推荐」试试。`
+            : activePlatformCount > 0
+              ? `${escapeHtml(platformName(activePlatform))}还有 ${activePlatformCount} 条候选没装进来，点「加载更多推荐」即可。`
+              : `${escapeHtml(platformName(activePlatform))}暂时没有新候选，后台会继续补货。`
+          : "";
+        const message = state.query.trim()
+          ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
+          : platformMessage
+            ? platformMessage
+            : state.videos.length
+              ? "当前筛选下没有推荐。"
+              : desktopRecommendationLoadState === "failed"
+                ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
+                : desktopRecommendationLoadState === "failed-exhausted"
+                  ? "推荐加载失败，点一下重新加载。"
+                  : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
+        const retry = desktopRecommendationLoadState === "failed-exhausted"
+          ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
+          : "";
+        grid.innerHTML = `<div class="empty-state">${message}${retry}</div>`;
+        $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
+        return;
+      }
+      grid.replaceChildren(...items.map((item, index) => {
+        const card = document.createElement("article");
+        const url = contentUrl(item);
+        const durationBadge = item.content_type === "video" && item.duration > 0
+          ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
+          : "";
+        const stats = recommendationStats(item);
+        card.className = "video-card";
+        card.dataset.bvid = item.bvid || item.id;
+        card.innerHTML = `
+          ${url
+            ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </a>`
+            : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </button>`}
+          <div>
+            <p class="video-title">${escapeHtml(item.title)}</p>
+            <p class="video-meta">${recommendationMetaHtml(item)}</p>
+            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
+          </div>
+          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
+${cardFeedbackBarHtml()}`;
         const reason = card.querySelector(".reason");
         const toggleReason = () => {
           const expanded = reason.classList.toggle("is-expanded");
@@ -1616,7 +3634,11 @@
             toggleReason();
           }
         });
-        card.querySelector(".cover").addEventListener("click", () => openRecommendation(item, card));
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => openRecommendation(item, card));
+        cover.addEventListener("auxclick", (event) => {
+          if (event.button === 1) openRecommendation(item, card);
+        });
         card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
         card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
           if (event.key === "Enter") handleCardAction("send-comment", item, card);
@@ -1628,24 +3650,22 @@
         // Lazy-load watch-later state
         const wlBtn = card.querySelector('[data-action="watch-later"]');
         if (wlBtn) {
-          const bvid = item.bvid || item.id;
-          watchLaterStatus(bvid).then((res) => {
-            if (res && res.saved) {
-              wlBtn.setAttribute("aria-pressed", "true");
-              wlBtn.title = "\u53D6\u6D88\u7A0D\u540E\u518D\u770B";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
+            wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            wlBtn.title = saved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          });
         }
         // Lazy-load favorite state
         const favBtn = card.querySelector('[data-action="favorite"]');
         if (favBtn) {
-          const bvid = item.bvid || item.id;
-          favoriteStatus(bvid).then((res) => {
-            if (res && res.saved) {
-              favBtn.setAttribute("aria-pressed", "true");
-              favBtn.title = "\u53D6\u6D88\u6536\u85CF";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
+            favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            favBtn.title = saved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          });
         }
         return card;
       }));
@@ -1660,46 +3680,144 @@
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
-          source_platform: item.platform,
+          source_platform: item.platform || item.source_platform,
           title: item.title,
           recommendation_id: item.id,
           topic_label: item.topic,
-          up_name: item.up
+          up_name: item.up || item.up_name
         })
       }).catch(() => {});
     }
 
     function openRecommendation(item, card) {
       const url = contentUrl(item);
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
       trackRecommendationClick(item);
       card.querySelector(".status-line").textContent = url ? "已打开真实内容链接，点击信号会在后台记录。" : "后端没有返回可打开链接；点击信号会在后台记录。";
       showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
     }
 
-    async function submitFeedback(item, feedback_type, note = "") {
-      return await requestJsonStrict(ENDPOINTS.feedback, {
+    function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
+      return requestJsonStrict(ENDPOINTS.feedback, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
-        timeoutMs: 30000
+        timeoutMs: 30000,
+        keepalive
       });
     }
 
-    function recommendationRemoveDelay() {
-      return isMobileViewport() ? 1000 : 2400;
+    function feedbackActionKey(item) {
+      const contentId = item?.bvid || item?.content_id;
+      if (!contentId) return "";
+      const platform = String(item?.platform || item?.source_platform || "").trim().toLowerCase();
+      return `recommendation:${platform}:${contentId}`;
     }
 
-    function removeRecommendationCard(item, card, message, delayMs = recommendationRemoveDelay()) {
-      const key = recommendationKey(item);
-      window.setTimeout(() => {
-        if (card) card.classList.add("is-removing");
-        window.setTimeout(() => {
-          state.videos = state.videos.filter((video) => recommendationKey(video) !== key);
-          renderAll();
-          if (message) showToast(message);
-        }, card ? 180 : 0);
-      }, card ? delayMs : 0);
+    function recommendationFeedbackButtons(card) {
+      return [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+    }
+
+    function recommendationFeedbackSnapshot(item, card, status) {
+      return {
+        feedbackType: item.feedback_type,
+        statusText: status.textContent,
+        pending: card.dataset.feedbackPending,
+        buttons: recommendationFeedbackButtons(card).map((button) => ({
+          button,
+          disabled: button.disabled,
+          pressed: button.getAttribute("aria-pressed"),
+          active: button.classList.contains("is-active")
+        }))
+      };
+    }
+
+    function restoreRecommendationFeedback(item, card, status, snapshot) {
+      item.feedback_type = snapshot.feedbackType;
+      status.classList.remove("has-feedback-action");
+      status.textContent = snapshot.statusText;
+      card.classList.remove("is-feedback-pending", "is-feedback-saving");
+      if (snapshot.pending == null) delete card.dataset.feedbackPending;
+      else card.dataset.feedbackPending = snapshot.pending;
+      snapshot.buttons.forEach(({ button, disabled, pressed, active }) => {
+        button.disabled = disabled;
+        if (pressed == null) button.removeAttribute("aria-pressed");
+        else button.setAttribute("aria-pressed", pressed);
+        button.classList.toggle("is-active", active);
+      });
+    }
+
+    function stageRecommendationFeedback(item, card, feedbackType) {
+      const key = feedbackActionKey(item);
+      if (!key) {
+        showToast("这条推荐缺少稳定内容标识，暂时无法记录反馈。");
+        return false;
+      }
+      const status = card.querySelector(".status-line");
+      const snapshot = recommendationFeedbackSnapshot(item, card, status);
+      const copy = {
+        like: {
+          pending: "已标记喜欢，10 秒内可撤销。",
+          saving: "正在保存喜欢反馈…",
+          committed: "已记录喜欢，推荐会继续保留在当前列表。",
+          toast: "已记录喜欢"
+        },
+        dislike: {
+          pending: "已标记不感兴趣，10 秒内可撤销。",
+          saving: "正在保存不感兴趣反馈…",
+          committed: "已记录不感兴趣，下次刷新列表时会隐藏。",
+          toast: "已记录不感兴趣"
+        },
+        dismiss: {
+          pending: "已标记忽略，10 秒内可撤销。",
+          saving: "正在保存忽略反馈…",
+          committed: "已忽略这条推荐，下次刷新列表时会隐藏。",
+          toast: "已忽略推荐"
+        }
+      }[feedbackType];
+      const scheduled = pendingActions.schedule(key, {
+        commit: ({ keepalive }) => {
+          if (card.isConnected && !keepalive) {
+            card.classList.remove("is-feedback-pending");
+            card.classList.add("is-feedback-saving");
+            status.classList.remove("has-feedback-action");
+            status.textContent = copy.saving;
+          }
+          return submitFeedback(item, feedbackType, "", { keepalive });
+        },
+        rollback: ({ reason }) => {
+          restoreRecommendationFeedback(item, card, status, snapshot);
+          if (reason === "undo") showToast("已撤销反馈");
+        },
+        committed: () => {
+          if (!card.isConnected) return;
+          delete card.dataset.feedbackPending;
+          card.classList.remove("is-feedback-pending", "is-feedback-saving");
+          status.classList.remove("has-feedback-action");
+          status.textContent = copy.committed;
+          showToast(copy.toast);
+        }
+      });
+      if (!scheduled) return false;
+
+      item.feedback_type = feedbackType;
+      card.dataset.feedbackPending = "true";
+      card.classList.add("is-feedback-pending");
+      const clicked = card.querySelector(`[data-action="${feedbackType}"]`);
+      recommendationFeedbackButtons(card).forEach((button) => { button.disabled = true; });
+      if (clicked) {
+        clicked.setAttribute("aria-pressed", "true");
+        clicked.classList.add("is-active");
+      }
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "feedback-undo-btn";
+      undo.dataset.feedbackUndo = key;
+      undo.textContent = "撤销";
+      undo.addEventListener("click", () => { pendingActions.undo(key); });
+      status.classList.add("has-feedback-action");
+      status.setAttribute("aria-live", "polite");
+      status.replaceChildren(document.createTextNode(`${copy.pending} `), undo);
+      return true;
     }
 
     function finishRecommendationFeedback(card, feedbackType = "") {
@@ -1786,6 +3904,28 @@
       scheduleActivityRailHeightSync();
     }
 
+    // 用户是否正在首页内容上互动：惊喜聊天框展开 / 有焦点 / 有未发送草稿，
+    // 或正在普通推荐卡上悬停、输入、提交可撤销反馈。后台推送与惊喜自动轮播
+    // 在此期间不得切卡或重渲染——否则会让下方卡片在点击中途发生位移，或把
+    // 惊喜聊天反馈记到换上来的新卡上。
+    function delightUserEngaged() {
+      const input = document.getElementById("delightCommentInput");
+      const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
+      const focused = document.activeElement === input;
+      const hasDraft = Boolean(String(input?.value || "").trim());
+      const recommendationEngaged = Boolean(document.querySelector(
+        "#videoGrid:hover, #videoGrid:focus-within, #videoGrid .is-feedback-pending, #videoGrid .card-actions.is-composing"
+      ));
+      return composing || focused || hasDraft || recommendationEngaged;
+    }
+
+    // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
+    function syncDelightCount() {
+      if ($("#delightCount") && state.delights.length) {
+        $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
+      }
+    }
+
     async function handleCardAction(action, item, card) {
       const status = card.querySelector(".status-line");
       if (card.dataset.feedbackPending === "true") return;
@@ -1794,21 +3934,23 @@
       if (action === "cancel-comment") { closeCardComposer(card); return; }
       if (action === "watch-later") {
         const btn = card.querySelector('[data-action="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u7A0D\u540E\u518D\u770B" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          const bvid = item.bvid || item.id;
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地稍后再看移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在稍后页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -1816,69 +3958,53 @@
       }
       if (action === "favorite") {
         const btn = card.querySelector('[data-action="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u6536\u85CF" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          const bvid = item.bvid || item.id;
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地收藏移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在收藏页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
         return;
       }
-      card.dataset.feedbackPending = "true";
-      card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = true; });
-      try {
-        if (action === "send-comment") {
-          const input = card.querySelector(".comment-field input");
-          const note = input.value.trim();
-          if (!note) {
-            delete card.dataset.feedbackPending;
-            card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-            status.textContent = "先写一句想聊的内容，再提交这条反馈。";
-            input?.focus();
-            return;
-          }
-          await submitFeedback(item, "comment", note);
-          if (input) input.value = "";
-          closeCardComposer(card);
-          item.feedback_type = "comment";
-          status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
-          finishRecommendationFeedback(card, "comment");
-          showToast("已提交聊天线索");
+      if (action === "send-comment") {
+        const input = card.querySelector(".comment-field input");
+        const note = input.value.trim();
+        if (!note) {
+          status.textContent = "先写一句想聊的内容，再提交这条反馈。";
+          input?.focus();
           return;
         }
-        const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
-        await submitFeedback(item, feedbackType);
-        const feedbackCopy = {
-          like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"],
-          dislike: ["已记录不感兴趣，几秒后从当前列表移除。", "已记录不感兴趣"],
-          dismiss: ["已忽略这条推荐，几秒后从当前列表移除。", "已忽略推荐"]
-        }[feedbackType];
-        status.textContent = feedbackCopy[0];
-        if (shouldRemoveRecommendationAfterFeedback(feedbackType)) {
-          removeRecommendationCard(item, card, feedbackCopy[1]);
-          return;
-        }
-        item.feedback_type = feedbackType;
-        finishRecommendationFeedback(card, feedbackType);
-        showToast(feedbackCopy[1]);
-      } catch (error) {
-        delete card.dataset.feedbackPending;
-        card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-        status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
-        showToast(status.textContent);
+        const previousFeedbackType = item.feedback_type;
+        if (input) input.value = "";
+        closeCardComposer(card);
+        item.feedback_type = "comment";
+        status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
+        finishRecommendationFeedback(card, "comment");
+        showToast("已提交聊天线索");
+        void submitFeedback(item, "comment", note).catch((error) => {
+          item.feedback_type = previousFeedbackType;
+          if (input) input.value = note;
+          status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
+          showToast(status.textContent);
+        });
+        return;
       }
+      const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
+      stageRecommendationFeedback(item, card, feedbackType);
     }
 
     function renderRail() {
@@ -2098,12 +4224,17 @@
       return `<div class="profile-meter"><div class="profile-meter-head"><span>${escapeHtml(label)}</span><strong>${Math.round(score * 100)}%</strong></div><div class="profile-meter-track"><div class="profile-meter-fill" style="width:${score * 100}%"></div></div></div>`;
     }
 
+    function isKnownText(value) {
+      const text = String(value == null ? "" : value).trim().toLowerCase();
+      return text !== "" && !["unknown", "none", "n/a", "未知"].includes(text);
+    }
+
     function styleHtml(style) {
       if (!style || typeof style !== "object" || Array.isArray(style)) return paragraphsHtml(style, "内容口味还在继续归拢。");
       const textRows = [
         ["偏好时长", style.preferred_duration],
         ["偏好节奏", style.preferred_pace]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       const bars = [
         ["质量敏感度", style.quality_sensitivity],
         ["幽默偏好", style.humor_preference],
@@ -2119,13 +4250,14 @@
         ["周末", context.weekend_patterns],
         ["一天中的时段", context.time_of_day_patterns],
         ["观看会话", context.session_type]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       return rows ? `<div class="profile-context">${rows}</div>` : paragraphsHtml("", "使用场景还在继续观察。");
     }
 
     function speculativeHtml(items, options = {}) {
       const isAvoidance = options.kind === "avoidance";
       const probeType = isAvoidance ? "avoidance.probe" : "interest.probe";
+      const actionCopy = probeActionCopy(probeType);
       const list = asArray(items).filter((item) => {
         if (typeof item !== "object") return !state.handledProbeKeys.has(probeKey(probeType, item));
         const domain = item.domain || item.name || item.title;
@@ -2158,7 +4290,7 @@
           ${item.reason ? `<p class="video-meta">${escapeHtml(item.reason)}</p>` : ""}
           ${specifics.length ? `<div class="spec-specifics">${specifics.map((s) => `<span class="spec-specific-chip">${escapeHtml(s.name)}${s.count > 0 ? `<span class="spec-specific-count">${s.count}</span>` : ""}</span>`).join("")}</div>` : ""}
           <p class="spec-help">${isAvoidance ? `置信度表示阿B认为你会避开这个方向的把握；确认次数来自后端累计的避雷确认信号，达到 ${threshold} 次后会进入更稳定的避雷画像。` : `置信度表示阿B认为你会喜欢这个方向的把握；确认次数来自后端累计的正向确认信号（包括但不限于这里的“喜欢”），达到 ${threshold} 次后会进入更稳定的兴趣画像。`}</p>
-          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
+          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${probeType}">${actionCopy.confirm}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${probeType}">${actionCopy.defer}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${probeType}">${actionCopy.reject}</button></div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
@@ -2500,34 +4632,52 @@
       if (!root) return;
       root.querySelector('[data-profile-edit-toggle="exit"]')?.addEventListener("click", () => { void exitProfileEdit(); });
       root.querySelectorAll("[data-edit-remove]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue });
+        });
       });
       root.querySelectorAll("[data-edit-remove-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({
-          target: btn.dataset.editRemoveSpecific,
-          op: "remove",
-          value: btn.dataset.editValue,
-          parent: btn.dataset.editParent || ""
-        }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({
+            target: btn.dataset.editRemoveSpecific,
+            op: "remove",
+            value: btn.dataset.editValue,
+            parent: btn.dataset.editParent || ""
+          });
+        });
       });
       root.querySelectorAll("[data-edit-reset]").forEach((btn) => {
         btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editReset, op: "reset" }));
       });
       root.querySelectorAll("[data-edit-add]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const path = btn.dataset.editAdd;
           const input = root.querySelector(`[data-edit-add-input="${path}"]`);
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: path, op: "add", value });
+          btn.disabled = true;
+          await applyProfileEdit({ target: path, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-add-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const input = btn.closest(".edit-add-row")?.querySelector("[data-edit-specific-input]");
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          btn.disabled = true;
+          await applyProfileEdit({
             target: btn.dataset.editAddSpecific,
             op: "add",
             value,
@@ -2536,21 +4686,27 @@
         });
       });
       root.querySelectorAll("[data-edit-add-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
+          const button = root.querySelector(`[data-edit-add="${input.dataset.editAddInput}"]`);
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-specific-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          const button = input.closest(".edit-add-row")?.querySelector("[data-edit-add-specific]");
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({
             target: input.dataset.editSpecificInput,
             op: "add",
             value,
@@ -2613,6 +4769,25 @@
 
     function isAvoidanceProbe(type) {
       return messageType({ type }) === "avoidance.probe";
+    }
+
+    const PROBE_ACTION_COPY = Object.freeze({
+      interest: Object.freeze({
+        confirm: "确认喜欢",
+        defer: "暂时搁置",
+        reject: "确认不喜欢",
+        chat: "多聊聊",
+      }),
+      avoidance: Object.freeze({
+        confirm: "确认避雷",
+        defer: "搁置避雷",
+        reject: "不是雷点",
+        chat: "多聊聊",
+      }),
+    });
+
+    function probeActionCopy(type) {
+      return PROBE_ACTION_COPY[isAvoidanceProbe(type) ? "avoidance" : "interest"];
     }
 
     function isChallengeProbe(item) {
@@ -2727,6 +4902,12 @@
       return Boolean(document.querySelector("#messageList .message-item.is-resolving, #messageList .message-item.is-resolved, #messageList .message-item.is-dismissing"));
     }
 
+    function bindMessageProbeActions(msg, el) {
+      el.querySelectorAll("[data-probe]").forEach((button) => {
+        button.addEventListener("click", () => respondProbe(msg, button.dataset.probe, el));
+      });
+    }
+
     function renderMessages() {
       const list = $("#messageList");
       if (state.messageListDomLocked || isMessageListLocked()) {
@@ -2750,28 +4931,41 @@
         el.dataset.messageKey = key;
         if (messageType(msg) === "notification") {
           el.classList.add("is-notification");
-          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-notification-msg="view">去看看</button></div></div>`;
-          el.querySelectorAll("[data-notification-msg]").forEach((btn) => btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el)));
+          const viewAction = msg.content_url
+            ? `<a class="small-btn" data-notification-msg="view" href="${escapeHtml(msg.content_url)}" target="_blank" rel="noopener noreferrer">去看看</a>`
+            : `<button class="small-btn" data-notification-msg="view" type="button">去看看</button>`;
+          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions">${viewAction}</div></div>`;
+          el.querySelectorAll("[data-notification-msg]").forEach((btn) => {
+            btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el));
+            btn.addEventListener("auxclick", (event) => {
+              if (event.button === 1 && btn.dataset.notificationMsg === "view") {
+                respondNotification(msg, "view", el);
+              }
+            });
+          });
         } else {
           const isAvoidance = messageType(msg) === "avoidance.probe";
           const isChallenge = !isAvoidance && isChallengeProbe(msg);
           el.classList.add(isAvoidance ? "is-avoidance-probe" : isChallenge ? "is-challenge-probe" : "is-interest-probe");
           const eyebrow = isAvoidance ? "避雷确认" : isChallenge ? "挑战探针" : "兴趣确认";
           const actionsLabel = isAvoidance ? "确认或排除这个避雷方向" : isChallenge ? "确认或排除这个挑战方向" : "确认或排除这个兴趣";
-          const confirmLabel = isAvoidance ? "确实不喜欢" : "喜欢";
-          const rejectLabel = isAvoidance ? "不是" : "不喜欢";
           const kindCopy = isAvoidance
             ? "想少看这类，就确认这是雷点；如果阿B猜错了，点不是。"
             : isChallenge
               ? "这是挑战方向，会把口味往侧边推一点；想继续试探就点喜欢，不准就点不喜欢。"
             : "想继续探索这个方向，就点喜欢；不准就点不喜欢。";
-          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
+          const actionCopy = probeActionCopy(messageType(msg));
+          const actionButtons = `
+            <button class="probe-btn is-confirm" data-probe="confirm" type="button">${actionCopy.confirm}</button>
+            <button class="probe-btn is-neutral" data-probe="defer" type="button">${actionCopy.defer}</button>
+            <button class="probe-btn is-reject" data-probe="reject" type="button">${actionCopy.reject}</button>`;
+          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}">${actionButtons}</div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">${actionCopy.chat}</button></div></div>`;
           if (resolvedResult) {
             el.classList.add("is-resolved");
             const resolvedActions = el.querySelector(".message-card-actions");
             if (resolvedActions) resolvedActions.outerHTML = `<div class="message-note is-success">${escapeHtml(resolvedResult)}</div>`;
           } else {
-            el.querySelectorAll("[data-probe]").forEach((btn) => btn.addEventListener("click", () => respondProbe(msg, btn.dataset.probe, el)));
+            bindMessageProbeActions(msg, el);
           }
         }
         return el;
@@ -2779,7 +4973,7 @@
     }
 
     async function respondNotification(msg, response, el) {
-      if (response === "view" && msg.content_url) window.open(msg.content_url, "_blank", "noopener,noreferrer");
+      if (response === "view" && msg.content_url) trackRecommendationClick(msg);
       await requestJson(ENDPOINTS.notificationSent, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: msg.bvid }) });
       state.messages = state.messages.filter((item) => !(messageType(item) === "notification" && String(item.bvid) === String(msg.bvid)));
       renderMessages();
@@ -2831,12 +5025,12 @@
       };
       try {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turnId)}`);
-        if (latest?.status === "completed" || latest?.reply) {
-          showReply(latest.reply || "后端已完成这轮聊天。");
-          return;
-        }
         if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
           showReply(latest?.error || "聊天处理超时，稍后可以在历史里继续查看。", "error");
+          return;
+        }
+        if (latest?.status === "completed" || latest?.reply) {
+          showReply(latest.reply || "后端已完成这轮聊天。");
           return;
         }
       } catch {
@@ -2919,7 +5113,45 @@
       window.setTimeout(() => input?.focus(), 40);
     }
 
-    async function respondProbe(msg, response, el) {
+    function probePendingKey(type, domain) {
+      const normalizedDomain = String(domain || "").trim().toLowerCase();
+      return normalizedDomain ? `probe:${messageType({ type })}:${normalizedDomain}` : "";
+    }
+
+    function submitProbeResponse(type, domain, response, { surface = "", keepalive = false } = {}) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
+      const payload = { domain, response, message: "" };
+      if (!isAvoidance && surface) payload.surface = surface;
+      return requestJsonStrict(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive
+      }).then((apiResponse) => {
+        if (apiResponse?.ok === false) throw new Error("后端未接受这次探针反馈");
+        return apiResponse;
+      });
+    }
+
+    function probeFeedbackMessage(type, response, domain, apiResponse = null) {
+      const raw = String(domain || apiResponse?.domain || "这个方向").replace(/\s+/g, " ").trim();
+      const subject = raw.length > 24 ? `${raw.slice(0, 23)}…` : raw;
+      const quoted = `「${subject || "这个方向"}」`;
+      const avoidance = type === "avoidance.probe";
+      if (response === "confirm") return avoidance ? `已确认避雷${quoted}` : `已确认兴趣${quoted}`;
+      if (response === "defer") {
+        if (apiResponse?.action === "defer_exhausted") {
+          return avoidance ? `已搁置避雷${quoted}，之后先不提` : `已搁置兴趣${quoted}，之后先不提`;
+        }
+        return avoidance
+          ? `已搁置避雷${quoted}，过阵子可能再提`
+          : `已搁置兴趣${quoted}，过阵子可能再提`;
+      }
+      return avoidance ? `已排除避雷${quoted}` : `已排除兴趣${quoted}`;
+    }
+
+    function respondProbe(msg, response, el) {
       if (!el) return;
       const actions = el.querySelector(".message-card-actions");
       if (response === "chat") {
@@ -2927,111 +5159,168 @@
         showToast("已在这条消息里打开聊天输入");
         return;
       }
-      const key = messageKey(msg);
-      state.messageListDomLocked = true;
-      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
-      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
-      el.classList.add("is-resolving");
-      state.resolvingMessageKeys.add(key);
-      actions?.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+      if (!actions) return;
+      const stateKey = messageKey(msg);
       const probeType = messageType(msg);
       const domain = msg.domain || "";
       const handledKey = probeKey(probeType, domain);
-      if (handledKey) state.handledProbeKeys.add(handledKey);
-      try {
-        const isAvoidance = probeType === "avoidance.probe";
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: msg.domain, response, message: "" }) });
-        if (apiResp && apiResp.ok === false) {
-          state.resolvingMessageKeys.delete(key);
-          state.messages = state.messages.filter((item) => messageKey(item) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-          state.messageListDomLocked = false;
-          renderMessages();
-          void refreshProfile();
-          return;
-        }
-        const result = isAvoidance
-          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。" : "已搁置，暂时不作为避雷方向。"
-          : response === "confirm" ? "已确认，后续推荐会提高权重。" : "已搁置，后续会少试探这个方向。";
-        state.resolvedMessageResults.set(key, result);
-        el.classList.remove("is-resolving");
-        el.classList.add("is-resolved");
-        if (actions) {
-          actions.classList.add("is-result");
-          actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
-        }
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已搁置这个避雷方向"
-          : response === "confirm" ? "已确认这个兴趣方向" : "已搁置这个兴趣方向");
-        setTimeout(() => {
-          collapseMessageItem(key, el, () => {
-            state.resolvingMessageKeys.delete(key);
-            state.resolvedMessageResults.delete(key);
-            state.messages = state.messages.filter((item) => messageKey(item) !== key);
-            if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-            state.messageListDomLocked = false;
-            renderMessages();
-            void refreshProfile();
+      const pendingKey = probePendingKey(probeType, domain);
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className,
+        minHeight: el.style.minHeight
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (el.isConnected && !keepalive) {
+            el.classList.remove("is-feedback-pending");
+            el.classList.add("is-feedback-saving");
+            actions.innerHTML = '<div class="message-action-result">正在保存反馈…</div>';
+          }
+          return submitProbeResponse(probeType, domain, response, { keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
           });
-        }, 1800);
-      } catch (error) {
-        state.resolvingMessageKeys.delete(key);
-        state.resolvedMessageResults.delete(key);
-        state.messageListDomLocked = false;
-        el.classList.remove("is-resolving");
-        el.style.minHeight = "";
-        if (handledKey) state.handledProbeKeys.delete(handledKey);
-        actions?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.resolvedMessageResults.delete(stateKey);
+          el.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          el.style.minHeight = snapshot.minHeight;
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindMessageProbeActions(msg, el);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = probeFeedbackMessage(probeType, response, domain, apiResponse);
+          state.resolvedMessageResults.set(stateKey, result);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.messages = state.messages.filter((item) => messageKey(item) !== stateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== stateKey);
+          syncMessageCount();
+          if (!el.isConnected) return;
+          el.classList.remove("is-feedback-pending", "is-feedback-saving");
+          el.classList.add("is-feedback-committed");
+          actions.classList.add("is-result");
+          const resultNode = document.createElement("div");
+          resultNode.className = "message-action-result";
+          resultNode.title = result;
+          resultNode.textContent = result;
+          actions.replaceChildren(resultNode);
+          showToast(result);
+        }
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      state.messageListDomLocked = true;
+      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
+      state.resolvingMessageKeys.add(stateKey);
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
+      el.classList.add("is-feedback-pending");
+      const result = probeFeedbackMessage(probeType, response, domain);
+      actions.classList.add("is-result");
+      const resultNode = document.createElement("div");
+      resultNode.className = "message-action-result";
+      resultNode.textContent = `${result} `;
+      const undoButton = document.createElement("button");
+      undoButton.className = "feedback-undo-btn";
+      undoButton.setAttribute("data-probe-undo", "");
+      undoButton.type = "button";
+      undoButton.textContent = "撤销";
+      undoButton.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      resultNode.appendChild(undoButton);
+      actions.replaceChildren(resultNode);
     }
 
-    function bindSpeculativeActions() {
-      document.querySelectorAll("[data-spec-response]").forEach((button) => {
+    function bindSpeculativeRowActions(row) {
+      row.querySelectorAll("[data-spec-response]").forEach((button) => {
         button.addEventListener("click", () => respondSpeculativeInterest(button));
       });
     }
 
-    async function respondSpeculativeInterest(button) {
+    function bindSpeculativeActions() {
+      document.querySelectorAll("[data-spec-domain]").forEach(bindSpeculativeRowActions);
+    }
+
+    function respondSpeculativeInterest(button) {
       const row = button.closest("[data-spec-domain]");
       const domain = row?.dataset.specDomain;
       const response = button.dataset.specResponse;
       if (!domain || !response) return;
-      row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = true; });
       const type = button.dataset.specType || "interest.probe";
-      const key = probeKey(type, domain);
-      if (key) state.handledProbeKeys.add(key);
-      try {
-        const isAvoidance = isAvoidanceProbe(type);
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const payload = { domain, response, message: "" };
-        if (!isAvoidance) payload.surface = "profile";
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (apiResp && apiResp.ok === false) {
-          row.remove();
-          state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-          renderMessages();
-          void refreshProfile();
-          return;
+      const handledKey = probeKey(type, domain);
+      const pendingKey = probePendingKey(type, domain);
+      const actions = row.querySelector(".spec-actions");
+      if (!actions) return;
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (row.isConnected && !keepalive) {
+            row.classList.remove("is-feedback-pending");
+            row.classList.add("is-feedback-saving");
+            actions.innerHTML = '<p class="spec-result">正在保存反馈…</p>';
+          }
+          return submitProbeResponse(type, domain, response, { surface: "profile", keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          row.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindSpeculativeRowActions(row);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = probeFeedbackMessage(type, response, domain, apiResponse);
+          const messageStateKey = probeKey(type, domain);
+          state.messages = state.messages.filter((msg) => messageKey(msg) !== messageStateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== messageStateKey);
+          syncMessageCount();
+          if (!row.isConnected) return;
+          row.classList.remove("is-feedback-pending", "is-feedback-saving");
+          row.classList.add("is-feedback-committed");
+          const resultNode = document.createElement("p");
+          resultNode.className = "spec-result";
+          resultNode.textContent = result;
+          actions.replaceChildren(resultNode);
+          showToast(result);
         }
-        const result = isAvoidance
-          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。` : `好，「${escapeHtml(domain)}」不记成避雷。`)
-          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。` : `好，「${escapeHtml(domain)}」先不看了。`);
-        row.innerHTML = `<p class="spec-result">${result}</p>`;
-        state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-        if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-        renderMessages();
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已排除这个避雷方向"
-          : response === "confirm" ? "已确认这个猜测兴趣" : "已排除这个猜测兴趣");
-        setTimeout(() => { void refreshProfile(); }, 1200);
-      } catch (error) {
-        if (key) state.handledProbeKeys.delete(key);
-        row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      row.classList.add("is-feedback-pending");
+      const result = probeFeedbackMessage(type, response, domain);
+      const resultNode = document.createElement("p");
+      resultNode.className = "spec-result";
+      resultNode.textContent = `${result} `;
+      const undoButton = document.createElement("button");
+      undoButton.className = "feedback-undo-btn";
+      undoButton.setAttribute("data-probe-undo", "");
+      undoButton.type = "button";
+      undoButton.textContent = "撤销";
+      undoButton.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      resultNode.appendChild(undoButton);
+      actions.replaceChildren(resultNode);
     }
 
     function createClientTurnId(prefix = "webui") {
@@ -3146,6 +5435,45 @@
       return current;
     }
 
+    function delightContentUrl(delight) {
+      if (!delight) return "";
+      return delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
+    }
+
+    function ensureDelightThumbAnchor() {
+      const thumb = $("#delightThumb");
+      if (!thumb || thumb.tagName.toLowerCase() === "a") return thumb;
+      const anchor = document.createElement("a");
+      Array.from(thumb.attributes).forEach((attr) => {
+        if (attr.name !== "role" && attr.name !== "tabindex") {
+          anchor.setAttribute(attr.name, attr.value);
+        }
+      });
+      while (thumb.firstChild) anchor.append(thumb.firstChild);
+      thumb.replaceWith(anchor);
+      return anchor;
+    }
+
+    function syncDelightThumbLink(delight) {
+      const thumb = ensureDelightThumbAnchor();
+      if (!thumb) return null;
+      const url = delightContentUrl(delight);
+      if (url) {
+        thumb.href = url;
+        thumb.target = "_blank";
+        thumb.rel = "noopener noreferrer";
+        thumb.removeAttribute("role");
+        thumb.removeAttribute("tabindex");
+        return thumb;
+      }
+      thumb.removeAttribute("href");
+      thumb.removeAttribute("target");
+      thumb.removeAttribute("rel");
+      thumb.setAttribute("role", "button");
+      thumb.setAttribute("tabindex", "0");
+      return thumb;
+    }
+
     function applyTurnToDelight(turn) {
       const subjectId = String(turn?.subject_id || turn?.bvid || "");
       if (!turn || (turn.scope && turn.scope !== "delight") || !subjectId) return null;
@@ -3184,24 +5512,29 @@
       window.setTimeout(poll, 1200);
     }
 
-    async function respondDelight(delight, response, el = null) {
+    async function respondDelight(delight, response, el = null, openUrl = false) {
       if (!delight) return;
       if (response === "chat") { openDelightComposer(); return; }
       if (response === "cancel-comment") { closeDelightComposer(); return; }
       if (response === "watch-later") {
         const btn = document.querySelector('[data-delight="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地稍后再看操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -3209,18 +5542,23 @@
       }
       if (response === "favorite") {
         const btn = document.querySelector('[data-delight="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地收藏操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -3253,8 +5591,12 @@
         return;
       }
       if (response === "view") {
-        const url = delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
-        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const url = delightContentUrl(delight);
+        // 「去看看」按钮是纯 <button>（不是封面那个 <a>），必须在这里显式打开，
+        // 否则点了只弹 toast 却什么都不开（field report 2026-07-07）。封面缩略图
+        // 已是带 href 的 <a> 靠原生导航打开，openUrl=false 不重复开、避免双开。
+        // window.open 在点击手势的同步栈内调用，不会被拦截。
+        if (openUrl && url) window.open(url, "_blank", "noopener,noreferrer");
         trackRecommendationClick(delight);
         // 浏览过即已读：上报 view 让后端标记 delight_notified，下次重灌不再出现。
         // fire-and-forget，不阻塞打开内容；当场卡片仍保留。
@@ -3269,7 +5611,7 @@
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已忽略这条惊喜推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      await requestJson(ENDPOINTS.delightRespond, {
+      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3279,8 +5621,17 @@
           message: ""
         })
       });
+      if (response === "like" && feedbackResult == null) {
+        showToast("这次喜欢还没记上，可以再试一次");
+        setActiveDelight(state.delightIndex);
+        return;
+      }
       if (response === "like") {
-        updateDelightState(delight.bvid, { response_message: "好，这类多来点。" });
+        updateDelightState(delight.bvid, {
+          state: "liked",
+          response_message: "好，这类多来点。",
+        });
+        setActiveDelight(state.delightIndex);
       }
       if (response === "dislike" || response === "dismiss") {
         state.delights = state.delights.filter((item) => item.bvid !== delight.bvid);
@@ -3379,13 +5730,13 @@
       const startedAt = Date.now();
       const poll = async () => {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turn.turn_id)}`);
-        if (latest?.status === "completed" || latest?.reply) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
+        if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
+          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
           renderChat();
           return;
         }
-        if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
+        if (latest?.status === "completed" || latest?.reply) {
+          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
           renderChat();
           return;
         }
@@ -3404,60 +5755,92 @@
       }
     }
 
-    async function dismissVisibleRecommendationsBeforeReshuffle() {
-      const visibleItems = filteredVideos().filter((item) => item?.id != null);
-      if (!visibleItems.length) return { total: 0, ok: 0, failed: 0 };
-      showToast(`正在忽略当前显示的 ${visibleItems.length} 张推荐…`);
-      const results = await Promise.allSettled(visibleItems.map((item) => submitFeedback(item, "dismiss")));
-      const dismissedKeys = new Set();
-      results.forEach((result, index) => {
-        if (result.status === "fulfilled") dismissedKeys.add(recommendationKey(visibleItems[index]));
-      });
-      if (dismissedKeys.size) {
-        state.videos = state.videos.filter((item) => !dismissedKeys.has(recommendationKey(item)));
-      }
-      return { total: visibleItems.length, ok: dismissedKeys.size, failed: visibleItems.length - dismissedKeys.size };
-    }
-
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
-      const dismissToggle = $("#dismissOnReshuffleToggle");
+      // 请求发出前捕获当时选中的平台：用户在请求期间切 Tab 不能把响应写进错误批次。
+      const requestPlatform = activePlatformSlug();
+      // 当前可见卡片始终是本次换一批的排除集；平台定向时覆盖该平台
+      // 本会话已加载的全部内容（不止可见的那些）。
+      const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
+      const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
+      const scopedForExclusion = requestPlatform
+        ? state.videos.filter((item) => item?.id != null && recommendationPlatformSlug(item) === requestPlatform)
+        : visibleForExclusion;
       if (reshuffleButton) reshuffleButton.disabled = true;
-      if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const dismissResult = state.dismissOnReshuffle ? await dismissVisibleRecommendationsBeforeReshuffle() : null;
-        const payload = await requestJson(ENDPOINTS.reshuffle, { method: "POST" });
-        if (payload?.items?.length) {
-          state.videos = normalizeRecommendationList(payload.items);
+        const excludedBvids = scopedForExclusion.map((item) => item.bvid).filter(Boolean);
+        const requestBody = { excluded_bvids: excludedBvids };
+        // "全部" 不带 source_platform：旧客户端 / 兼容路径的请求形状保持不变。
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
+        const payload = await requestJson(ENDPOINTS.reshuffle, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody)
+        });
+        const returned = payload?.items?.length ? normalizeRecommendationList(payload.items) : [];
+        if (requestPlatform && reportPlatformScopeLeak("换一批", requestPlatform, returned)) return;
+        const fresh = returned.filter((item) => !visibleKeys.has(recommendationKey(item)));
+        // 后端返回空数组时保留现有卡片，不制造空屏。
+        if (fresh.length) {
+          state.videos = requestPlatform ? replacePlatformCards(state.videos, requestPlatform, fresh) : fresh;
           renderAll();
-          if (dismissResult?.ok) {
-            const failedText = dismissResult.failed ? `，${dismissResult.failed} 张忽略失败` : "";
-            showToast(`已忽略 ${dismissResult.ok} 张当前推荐并换一批${failedText}`);
-          } else {
-            showToast("已换一批推荐");
-          }
+          showToast("已换一批推荐");
         } else {
-          renderAll();
-          showToast("换一批失败：请检查后端连接");
+          showToast("暂时没有更多新推荐了");
         }
       } finally {
+        schedulePlatformAvailabilityRefresh();
         if (reshuffleButton) reshuffleButton.disabled = false;
-        if (dismissToggle) dismissToggle.disabled = false;
       }
     }
 
+    // 手动「加载更多」与滚动自动续页共用这一条路径。库存为 0 时按钮仍可点：
+    // 它负责唤醒后端已有的补货链路；只有自动续页会被库存 gate 拦下。
     async function appendMore() {
-      const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
-      if (payload?.items?.length) {
-        const freshItems = normalizeRecommendationList(payload.items);
-        state.videos = state.videos.concat(freshItems);
-        renderAll();
-        // Keep decoding off the interaction path: slow first-miss covers should
-        // not delay the new recommendation cards from appearing.
-        void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
-        showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
-      } else {
-        showToast("加载更多失败：后端没有返回新候选");
+      if (appendMoreInFlight) return;
+      appendMoreInFlight = true;
+      // 与换一批同理：捕获请求开始时的平台，响应到达时不再读 state.filter。
+      const requestPlatform = activePlatformSlug();
+      showAppendSkeletons();
+      try {
+        const requestBody = { excluded_bvids: state.videos.map((v) => v.bvid) };
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
+        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) });
+        const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
+        if (payload?.items?.length) {
+          const returned = normalizeRecommendationList(payload.items);
+          if (requestPlatform && reportPlatformScopeLeak("加载更多", requestPlatform, returned)) return;
+          // 按稳定 recommendation key 去重后再追加。
+          const loadedKeys = new Set(state.videos.map((item) => recommendationKey(item)));
+          const freshItems = returned.filter((item) => {
+            const key = recommendationKey(item);
+            if (!key || loadedKeys.has(key)) return false;
+            loadedKeys.add(key);
+            return true;
+          });
+          const appendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
+          state.videos = state.videos.concat(freshItems);
+          renderAll();
+          // Keep decoding off the interaction path: slow first-miss covers should
+          // not delay the new recommendation cards from appearing.
+          void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
+          if (!appendCameUpShort) {
+            showToast("已加载更多推荐");
+          } else if (freshItems.length) {
+            showToast(`已加载 ${freshItems.length} 条，候选池暂时见底，后台正在补货，${retryHint}`);
+          } else {
+            showToast(`这批内容都已反馈过，后台正在补货，${retryHint}`);
+          }
+        } else {
+          showToast(`候选池暂时没有新内容，已请求后台补货，${retryHint}`);
+        }
+      } finally {
+        removeAppendSkeletons();
+        // showAppendSkeletons may have cleared an empty-state placeholder; if
+        // nothing came back, re-render so the grid never ends up blank.
+        if (!grid.childElementCount) renderVideos();
+        schedulePlatformAvailabilityRefresh();
+        appendMoreInFlight = false;
       }
     }
 
@@ -3490,6 +5873,16 @@
         manual_refresh_state: manualRefreshState || "idle",
         manual_refresh_message: String(merged.manual_refresh_message || ""),
         runtime_event_type: incomingType || String(merged.runtime_event_type || ""),
+        last_account_sync_at: String(merged.last_account_sync_at ?? ""),
+        last_account_sync_error: String(merged.last_account_sync_error ?? ""),
+        last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
+        last_account_sync_issues: Array.isArray(merged.last_account_sync_issues)
+          ? merged.last_account_sync_issues
+          : [],
+        // This is an explicit-key whitelist: a field missing here is dropped
+        // silently, which is how the backend copy stopped reaching the chip.
+        last_account_sync_message: String(merged.last_account_sync_message ?? ""),
+        last_account_sync_severity: String(merged.last_account_sync_severity ?? ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
     }
@@ -3506,8 +5899,20 @@
 
     function shouldShowInitOnboarding(status) {
       const runtime = normalizeRuntimeStatus(status);
-      if (initWaitingForFirstPool(state.initStatus)) return true;
       if (Boolean(state.initStatus?.running)) return true;
+      // init-status owns the terminal contract: normal completion already
+      // verified a serviceable canonical row, while partial completion
+      // explicitly lets the user enter and leaves replenishment to runtime.
+      // A stale runtime snapshot must not recreate the onboarding card.
+      if (state.initStatus?.initialized === true) return false;
+      // /api/init-status is the authoritative pre-init source. runtime-status
+      // can be transiently unreachable (state.runtimeStatus stays null) or get
+      // rebuilt from field-less runtime events / message merges, where the
+      // missing `initialized` defaults to true — neither may hide the guided
+      // init card while the backend explicitly reports it never initialized.
+      if (state.initStatus?.initialized === false && !state.videos.length && !hasPostInitRuntimeSignals(runtime)) {
+        return true;
+      }
       return Boolean(status) && runtime.initialized === false && !hasPostInitRuntimeSignals(runtime);
     }
 
@@ -3578,6 +5983,57 @@
       $("#poolReplenished").textContent = summary?.replenished || "—";
       $("#poolTopics").textContent = summary?.topics || "—";
       $("#poolRefreshState").textContent = getPoolRefreshLabel(runtime);
+      renderDesktopRuntimeFailure();
+    }
+
+    function renderAccountSyncStatus(runtime) {
+      const el = document.getElementById("accountSyncStatus");
+      if (!el) return;
+      const kind = String(runtime?.last_account_sync_error_kind || "");
+      const error = String(runtime?.last_account_sync_error || "");
+      const issues = Array.isArray(runtime?.last_account_sync_issues)
+        ? runtime.last_account_sync_issues
+        : [];
+      const severity = String(runtime?.last_account_sync_severity || "");
+      const sourceIssues = collectEnabledSourceIssues(state.sourceStatus);
+      // Healthy installs (no sync or source issue) show nothing — zero visual
+      // change. Pending verification alone is not an error and stays on the
+      // source card instead of turning the dashboard into an alarm panel.
+      if (!error && !kind && !issues.length && !sourceIssues.length) {
+        el.hidden = true;
+        el.textContent = "";
+        el.classList.remove("is-auth-expired", "is-warning", "is-error");
+        return;
+      }
+      el.hidden = false;
+      // The backend renders the sentence so every surface says the same thing;
+      // the literals here are only a fallback for an older backend.
+      const message = String(runtime?.last_account_sync_message || "");
+      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
+      const accountDetail = message || (error || kind || issues.length
+        ? "账号同步遇到未分类异常，暂时无法确定具体环节"
+        : "");
+      const accountText = accountDetail && when
+        ? `${accountDetail}（上次同步 ${when}）`
+        : accountDetail;
+      const sourceText = sourceIssues.length
+        ? `来源接入：${sourceIssues.map((issue) => `${issue.source}：${issue.detail}`).join("；")}`
+        : "";
+      const combined = [accountText, sourceText].filter(Boolean).join("；");
+      const hasSourceDanger = sourceIssues.some((issue) => issue.tone === "danger");
+      if (kind === "auth_expired" && !hasSourceDanger) {
+        el.classList.add("is-auth-expired", "is-warning");
+        el.classList.remove("is-error");
+        const fallback = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        el.textContent = [message ? accountText : fallback, sourceText].filter(Boolean).join("；");
+        return;
+      }
+      const hasAccountIssue = Boolean(error || kind || issues.length);
+      const warningOnly = !hasSourceDanger && (!hasAccountIssue || severity === "warning");
+      el.classList.toggle("is-warning", warningOnly);
+      el.classList.toggle("is-error", !warningOnly);
+      el.classList.remove("is-auth-expired");
+      el.textContent = combined;
     }
 
     function applyRuntimeStatus(payload) {
@@ -3590,6 +6046,8 @@
       syncSourceMetric();
       $("#runtimeSummary").textContent = state.runtimeStatus.live_summary || summary?.available || "后端在线，推荐池与采集运行时可读取。";
       renderPoolStatus(state.runtimeStatus);
+      maybeAutoLoadAfterPoolRefill();
+      renderAccountSyncStatus(state.runtimeStatus);
     }
 
     function setInput(id, value) {
@@ -3676,6 +6134,39 @@
       return selected.length > 0 ? selected : ["search"];
     }
 
+    const BANGUMI_SOURCE_MODE_FIELDS = [
+      ["search", "bangumiModeSearch"],
+      ["ranked", "bangumiModeRanked"],
+      ["latest", "bangumiModeLatest"],
+    ];
+    const BANGUMI_SUBJECT_TYPE_FIELDS = [
+      ["anime", "bangumiTypeAnime"],
+      ["book", "bangumiTypeBook"],
+      ["game", "bangumiTypeGame"],
+      ["music", "bangumiTypeMusic"],
+      ["real", "bangumiTypeReal"],
+    ];
+
+    function setCheckedValues(fields, rawValues) {
+      const fallback = fields.map(([value]) => value);
+      const selected = new Set(
+        (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+          .map((value) => String(value).trim())
+          .filter(Boolean),
+      );
+      fields.forEach(([value, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = selected.has(value);
+      });
+    }
+
+    function collectCheckedValues(fields, fallback) {
+      const selected = fields
+        .filter(([, id]) => document.getElementById(id)?.checked === true)
+        .map(([value]) => value);
+      return selected.length > 0 ? selected : fallback;
+    }
+
     function joinPath(directory, filename) {
       const dir = String(directory || "").trim();
       const name = String(filename || "").trim();
@@ -3709,8 +6200,16 @@
 
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+    //
+    // The state -> label/tone table, the verify tones and the credential-row
+    // shape all come from /shared/source-status.js, which the extension side
+    // panel and the setup wizard load too. Keeping a private copy here is what
+    // let the two surfaces drift into painting `no_auth` and `unverified` the
+    // same colour (spec D6). The roster it exports includes Bangumi, so this
+    // page keeps rendering that row even though the backend sends it no `auth`
+    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+    const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -3718,26 +6217,63 @@
       youtube: "youtubeEnabled",
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
-      reddit: "redditEnabled"
+      reddit: "redditEnabled",
+      bangumi: "bangumiEnabled"
     };
-    const SOURCE_ACCESS_STATE = {
-      ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "接入可用" },
-      no_auth: { tone: "public", label: "无需登录" },
-      unverified: { tone: "pending", label: "状态待验证" },
-      missing: { tone: "warning", label: "需要登录" },
-      missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "warning", label: "频率受限" },
-      partial: { tone: "warning", label: "部分可用" },
-      stale: { tone: "warning", label: "需要刷新" },
-      expired_cookie: { tone: "danger", label: "Cookie 失效" },
-      blocked: { tone: "danger", label: "接入受阻" }
-    };
+
+    function collectEnabledSourceIssues(data) {
+      if (!data || typeof data !== "object") return [];
+      return SOURCE_STATUS_KEYS.flatMap((key) => {
+        const issue = SourceStatus.describeSourceIssue(data[key]);
+        if (!issue) return [];
+        return [{ ...issue, key, source: SourceStatus.sourceLabel(key) }];
+      });
+    }
 
     function setSourceBadge(badge, text, tone) {
       if (!badge) return;
       badge.textContent = text;
       badge.dataset.tone = tone;
+    }
+
+    // How strong the evidence behind the access verdict is, as its own badge
+    // beside it. Two sources can honestly both read 已验证 while one asked the
+    // platform and the other only found a file on disk; before this they were
+    // the same green pill, which is the misreading the contract exists to fix.
+    // Hidden rather than blanked when there is nothing to rate — a source that
+    // needs no credential has no evidence, and an empty pill reads as a bug.
+    function setSourceEvidence(badge, evidence) {
+      if (!badge) return;
+      const shown = Boolean(evidence && evidence.text);
+      badge.hidden = !shown;
+      badge.textContent = shown ? evidence.text : "";
+      badge.dataset.rank = shown ? evidence.rank : "none";
+      // The glyph and the method name already carry the distinction; the title
+      // spells it out for anyone who wants it, and comes from the shared module
+      // so it cannot drift from the glyph it explains.
+      if (shown && evidence.hint) badge.title = evidence.hint;
+      else badge.removeAttribute("title");
+    }
+
+    // The overseas-egress advisory is authored by the backend
+    // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+    // verbatim. This function must never learn a platform name nor read
+    // [network].mode: adding a platform must stay a one-line backend change.
+    // Only the `enabled` gate lives here, because "is this row live right now"
+    // is a UI fact the backend cannot see (the desktop select can be pending).
+    function applySourceNetworkHint(row, hint, enabled) {
+      const text = enabled ? String(hint || "") : "";
+      let node = row.querySelector(".source-network-hint");
+      if (!text) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.className = "source-network-hint";
+        row.appendChild(node);
+      }
+      node.textContent = text;
     }
 
     function getPendingSourceEnabled(key, item) {
@@ -3759,29 +6295,35 @@
         if (!row) return;
         const sourceBadge = row.querySelector(".source-source-badge");
         const accessBadge = row.querySelector(".source-access-badge");
+        const evidenceBadge = row.querySelector(".source-evidence-badge");
         const detail = row.querySelector(".src-detail");
         const item = data?.[key];
-        if (!item) {
+        const access = SourceStatus.describeAccess(item);
+        setSourceEvidence(evidenceBadge, access.evidence);
+        if (!access.present) {
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
-          setSourceBadge(accessBadge, "接入：后端未连接", "muted");
-          if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
+          if (detail) detail.textContent = access.detail;
+          // No status means no basis for an egress advisory either; drop any
+          // hint left over from the last successful poll.
+          applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
-          row.dataset.accessTone = "muted";
+          row.dataset.accessTone = access.tone;
           return;
         }
         const enableState = getPendingSourceEnabled(key, item);
-        const accessState = SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" };
         const sourceLabel = enableState.pending
           ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
           : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
         setSourceBadge(sourceBadge, sourceLabel, enableState.pending ? "pending" : enableState.savedEnabled ? "enabled" : "disabled");
-        setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
+        setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
-        if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        if (detail) detail.textContent = detailPrefix + (access.detail || "暂无更多状态细节。");
+        applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
-        row.dataset.accessTone = accessState.tone;
+        row.dataset.accessTone = access.tone;
       });
     }
 
@@ -3790,33 +6332,75 @@
       try { data = await requestJson("/sources/status"); } catch { data = null; }
       state.sourceStatus = data;
       renderSourcesStatusRows(data);
+      renderAccountSyncStatus(state.runtimeStatus);
     }
+
+    function renderVerifyResult(statusEl, result) {
+      const view = SourceStatus.describeVerifyResult(result);
+      setProbeStatus(statusEl, view.tone, view.text);
+    }
+
+    const sourceVerifyInFlight = new Set();
+
+    async function runSourceVerify(row) {
+      const slug = row?.dataset?.sourceStatus || "";
+      if (!slug || sourceVerifyInFlight.has(slug)) return;
+      const button = row.querySelector(".source-verify-btn");
+      const statusEl = row.querySelector(".source-verify-status");
+      sourceVerifyInFlight.add(slug);
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "连接");
+      let cooldown = 0;
+      try {
+        const result = await requestJsonStrict(`/sources/${encodeURIComponent(slug)}/verify`, {
+          method: "POST",
+          timeoutMs: 30000
+        });
+        renderVerifyResult(statusEl, result);
+        cooldown = Number(result?.retry_after_seconds) || 0;
+        // Only a verification that actually moved the credential or the verdict
+        // makes the badge above it stale; a refreshed timestamp does not.
+        if (result?.changed) void renderSourcesStatus();
+      } catch (error) {
+        const view = SourceStatus.describeVerifyError(error);
+        setProbeStatus(statusEl, view.tone, view.text);
+      } finally {
+        sourceVerifyInFlight.delete(slug);
+        SourceStatus.startVerifyCooldown(button, cooldown);
+      }
+    }
+
+    $("#sourceStatusList")?.addEventListener("click", (event) => {
+      const button = event.target.closest(".source-verify-btn");
+      if (!button || button.disabled) return;
+      void runSourceVerify(button.closest(".source-status-row"));
+    });
 
     function renderSourceCredentialRows(data) {
       const list = $("#sourceCredentialList");
       if (!list) return;
-      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
+      SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
-        const item = data?.[key];
-        if (!item) {
-          row.dataset.available = "false";
-          if (summary) summary.textContent = "状态暂不可用";
-          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
-          return;
-        }
-        row.dataset.available = item.available ? "true" : "false";
-        if (summary) {
-          summary.textContent = item.available
-            ? `${item.label || "Cookie"} 已保存，展开查看`
-            : item.detail || "当前没有可展示 Cookie";
-        }
-        if (value) {
-          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
-        }
+        // Summary wording is the backend's, including 小红书's "a stored
+        // content token is not a login" caveat. That caveat used to be a
+        // per-platform branch right here, so only this page ever showed it —
+        // the side panel and the setup wizard silently disagreed.
+        const view = SourceStatus.describeCredential(data?.[key]);
+        row.dataset.available = view.available ? "true" : "false";
+        row.dataset.formKind = view.form.kind;
+        if (summary) summary.textContent = view.summary;
+        if (value) value.value = view.value;
       });
+      // Not a display branch over the access enum: every other paste box gets
+      // its "已保存/未保存" placeholder from the config snapshot in
+      // populateForm(), but Reddit's credential goes to rdt-cli's own store, so
+      // config.toml has no field to read and the hint has to come from here.
+      // Generalising it would mean either a new contract field or moving three
+      // other platforms off the config snapshot — both beyond this change.
+      setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
 
     async function renderSourceCredentials() {
@@ -3965,8 +6549,593 @@
       return { reload: load };
     }
 
+    const LLM_PROVIDER_LABELS = {
+      openai: "OpenAI",
+      claude: "Claude",
+      gemini: "Gemini",
+      deepseek: "DeepSeek",
+      openrouter: "OpenRouter",
+      ollama: "Ollama",
+      openai_compatible: "OpenAI-compatible"
+    };
+    const LLM_PROVIDER_DEFAULTS = {
+      openai: { model: "gpt-5-nano", base_url: "" },
+      claude: { model: "claude-sonnet-4-20250514", base_url: "" },
+      gemini: { model: "gemini-2.5-flash", base_url: "" },
+      deepseek: { model: "deepseek-v4-flash", base_url: "https://api.deepseek.com" },
+      openrouter: { model: "openai/gpt-4o-mini", base_url: "https://openrouter.ai/api/v1" },
+      ollama: { model: "qwen2.5:7b", base_url: "http://127.0.0.1:11434/v1" },
+      openai_compatible: { model: "", base_url: "" }
+    };
+    const LLM_MODEL_DISCOVERY_PROVIDERS = new Set([
+      "openai",
+      "deepseek",
+      "openrouter",
+      "ollama",
+      "openai_compatible"
+    ]);
+    const LLM_MODULE_UI = {
+      soul: { mode: "moduleSoulMode", custom: "moduleSoulCustom", list: "moduleSoulChain", picker: "moduleSoulPicker", add: "moduleSoulAdd", label: "画像理解" },
+      discovery: { mode: "moduleDiscoveryMode", custom: "moduleDiscoveryCustom", list: "moduleDiscoveryChain", picker: "moduleDiscoveryPicker", add: "moduleDiscoveryAdd", label: "内容发现" },
+      recommendation: { mode: "moduleRecommendationMode", custom: "moduleRecommendationCustom", list: "moduleRecommendationChain", picker: "moduleRecommendationPicker", add: "moduleRecommendationAdd", label: "推荐表达" },
+      evaluation: { mode: "moduleEvaluationMode", custom: "moduleEvaluationCustom", list: "moduleEvaluationChain", picker: "moduleEvaluationPicker", add: "moduleEvaluationAdd", label: "内容评估" }
+    };
+    const LLM_INSTANCE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+    let llmDialogReturnFocus = null;
+    let llmDraggedRoute = null;
+
+    function clonePlain(value) {
+      return JSON.parse(JSON.stringify(value ?? null));
+    }
+
+    function normalizeLlmDraft(llm) {
+      const instances = {};
+      for (const [rawId, rawInstance] of Object.entries(llm?.instances || {})) {
+        const id = String(rawId || "").trim().toLowerCase();
+        if (!id || !rawInstance || typeof rawInstance !== "object") continue;
+        instances[id] = {
+          name: String(rawInstance.name || id),
+          provider_type: String(rawInstance.provider_type || ""),
+          enabled: rawInstance.enabled !== false,
+          api_key: String(rawInstance.api_key || ""),
+          model: String(rawInstance.model || ""),
+          base_url: String(rawInstance.base_url || ""),
+          auth_mode: String(rawInstance.auth_mode || ""),
+          api_flavor: String(rawInstance.api_flavor || ""),
+          http_referer: String(rawInstance.http_referer || ""),
+          x_title: String(rawInstance.x_title || ""),
+          reasoning_effort: String(rawInstance.reasoning_effort || ""),
+          num_ctx: Number.parseInt(rawInstance.num_ctx, 10) || 0
+        };
+      }
+      const defaultChain = Array.from(new Set((llm?.default_chain || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)));
+      const routes = {};
+      for (const moduleName of Object.keys(LLM_MODULE_UI)) {
+        const rawRoute = llm?.routes?.[moduleName] || llm?.[moduleName] || {};
+        routes[moduleName] = {
+          inherit: rawRoute.inherit !== false,
+          chain: Array.from(new Set((rawRoute.chain || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)))
+        };
+      }
+      return { instances, default_chain: defaultChain, routes };
+    }
+
+    function llmInstanceReferences(instanceId) {
+      const draft = state.llmDraft;
+      if (!draft) return [];
+      const references = [];
+      if (draft.default_chain.includes(instanceId)) references.push("默认链");
+      for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+        const route = draft.routes[moduleName];
+        if (route && !route.inherit && route.chain.includes(instanceId)) references.push(ui.label);
+      }
+      return references;
+    }
+
+    function llmEndpointSummary(instance) {
+      const raw = String(instance?.base_url || "").trim();
+      if (!raw) return "官方默认地址";
+      try {
+        const url = new URL(raw);
+        return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+      } catch {
+        return raw;
+      }
+    }
+
+    function llmActionIcon(action) {
+      if (action === "up") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>';
+      if (action === "down") return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+    }
+
+    function llmRouteChain(scope) {
+      if (!state.llmDraft) return [];
+      return scope === "default"
+        ? state.llmDraft.default_chain
+        : state.llmDraft.routes[scope]?.chain || [];
+    }
+
+    function setLlmRouteChain(scope, chain) {
+      if (!state.llmDraft) return;
+      if (scope === "default") state.llmDraft.default_chain = chain;
+      else state.llmDraft.routes[scope].chain = chain;
+    }
+
+    function renderLlmChain(scope, listId, pickerId) {
+      const list = document.getElementById(listId);
+      const picker = document.getElementById(pickerId);
+      if (!list || !picker || !state.llmDraft) return;
+      const chain = llmRouteChain(scope);
+      const instances = state.llmDraft.instances;
+      if (!chain.length) {
+        list.innerHTML = '<li class="llm-empty-state">还没有实例。请从下方加入一个端点。</li>';
+      } else {
+        list.innerHTML = chain.map((instanceId, index) => {
+          const instance = instances[instanceId];
+          const name = instance?.name || instanceId;
+          const detail = instance
+            ? `${LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type} · ${instance.model || "未填写模型"}`
+            : "实例不存在";
+          const removeDisabled = scope === "default" && chain.length <= 1;
+          return `<li class="llm-chain-item" draggable="true" data-route-scope="${escapeHtml(scope)}" data-instance-id="${escapeHtml(instanceId)}">
+            <span class="llm-chain-position" aria-label="优先级 ${index + 1}">${index + 1}</span>
+            <span class="llm-chain-copy"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(detail)}</small></span>
+            <span class="llm-chain-actions">
+              <button class="llm-chain-action" type="button" data-chain-action="up" aria-label="上移 ${escapeHtml(name)}" ${index === 0 ? "disabled" : ""}>${llmActionIcon("up")}</button>
+              <button class="llm-chain-action" type="button" data-chain-action="down" aria-label="下移 ${escapeHtml(name)}" ${index === chain.length - 1 ? "disabled" : ""}>${llmActionIcon("down")}</button>
+              <button class="llm-chain-action" type="button" data-chain-action="remove" aria-label="从调用链移除 ${escapeHtml(name)}" ${removeDisabled ? "disabled" : ""}>${llmActionIcon("remove")}</button>
+            </span>
+          </li>`;
+        }).join("");
+      }
+      const candidates = Object.entries(instances).filter(([instanceId, instance]) => instance.enabled !== false && !chain.includes(instanceId));
+      picker.innerHTML = candidates.length
+        ? candidates.map(([instanceId, instance]) => `<option value="${escapeHtml(instanceId)}">${escapeHtml(instance.name || instanceId)} · ${escapeHtml(instance.model || "未填写模型")}</option>`).join("")
+        : '<option value="">没有可添加的实例</option>';
+      picker.disabled = candidates.length === 0;
+      const addButton = scope === "default"
+        ? $("#addLlmDefaultChainItem")
+        : document.getElementById(LLM_MODULE_UI[scope]?.add || "");
+      if (addButton) addButton.disabled = candidates.length === 0;
+
+      list.querySelectorAll(".llm-chain-item").forEach((item) => {
+        item.addEventListener("dragstart", (event) => {
+          llmDraggedRoute = { scope, instanceId: item.dataset.instanceId };
+          item.classList.add("is-dragging");
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", item.dataset.instanceId || "");
+        });
+        item.addEventListener("dragend", () => {
+          llmDraggedRoute = null;
+          list.querySelectorAll(".llm-chain-item").forEach((row) => row.classList.remove("is-dragging", "is-drop-target"));
+        });
+        item.addEventListener("dragover", (event) => {
+          if (!llmDraggedRoute || llmDraggedRoute.scope !== scope) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          item.classList.add("is-drop-target");
+        });
+        item.addEventListener("dragleave", () => item.classList.remove("is-drop-target"));
+        item.addEventListener("drop", (event) => {
+          event.preventDefault();
+          const sourceId = llmDraggedRoute?.instanceId;
+          const targetId = item.dataset.instanceId;
+          if (!sourceId || !targetId || sourceId === targetId) return;
+          const next = [...llmRouteChain(scope)];
+          const sourceIndex = next.indexOf(sourceId);
+          const targetIndex = next.indexOf(targetId);
+          if (sourceIndex < 0 || targetIndex < 0) return;
+          next.splice(sourceIndex, 1);
+          next.splice(targetIndex, 0, sourceId);
+          setLlmRouteChain(scope, next);
+          renderLlmRouting();
+        });
+      });
+      list.querySelectorAll("[data-chain-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const row = button.closest(".llm-chain-item");
+          const instanceId = row?.dataset.instanceId || "";
+          const action = button.dataset.chainAction;
+          const next = [...llmRouteChain(scope)];
+          const index = next.indexOf(instanceId);
+          if (index < 0) return;
+          if (action === "up" && index > 0) [next[index - 1], next[index]] = [next[index], next[index - 1]];
+          if (action === "down" && index < next.length - 1) [next[index + 1], next[index]] = [next[index], next[index + 1]];
+          if (action === "remove") next.splice(index, 1);
+          setLlmRouteChain(scope, next);
+          renderLlmRouting();
+        });
+      });
+    }
+
+    function renderLlmInstances() {
+      const container = $("#llmInstanceList");
+      if (!container || !state.llmDraft) return;
+      const entries = Object.entries(state.llmDraft.instances);
+      if (!entries.length) {
+        container.innerHTML = '<div class="llm-empty-state">尚未配置 LLM 实例。新建一个端点后即可组成调用链。</div>';
+        return;
+      }
+      container.innerHTML = entries.map(([instanceId, instance]) => {
+        const references = llmInstanceReferences(instanceId);
+        const probe = state.llmProbeResults.get(instanceId);
+        const probeText = probe?.pending
+          ? "正在探测…"
+          : probe
+          ? formatProbeResult(probe)
+          : "尚未测试";
+        const probeTone = probe?.pending ? "pending" : probe?.ok === true ? "success" : probe ? "error" : "";
+        return `<article class="llm-instance-card" data-enabled="${instance.enabled !== false}" data-instance-card="${escapeHtml(instanceId)}">
+          <div class="llm-instance-card-head">
+            <div class="llm-instance-card-title"><strong>${escapeHtml(instance.name || instanceId)}</strong><code>${escapeHtml(instanceId)}</code></div>
+            <span class="llm-instance-badge" data-tone="${instance.enabled !== false ? "success" : "muted"}">${instance.enabled !== false ? "已启用" : "已停用"}</span>
+          </div>
+          <div class="llm-instance-badges"><span class="llm-instance-badge">${escapeHtml(LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type)}</span>${references.map((reference) => `<span class="llm-instance-badge" data-tone="muted">${escapeHtml(reference)}</span>`).join("")}</div>
+          <p class="llm-instance-meta"><span>模型：${escapeHtml(instance.model || "未填写")}</span><span>地址：${escapeHtml(llmEndpointSummary(instance))}</span></p>
+          <p class="llm-instance-probe" data-tone="${probeTone}" aria-live="polite">${escapeHtml(probeText)}</p>
+          <div class="llm-instance-actions">
+            <button class="pill-btn" type="button" data-instance-action="probe" data-instance-id="${escapeHtml(instanceId)}">测试</button>
+            <button class="pill-btn" type="button" data-instance-action="edit" data-instance-id="${escapeHtml(instanceId)}">编辑</button>
+            <button class="pill-btn" type="button" data-instance-action="delete" data-instance-id="${escapeHtml(instanceId)}">删除</button>
+          </div>
+        </article>`;
+      }).join("");
+      container.querySelectorAll("[data-instance-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const instanceId = button.dataset.instanceId || "";
+          if (button.dataset.instanceAction === "probe") void runLlmInstanceProbe(instanceId);
+          if (button.dataset.instanceAction === "edit") openLlmInstanceDialog(instanceId);
+          if (button.dataset.instanceAction === "delete") deleteLlmInstance(instanceId);
+        });
+      });
+    }
+
+    function renderLlmRouting() {
+      if (!state.llmDraft) return;
+      renderLlmInstances();
+      renderLlmChain("default", "llmDefaultChain", "llmDefaultChainPicker");
+      for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+        const route = state.llmDraft.routes[moduleName];
+        setSelect(ui.mode, route.inherit ? "inherit" : "custom");
+        const custom = document.getElementById(ui.custom);
+        if (custom) custom.hidden = route.inherit;
+        renderLlmChain(moduleName, ui.list, ui.picker);
+      }
+    }
+
+    function addLlmChainItem(scope) {
+      const picker = scope === "default"
+        ? $("#llmDefaultChainPicker")
+        : document.getElementById(LLM_MODULE_UI[scope]?.picker || "");
+      const instanceId = String(picker?.value || "").trim();
+      if (!instanceId) return;
+      const chain = llmRouteChain(scope);
+      if (!chain.includes(instanceId)) setLlmRouteChain(scope, [...chain, instanceId]);
+      renderLlmRouting();
+    }
+
+    function renderLlmDatalist(id, values, currentValue = "") {
+      const list = document.getElementById(id);
+      if (!(list instanceof HTMLDataListElement)) return;
+      const normalized = [...new Set(
+        [...(Array.isArray(values) ? values : []), currentValue]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      )];
+      list.replaceChildren(...normalized.map((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        return option;
+      }));
+    }
+
+    function setLlmModelDiscoveryStatus(tone, text) {
+      const status = $("#llmInstanceModelDiscoveryStatus");
+      if (!status) return;
+      status.dataset.tone = tone || "neutral";
+      status.textContent = text;
+    }
+
+    function resetLlmModelDiscovery() {
+      renderLlmDatalist("llmInstanceModelOptions", []);
+      const providerType = getInput("llmInstanceProviderType");
+      const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType);
+      const button = $("#refreshLlmInstanceModels");
+      if (button) {
+        button.hidden = !supported;
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
+      setLlmModelDiscoveryStatus(
+        "neutral",
+        supported
+          ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+          : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。"
+      );
+    }
+
+    function buildLlmModelDiscoveryRequest() {
+      if (!state.llmDraft) return null;
+      const existingId = state.llmEditingInstanceId;
+      const instanceId = String(
+        existingId || getInput("llmInstanceId") || "model-discovery-draft"
+      ).trim().toLowerCase();
+      const current = state.llmDraft.instances[existingId] || {};
+      const providerType = getInput("llmInstanceProviderType").trim();
+      const typedKey = getInput("llmInstanceApiKey");
+      const apiKey = $("#llmInstanceClearApiKey")?.checked
+        ? ""
+        : typedKey || current.api_key || "";
+      const instance = {
+        ...current,
+        name: getInput("llmInstanceName").trim() || current.name || instanceId,
+        provider_type: providerType,
+        enabled: true,
+        api_key: apiKey,
+        model: getInput("llmInstanceModel").trim(),
+        base_url: getInput("llmInstanceBaseUrl").trim(),
+        auth_mode: providerType === "openai"
+          ? getInput("llmInstanceAuthMode") || "api_key"
+          : "",
+        api_flavor: ["openai", "openai_compatible"].includes(providerType)
+          ? getInput("llmInstanceApiFlavor")
+          : "",
+        http_referer: providerType === "openrouter"
+          ? getInput("llmInstanceReferer").trim()
+          : "",
+        x_title: providerType === "openrouter"
+          ? getInput("llmInstanceTitle").trim()
+          : "",
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+          ? getInput("llmInstanceReasoning").trim()
+          : "",
+        num_ctx: providerType === "ollama"
+          ? Math.max(0, getIntInput("llmInstanceNumCtx", 0))
+          : 0
+      };
+      return {
+        instanceId,
+        config: {
+          llm: {
+            routing_version: 2,
+            instances: {
+              ...clonePlain(state.llmDraft.instances),
+              [instanceId]: instance
+            },
+            default_chain: [...state.llmDraft.default_chain],
+            routes: clonePlain(state.llmDraft.routes)
+          }
+        }
+      };
+    }
+
+    async function discoverLlmInstanceModels() {
+      const request = buildLlmModelDiscoveryRequest();
+      const button = $("#refreshLlmInstanceModels");
+      if (!request || !button || button.disabled) return;
+      button.disabled = true;
+      button.textContent = "获取中…";
+      setLlmModelDiscoveryStatus("pending", "正在向当前端点请求 /models…");
+      try {
+        const result = await requestJsonStrict(ENDPOINTS.configModelDiscovery, {
+          method: "POST",
+          timeoutMs: 25000,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instance_id: request.instanceId,
+            config: request.config
+          })
+        });
+        if (Array.isArray(result?.reasoning_efforts) && result.reasoning_efforts.length) {
+          renderLlmDatalist(
+            "llmInstanceReasoningOptions",
+            result.reasoning_efforts,
+            getInput("llmInstanceReasoning")
+          );
+        }
+        if (!result?.ok) {
+          throw new Error(result?.error || "端点没有返回模型列表");
+        }
+        const models = Array.isArray(result.models) ? result.models : [];
+        renderLlmDatalist("llmInstanceModelOptions", models, getInput("llmInstanceModel"));
+        setLlmModelDiscoveryStatus(
+          "success",
+          models.length
+            ? `已获取 ${models.length} 个模型；可从下拉选择，也可继续手填。`
+            : "接口返回了空列表；保留当前手填值。"
+        );
+      } catch (error) {
+        setLlmModelDiscoveryStatus(
+          "error",
+          `获取失败：${error?.message || "未知错误"}；当前输入未改动，仍可手填。`
+        );
+      } finally {
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
+    }
+
+    function syncLlmInstanceConditionalFields() {
+      const providerType = getInput("llmInstanceProviderType");
+      document.querySelectorAll("[data-instance-field]").forEach((field) => {
+        const kind = field.dataset.instanceField;
+        const visible =
+          (kind === "openai-auth" && providerType === "openai") ||
+          (kind === "openai-protocol" && ["openai", "openai_compatible"].includes(providerType)) ||
+          (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)) ||
+          (kind === "ollama" && providerType === "ollama") ||
+          (kind === "openrouter" && providerType === "openrouter");
+        field.hidden = !visible;
+      });
+      resetLlmModelDiscovery();
+    }
+
+    function openLlmInstanceDialog(instanceId = "") {
+      if (!state.llmDraft) return;
+      const dialog = $("#llmInstanceDialog");
+      const instance = instanceId ? state.llmDraft.instances[instanceId] : null;
+      state.llmEditingInstanceId = instanceId;
+      llmDialogReturnFocus = document.activeElement;
+      dialog.dataset.providerType = instance?.provider_type || "";
+      $("#llmInstanceDialogTitle").textContent = instance ? "编辑 LLM 实例" : "新建 LLM 实例";
+      setInput("llmInstanceName", instance?.name || "");
+      setInput("llmInstanceId", instanceId);
+      $("#llmInstanceId").disabled = Boolean(instance);
+      setSelect("llmInstanceProviderType", instance?.provider_type || "openai");
+      setSelect("llmInstanceEnabled", instance?.enabled === false ? "off" : "on");
+      setInput("llmInstanceModel", instance?.model || "");
+      setInput("llmInstanceBaseUrl", instance?.base_url || "");
+      setInput("llmInstanceApiKey", "");
+      $("#llmInstanceApiKey").placeholder = instance?.api_key ? "已配置；留空保留原密钥" : "输入 API Key";
+      $("#llmInstanceClearApiKey").checked = false;
+      $("#llmInstanceClearApiKeyField").hidden = !instance?.api_key;
+      setSelect("llmInstanceAuthMode", instance?.auth_mode || "api_key");
+      setSelect("llmInstanceApiFlavor", instance?.api_flavor || "");
+      setInput("llmInstanceReasoning", instance?.reasoning_effort || "");
+      setInput("llmInstanceNumCtx", instance?.num_ctx || 0);
+      setInput("llmInstanceReferer", instance?.http_referer || "");
+      setInput("llmInstanceTitle", instance?.x_title || "");
+      $("#llmInstanceFormError").textContent = "";
+      renderLlmDatalist(
+        "llmInstanceReasoningOptions",
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        instance?.reasoning_effort || ""
+      );
+      syncLlmInstanceConditionalFields();
+      if (!instance) applyLlmProviderDefaults();
+      dialog.hidden = false;
+      document.body.classList.add("llm-dialog-open");
+      window.setTimeout(() => (instance ? $("#llmInstanceName") : $("#llmInstanceName"))?.focus(), 0);
+    }
+
+    function closeLlmInstanceDialog() {
+      const dialog = $("#llmInstanceDialog");
+      if (!dialog || dialog.hidden) return;
+      dialog.hidden = true;
+      document.body.classList.remove("llm-dialog-open");
+      state.llmEditingInstanceId = "";
+      if (llmDialogReturnFocus?.focus) llmDialogReturnFocus.focus();
+      llmDialogReturnFocus = null;
+    }
+
+    function saveLlmInstanceDraft() {
+      if (!state.llmDraft) return;
+      const existingId = state.llmEditingInstanceId;
+      const instanceId = String(existingId || getInput("llmInstanceId")).trim().toLowerCase();
+      const name = getInput("llmInstanceName").trim();
+      const providerType = getInput("llmInstanceProviderType").trim();
+      const enabled = getInput("llmInstanceEnabled") !== "off";
+      const model = getInput("llmInstanceModel").trim();
+      const baseUrl = getInput("llmInstanceBaseUrl").trim();
+      const error = $("#llmInstanceFormError");
+      if (!LLM_INSTANCE_ID_PATTERN.test(instanceId)) {
+        error.textContent = "实例 ID 只能使用小写字母、数字、下划线和连字符，且最长 64 个字符。";
+        $("#llmInstanceId")?.focus();
+        return;
+      }
+      if (!existingId && state.llmDraft.instances[instanceId]) {
+        error.textContent = "这个实例 ID 已经存在。";
+        $("#llmInstanceId")?.focus();
+        return;
+      }
+      if (!name) {
+        error.textContent = "请填写实例名称。";
+        $("#llmInstanceName")?.focus();
+        return;
+      }
+      if (enabled && !model) {
+        error.textContent = "启用的实例必须明确填写模型。";
+        $("#llmInstanceModel")?.focus();
+        return;
+      }
+      if (enabled && providerType === "openai_compatible" && !baseUrl) {
+        error.textContent = "OpenAI-compatible 实例必须填写 Base URL。";
+        $("#llmInstanceBaseUrl")?.focus();
+        return;
+      }
+      const current = state.llmDraft.instances[existingId] || {};
+      const typedKey = getInput("llmInstanceApiKey");
+      const authMode = providerType === "openai" ? getInput("llmInstanceAuthMode") || "api_key" : "";
+      const effectiveKey = $("#llmInstanceClearApiKey")?.checked
+        ? ""
+        : typedKey || current.api_key || "";
+      if (enabled && !["ollama", "gemini"].includes(providerType) && !(providerType === "openai" && authMode === "codex_oauth") && !effectiveKey) {
+        error.textContent = "启用的远端实例需要 API Key。";
+        $("#llmInstanceApiKey")?.focus();
+        return;
+      }
+      if (!enabled && llmInstanceReferences(existingId).length) {
+        error.textContent = `请先从这些调用链移除实例：${llmInstanceReferences(existingId).join("、")}。`;
+        return;
+      }
+      state.llmDraft.instances[instanceId] = {
+        name,
+        provider_type: providerType,
+        enabled,
+        api_key: effectiveKey,
+        model,
+        base_url: baseUrl,
+        auth_mode: authMode,
+        api_flavor: ["openai", "openai_compatible"].includes(providerType) ? getInput("llmInstanceApiFlavor") : "",
+        http_referer: providerType === "openrouter" ? getInput("llmInstanceReferer").trim() : "",
+        x_title: providerType === "openrouter" ? getInput("llmInstanceTitle").trim() : "",
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType) ? getInput("llmInstanceReasoning") : "",
+        num_ctx: providerType === "ollama" ? Math.max(0, getIntInput("llmInstanceNumCtx", 0)) : 0
+      };
+      closeLlmInstanceDialog();
+      renderLlmRouting();
+    }
+
+    function deleteLlmInstance(instanceId) {
+      if (!state.llmDraft?.instances[instanceId]) return;
+      const references = llmInstanceReferences(instanceId);
+      if (references.length) {
+        showToast(`无法删除：仍被 ${references.join("、")} 引用`);
+        return;
+      }
+      const name = state.llmDraft.instances[instanceId].name || instanceId;
+      if (!window.confirm(`删除 LLM 实例「${name}」？`)) return;
+      delete state.llmDraft.instances[instanceId];
+      state.llmProbeResults.delete(instanceId);
+      renderLlmRouting();
+    }
+
+    function applyLlmProviderDefaults() {
+      const providerType = getInput("llmInstanceProviderType");
+      const defaults = LLM_PROVIDER_DEFAULTS[providerType] || {};
+      const dialog = $("#llmInstanceDialog");
+      const previousType = String(dialog?.dataset.providerType || "");
+      const previousDefaults = LLM_PROVIDER_DEFAULTS[previousType] || {};
+      const isNew = !state.llmEditingInstanceId;
+      const model = getInput("llmInstanceModel");
+      const baseUrl = getInput("llmInstanceBaseUrl");
+      if (!model || (isNew && model === (previousDefaults.model || ""))) {
+        setInput("llmInstanceModel", defaults.model || "");
+      }
+      if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
+        setInput("llmInstanceBaseUrl", defaults.base_url || "");
+      }
+      const previousBaseId = previousType.replace(/_/g, "-");
+      const currentId = getInput("llmInstanceId");
+      if (!currentId || (isNew && currentId === previousBaseId)) {
+        let candidate = providerType.replace(/_/g, "-");
+        let suffix = 2;
+        while (state.llmDraft?.instances[candidate]) candidate = `${providerType.replace(/_/g, "-")}-${suffix++}`;
+        setInput("llmInstanceId", candidate);
+      }
+      const previousLabel = LLM_PROVIDER_LABELS[previousType] || previousType;
+      const currentName = getInput("llmInstanceName");
+      if (!currentName || (isNew && currentName === previousLabel)) {
+        setInput("llmInstanceName", LLM_PROVIDER_LABELS[providerType] || providerType);
+      }
+      if (dialog) dialog.dataset.providerType = providerType;
+      syncLlmInstanceConditionalFields();
+    }
+
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
+      state.degraded = config.degraded === true;
       state.config = config;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
@@ -3991,6 +7160,7 @@
       setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
+      setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -4000,6 +7170,8 @@
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
       const discovery = config.discovery || {};
+      setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
+      setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency);
       setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
       setInput("multimodalBatchSize", discovery.multimodal_batch_size);
       setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
@@ -4013,34 +7185,20 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
+      // Mirrors the [network].mode backend default (system since v0.3.175);
+      // only reached if /api/config omits the field.
+      setSelect("networkProxyMode", config.network?.mode || "system");
+      setInput("networkProxy", config.network?.proxy || "");
+      const savedAutoSync = $("#savedAutoSync");
+      if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
 
       const llm = config.llm || {};
-      const provider = llm.default_provider || llm.provider;
-      setSelect("llmProvider", provider);
-      const fallbackProvider = llm.fallback_provider || "";
-      setSelect("llmFallbackProvider", fallbackProvider);
-      setInput("llmConcurrency", llm.concurrency ?? 3);
+      setInput("llmConcurrency", llm.concurrency ?? 4);
       setInput("llmTimeout", llm.timeout);
-      setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
-      if (provider) {
-        setInput("llmModel", llm[provider]?.model);
-        setInput("llmApiKey", llm[provider]?.api_key);
-        setInput("llmBaseUrl", llm[provider]?.base_url);
-      }
-      if (fallbackProvider) {
-        setSelect("llmFallbackAuthMode", llm[fallbackProvider]?.auth_mode || "api_key");
-        setInput("llmFallbackModel", llm[fallbackProvider]?.model);
-        setInput("llmFallbackApiKey", llm[fallbackProvider]?.api_key);
-        setInput("llmFallbackBaseUrl", llm[fallbackProvider]?.base_url);
-      } else {
-        setSelect("llmFallbackAuthMode", "api_key");
-        setInput("llmFallbackModel", "");
-        setInput("llmFallbackApiKey", "");
-        setInput("llmFallbackBaseUrl", "");
-      }
-      setInput("openrouterReferer", llm.openrouter?.http_referer);
-      setInput("openrouterTitle", llm.openrouter?.x_title);
-      setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
+      state.llmDraft = normalizeLlmDraft(llm);
+      state.llmProbeResults.clear();
+      renderLlmRouting();
       setSelect("embeddingProvider", llm.embedding?.provider || "");
       const embeddingFallbackProvider = llm.embedding?.fallback_provider || "";
       setSelect("embeddingFallbackProvider", embeddingFallbackProvider);
@@ -4049,24 +7207,7 @@
       setInput("embeddingBaseUrl", llm.embedding?.base_url);
       setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
       setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
-      if (embeddingFallbackProvider) {
-        setInput("embeddingFallbackModel", llm[embeddingFallbackProvider]?.model);
-        setInput("embeddingFallbackApiKey", llm[embeddingFallbackProvider]?.api_key);
-        setInput("embeddingFallbackBaseUrl", llm[embeddingFallbackProvider]?.base_url);
-      } else {
-        setInput("embeddingFallbackModel", "");
-        setInput("embeddingFallbackApiKey", "");
-        setInput("embeddingFallbackBaseUrl", "");
-      }
-      setSelect("moduleSoulProvider", llm.soul?.provider || "");
-      setInput("moduleSoulModel", llm.soul?.model);
-      setSelect("moduleDiscoveryProvider", llm.discovery?.provider || "");
-      setInput("moduleDiscoveryModel", llm.discovery?.model);
-      setSelect("moduleRecommendationProvider", llm.recommendation?.provider || "");
-      setInput("moduleRecommendationModel", llm.recommendation?.model);
-      setSelect("moduleEvaluationProvider", llm.evaluation?.provider || "");
-      setInput("moduleEvaluationModel", llm.evaluation?.model);
-
+      setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
       setSelect("biliAuth", config.bilibili?.auth_method || "cookie");
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
@@ -4117,8 +7258,46 @@
       setInput("redditDailyRelatedBudget", config.sources?.reddit?.daily_related_budget);
       setInput("redditRequestInterval", config.sources?.reddit?.request_interval_seconds);
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      setSelect("bangumiEnabled", config.sources?.bangumi?.enabled === true ? "on" : "off");
+      setInput("bangumiUsername", config.sources?.bangumi?.username);
+      {
+        // The token itself is never returned by GET (secret); access_token_set
+        // only tells us whether one is stored. Keep the field empty and signal
+        // the stored state via placeholder so an untouched save never clobbers it.
+        const bangumiToken = document.getElementById("bangumiAccessToken");
+        if (bangumiToken) {
+          bangumiToken.value = "";
+          bangumiToken.placeholder = config.sources?.bangumi?.access_token_set
+            ? "已配置（留空保持不变；填写新令牌以替换）"
+            : "可留空；填写以自动识别当前用户并读取私密收藏";
+        }
+        // Clear-token is a per-save action; never leave it pre-checked after a
+        // reload, and hide it when nothing is stored to clear.
+        const bangumiClearToken = document.getElementById("bangumiClearToken");
+        if (bangumiClearToken) {
+          bangumiClearToken.checked = false;
+          bangumiClearToken.disabled = !config.sources?.bangumi?.access_token_set;
+        }
+      }
+      setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, config.sources?.bangumi?.source_modes);
+      setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, config.sources?.bangumi?.subject_types);
+      setInput("bangumiDailySearchBudget", config.sources?.bangumi?.daily_search_budget);
+      setInput("bangumiDailyRankedBudget", config.sources?.bangumi?.daily_ranked_budget);
+      setInput("bangumiDailyLatestBudget", config.sources?.bangumi?.daily_latest_budget);
+      setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
+      setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
+      setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      if (!state.initBangumiUsernameTouched) {
+        state.initBangumiUsername = config.sources?.bangumi?.username || "";
+        // A successful prefill populated the field; a later explicit clear is
+        // then a deliberate reset (sends ""), while an untouched or config-failed
+        // empty field omits the username to keep the configured value.
+        state.initBangumiUsernamePrefilled = true;
+      }
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -4136,34 +7315,110 @@
 
     function normalizeDelight(item) {
       if (!item) return null;
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
       // 后端 pending-batch 对喜欢过的候选下发 state="liked"，重灌后恢复
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
       const fallbackMessage = serverState === "liked" ? "好，这类多来点。" : "";
+      // Same defense as the grid (issue #79): the delight card was the exact
+      // `<h3 id="delightTitle">answer_<id>` the report screenshotted. Route the
+      // title through the ID fallback (derive from body / placeholder), but
+      // keep the friendly delight default when there is genuinely no title.
+      const delightBody = decodeHtmlEntities(item.body_text ?? "");
+      const delightCt = canonical.content_type.toLowerCase();
+      const derivedTitle = displayRecommendationTitle(
+        decodeHtmlEntities(item.title ?? ""), delightBody, delightCt);
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
-        title: decodeHtmlEntities(item.title ?? "发现了一条你可能会意外喜欢的内容"),
+        item_key: canonical.item_key,
+        content_id: canonical.content_id,
+        content_type: canonical.content_type,
+        title: derivedTitle && derivedTitle !== "未命名内容"
+          ? derivedTitle
+          : "发现了一条你可能会意外喜欢的内容",
+        body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
-        content_url: String(item.content_url ?? ""),
-        source_platform: String(item.source_platform ?? item.platform ?? "bilibili"),
+        content_url: canonical.content_url,
+        source_platform: canonical.source_platform,
         chat_turn_id: String(item.chat_turn_id ?? ""),
         chat_reply: String(item.chat_reply ?? item.reply ?? ""),
         chat_draft: String(item.chat_draft ?? ""),
         state: serverState,
         response_message: String(item.response_message ?? "") || fallbackMessage,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+        // Engagement stats so the delight card shows the same ▶/👍/💬 row as the
+        // grid (v0.3.159+; 0 = not fetched → recommendationStats renders nothing).
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
 
+    function renderDelightTextMedia(thumb, delight) {
+      if (!thumb || !delight) return;
+      const bodyText = String(delight.body_text || "").trim();
+      if (!bodyText) return;
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image");
+      thumb.classList.add("is-text-media");
+      thumb.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      const text = document.createElement("p");
+      text.className = "delight-text-media-copy";
+      text.textContent = bodyText;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      thumb.append(text, badge);
+    }
+
+    function renderDelightFallbackMedia(thumb, delight) {
+      const bodyText = String(delight?.body_text || "").trim();
+      if (bodyText) {
+        renderDelightTextMedia(thumb, delight);
+        return;
+      }
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
+      if (!delight) return;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      thumb.append(badge);
+    }
+
     function renderDelightCover(delight) {
-      const thumb = $("#delightBanner .thumb");
+      const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
       thumb.classList.toggle("has-image", Boolean(url));
-      if (!url) return;
+      // 设置 banner 背景图（模糊用）
+      const banner = $("#delightBanner");
+      if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
+      if (!delight) return;
+      if (!url) {
+        renderDelightFallbackMedia(thumb, delight);
+        return;
+      }
+      // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -4173,10 +7428,58 @@
       image.referrerPolicy = "no-referrer";
       image.src = url;
       image.addEventListener("error", () => {
-        image.remove();
-        thumb.classList.remove("has-image");
+        if (!image.isConnected || image.parentElement !== thumb) return;
+        renderDelightFallbackMedia(thumb, delight);
+        if (banner) banner.style.setProperty("--cover-url", "none");
       });
       thumb.append(image);
+      thumb.append(badge);
+    }
+
+    function resetDelightExcerpt() {
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !excerpt || !toggle) return;
+      wrapper.classList.remove("is-expanded");
+      wrapper.hidden = true;
+      excerpt.textContent = "";
+      toggle.hidden = true;
+      toggle.textContent = "展开正文";
+      toggle.setAttribute("aria-expanded", "false");
+    }
+
+    function syncDelightExcerpt(delight) {
+      resetDelightExcerpt();
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      const bodyText = String(delight?.body_text || "").trim();
+      if (!wrapper || !excerpt || !toggle || !bodyText) return;
+      excerpt.textContent = bodyText;
+      wrapper.hidden = false;
+      requestAnimationFrame(() => {
+        const overflows = excerpt.scrollHeight > excerpt.clientHeight + 1;
+        toggle.hidden = !overflows;
+        toggle.setAttribute("aria-expanded", "false");
+      });
+    }
+
+    function _startDelightAutoAdvance() {
+        _stopDelightAutoAdvance();
+        if (state.delights.length < 2) return;
+        _delightAutoTimer = setInterval(() => {
+            if (delightUserEngaged()) return;
+            const next = state.delightIndex + 1;
+            setActiveDelight(next >= state.delights.length ? 0 : next);
+        }, DELIGHT_AUTO_ADVANCE_MS);
+    }
+
+    function _stopDelightAutoAdvance() {
+        if (_delightAutoTimer !== null) {
+            clearInterval(_delightAutoTimer);
+            _delightAutoTimer = null;
+        }
     }
 
     function setActiveDelight(index = state.delightIndex) {
@@ -4186,48 +7489,210 @@
         closeDelightComposer();
         renderDelightCover(null);
         renderDelightTurns(null);
+        resetDelightExcerpt();
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
+        if ($("#delightStats")) $("#delightStats").hidden = true;
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          delightPublishedEl.textContent = "";
+          delightPublishedEl.removeAttribute("title");
+          delightPublishedEl.hidden = true;
+        }
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
         scheduleActivityRailHeightSync();
         return;
       }
+      const shouldAnimateTransition = Boolean(state.delight);
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
-      closeDelightComposer();
-      renderDelightCover(state.delight);
-      renderDelightTurns(state.delight);
-      $("#delightTitle").textContent = state.delight.title;
-      $("#delightReason").textContent = state.delight.reason;
-      if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+      // 锁定容器高度防止下方布局跳变
+      const banner = $("#delightBanner");
+      if (banner && shouldAnimateTransition) {
+        banner.style.height = `${banner.offsetHeight}px`;
+        banner.classList.add("is-height-locked");
+        banner.classList.remove("is-height-settling");
+      }
+      // 切换动画：先淡出，再替换内容，再淡入
+      const copy = $(".delight-copy");
+      const thumb = $(".delight .thumb");
+      const applyContent = () => {
+        closeDelightComposer();
+        renderDelightCover(state.delight);
+        renderDelightTurns(state.delight);
+        $("#delightTitle").textContent = state.delight.title;
+        syncDelightExcerpt(state.delight);
+        const delightStatsEl = $("#delightStats");
+        if (delightStatsEl) {
+          const delightStats = recommendationStats(state.delight);
+          delightStatsEl.textContent = delightStats;
+          delightStatsEl.hidden = !delightStats;
+        }
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          const published = formatPublishedTime(state.delight);
+          delightPublishedEl.textContent = published;
+          delightPublishedEl.title = Number.isFinite(Date.parse(state.delight.published_at))
+            ? new Date(state.delight.published_at).toLocaleString()
+            : "";
+          delightPublishedEl.hidden = !published;
+        }
+        $("#delightReason").textContent = state.delight.reason;
+        if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+        if (copy) copy.classList.remove("is-exiting");
+        if (thumb) thumb.classList.remove("is-exiting");
+        // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
+        if (banner && shouldAnimateTransition) {
+          if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
+          const startH = parseFloat(banner.style.height) || banner.offsetHeight;
+          banner.style.height = `${startH}px`;
+          banner.classList.remove("is-height-locked");
+          banner.offsetHeight; // 强制 reflow：浏览器确认当前高度为 startH
+          // 临时放开高度测量自然高度
+          banner.style.removeProperty("height");
+          const endH = banner.offsetHeight;
+          if (Math.abs(endH - startH) < 0.5) {
+            banner.style.removeProperty("height");
+            banner.classList.remove("is-height-settling");
+            return;
+          }
+          // 切回起始高度，开始动画
+          banner.style.height = `${startH}px`;
+          banner.offsetHeight;
+          const duration = 200;
+          const t0 = performance.now();
+          const step = (now) => {
+            const p = Math.min((now - t0) / duration, 1);
+            const ease = 1 - (1 - p) * (1 - p); // ease-out quad
+            banner.style.height = `${startH + (endH - startH) * ease}px`;
+            if (p < 1) {
+              banner._heightRaf = requestAnimationFrame(step);
+            } else {
+              banner._heightRaf = null;
+              banner.style.removeProperty("height");
+              banner.classList.remove("is-height-settling");
+            }
+          };
+          banner._heightRaf = requestAnimationFrame(step);
+        } else if (banner) {
+          banner.style.removeProperty("height");
+          banner.classList.remove("is-height-locked", "is-height-settling");
+        }
+      };
+      if (copy && shouldAnimateTransition) copy.classList.add("is-exiting");
+      if (thumb && shouldAnimateTransition) thumb.classList.add("is-exiting");
+      if (shouldAnimateTransition && (copy || thumb)) {
+        setTimeout(applyContent, 250);
+      } else {
+        applyContent();
+      }
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
-      // Sync ☆ / ♥ pressed state for the current delight.
-      const delightBvid = state.delight.bvid;
-      const wlBtn = document.querySelector('[data-delight="watch-later"]');
-      if (wlBtn && delightBvid) {
-        wlBtn.setAttribute("aria-pressed", "false");
-        watchLaterStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            wlBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
-      }
-      const favBtn = document.querySelector('[data-delight="favorite"]');
-      if (favBtn && delightBvid) {
-        favBtn.setAttribute("aria-pressed", "false");
-        favoriteStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            favBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
-      }
       controls.forEach((btn) => {
-        const action = btn.dataset.delight;
-        btn.disabled = (action === "prev" && state.delightIndex === 0) || (action === "next" && state.delightIndex === state.delights.length - 1);
+          btn.disabled = false;
       });
+      // Sync ☆ / ♥ pressed state for the current delight.
+      const delightKey = desktopSavedItem(state.delight).item_key;
+      if (delightKey && _delightStatusCache.has(delightKey)) {
+        _syncDelightStatusButtons(delightKey);
+      } else {
+        const wlBtn = document.querySelector('[data-delight="watch-later"]');
+        if (wlBtn) wlBtn.setAttribute("aria-pressed", "false");
+        const favBtn = document.querySelector('[data-delight="favorite"]');
+        if (favBtn) favBtn.setAttribute("aria-pressed", "false");
+      }
+      const likeBtn = document.querySelector('[data-delight="like"]');
+      const liked = state.delight?.state === "liked";
+      if (likeBtn) {
+        likeBtn.setAttribute("aria-pressed", liked ? "true" : "false");
+        likeBtn.disabled = liked;
+      }
       scheduleActivityRailHeightSync();
+    }
+
+    // 鼠标/触摸拖动切换 delight
+    const _DELIGHT_DRAG_DEAD_ZONE = 10;
+    let _delightDragging = false;   // 按下已就绪，尚未越过死区
+    let _delightDragActive = false; // 已越过死区，真正进入拖拽
+    let _delightDragLastX = 0;
+    function _initDelightSwipe() {
+        const banner = $("#delightBanner");
+        if (!banner || banner.dataset.swipeInited) return;
+        banner.dataset.swipeInited = "1";
+        const inner = banner.querySelector(".delight-body, .thumb");
+        // 交互元素阻止事件冒泡，避免触发拖拽
+        banner.querySelectorAll("button, [data-delight], input, select, textarea, a").forEach((el) => {
+            el.addEventListener("pointerdown", (e) => e.stopPropagation());
+        });
+        banner.addEventListener("pointerdown", (e) => {
+            _delightDragging = true;
+            _delightDragActive = false;
+            _delightSwipeStartX = e.clientX;
+            _delightDragLastX = e.clientX;
+            banner.setPointerCapture(e.pointerId);
+            // 死区内不进入拖拽视觉态
+        });
+        banner.addEventListener("pointermove", (e) => {
+            if (!_delightDragging) return;
+            const dx = e.clientX - _delightSwipeStartX;
+            // 死区判定：未越过阈值前不应用位移、不加 is-dragging
+            if (!_delightDragActive) {
+                if (Math.abs(dx) < _DELIGHT_DRAG_DEAD_ZONE) return;
+                _delightDragActive = true;
+                banner.classList.add("is-dragging");
+            }
+            const maxDrag = banner.offsetWidth * 0.3;
+            const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
+            // 首项/末项增加阻力
+            const atEdge = (dx > 0 && state.delightIndex === 0) || (dx < 0 && state.delightIndex >= state.delights.length - 1);
+            const factor = atEdge ? 0.25 : 1;
+            banner.style.setProperty("--drag-offset", `${clamped * factor}px`);
+            _delightDragLastX = e.clientX;
+        });
+        banner.addEventListener("pointerup", (e) => {
+            if (!_delightDragging) return;
+            _delightDragging = false;
+            const wasActive = _delightDragActive;
+            _delightDragActive = false;
+            banner.classList.remove("is-dragging");
+            banner.releasePointerCapture(e.pointerId);
+            const dx = e.clientX - _delightSwipeStartX;
+            if (wasActive && Math.abs(dx) >= 50) {
+                if (dx > 0) setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1);
+                else if (dx < 0) setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1);
+            }
+            banner.style.removeProperty("--drag-offset");
+        });
+        banner.addEventListener("pointercancel", () => {
+            _delightDragging = false;
+            _delightDragActive = false;
+            banner.classList.remove("is-dragging");
+            banner.style.removeProperty("--drag-offset");
+        });
+    }
+
+    let _delightVisibilityObserver = null;
+    function _initDelightVisibilityObserver() {
+      if (_delightVisibilityObserver) return;
+      const banner = $("#delightBanner");
+      if (!banner) return;
+      _delightVisibilityObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) _startDelightAutoAdvance();
+          else _stopDelightAutoAdvance();
+        }
+      }, { threshold: 0.3 });
+      _delightVisibilityObserver.observe(banner);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) _stopDelightAutoAdvance();
+        else if (_delightVisibilityObserver) {
+          // 切回时检查 banner 是否在视口内
+          const rect = banner.getBoundingClientRect();
+          const inView = rect.top < window.innerHeight && rect.bottom > 0;
+          if (inView) _startDelightAutoAdvance();
+        }
+      });
     }
 
     function applyDelights(payload) {
@@ -4246,10 +7711,58 @@
         if (existingIndex >= 0) state.delights[existingIndex] = merged;
         else state.delights.push(merged);
       }
-      const nextIndex = previousActiveBvid
-        ? Math.max(0, state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid))
-        : 0;
-      setActiveDelight(nextIndex);
+      const activePosition = previousActiveBvid
+        ? state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid)
+        : -1;
+      if (delightUserEngaged() && state.delight) {
+        // 打字中：只同步队列数据与计数。当前卡还在队列里就更新引用；即便已被
+        // 后端消费 / 过期也保留 state.delight——发送必须落在用户正对着的这张卡上。
+        if (activePosition >= 0) {
+          state.delightIndex = activePosition;
+          state.delight = state.delights[activePosition];
+        }
+        syncDelightCount();
+        return;
+      }
+      setActiveDelight(activePosition >= 0 ? activePosition : 0);
+      _startDelightAutoAdvance();
+      _initDelightSwipe();
+      _initDelightVisibilityObserver();
+      // 批量预取 delight 队列中所有项的稍后再看/收藏状态
+      (async () => {
+        const delightItems = state.delights.map(desktopSavedItem).filter((item) => item.item_key);
+        if (!delightItems.length) return;
+        await Promise.allSettled(delightItems.flatMap((item) => [
+          desktopSavedMutations.hydrate("watch_later", item.item_key, () => watchLaterStatus(item)),
+          desktopSavedMutations.hydrate("favorite", item.item_key, () => favoriteStatus(item))
+        ]));
+        for (const item of delightItems) {
+          _delightStatusCache.set(item.item_key, {
+            watchLater: desktopSavedMutations.isSaved("watch_later", item.item_key),
+            favorite: desktopSavedMutations.isSaved("favorite", item.item_key)
+          });
+        }
+        // 如果当前显示的 delight 缓存已就绪，立即刷新按钮状态
+        const currentKey = state.delight ? desktopSavedItem(state.delight).item_key : "";
+        if (currentKey && _delightStatusCache.has(currentKey)) _syncDelightStatusButtons(currentKey);
+      })();
+    }
+
+    function _syncDelightStatusButtons(itemKey) {
+      const cached = _delightStatusCache.get(itemKey);
+      if (!cached) return;
+      const wlBtn = document.querySelector('[data-delight="watch-later"]');
+      if (wlBtn) {
+        wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");
+        wlBtn.setAttribute("aria-label", cached.watchLater ? "取消稍后再看" : "稍后再看");
+        wlBtn.title = cached.watchLater ? "取消稍后再看" : "稍后再看";
+      }
+      const favBtn = document.querySelector('[data-delight="favorite"]');
+      if (favBtn) {
+        favBtn.setAttribute("aria-pressed", cached.favorite ? "true" : "false");
+        favBtn.setAttribute("aria-label", cached.favorite ? "取消收藏" : "收藏");
+        favBtn.title = cached.favorite ? "取消收藏" : "收藏";
+      }
     }
 
     function mergeMessages(items) {
@@ -4270,18 +7783,53 @@
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
+        desktopRuntimeGeneration += 1;
+        clearDesktopRuntimeRecovery();
+      }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      // 库存变化事件只刷新 Tab 数字 / 空态 / 自动续页 gate，不碰已加载的推荐卡片。
+      if (event.type === "refresh.pool_updated" || event.type === "pool_status") schedulePlatformAvailabilityRefresh();
+      if (event.type === "degraded") {
+        presentDegradedConfigRecovery({
+          degraded: true,
+          degraded_reason: event.reason || "",
+          issues: event.issues || [],
+        });
+      }
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
       // (/api/recommendations only returns the latest top window). Header/pool counts
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
-      if (["config_reloaded"].includes(event.type)) scheduleBackendHydration();
+      if (["config_reloaded"].includes(event.type)) {
+        // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
+        // 用户正在表单里编辑（焦点在 #settingsForm 内）时跳过，避免未保存的输入
+        // 被后台事件悄悄打回。
+        const settingsForm = document.getElementById("settingsForm");
+        const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
+        if (!editingSettings) scheduleBackendHydration();
+      }
       if (["init_progress", "init_failed", "init_completed"].includes(event.type)) {
         void refreshInitStatus({ schedule: event.type === "init_progress" });
       }
       if (event.type === "refresh.pool_updated" && Boolean(state.initStatus?.initialized)) {
         void refreshInitStatus({ schedule: false });
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed-exhausted"
+      ) {
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed"
+      ) {
+        scheduleDesktopRecommendationRecovery();
       }
       if (event.type === "activity.added") scheduleActivityPageRefresh();
       if (
@@ -4300,10 +7848,23 @@
           const existingIndex = state.delights.findIndex((item) => String(item.bvid || "") === key);
           if (existingIndex >= 0) {
             state.delights[existingIndex] = mergeDelightItem(state.delights[existingIndex], delight);
-            if (state.delight && String(state.delight.bvid || "") === key) setActiveDelight(existingIndex);
+            if (state.delight && String(state.delight.bvid || "") === key) {
+              if (delightUserEngaged()) {
+                // 正在这张卡上打字：只更新数据引用，不重渲染（重渲染会收起输入框）。
+                state.delight = state.delights[existingIndex];
+              } else {
+                setActiveDelight(existingIndex);
+              }
+            }
           } else {
             state.delights.push(delight);
-            setActiveDelight(state.delights.length - 1);
+            if (delightUserEngaged()) {
+              // 用户正在当前卡的聊天框里打字：新候选只静默入队并更新计数，
+              // 不抢走当前卡——否则输入被收起、随后的发送还会串到新卡上。
+              syncDelightCount();
+            } else {
+              setActiveDelight(state.delights.length - 1);
+            }
           }
         }
       }
@@ -4321,26 +7882,124 @@
           : `发现后端新版本 ${newVersion}`);
       }
       if (event.type === "delight.refreshed") scheduleDelightQueueRefresh();
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.delights.findIndex((item) => String(item.bvid || "") === bvid);
+        if (index >= 0) {
+          state.delights[index] = {
+            ...state.delights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          if (state.delight && String(state.delight.bvid || "") === bvid) {
+            setActiveDelight(index);
+          }
+        }
+      }
       if (event.type === "notification.pending" && event.bvid) mergeMessages([{ ...event, type: "notification" }]);
       if (event.type === "interest.probe" && event.domain) mergeMessages([{ type: "interest.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个兴趣方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
     }
 
+    function scheduleDesktopRuntimeReconnect() {
+      if (document.hidden || desktopRuntimeReconnectTimer !== null) return;
+      desktopRuntimeReconnectTimer = window.setTimeout(() => {
+        desktopRuntimeReconnectTimer = null;
+        connectRuntimeStream();
+      }, 3000);
+    }
+
     function connectRuntimeStream() {
+      if (document.hidden) return;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      if (state.runtimeSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.runtimeSocket.readyState)) {
+        return;
+      }
       if (state.runtimeSocket) state.runtimeSocket.close();
       try {
         const socket = new WebSocket(getRuntimeStreamUrl());
         state.runtimeSocket = socket;
-        socket.addEventListener("open", () => { $("#statusLabel").textContent = "实时连接中"; });
+        socket.addEventListener("open", () => {
+          $("#statusLabel").textContent = "实时连接中";
+          restartDesktopFailedRecoveries();
+          // The page may load before the backend binds (frozen-entry launch
+          // race): the boot hydrate then swallows every failure into nulls and
+          // nothing else ever re-fetches — an uninitialized backend emits no
+          // runtime events, so the guided-init card would stay hidden forever.
+          // First successful (re)connect with no backend data yet → hydrate.
+          // Scoped to the never-hydrated case so transient reconnects don't
+          // wipe locally appended recommendation cards (see fix 79042ce).
+          if (!state.initStatus && !state.runtimeStatus) {
+            void ensureAuthenticated()
+              .then(scheduleBackendHydration)
+              .catch(() => {});
+          }
+        });
         socket.addEventListener("message", (event) => {
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
         });
         socket.addEventListener("close", () => {
-          if (state.runtimeSocket === socket) window.setTimeout(connectRuntimeStream, 3000);
+          if (state.runtimeSocket === socket) {
+            state.runtimeSocket = null;
+            scheduleDesktopRuntimeReconnect();
+          }
         });
         socket.addEventListener("error", () => { $("#statusLabel").textContent = "实时流断开"; });
       } catch {
         $("#statusLabel").textContent = "实时流不可用";
+      }
+    }
+
+    function pauseDesktopBackendSession() {
+      backendHydrationPending = true;
+      if (desktopRuntimeReconnectTimer !== null) {
+        window.clearTimeout(desktopRuntimeReconnectTimer);
+        desktopRuntimeReconnectTimer = null;
+      }
+      for (const timer of [
+        backendHydrationTimer,
+        desktopRecommendationRecoveryTimer,
+        desktopRuntimeRecoveryTimer,
+        platformAvailabilityRetryTimer,
+        activityPageRefreshTimer,
+      ]) {
+        if (timer !== null) window.clearTimeout(timer);
+      }
+      backendHydrationTimer = null;
+      desktopRecommendationRecoveryTimer = null;
+      desktopRuntimeRecoveryTimer = null;
+      platformAvailabilityRetryTimer = null;
+      activityPageRefreshTimer = null;
+      clearInitPolling();
+      const socket = state.runtimeSocket;
+      state.runtimeSocket = null;
+      if (socket) socket.close();
+    }
+
+    async function startDesktopBackendSession({ forceHydrate = false } = {}) {
+      if (document.hidden || desktopBackendSessionInFlight) return;
+      desktopBackendSessionInFlight = true;
+      try {
+        await ensureAuthenticated();
+        const stale = Date.now() - desktopLastHydratedAt >= DESKTOP_RESUME_HYDRATE_TTL_MS;
+        if (forceHydrate || backendHydrationPending || !desktopLastHydratedAt || stale) {
+          await hydrateFromBackend();
+          desktopLastHydratedAt = Date.now();
+          backendHydrationPending = false;
+        }
+        if (!document.hidden) connectRuntimeStream();
+      } catch (error) {
+        console.error("后端数据加载失败", error);
+        $("#statusLabel").textContent = "后端数据加载失败";
+        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
+        showToast("后端数据加载失败，页面已保留离线数据");
+        if (!document.hidden) connectRuntimeStream();
+      } finally {
+        desktopBackendSessionInFlight = false;
       }
     }
 
@@ -4358,126 +8017,265 @@
     }
 
     async function hydrateFromBackend() {
-      const [health, recs, runtime, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
+      const firstRuntimeGeneration = desktopRuntimeGeneration;
+      let runtimeReconciliationGeneration = null;
+
+      function applyInitialRecommendations(items) {
+        applyDesktopRecommendationSnapshot(items, { replace: true });
+        renderFilters();
+        renderVideos();
+        scheduleAutoLoadCheck();
+      }
+
+      function markDesktopRecommendationFailedAndRecover(error) {
+        if (state.videos.length > 0) {
+          clearDesktopRecommendationRecovery("ready");
+          return;
+        }
+        // A mid-session LLM-registry degrade blocks /api/recommendations with a
+        // 503 {status:"degraded", …} envelope, which requestJsonStrict rethrows
+        // as error.details (§4.8). Route that to the model-settings recovery
+        // instead of the generic retry UI — the pool cannot refill until the
+        // provider is fixed, so a retry loop here is a dead end.
+        const details = error && error.details;
+        if (details && details.status === "degraded") {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: details.reason || "",
+            issues: details.issues || [],
+          });
+          return;
+        }
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+        renderVideos();
+      }
+
+      function readRuntimeSnapshot() {
+        return readRuntimeStatusSnapshot();
+      }
+
+      function applyInitialRuntimeSnapshot(snapshot) {
+        if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;
+        try {
+          const applied = applyDesktopRuntimeSnapshot(snapshot, firstRuntimeGeneration);
+          if (applied && runtimeReconciliationGeneration === firstRuntimeGeneration) {
+            runtimeReconciliationGeneration = desktopRuntimeGeneration;
+          }
+          if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+        } catch {
+          markDesktopRuntimeFailedAndRecover();
+        }
+      }
+
+      function markDesktopRuntimeFailedAndRecover() {
+        if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
+
+      function applyHealthSnapshot(snapshot) {
+        if (!snapshot) return;
+        if (snapshot.degraded === true) {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: snapshot.degraded_reason || "",
+            issues: snapshot.issues || [],
+          });
+          return;
+        }
+        $("#statusLabel").textContent = "已连接本地后端";
+      }
+
+      function applyInitStatusSnapshot(snapshot) {
+        if (!snapshot) return;
+        state.initStatus = snapshot;
+        renderVideos();
+        // Re-attach the init poll if a run is live at load time. Hydrate only
+        // fetches init-status once, while the poll observes quiet heartbeats
+        // when runtime events are unavailable.
+        if (snapshot.running
+          || embeddingPullProgressView(snapshot).active) {
+          scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
+        }
+      }
+
+      function applyActivitySnapshot(snapshot) {
+        if (!snapshot) return;
+        state.activity = snapshot;
+        state.activityItems = asArray(snapshot.items);
+        state.activityCursor = snapshot.next_cursor || snapshot.next || "";
+        state.activityHasMore = Boolean(snapshot.has_more && state.activityCursor);
+        renderRail();
+        renderActivityHistory();
+      }
+
+      function applyProfileSnapshot(snapshot) {
+        const profile = snapshot?.profile || snapshot;
+        if (!profile || profile.initialized === false) return;
+        state.profile = profile;
+        hydrateInboxFromSpeculations(profile.speculative_interests);
+        hydrateInboxFromSpeculations(profile.speculative_avoidances, "avoidance.probe");
+        renderRail();
+        renderProfileDetails();
+        renderMessages();
+      }
+
+      function applyDelightSnapshot(snapshot) {
+        applyDelights(snapshot);
+      }
+
+      function applyNotificationSnapshot(snapshot) {
+        if (snapshot?.item) mergeMessages([{ ...snapshot.item, type: "notification" }]);
+      }
+
+      function applyChatSnapshot(snapshot) {
+        const chatItems = Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items);
+        if (!chatItems.length) return;
+        state.chat = chatItems.flatMap((turn) => {
+          const failed = String(turn.status || "").toLowerCase() === "failed";
+          const agentText = failed
+            ? turn.error || "这句还没发出去，稍后再试。"
+            : turn.reply || turn.assistant_message || "等待后端回复中。";
+          return [
+            { role: "user", text: turn.message || turn.user_message || "" },
+            { role: "agent", text: agentText }
+          ];
+        }).filter((item) => item.text);
+        renderChat();
+      }
+
+      function applyDelightChatSnapshot(snapshot) {
+        const items = Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items);
+        for (const turn of items.filter(Boolean)) {
+          applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
+        }
+      }
+
+      function applyConfigSnapshot(snapshot) {
+        const configSnapshot = snapshot?.config || snapshot;
+        applyConfig(configSnapshot);
+        presentDegradedConfigRecovery(configSnapshot);
+        renderFilters();
+        syncSourceMetric();
+      }
+
+      async function reconcileRuntimeAfterRecommendations() {
+        const secondRuntimeGeneration = desktopRuntimeGeneration;
+        runtimeReconciliationGeneration = secondRuntimeGeneration;
+        try {
+          const applied = applyDesktopRuntimeSnapshot(
+            await readRuntimeSnapshot(),
+            runtimeReconciliationGeneration
+          );
+          if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+        } catch {
+          // Keep the first successful runtime snapshot (or a newer stream
+          // update). If both boot reads failed, its resource-level recovery is
+          // already scheduled by markDesktopRuntimeFailedAndRecover().
+          if (runtimeReconciliationGeneration !== desktopRuntimeGeneration) return;
+          if (desktopRuntimeLoadState === "failed") {
+            scheduleDesktopRuntimeRecovery();
+            renderDesktopRuntimeFailure();
+          }
+        }
+      }
+
+      // /api/ping is deliberately provider-free and carries recovery
+      // metadata only when the backend is degraded. Pay one loopback RTT
+      // before normal parallel hydration so a broken LLM registry does not
+      // generate a console storm from intentionally-blocked business APIs.
+      const pingSnapshot = await requestJson(ENDPOINTS.ping);
+      applyHealthSnapshot(pingSnapshot);
+      if (pingSnapshot?.degraded === true) {
+        applyConfigSnapshot(await requestJson(ENDPOINTS.config));
+        return;
+      }
+
+      const recommendationsPromise = readRecommendationSnapshot();
+      const runtimePromise = readRuntimeSnapshot();
+
+      const recommendationApplicationPromise = recommendationsPromise.then(
+        (items) => applyInitialRecommendations(items),
+        (error) => markDesktopRecommendationFailedAndRecover(error),
+      );
+      const runtimeApplicationPromise = runtimePromise.then(
+        (snapshot) => applyInitialRuntimeSnapshot(snapshot),
+        () => markDesktopRuntimeFailedAndRecover(),
+      );
+      const runtimeReconciliationPromise = recommendationApplicationPromise.then(
+        () => reconcileRuntimeAfterRecommendations(),
+        () => reconcileRuntimeAfterRecommendations(),
+      );
+
+      const secondaryPromises = [
         requestJson(ENDPOINTS.health),
-        requestJson(ENDPOINTS.recommendations),
-        requestJson(ENDPOINTS.runtimeStatus),
-        requestJson(`${ENDPOINTS.activityFeed}?limit=5`),
-        requestJson(ENDPOINTS.profile),
-        requestJson(ENDPOINTS.delightBatch),
-        requestJson(ENDPOINTS.notificationPending),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`),
-        requestJson(ENDPOINTS.config),
-        requestJson(ENDPOINTS.initStatus)
+        requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
+        requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),
+        requestJson(ENDPOINTS.profile).then(applyProfileSnapshot),
+        requestJson(ENDPOINTS.delightBatch).then(applyDelightSnapshot),
+        requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
+        requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
+        refreshPlatformAvailability(),
+      ];
+
+      // 预取 LAN IP，供二维码面板使用；它不参与任一首屏资源的应用顺序。
+      requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
+      await Promise.allSettled(secondaryPromises);
+      await Promise.allSettled([
+        recommendationApplicationPromise,
+        runtimeApplicationPromise,
+        runtimeReconciliationPromise,
       ]);
-      if (health) $("#statusLabel").textContent = "已连接本地后端";
-      if (initStatus) state.initStatus = initStatus;
-      const recommendationItems = Array.isArray(recs) ? recs : asArray(recs?.items);
-      state.videos = normalizeRecommendationList(recommendationItems);
-      if (activity) {
-        state.activity = activity;
-        state.activityItems = asArray(activity.items);
-        state.activityCursor = activity.next_cursor || activity.next || "";
-        state.activityHasMore = Boolean(activity.has_more && state.activityCursor);
-      }
-      const profilePayload = profile?.profile || profile;
-      if (profilePayload && profilePayload.initialized !== false) {
-        state.profile = profilePayload;
-        hydrateInboxFromSpeculations(profilePayload.speculative_interests);
-        hydrateInboxFromSpeculations(profilePayload.speculative_avoidances, "avoidance.probe");
-      }
-      const chatItems = Array.isArray(chatTurns) ? chatTurns : asArray(chatTurns?.items);
-      if (chatItems.length) {
-        state.chat = chatItems.flatMap((turn) => [
-          { role: "user", text: turn.message || turn.user_message || "" },
-          { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
-        ]).filter((item) => item.text);
-      }
-      const effectiveRuntime = await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime);
-      applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
-      applyDelights(delights);
-      const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
-      for (const turn of delightChatItems.filter(Boolean)) applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
-      if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
-      applyConfig(config?.config || config);
-      renderAll();
     }
 
     function renderAll() {
-      const steps = [renderReshuffleToggle, renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
+      const steps = [renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
       for (const step of steps) {
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
       scheduleActivityRailHeightSync();
+      scheduleAutoLoadCheck();
     }
 
     function buildConfigUpdate() {
-      const provider = $("#llmProvider").value;
-      const fallbackProvider = getInput("llmFallbackProvider");
-      const llmProviderConfig = { model: getInput("llmModel") };
-      if (provider === "openai") llmProviderConfig.auth_mode = getInput("llmAuthMode") || "api_key";
-      if (getInput("llmApiKey")) llmProviderConfig.api_key = getInput("llmApiKey");
-      if (getInput("llmBaseUrl")) llmProviderConfig.base_url = getInput("llmBaseUrl");
-      const llmFallbackConfig = { model: getInput("llmFallbackModel") };
-      if (fallbackProvider === "openai") llmFallbackConfig.auth_mode = getInput("llmFallbackAuthMode") || "api_key";
-      if (getInput("llmFallbackApiKey")) llmFallbackConfig.api_key = getInput("llmFallbackApiKey");
-      if (getInput("llmFallbackBaseUrl")) llmFallbackConfig.base_url = getInput("llmFallbackBaseUrl");
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);
       const embeddingFallbackProvider = getInput("embeddingFallbackProvider");
-      const embeddingFallbackConfig = { model: getInput("embeddingFallbackModel") };
-      if (getInput("embeddingFallbackApiKey")) embeddingFallbackConfig.api_key = getInput("embeddingFallbackApiKey");
-      if (getInput("embeddingFallbackBaseUrl")) embeddingFallbackConfig.base_url = getInput("embeddingFallbackBaseUrl");
       const embedding = {
         provider: $("#embeddingProvider").value,
         fallback_enabled: Boolean(embeddingFallbackProvider),
         fallback_provider: embeddingFallbackProvider,
         model: getInput("embeddingModel"),
         output_dimensionality: Math.max(0, getIntInput("embeddingOutputDimensionality", 1024)),
-        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82)
+        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82),
+        multimodal_enabled: $("#embeddingMultimodalEnabled")?.value === "on"
       };
       if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
       if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");
       const cookie = getInput("biliCookie");
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
+      const redditCookie = getInput("redditCookie");
+      const llmDraft = state.llmDraft || normalizeLlmDraft(state.config?.llm || {});
       const llm = {
-        ...(state.config?.llm || {}),
-        default_provider: provider,
-        fallback_enabled: Boolean(fallbackProvider),
-        fallback_provider: fallbackProvider,
-        concurrency: getIntInput("llmConcurrency", 3),
-        timeout: getIntInput("llmTimeout", 60),
-        [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
-        embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
-        soul: { ...(state.config?.llm?.soul || {}), provider: getInput("moduleSoulProvider"), model: getInput("moduleSoulModel") },
-        discovery: { ...(state.config?.llm?.discovery || {}), provider: getInput("moduleDiscoveryProvider"), model: getInput("moduleDiscoveryModel") },
-        recommendation: { ...(state.config?.llm?.recommendation || {}), provider: getInput("moduleRecommendationProvider"), model: getInput("moduleRecommendationModel") },
-        evaluation: { ...(state.config?.llm?.evaluation || {}), provider: getInput("moduleEvaluationProvider"), model: getInput("moduleEvaluationModel") }
-      };
-      if (fallbackProvider && fallbackProvider !== provider) {
-        llm[fallbackProvider] = {
-          ...(state.config?.llm?.[fallbackProvider] || {}),
-          ...llmFallbackConfig
-        };
-      }
-      if (embeddingFallbackProvider) {
-        llm[embeddingFallbackProvider] = {
-          ...(llm[embeddingFallbackProvider] || state.config?.llm?.[embeddingFallbackProvider] || {}),
-          ...embeddingFallbackConfig
-        };
-      }
-      if (getInput("openrouterReferer") || getInput("openrouterTitle")) {
-        llm.openrouter = {
-          ...(llm.openrouter || {}),
-          http_referer: getInput("openrouterReferer"),
-          x_title: getInput("openrouterTitle")
-        };
-      }
-      const deepseekReasoning = getInput("deepseekReasoning");
-      llm.deepseek = {
-        ...(llm.deepseek || state.config?.llm?.deepseek || {}),
-        reasoning_effort: deepseekReasoning
+        routing_version: 2,
+        instances: clonePlain(llmDraft.instances),
+        default_chain: [...llmDraft.default_chain],
+        routes: Object.fromEntries(
+          Object.entries(llmDraft.routes).map(([moduleName, route]) => [
+            moduleName,
+            {
+              inherit: route.inherit !== false,
+              chain: route.inherit !== false ? [] : [...route.chain]
+            }
+          ])
+        ),
+        concurrency: getIntInput("llmConcurrency", 4),
+        timeout: getIntInput("llmTimeout", 300),
+        embedding: { ...(state.config?.llm?.embedding || {}), ...embedding }
       };
       return {
         language: getInput("language") || "zh",
@@ -4546,6 +8344,7 @@
           reddit: {
             enabled: $("#redditEnabled").value === "on",
             backend: getInput("redditBackend") || "rdt",
+            ...(redditCookie ? { cookie: redditCookie } : {}),
             source_modes: collectRedditSourceModes(),
             daily_search_budget: getIntInput("redditDailySearchBudget", 300),
             daily_hot_budget: getIntInput("redditDailyHotBudget", 300),
@@ -4553,6 +8352,28 @@
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
             min_interval_minutes: getIntInput("redditMinInterval", 60)
+          },
+          bangumi: {
+            enabled: $("#bangumiEnabled").value === "on",
+            username: getInput("bangumiUsername"),
+            // Precedence: an explicit "clear token" checkbox sends access_token:""
+            // (backend clears the stored token + rejection marker). Otherwise
+            // send the token only when the user typed one; an empty field means
+            // "leave the stored token unchanged", so omit the key rather than
+            // clobbering it with "".
+            ...(document.getElementById("bangumiClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("bangumiAccessToken") || "") !== ""
+                ? { access_token: getInput("bangumiAccessToken") }
+                : {}),
+            subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+            source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("bangumiDailySearchBudget", 300),
+            daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
+            daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
+            request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 60),
+            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },
         scheduler: {
@@ -4577,7 +8398,8 @@
             youtube: getIntInput("shareYoutube", 1),
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
-            reddit: getIntInput("shareReddit", 1)
+            reddit: getIntInput("shareReddit", 1),
+            bangumi: getIntInput("shareBangumi", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -4591,13 +8413,17 @@
         },
         discovery: {
           ...(state.config?.discovery || {}),
+          keyword_generation_mode: $("#keywordGenerationMode").value,
+          candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3),
           multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),
           multimodal_image_quality: getIntInput("multimodalImageQuality", 72),
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
+        saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
         storage: { db_path: getInput("storageDbPath") },
+        network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") },
         logging: {
           level: getInput("logLevel") || "INFO",
           file_level: getInput("logFileLevel") || "DEBUG",
@@ -4616,7 +8442,9 @@
     const UPDATE_REASON_TEXT = {
       dirty_worktree: "代码目录有未提交改动，更新被阻止",
       unsupported_install_mode: "当前安装方式不支持自动更新",
-      untrusted_remote: "git 远端不在允许列表，更新被阻止",
+      docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+      untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
+      origin_remote_unusable: "无法读取本地 git origin 远端，更新被阻止（按下方最近错误的修复命令处理）",
       branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
       merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
       github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -4629,7 +8457,9 @@
       already_applying: "正在更新中"
     };
 
-    function formatUpdateCheckTime(iso) {
+    // Shared by update checks and account-sync status: the backend hands out
+    // raw ISO strings (UTC, microseconds), which are unreadable as-is.
+    function formatLocalTime(iso) {
       if (!iso) return "";
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return "";
@@ -4641,7 +8471,7 @@
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "disabled":
@@ -4656,14 +8486,54 @@
           return { text: `正在更新到 ${latest || "新版本"}…`, tone: "" };
         case "restart_pending":
           return { text: "更新完成，等待后端重启生效。", tone: "success" };
-        case "blocked":
-          return { text: `更新被阻止：${reasonText || "未知原因"}${suffix}`, tone: "error" };
+        case "blocked": {
+          // Prefer the backend's detailed refusal (actual redacted remote URL
+          // + fix command) over the generic reason mapping when present — a
+          // bare reason code stays mapped via UPDATE_REASON_TEXT.
+          const detail =
+            backend.last_error && !UPDATE_REASON_TEXT[backend.last_error]
+              ? backend.last_error
+              : "";
+          return { text: `更新被阻止：${detail || reasonText || "未知原因"}${suffix}`, tone: "error" };
+        }
         case "unsupported":
           return { text: reasonText || "当前安装方式不支持自动更新。", tone: "error" };
-        case "error":
-          return { text: `更新检查出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `更新检查出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
         default:
           return { text: `尚未检查更新${current ? `，当前版本 ${current}` : ""}。`, tone: "" };
+      }
+    }
+
+    // Docker containers can't self-apply — the image is the code. The backend
+    // runs a check-only loop against backend-v* tags and the UI guides the
+    // user to pull the new image instead.
+    function describeDockerUpdateStatus(backend) {
+      const reasonKey = backend.reason && backend.reason !== "none" ? String(backend.reason) : "";
+      const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
+      const current = backend.current_version ? `v${backend.current_version}` : "";
+      const latest = backend.latest_version ? `v${backend.latest_version}` : "";
+      const checkedAt = formatLocalTime(backend.last_check_at);
+      const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
+      switch (backend.state) {
+        case "checking":
+          return { text: "正在检查新版镜像…", tone: "" };
+        case "up_to_date":
+          return { text: `当前镜像已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
+        case "update_available":
+          return { text: `发现新版镜像 ${latest}（当前 ${current}），在部署目录执行 docker compose pull && docker compose up -d 完成升级${suffix}`, tone: "" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `检查新版镜像出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
+        default:
+          return { text: `Docker 安装通过拉取新镜像升级；后台会定期检查新版并在这里提醒${current ? `（当前 ${current}）` : ""}。`, tone: "" };
       }
     }
 
@@ -4675,7 +8545,7 @@
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -4684,8 +8554,12 @@
           return { text: `当前安装包已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
         case "update_available":
           return { text: `发现新版安装包 ${latest}（当前 ${current}），桌面安装包不支持自动更新，请下载新版安装包完成升级${suffix}`, tone: "" };
-        case "error":
-          return { text: `检查新版安装包出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `检查新版安装包出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
         default:
           return { text: `桌面安装包不支持自动应用更新；后台会定期检查新版安装包并在这里提醒下载${current ? `（当前 ${current}）` : ""}。`, tone: "" };
       }
@@ -4706,16 +8580,21 @@
       const mode = String(backend.install_mode || "");
       const isGitInstall = mode === "git";
       const isFrozenInstall = mode === "frozen";
+      const isDockerInstall = mode === "docker";
       const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
       const unsupportedInstall = !isGitInstall;
       const toggle = $("#autoUpdate");
       const interval = $("#autoUpdateInterval");
       // The toggle governs auto-apply, which non-git installs can never do —
-      // frozen check-reminders run unconditionally on the backend side.
+      // frozen / docker check-reminders run unconditionally on the backend side.
       if (toggle) toggle.disabled = unsupportedInstall;
       if (interval) interval.disabled = unsupportedInstall;
       if (isFrozenInstall || isDesktopInstallerUpdate) {
         const { text, tone } = describeFrozenUpdateStatus(backend);
+        line.dataset.tone = tone;
+        line.textContent = text;
+      } else if (isDockerInstall) {
+        const { text, tone } = describeDockerUpdateStatus(backend);
         line.dataset.tone = tone;
         line.textContent = text;
       } else if (unsupportedInstall) {
@@ -4727,10 +8606,12 @@
         line.textContent = text;
       }
       line.hidden = false;
-      // 立即检查 works on git checkouts AND frozen bundles (check-only there);
-      // 立即应用 only when a newer tag is ready to fast-forward on git; the
-      // download link replaces 立即应用 on frozen when a new installer exists.
-      const lockActions = unsupportedInstall && !isFrozenInstall && !isDesktopInstallerUpdate;
+      // 立即检查 works on git checkouts, frozen bundles AND docker containers
+      // (check-only on the latter two); 立即应用 only when a newer tag is ready
+      // to fast-forward on git; the download link replaces 立即应用 on frozen
+      // when a new installer exists.
+      const lockActions =
+        unsupportedInstall && !isFrozenInstall && !isDockerInstall && !isDesktopInstallerUpdate;
       if (actions) actions.hidden = lockActions;
       if (checkBtn) checkBtn.disabled = lockActions || backend.state === "checking" || backend.state === "applying";
       if (applyBtn) {
@@ -4824,50 +8705,75 @@
 
     function formatProbeResult(result) {
       const ok = Boolean(result?.ok);
-      const provider = result?.provider ? ` ${result.provider}` : "";
+      const instance = result?.instance_id ? ` ${result.instance_id}` : "";
+      const provider = result?.provider ? ` · ${result.provider}` : "";
       const model = result?.model ? ` / ${result.model}` : "";
       const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
         ? ` (${Math.round(Number(result.latency_ms))}ms)`
         : "";
       const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-      return `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+      return `${ok ? "可用" : "不可用"}${instance}${provider}${model}${latency}: ${detail}`;
     }
 
-    async function probeConfigService(kind, config) {
+    async function probeConfigService(kind, config, instanceId = "") {
       return await requestJsonStrict(ENDPOINTS.configProbe, {
         method: "POST",
         timeoutMs: 35000,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, config })
+        body: JSON.stringify({ kind, instance_id: String(instanceId || ""), config })
       });
+    }
+
+    // One DOM convention for every "click, wait, read a verdict" strip on this
+    // page: tone in the dataset, verdict in the text. The LLM/embedding probes
+    // and the per-source 测试连接 buttons share it instead of each keeping a
+    // private copy — two independent copies of one rendering rule is exactly
+    // the drift that left the codebase with two divergent source status maps.
+    function setProbeStatus(statusEl, tone, text) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = tone;
+      statusEl.textContent = text;
     }
 
     function renderProbeResult(statusEl, result) {
       if (!statusEl) return;
-      statusEl.dataset.tone = result?.ok ? "success" : "error";
-      statusEl.textContent = formatProbeResult(result);
+      setProbeStatus(statusEl, result?.ok ? "success" : "error", formatProbeResult(result));
       const configStatus = $("#configStatus");
       if (configStatus) configStatus.value = formatProbeResult(result);
     }
 
     function renderProbePending(statusEl, label) {
-      if (!statusEl) return;
-      statusEl.dataset.tone = "pending";
-      statusEl.textContent = `${label} 探测中…`;
+      setProbeStatus(statusEl, "pending", `${label} 探测中…`);
     }
 
-    async function runLlmConfigProbe() {
-      const button = $("#probeLlm");
-      const statusEl = $("#probeLlmStatus");
-      if (button) button.disabled = true;
-      renderProbePending(statusEl, "LLM");
+    async function runLlmInstanceProbe(instanceId) {
+      if (!state.llmDraft?.instances[instanceId]) return;
+      state.llmProbeResults.set(instanceId, { pending: true });
+      renderLlmInstances();
       try {
-        const result = await probeConfigService("llm", buildConfigUpdate());
+        const result = await probeConfigService("llm_instance", buildConfigUpdate(), instanceId);
+        state.llmProbeResults.set(instanceId, result);
+      } catch (error) {
+        state.llmProbeResults.set(instanceId, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "实例探测失败"
+        });
+      }
+      renderLlmInstances();
+    }
+
+    async function runLlmChainProbe() {
+      const button = $("#probeLlmChain");
+      const statusEl = $("#probeLlmChainStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "默认调用链");
+      try {
+        const result = await probeConfigService("llm_chain", buildConfigUpdate());
         renderProbeResult(statusEl, result);
       } catch (error) {
         renderProbeResult(statusEl, {
           ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "LLM 探测失败"
+          error: configErrorMessage(error?.details) || error?.message || "调用链探测失败"
         });
       } finally {
         if (button) button.disabled = false;
@@ -4886,6 +8792,24 @@
         renderProbeResult(statusEl, {
           ok: false,
           error: configErrorMessage(error?.details) || error?.message || "Embedding 探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
+    async function runNetworkProxyConfigProbe() {
+      const button = $("#probeNetworkProxy");
+      const statusEl = $("#probeNetworkProxyStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "代理");
+      try {
+        const result = await probeConfigService("network_proxy", { network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") } });
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "代理探测失败"
         });
       } finally {
         if (button) button.disabled = false;
@@ -4956,6 +8880,77 @@
       button.addEventListener("click", returnToMobileMenu);
     });
 
+    const MOBILE_QR_SEEN_KEY = "openbiliclaw.webui.mobileQrSeen";
+    function markMobileQrSeen() {
+      storageSet(MOBILE_QR_SEEN_KEY, "1");
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = true;
+      if (callout) callout.hidden = true;
+    }
+    function initMobileQrDiscovery() {
+      if (storageGet(MOBILE_QR_SEEN_KEY)) return;
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = false;
+      if (callout) {
+        callout.hidden = false;
+        // Quiet down on its own — the dot keeps marking the entry until the
+        // drawer is actually opened once.
+        window.setTimeout(() => { callout.hidden = true; }, 15000);
+      }
+    }
+    async function openMobileQrDrawer() {
+      markMobileQrSeen();
+      openPanel("mobileQrDrawer");
+      const canvas = $("#mobileQrCanvas");
+      const urlEl = $("#mobileQrUrl");
+      const hintEl = $("#mobileQrHint");
+      const qr = window.OBCMobileQr;
+      if (!canvas || !urlEl || !hintEl || !qr) return;
+      canvas.textContent = "";
+      urlEl.textContent = "正在获取局域网地址…";
+      hintEl.hidden = true;
+      hintEl.textContent = "";
+      // The backend knows its own LAN IP; the page host may be 127.0.0.1,
+      // which a phone cannot reach. Always re-query on open: the address moves
+      // when the user switches Wi-Fi or plugs in a dongle, and a sticky cache
+      // would keep encoding an unreachable host until a full page reload. The
+      // page-load prefetch is only a fallback for when this request fails.
+      const freshLanIp = String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      if (freshLanIp) _cachedLanIp = freshLanIp;
+      const lanIp = freshLanIp || _cachedLanIp;
+      const def = locationApiDefault();
+      const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
+      const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
+      const host = lanIp || typedHost || def.host;
+      const url = qr.buildMobileWebUrl({ host, port: typedPort || def.port });
+      urlEl.textContent = url;
+      if (qr.isLoopbackMobileHost(host)) {
+        hintEl.textContent =
+          "没拿到局域网 IP（后端可能只监听了本机地址）。手机打不开本机地址：请用 --host 0.0.0.0 启动后端，或手动把地址里的 127.0.0.1 换成电脑的局域网 IP。";
+        hintEl.hidden = false;
+      }
+      try {
+        canvas.innerHTML = qr.createQrSvgMarkup(url);
+      } catch {
+        canvas.textContent = "二维码生成失败，请直接复制上方链接。";
+      }
+    }
+    safeBind("#mobileQrBtn", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutOpen", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutClose", "click", markMobileQrSeen);
+    initMobileQrDiscovery();
+    safeBind("#mobileQrCopyBtn", "click", async () => {
+      const url = $("#mobileQrUrl")?.textContent || "";
+      if (!url.startsWith("http")) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        showToast("手机版链接已复制");
+      } catch {
+        showToast("复制失败，请手动选中链接复制");
+      }
+    });
     safeBind("#profileBtn", "click", openProfilePage);
     safeBind("#homeBtn", "click", openHomePage);
     safeBind("#watchLaterBtn", "click", openWatchLaterPage);
@@ -4979,15 +8974,32 @@
     bindStarButton();
     syncTopbarHeight();
     window.addEventListener("resize", syncTopbarHeight);
-    ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
-      safeBind(selector, "change", (event) => {
-        setDismissOnReshuffle(Boolean(event.target.checked), { toast: true });
-      });
+    safeBind("#themeToggleBtn", "click", cycleThemeMode);
+    bindRovingChoiceGroup("[data-theme-choice]", (button) => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    bindRovingChoiceGroup("[data-hue]", (button) => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    bindRovingChoiceGroup("[data-accent-choice]", (button) => setAccentStyle(button.dataset.accentChoice, { toast: true }));
+    safeBind("#hueSlider", "input", (event) => {
+      const val = parseInt(event.target.value, 10);
+      setThemeHue(val);
     });
+    safeBind("#hueValueInput", "change", (event) => {
+      const val = Math.min(360, Math.max(0, parseInt(event.target.value, 10) || 0));
+      setThemeHue(val);
+    });
+    safeBind("#autoLoadOnScrollSetting", "change", (event) => {
+      setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
+    });
+    window.addEventListener("scroll", scheduleAutoLoadCheck, { passive: true });
+    window.addEventListener("resize", scheduleAutoLoadCheck);
     safeBind("#reshuffleBtn", "click", reshuffle);
     safeBind("#loadMoreBtn", "click", appendMore);
+    ensureDelightThumbAnchor();
     safeBind("#delightThumb", "click", () => respondDelight(state.delight, "view"));
+    safeBind("#delightThumb", "auxclick", (event) => {
+      if (event.button === 1) respondDelight(state.delight, "view");
+    });
     safeBind("#delightThumb", "keydown", (event) => {
+      if (event.currentTarget?.getAttribute("href")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       respondDelight(state.delight, "view");
@@ -5022,18 +9034,71 @@
         subjectTitle: state.messageChatSubjectTitle
       });
     });
-    safeBind("#llmProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }));
-    safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
-    safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
-    safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
+    safeBind("#addLlmInstance", "click", () => openLlmInstanceDialog());
+    safeBind("#closeLlmInstanceDialog", "click", closeLlmInstanceDialog);
+    safeBind("#cancelLlmInstance", "click", closeLlmInstanceDialog);
+    safeBind("[data-close-llm-instance-dialog]", "click", closeLlmInstanceDialog);
+    safeBind("#saveLlmInstance", "click", saveLlmInstanceDraft);
+    safeBind("#llmInstanceProviderType", "change", applyLlmProviderDefaults);
+    safeBind("#refreshLlmInstanceModels", "click", () => { void discoverLlmInstanceModels(); });
+    safeBind("#llmInstanceBaseUrl", "input", resetLlmModelDiscovery);
+    safeBind("#llmInstanceApiKey", "input", resetLlmModelDiscovery);
+    safeBind("#llmInstanceAuthMode", "change", resetLlmModelDiscovery);
+    safeBind("#addLlmDefaultChainItem", "click", () => addLlmChainItem("default"));
+    safeBind("#probeLlmChain", "click", () => { void runLlmChainProbe(); });
+    for (const [moduleName, ui] of Object.entries(LLM_MODULE_UI)) {
+      safeBind(`#${ui.mode}`, "change", (event) => {
+        if (!state.llmDraft) return;
+        const route = state.llmDraft.routes[moduleName];
+        route.inherit = event.currentTarget.value !== "custom";
+        if (!route.inherit && !route.chain.length) route.chain = [...state.llmDraft.default_chain];
+        renderLlmRouting();
+      });
+      safeBind(`#${ui.add}`, "click", () => addLlmChainItem(moduleName));
+    }
+    document.addEventListener("keydown", (event) => {
+      const dialog = $("#llmInstanceDialog");
+      if (!dialog || dialog.hidden) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLlmInstanceDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex='0']")).filter((element) => !element.closest("[hidden]"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
+    safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
+    safeBind("#savedAutoSync", "change", (event) => {
+      const toggle = event.currentTarget;
+      if (toggle.checked && state.config?.saved_sync?.auto_sync_enabled !== true) {
+        const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+        if (!window.confirm(warning)) {
+          toggle.checked = false;
+          if ($("#savedAutoSyncStatus")) $("#savedAutoSyncStatus").textContent = "已取消，自动同步仍为关闭。";
+        } else if ($("#savedAutoSyncStatus")) {
+          $("#savedAutoSyncStatus").textContent = "已确认；保存配置后开启。";
+        }
+      }
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = toggle.checked ? "开启" : "关闭";
+    });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -5043,6 +9108,7 @@
         if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");
@@ -5056,12 +9122,13 @@
         submitBtn.disabled = true;
         submitBtn.textContent = "保存中…";
       }
+      $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
-        const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {
+        const result = await requestJsonStrict(ENDPOINTS.config, {
           method: "PUT",
           timeoutMs: 60000,
           headers: { "Content-Type": "application/json" },
@@ -5076,7 +9143,7 @@
         void refreshUpdateStatus();
       } catch (error) {
         const message = configErrorMessage(error.details) || error.message || "未知错误";
-        if ($("#configStatus")) $("#configStatus").value = `保存失败：\n${message}`;
+        if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");
       } finally {
         if (submitBtn) {
@@ -5085,17 +9152,36 @@
         }
       }
     });
+    const delightBanner = $("#delightBanner");
+    if (delightBanner) {
+        delightBanner.addEventListener("mouseenter", _stopDelightAutoAdvance);
+        delightBanner.addEventListener("mouseleave", _startDelightAutoAdvance);
+        delightBanner.addEventListener("touchstart", _stopDelightAutoAdvance, { passive: true });
+        delightBanner.addEventListener("touchend", _startDelightAutoAdvance, { passive: true });
+    }
     document.querySelectorAll("[data-delight]").forEach((btn) => btn.addEventListener("click", async () => {
       const response = btn.dataset.delight;
-      if (response === "prev") { setActiveDelight(state.delightIndex - 1); return; }
-      if (response === "next") { setActiveDelight(state.delightIndex + 1); return; }
-      await respondDelight(state.delight, response);
+        if (response === "prev") { setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1); return; }
+        if (response === "next") { setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1); return; }
+      // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
+      await respondDelight(state.delight, response, null, response === "view");
     }));
+    $("#delightExcerptToggle")?.addEventListener("click", () => {
+      const wrapper = $("#delightExcerpt");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !toggle) return;
+      const expanded = wrapper.classList.toggle("is-expanded");
+      toggle.textContent = expanded ? "收起正文" : "展开正文";
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      scheduleActivityRailHeightSync();
+    });
 
     restoreBackendEndpoint();
     restoreFrontendSettings();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
+    toastManager.init();
+    setupThemeNotice();
     try {
       renderAll();
     } catch (error) {
@@ -5103,13 +9189,9 @@
       $("#statusLabel").textContent = "首屏渲染失败";
       $("#runtimeSummary").textContent = error?.message || "请检查后端返回的数据结构。";
     }
-    ensureAuthenticated()
-      .then(() => hydrateFromBackend())
-      .then(connectRuntimeStream)
-      .catch((error) => {
-        console.error("后端数据加载失败", error);
-        $("#statusLabel").textContent = "后端数据加载失败";
-        $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
-        showToast("后端数据加载失败，页面已保留离线数据");
-      });
+    const requestedSettingsPanel = new URLSearchParams(window.location.search).get("settings");
+    if (["models", "sources", "scheduler", "general", "frontend", "logging"].includes(requestedSettingsPanel)) {
+      openSettingsPage(requestedSettingsPanel);
+    }
+    void startDesktopBackendSession({ forceHydrate: true });
     })();

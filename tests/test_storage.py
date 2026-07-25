@@ -1,12 +1,15 @@
 """Tests for the Storage database module."""
 
+import json
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+from openbiliclaw.saved_sync.models import SavedItemInput
 from openbiliclaw.storage.database import Database
 
 
@@ -36,6 +39,121 @@ class TestDatabase:
             assert db.conn is not None
             db.close()
 
+    def test_claim_token_prevents_stale_evaluation_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:BV{i}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=f"BV{i}",
+                        title=f"Candidate {i}",
+                    )
+                    for i in range(2)
+                ]
+            )
+
+            original = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-a")
+            assert {row["claim_token"] for row in original} == {"claim-a"}
+            ids = [int(row["id"]) for row in original]
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="reload",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 2
+            )
+
+            replacement = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-b")
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                    for row in original
+                ],
+                claim_token="claim-a",
+            )
+
+            assert updated == set()
+            assert {row["claim_token"] for row in replacement} == {"claim-b"}
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="stale release",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 0
+            )
+
+            db.close()
+
+    def test_tokenized_completion_and_stale_reset_clear_claim_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key="bilibili:BVTOKEN",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id="BVTOKEN",
+                        title="Token",
+                    )
+                ]
+            )
+            row = db.claim_discovery_candidates_for_eval(limit=1, claim_token="claim-a")[0]
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                claim_token="claim-a",
+            )
+            stored = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+
+            assert updated == {int(row["id"])}
+            assert dict(stored) == {
+                "status": "evaluated",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.conn.execute(
+                "UPDATE discovery_candidates SET status='evaluating', "
+                "claim_token='orphan', claimed_at=NULL"
+            )
+            db.conn.commit()
+            assert db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30) == 1
+            reset = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+            assert dict(reset) == {
+                "status": "pending_eval",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.close()
+
     def test_initialize_creates_recommendation_read_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -45,13 +163,32 @@ class TestDatabase:
                 str(row["name"])
                 for row in db.conn.execute("PRAGMA index_list(recommendations)").fetchall()
             }
+            event_indexes = {
+                str(row["name"]) for row in db.conn.execute("PRAGMA index_list(events)").fetchall()
+            }
             content_indexes = {
                 str(row["name"])
                 for row in db.conn.execute("PRAGMA index_list(content_cache)").fetchall()
             }
 
             assert "idx_recommendations_created_id" in recommendation_indexes
+            assert "idx_recommendations_bvid" in recommendation_indexes
+            assert "idx_events_type_id" in event_indexes
             assert "idx_content_cache_content_id" in content_indexes
+
+            db.close()
+
+    def test_initialize_creates_saved_membership_item_key_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            membership_indexes = {
+                str(row["name"])
+                for row in db.conn.execute("PRAGMA index_list(saved_memberships)").fetchall()
+            }
+
+            assert "idx_saved_memberships_item_key" in membership_indexes
 
             db.close()
 
@@ -93,6 +230,46 @@ class TestDatabase:
             assert row is not None
             assert row["title"] == "Test Video"
             assert row["up_name"] == "TestUP"
+            assert row["relevance_score"] == 0.0
+
+            db.close()
+
+    def test_cache_content_empty_cover_does_not_wipe_existing(self) -> None:
+        """空封面的重摄入(如仅刷新互动数据)不得抹掉已有的好封面。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="//i2.hdslb.com/bfs/archive/good.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="",
+                view_count=12345,
+                source="related",
+            )
+
+            row = db.conn.execute(
+                "SELECT cover_url, view_count FROM content_cache WHERE bvid = ?", ("BV1cover",)
+            ).fetchone()
+            assert row["cover_url"] == "//i2.hdslb.com/bfs/archive/good.jpg"
+            assert row["view_count"] == 12345
+
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="//i2.hdslb.com/bfs/archive/new.jpg",
+                source="search",
+            )
+            row = db.conn.execute(
+                "SELECT cover_url FROM content_cache WHERE bvid = ?", ("BV1cover",)
+            ).fetchone()
+            assert row["cover_url"] == "//i2.hdslb.com/bfs/archive/new.jpg"
 
             db.close()
 
@@ -151,6 +328,112 @@ class TestDatabase:
 
             db.close()
 
+    def test_search_local_inspiration_evidence_returns_content_cache_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            assert rows[0]["source_table"] == "content_cache"
+            assert rows[0]["source_platform"] == "bilibili"
+            db.close()
+
+    def test_search_local_inspiration_evidence_matches_spaceless_cjk_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            db.close()
+
+    def test_search_local_inspiration_evidence_synthesizes_bilibili_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            db.close()
+
+    def test_search_local_inspiration_evidence_excludes_single_weak_token_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal2",
+                content_id="BVlocal2",
+                source_platform="bilibili",
+                title="独立音乐人访谈实录",
+                content_url="https://www.bilibili.com/video/BVlocal2",
+                description="音乐创作与巡演生活。",
+                topic_group="音乐",
+                pool_topic_label="独立音乐",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows == []
+            db.close()
+
     def test_iter_cover_lifecycle_reports_status_and_saved_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -175,6 +458,39 @@ class TestDatabase:
             assert rows["https://i1.hdslb.com/c.jpg"][1] is True  # favorite -> saved
             assert rows["https://i1.hdslb.com/d.jpg"][1] is True  # watch-later -> saved
             assert "" not in rows  # empty cover_url rows are excluded
+
+            db.close()
+
+    def test_iter_cover_lifecycle_uses_normalized_saved_memberships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            bilibili = SavedItemInput(source_platform="bilibili", content_id="BV1normalized")
+            xhs = SavedItemInput(source_platform="xiaohongshu", content_id="note-normalized")
+            db.cache_content(
+                "BV1normalized",
+                source_platform="bilibili",
+                content_id="BV1normalized",
+                cover_url="https://i1.hdslb.com/normalized.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "xiaohongshu:note-normalized",
+                source_platform="xiaohongshu",
+                content_id="note-normalized",
+                cover_url="https://sns-webpic-qc.xhscdn.com/normalized.jpg",
+                source="xhs-feed",
+            )
+
+            db.upsert_saved_membership("favorite", bilibili)
+            db.upsert_saved_membership("watch_later", xhs)
+
+            assert db.conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()[0] == 0
+            rows = {cover: saved for cover, _, saved in db.iter_cover_lifecycle()}
+            assert rows["https://i1.hdslb.com/normalized.jpg"] is True
+            assert rows["https://sns-webpic-qc.xhscdn.com/normalized.jpg"] is True
 
             db.close()
 
@@ -207,6 +523,47 @@ class TestDatabase:
             assert "https://i1.hdslb.com/saved.jpg" in urls  # stale but saved -> kept
             assert "https://i1.hdslb.com/stale.jpg" not in urls  # stale + unsaved -> excluded
             assert "https://i1.hdslb.com/old.jpg" not in urls  # outside recency window
+
+            db.close()
+
+    def test_iter_servable_cover_urls_uses_normalized_saved_memberships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            bilibili = SavedItemInput(source_platform="bilibili", content_id="BV1normalized")
+            xhs = SavedItemInput(source_platform="xiaohongshu", content_id="note-normalized")
+            db.cache_content(
+                "BV1normalized",
+                source_platform="bilibili",
+                content_id="BV1normalized",
+                cover_url="https://i1.hdslb.com/normalized.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "xiaohongshu:note-normalized",
+                source_platform="xiaohongshu",
+                content_id="note-normalized",
+                cover_url="https://sns-webpic-qc.xhscdn.com/normalized.jpg",
+                source="xhs-feed",
+            )
+            db.cache_content(
+                "xiaohongshu:note-unsaved",
+                source_platform="xiaohongshu",
+                content_id="note-unsaved",
+                cover_url="https://sns-webpic-qc.xhscdn.com/unsaved.jpg",
+                source="xhs-feed",
+            )
+            db.conn.execute("UPDATE content_cache SET pool_status='stale'")
+            db.conn.commit()
+
+            db.upsert_saved_membership("favorite", bilibili)
+            db.upsert_saved_membership("watch_later", xhs)
+
+            urls = db.iter_servable_cover_urls(recent_hours=12, limit=100)
+            assert "https://i1.hdslb.com/normalized.jpg" in urls
+            assert "https://sns-webpic-qc.xhscdn.com/normalized.jpg" in urls
+            assert "https://sns-webpic-qc.xhscdn.com/unsaved.jpg" not in urls
 
             db.close()
 
@@ -977,6 +1334,44 @@ class TestDatabase:
             assert counts == {"bilibili": 4}
             db.close()
 
+    def test_zhihu_pool_accounting_collapses_blank_platform_strategies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index, source in enumerate(("zhihu-creator", "zhihu-hot", "zhihu-feed")):
+                _seed_visible(
+                    db,
+                    f"zhihu:answer:{index}",
+                    title=f"知乎回答 {index}",
+                    source=source,
+                    source_platform="",
+                    content_id=f"answer:{index}",
+                    content_url=f"https://www.zhihu.com/question/1/answer/{index}",
+                )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 3}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 3}
+            db.close()
+
+    def test_zhihu_pool_accounting_overrides_bilibili_cache_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(
+                db,
+                "zhihu:answer:cache-default",
+                title="知乎缓存默认平台回归",
+                source="zhihu-hot",
+                source_platform="bilibili",
+                content_id="answer:cache-default",
+                content_url="https://www.zhihu.com/question/1/answer/cache-default",
+            )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 1}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 1}
+            db.close()
+
     def test_trim_pool_share_quotas_protect_xhs_source_family(self) -> None:
         """Xiaohongshu rows are protected by the xiaohongshu quota.
 
@@ -1588,11 +1983,12 @@ class TestDatabase:
         """Surprise-channel rows never enter the regular feed.
 
         A row is delight-claimed when it was delivered as a surprise
-        (delight_notified=1) or is currently queue-eligible (score above
-        threshold with reason + hook). Sub-threshold delight scores
-        without metadata keep the row servable. count_pool_candidates
-        must agree with get_pool_candidates so the "还有 N 条" display
-        never overstates what serve() can load.
+        (delight_notified=1) or has a score above the threshold with its exact
+        formal-copy snapshot ready. An unsynchronized evaluator reason must
+        not claim the row, and an uncopied high-score row remains available to
+        the expression-copy backlog. Sub-threshold delight scores keep the row
+        servable. count_pool_candidates must agree with get_pool_candidates so
+        the "还有 N 条" display never overstates what serve() can load.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -1634,19 +2030,28 @@ class TestDatabase:
                 relevance_score=0.93,
                 topic_group="组D",
             )
+            _seed_visible(
+                db,
+                "BV1UNSYNC",
+                title="惊喜快照尚未同步",
+                up_name="UPE",
+                source="search",
+                relevance_score=0.92,
+                topic_group="组E",
+            )
             # Currently delight-eligible: in the surprise queue right now.
             db.update_delight_score(
                 "BV1CLAIM",
                 delight_score=0.85,
-                delight_reason="跨域呼应",
-                delight_hook="惊喜钩子",
+                delight_reason="测试推荐文案",
+                delight_hook="测试主题",
             )
             # Delivered as a surprise then read — must stay out of the feed.
             db.update_delight_score(
                 "BV1READ",
                 delight_score=0.9,
-                delight_reason="深度共鸣",
-                delight_hook="惊喜钩子",
+                delight_reason="测试推荐文案",
+                delight_hook="测试主题",
             )
             db.mark_delight_notified("BV1READ")
             # Scored but below threshold and without metadata: not claimed.
@@ -1656,11 +2061,27 @@ class TestDatabase:
                 delight_reason="",
                 delight_hook="",
             )
+            # Above the default score floor, but a stale evaluator snapshot is
+            # not proof that the profile-aware scorer admitted it to delight.
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score = 0.85,
+                    delight_reason = '评估器内部判断',
+                    delight_hook = '高契合'
+                WHERE bvid = 'BV1UNSYNC'
+                """
+            )
+            db.conn.commit()
 
             items = db.get_pool_candidates(limit=10)
 
-            assert {item["bvid"] for item in items} == {"BV1NORMAL", "BV1LOW"}
-            assert db.count_pool_candidates() == 2
+            assert {item["bvid"] for item in items} == {
+                "BV1NORMAL",
+                "BV1LOW",
+                "BV1UNSYNC",
+            }
+            assert db.count_pool_candidates() == 3
 
             db.close()
 
@@ -1689,6 +2110,21 @@ class TestDatabase:
             items = db.get_pool_candidates(limit=10)
 
             assert [item["bvid"] for item in items] == ["BV1HIGH"]
+            assert db.count_pool_candidates() == 1
+
+            db.close()
+
+    def test_pool_serving_allows_only_exact_explore_relaxed_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BVEXP", source="explore", relevance_score=0.58)
+            _seed_visible(db, "BVTREND", source="trending", relevance_score=0.58)
+            _seed_visible(db, "BVLOOKALIKE", source="explore-backfill", relevance_score=0.58)
+
+            assert [row["bvid"] for row in db.get_pool_candidates(limit=10)] == ["BVEXP"]
+            assert [row["bvid"] for row in db.get_unrecommended_content(limit=10)] == ["BVEXP"]
             assert db.count_pool_candidates() == 1
 
             db.close()
@@ -1921,6 +2357,342 @@ class TestDatabase:
             assert sum(counts.values()) == db.count_pool_candidates()
             db.close()
 
+    def test_pool_platform_availability_total_matches_sum_by_platform(self) -> None:
+        """Platform-scoped tab counts must partition the canonical available set."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-AVAIL-1", title="B 站一", source="search", topic_group="G1")
+            _seed_visible(db, "BV-AVAIL-2", title="B 站二", source="trending", topic_group="G2")
+            _seed_visible(
+                db,
+                "zhihu-avail-1",
+                title="知乎一",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-avail-1",
+                content_url="https://www.zhihu.com/answer/1",
+                topic_group="G3",
+            )
+            _seed_visible(
+                db,
+                "zhihu-avail-2",
+                title="知乎二",
+                source="zhihu-search",
+                source_platform="zhihu",
+                content_id="zhihu-avail-2",
+                content_url="https://www.zhihu.com/answer/2",
+                topic_group="G4",
+            )
+            _seed_visible(
+                db,
+                "xhs-avail-1",
+                title="小红书一",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-avail-1",
+                content_url="https://www.xiaohongshu.com/explore/xhs-avail-1?xsec_token=ABC=",
+                topic_group="G5",
+            )
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.total_available == db.count_pool_candidates()
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            assert snapshot.by_platform == {"bilibili": 2, "zhihu": 2, "xiaohongshu": 1}
+            db.close()
+
+    def test_pool_platform_availability_groups_legacy_source_strategies(self) -> None:
+        """Legacy rows without source_platform still land in a canonical family."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-LEGACY", title="B 站", source="related_chain", topic_group="L1")
+            _seed_visible(
+                db,
+                "zhihu-legacy",
+                title="知乎旧策略",
+                source="zhihu-hot",
+                content_id="zhihu-legacy",
+                content_url="https://www.zhihu.com/answer/legacy",
+                topic_group="L2",
+            )
+            _seed_visible(
+                db,
+                "xhs-legacy",
+                title="小红书旧策略",
+                source="xhs-extension-search",
+                content_id="xhs-legacy",
+                content_url="https://www.xiaohongshu.com/explore/xhs-legacy?xsec_token=ABC=",
+                topic_group="L3",
+            )
+            _seed_visible(
+                db,
+                "dy-legacy",
+                title="抖音旧策略",
+                source="dy-plugin-search",
+                content_id="dy-legacy",
+                content_url="https://www.douyin.com/video/dy-legacy",
+                topic_group="L4",
+            )
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.by_platform == {
+                "bilibili": 1,
+                "zhihu": 1,
+                "xiaohongshu": 1,
+                "douyin": 1,
+            }
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            # The strict reader must resolve the same legacy rows.
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("zhihu")] == [
+                "zhihu-legacy"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("douyin")] == [
+                "dy-legacy"
+            ]
+            db.close()
+
+    def test_pool_platform_availability_excludes_non_servable_rows(self) -> None:
+        """Counts and strict reads share one servability gate."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            def _seed_zhihu(bvid: str, group: str, **kwargs: Any) -> None:
+                kwargs.setdefault("source", "zhihu-hot")
+                kwargs.setdefault("source_platform", "zhihu")
+                kwargs.setdefault("content_id", bvid)
+                kwargs.setdefault("content_url", f"https://www.zhihu.com/answer/{bvid}")
+                _seed_visible(db, bvid, title=bvid, topic_group=group, **kwargs)
+
+            _seed_zhihu("zhihu-ok", "S1")
+            _seed_zhihu("zhihu-recommended", "S2")
+            _seed_zhihu("zhihu-viewed", "S3")
+            _seed_zhihu("zhihu-delight", "S4")
+            # Unclassified and copy-pending rows never reach the serve window.
+            _seed_zhihu("zhihu-unclassified", "S5", style_key="")
+            _seed_zhihu("zhihu-copy-pending", "S6", pool_expression="")
+            # Non-linkable xhs rows mint dead links, so they are not inventory.
+            _seed_visible(
+                db,
+                "xhs-bare",
+                title="缺 token 的小红书",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-bare",
+                content_url="https://www.xiaohongshu.com/explore/xhs-bare",
+                topic_group="S7",
+            )
+
+            db.insert_recommendation(
+                "zhihu-recommended",
+                confidence=0.9,
+                expression="already recommended",
+                topic="testing",
+            )
+            db.insert_event(
+                "view",
+                title="zhihu-viewed",
+                url="https://www.zhihu.com/answer/zhihu-viewed",
+                metadata={"source_platform": "zhihu", "content_id": "zhihu-viewed"},
+            )
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score=0.9,
+                    delight_reason=pool_expression,
+                    delight_hook=pool_topic_label
+                WHERE bvid='zhihu-delight'
+                """
+            )
+            db.conn.commit()
+
+            snapshot = db.load_pool_platform_availability()
+
+            assert snapshot.by_platform.get("zhihu") == 1
+            assert "xiaohongshu" not in snapshot.by_platform
+            assert snapshot.total_available == db.count_pool_candidates()
+            assert sum(snapshot.by_platform.values()) == snapshot.total_available
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+            assert [row["bvid"] for row in strict] == ["zhihu-ok"]
+            assert db.get_pool_candidates_for_platform("xiaohongshu", limit=20) == []
+            db.close()
+
+    def test_get_pool_candidates_for_platform_matches_inventory_and_returns_full_rows(
+        self,
+    ) -> None:
+        """Strict reads are a subset of the counted set and carry full rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-MIX-1", title="B 站", source="search", topic_group="M1")
+            for index in range(3):
+                _seed_visible(
+                    db,
+                    f"zhihu-mix-{index}",
+                    title=f"知乎 {index}",
+                    source="zhihu-hot",
+                    source_platform="zhihu",
+                    content_id=f"zhihu-mix-{index}",
+                    content_url=f"https://www.zhihu.com/answer/mix-{index}",
+                    topic_group=f"M-Z{index}",
+                    relevance_score=0.9 - index * 0.01,
+                )
+
+            snapshot = db.load_pool_platform_availability()
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+
+            assert len(strict) == snapshot.by_platform["zhihu"] == 3
+            assert {row["source_platform"] for row in strict} == {"zhihu"}
+            # Full candidate rows so the existing recommendation path still works.
+            assert strict[0]["title"] == "知乎 0"
+            assert strict[0]["pool_expression"] == "测试推荐文案"
+            assert strict[0]["content_url"] == "https://www.zhihu.com/answer/mix-0"
+            # Stable relevance ordering, same as the canonical available set.
+            assert [row["bvid"] for row in strict] == [
+                "zhihu-mix-0",
+                "zhihu-mix-1",
+                "zhihu-mix-2",
+            ]
+            db.close()
+
+    def test_get_pool_candidates_for_platform_normalizes_platform_aliases(self) -> None:
+        """Aliases canonicalize before the query, so no alias leaks into SQL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(
+                db,
+                "xhs-alias",
+                title="小红书",
+                source="xhs-extension-task",
+                source_platform="xiaohongshu",
+                content_id="xhs-alias",
+                content_url="https://www.xiaohongshu.com/explore/xhs-alias?xsec_token=ABC=",
+                topic_group="A1",
+            )
+            _seed_visible(
+                db,
+                "zhihu-alias",
+                title="知乎",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-alias",
+                content_url="https://www.zhihu.com/answer/alias",
+                topic_group="A2",
+            )
+
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("XHS")] == [
+                "xhs-alias"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("rednote")] == [
+                "xhs-alias"
+            ]
+            assert [row["bvid"] for row in db.get_pool_candidates_for_platform("zh")] == [
+                "zhihu-alias"
+            ]
+            assert db.get_pool_candidates_for_platform("not-a-platform") == []
+            db.close()
+
+    def test_get_pool_candidates_for_platform_applies_topic_window(self) -> None:
+        """Strict reads honour the same topic window as the displayed count."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index in range(5):
+                _seed_visible(
+                    db,
+                    f"zhihu-window-{index}",
+                    title=f"同组知乎 {index}",
+                    source="zhihu-hot",
+                    source_platform="zhihu",
+                    content_id=f"zhihu-window-{index}",
+                    content_url=f"https://www.zhihu.com/answer/window-{index}",
+                    topic_group="同一个话题组",
+                    relevance_score=0.9 - index * 0.01,
+                )
+
+            snapshot = db.load_pool_platform_availability()
+            strict = db.get_pool_candidates_for_platform("zhihu", limit=20)
+
+            # Default max_per_topic_group=3 caps a concentrated group in both.
+            assert snapshot.by_platform["zhihu"] == 3
+            assert len(strict) == 3
+            assert snapshot.total_available == db.count_pool_candidates() == 3
+            db.close()
+
+    def test_scoped_serve_snapshot_balances_topics_like_the_global_window(self) -> None:
+        """A platform-scoped window must be as topically rich as "全部".
+
+        ``get_pool_candidates`` round-robins the relevance-ordered pool by
+        topic_group so a few dominant groups cannot fill the candidate window.
+        A scoped read that merely truncates by relevance would hand the
+        downstream MMR/diversity stages a window covering a handful of groups,
+        making platform tabs visibly more repetitive than the mixed feed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            # 20 groups x 3 rows, relevance clustered so plain truncation would
+            # take whole groups off the head.
+            for group in range(20):
+                for index in range(3):
+                    bvid = f"zh-{group}-{index}"
+                    _seed_visible(
+                        db,
+                        bvid,
+                        title=bvid,
+                        source="zhihu-hot",
+                        source_platform="zhihu",
+                        content_id=bvid,
+                        content_url=f"https://www.zhihu.com/answer/{bvid}",
+                        topic_group=f"组{group}",
+                        relevance_score=0.99 - group * 0.01 - index * 0.0001,
+                    )
+
+            snapshot = db.load_pool_serve_snapshot(limit=12, source_platform="zhihu")
+
+            groups = {str(row["topic_group"]) for row in snapshot.candidate_rows}
+            assert len(snapshot.candidate_rows) == 12
+            # Pure relevance truncation would reach only 4 groups (12 / 3).
+            assert len(groups) == 12
+            assert {str(row["source_platform"]) for row in snapshot.candidate_rows} == {"zhihu"}
+            db.close()
+
+    async def test_load_pool_platform_availability_async_reads_in_isolation(self) -> None:
+        """The async snapshot must not borrow the process-shared connection."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BV-ASYNC", title="B 站", source="search", topic_group="N1")
+            _seed_visible(
+                db,
+                "zhihu-async",
+                title="知乎",
+                source="zhihu-hot",
+                source_platform="zhihu",
+                content_id="zhihu-async",
+                content_url="https://www.zhihu.com/answer/async",
+                topic_group="N2",
+            )
+
+            snapshot = await db.load_pool_platform_availability_async()
+
+            assert snapshot.total_available == 2
+            assert snapshot.by_platform == {"bilibili": 1, "zhihu": 1}
+            # The shared connection is left untouched by the isolated read.
+            assert not db.conn.in_transaction
+            db.close()
+
     def test_count_pool_raw_material_counts_pending_xhs_and_excludes_viewed_rows(
         self,
     ) -> None:
@@ -2075,10 +2847,220 @@ class TestDatabase:
                 "available": 1,
                 "raw": 3,
                 "pending": 1,
+                "admitted_pending_copy": 1,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
 
+            db.close()
+
+    def test_pool_serve_snapshot_materializes_seen_ledger_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            db.insert_event(
+                "view",
+                title="另一个视频",
+                url="https://www.bilibili.com/video/BVSEEN",
+                metadata={"bvid": "BVSEEN"},
+            )
+            original = Database._seen_state_on
+            calls = 0
+
+            def counted(
+                database: Database,
+                conn: sqlite3.Connection,
+            ) -> tuple[set[str], set[str]]:
+                nonlocal calls
+                calls += 1
+                return original(database, conn)
+
+            with patch.object(Database, "_seen_state_on", counted):
+                snapshot = db.load_pool_serve_snapshot(limit=10)
+
+            assert snapshot.readiness["available"] == 1
+            assert [row["bvid"] for row in snapshot.candidate_rows] == ["BVREADY"]
+            assert calls == 1
+            db.close()
+
+    def test_pool_serve_snapshot_reuses_and_invalidates_seen_ledger_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            db.insert_event(
+                "view",
+                title="看过一",
+                url="https://www.bilibili.com/video/BVSEEN1",
+                metadata={"bvid": "BVSEEN1"},
+            )
+            first = db.load_pool_serve_snapshot(limit=10)
+            assert first.seen_bvids == frozenset({"BVSEEN1"})
+            cached = dict(db._seen_state_cache)
+
+            second = db.load_pool_serve_snapshot(limit=10)
+            assert second.seen_bvids == first.seen_bvids
+            assert db._seen_state_cache == cached
+
+            db.insert_event(
+                "view",
+                title="看过二",
+                url="https://www.bilibili.com/video/BVSEEN2",
+                metadata={"bvid": "BVSEEN2"},
+            )
+            assert db._seen_state_cache == {}
+
+            refreshed = db.load_pool_serve_snapshot(limit=10)
+            assert refreshed.seen_bvids == frozenset({"BVSEEN1", "BVSEEN2"})
+
+            db.close()
+
+    def test_pool_maintenance_parses_view_history_once_per_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            original = Database._recent_viewed_content_keys_on
+            calls = 0
+
+            def counted(
+                database: Database,
+                conn: sqlite3.Connection,
+                *,
+                limit: int = 2000,
+            ) -> set[str]:
+                nonlocal calls
+                calls += 1
+                return original(database, conn, limit=limit)
+
+            with patch.object(Database, "_recent_viewed_content_keys_on", counted):
+                result = db.maintain_pool_inventory(
+                    target=1,
+                    raw_ceiling=2,
+                    source_share_quotas={"bilibili": 1},
+                    max_mutations=50,
+                )
+
+            assert result.available_after == 1
+            assert calls == 1
+            db.close()
+
+    def test_count_pool_readiness_reports_only_canonical_admitted_pending_copy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", source="search")
+            db.cache_content(
+                "BVCOPY",
+                title="classified and admitted",
+                source="search",
+                relevance_score=0.9,
+                style_key="tutorial",
+                topic_group="testing",
+            )
+            db.cache_content(
+                "BVUNCLASSIFIED",
+                title="not copy ready",
+                source="search",
+                relevance_score=0.9,
+                topic_group="testing",
+            )
+            for bvid in ("BVRECOMMENDED", "BVVIEWED", "BVDELIGHT"):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    source="search",
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.insert_recommendation(
+                "BVRECOMMENDED",
+                confidence=0.9,
+                expression="already recommended",
+                topic="testing",
+            )
+            db.insert_event(
+                "view",
+                title="BVVIEWED",
+                url="https://www.bilibili.com/video/BVVIEWED",
+                metadata={"bvid": "BVVIEWED"},
+            )
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score=0.9, delight_reason='surprise', delight_hook='hook'
+                WHERE bvid='BVDELIGHT'
+                """
+            )
+            xhs_url = "https://www.xiaohongshu.com/explore/note"
+            for bvid, up_name, content_url in (
+                ("XHSBARE", "Friend", xhs_url),
+                ("XHSSELF", "Me", f"{xhs_url}?xsec_token=token"),
+            ):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    up_name=up_name,
+                    source="xhs-extension-task",
+                    source_platform="xiaohongshu",
+                    content_url=content_url,
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:{bvid}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=bvid,
+                        title=bvid,
+                    )
+                    for bvid in ("BVEVALUATED", "BVPENDING", "BVEVALUATING")
+                ]
+            )
+            evaluated = db.claim_discovery_candidates_for_eval(
+                limit=1, claim_token="evaluated-token"
+            )
+            assert db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": int(evaluated[0]["id"]),
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                        "relevance_reason": "fit",
+                        "topic_key": "testing",
+                        "topic_group": "testing",
+                        "style_key": "tutorial",
+                        "franchise_key": "",
+                        "pool_expression": "",
+                        "pool_topic_label": "",
+                        "eval_error": "",
+                    }
+                ],
+                claim_token="evaluated-token",
+            )
+            db.claim_discovery_candidates_for_eval(limit=1, claim_token="evaluating-token")
+
+            readiness = db.count_pool_readiness(xhs_self_nickname="Me")
+
+            assert readiness["available"] == 1
+            # BVCOPY and the legacy BVDELIGHT row both still need formal
+            # recommendation copy. A high delight score plus arbitrary
+            # evaluator reason/hook must not claim the row before that copy
+            # exists, otherwise it can never reach the copy backlog.
+            assert readiness["admitted_pending_copy"] == 2
+            assert readiness["evaluated_pending"] == 1
+            assert readiness["pending_eval"] == 2
+            assert [
+                row["bvid"]
+                for row in db.get_pool_candidates_needing_copy(limit=20, xhs_self_nickname="Me")
+            ] == ["BVCOPY", "BVDELIGHT"]
             db.close()
 
     def test_count_pool_readiness_includes_pending_discovery_candidates(self) -> None:
@@ -2187,6 +3169,12 @@ class TestDatabase:
                 url="https://www.bilibili.com/video/BV1SEEN",
                 metadata={"source_platform": "bilibili", "bvid": "BV1SEEN"},
             )
+            db.insert_event(
+                "view",
+                title="知乎回答",
+                url="https://www.zhihu.com/question/1/answer/42",
+                metadata={"source_platform": "zh", "content_id": "answer:42"},
+            )
 
             keys = db.get_recent_viewed_content_keys()
 
@@ -2196,7 +3184,78 @@ class TestDatabase:
             assert "reddit:t3_abc123" in keys
             assert "bilibili:BV1SEEN" in keys
             assert "BV1SEEN" in keys
+            assert "zhihu:answer:42" in keys
 
+            db.close()
+
+    def test_seen_items_backfill_is_unbounded_and_excludes_oldest_legacy_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.db"
+            db = Database(path)
+            db.initialize()
+            db.conn.execute("DROP TABLE seen_items")
+            db.conn.execute("DROP TABLE seen_items_backfill_state")
+            db.conn.executemany(
+                """
+                INSERT INTO events (event_type, url, metadata)
+                VALUES ('view', ?, ?)
+                """,
+                [
+                    (
+                        f"https://www.bilibili.com/video/BVOLD{index:05d}",
+                        json.dumps({"bvid": f"BVOLD{index:05d}"}),
+                    )
+                    for index in range(2005)
+                ],
+            )
+            db.conn.commit()
+            db.close()
+
+            migrated = Database(path)
+            migrated.initialize()
+            _seed_visible(
+                migrated,
+                "BVOLD00000",
+                title="超过旧 2000 条窗口的已看内容",
+                source="search",
+                relevance_score=0.99,
+            )
+            _seed_visible(
+                migrated,
+                "BVFRESH",
+                title="没看过的新内容",
+                source="search",
+                relevance_score=0.90,
+            )
+
+            assert len(migrated.get_seen_bvids()) == 2005
+            assert [row["bvid"] for row in migrated.get_pool_candidates(limit=10)] == ["BVFRESH"]
+            migrated.close()
+
+    def test_event_batch_updates_seen_items_in_the_same_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            inserted = db.insert_events_batch(
+                [
+                    {
+                        "event_type": "view",
+                        "url": "https://www.youtube.com/watch?v=batch-seen",
+                        "metadata": {
+                            "source_platform": "youtube",
+                            "video_id": "batch-seen",
+                        },
+                    },
+                    {
+                        "event_type": "search",
+                        "metadata": {"query": "not a seen item"},
+                    },
+                ]
+            )
+
+            assert inserted == 2
+            assert db.get_seen_content_keys() == {"youtube:batch-seen"}
             db.close()
 
     def test_get_pool_candidates_skips_recently_viewed_non_bilibili_content(self) -> None:
@@ -3258,3 +4317,23 @@ class TestDatabaseMaintenance:
         row = repaired.execute("SELECT title FROM events").fetchone()
         repaired.close()
         assert row == ("恢复成功",)
+
+
+def test_feedback_signals_return_topic_key_and_group() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "BV_TOPIC",
+            title="动画叙事拆解",
+            source="search",
+            topic_key="动漫解说",
+            topic_group="动漫",
+        )
+        recommendation_id = db.insert_recommendation("BV_TOPIC", confidence=0.9)
+        db.update_recommendation_feedback(recommendation_id, feedback_type="dislike")
+
+        rows = db.get_feedback_signals()
+
+        assert rows[0]["topic_key"] == "动漫解说"
+        assert rows[0]["topic_group"] == "动漫"

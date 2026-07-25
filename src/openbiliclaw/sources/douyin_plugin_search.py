@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib import error, request
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# One hot term stays newsworthy ≈ half a day; re-seeding the same
+# ``sentence_id`` sooner only yields dedupe-absorbed repeats (2026-07-17 log
+# evidence: sentence_id=2574280 seeded 3 consecutive hot runs, runs 2-3
+# produced only duplicates the pool dedupe dropped). Calibrated against that
+# incident; revisit if Douyin's hot-board refresh cadence changes.
+_HOT_SEED_REUSE_TTL_SECONDS = 6 * 3600
+# Pull a wider hot-board pool than we seed so rotation has fresh terms to pick
+# from after filtering out the recently-used ones.
+_HOT_SEED_POOL_LIMIT = 30
 
 
 class DouyinBudgetExhausted(Exception):  # noqa: N818 - plan-mandated name (no Error suffix)
@@ -77,6 +88,9 @@ def plugin_search_item_to_aweme(item: dict[str, Any]) -> dict[str, object] | Non
         "desc": title,
         "author": {"nickname": author, "sec_uid": author_sec_uid},
     }
+    published_time = item.get("published_at") or item.get("create_time")
+    if published_time not in (None, ""):
+        aweme["create_time"] = published_time
     if cover_url:
         aweme["video"] = {"cover": {"url_list": [cover_url]}}
     else:
@@ -142,6 +156,10 @@ class DouyinPluginSearchClient:
             daily_feed_budget if daily_feed_budget is not None else daily_budget
         )
         self._kick = kick or kick_douyin_task_dispatcher
+        # Hot-seed rotation state: sentence_id -> monotonic timestamp of last
+        # use. Filters recently-seeded hot terms so consecutive hot runs don't
+        # re-pick the same top term and yield only dedupe-absorbed repeats.
+        self._recent_hot_sentence_ids: dict[str, float] = {}
 
     @property
     def cookie(self) -> str:
@@ -169,7 +187,8 @@ class DouyinPluginSearchClient:
         if limit <= 0:
             return []
 
-        hot_terms = await self._load_hot_terms(limit=_hot_seed_count(limit))
+        hot_terms = await self._load_hot_terms(limit=_HOT_SEED_POOL_LIMIT)
+        hot_terms = self._rotate_hot_terms(hot_terms, seed_count=_hot_seed_count(limit))
         plugin_items = await self._hot_via_plugin(hot_terms, limit=max(1, limit))
         if plugin_items:
             return plugin_items[:limit]
@@ -247,6 +266,44 @@ class DouyinPluginSearchClient:
         except Exception as exc:
             logger.info("douyin hot terms fetch failed: %s", exc)
             return []
+
+    def _rotate_hot_terms(
+        self,
+        hot_terms: list[dict[str, object]],
+        *,
+        seed_count: int,
+    ) -> list[dict[str, object]]:
+        """Pick ``seed_count`` hot terms, deprioritizing recently-used ones.
+
+        Fresh terms (no recent reuse within the TTL) come first; if fewer than
+        ``seed_count`` are fresh, recently-used terms top up the tail — we prefer
+        stale seeds over returning fewer than are available. The sentence_ids of
+        the terms actually chosen are recorded so the next run rotates past them.
+        """
+        self._prune_recent_hot_seeds()
+        if seed_count <= 0:
+            return []
+        fresh: list[dict[str, object]] = []
+        recent: list[dict[str, object]] = []
+        for term in hot_terms:
+            sentence_id = _hot_term_sentence_id(term)
+            if sentence_id and sentence_id in self._recent_hot_sentence_ids:
+                recent.append(term)
+            else:
+                fresh.append(term)
+        chosen = (fresh + recent)[:seed_count]
+        now = time.monotonic()
+        for term in chosen:
+            sentence_id = _hot_term_sentence_id(term)
+            if sentence_id:
+                self._recent_hot_sentence_ids[sentence_id] = now
+        return chosen
+
+    def _prune_recent_hot_seeds(self) -> None:
+        cutoff = time.monotonic() - _HOT_SEED_REUSE_TTL_SECONDS
+        expired = [sid for sid, ts in self._recent_hot_sentence_ids.items() if ts <= cutoff]
+        for sentence_id in expired:
+            del self._recent_hot_sentence_ids[sentence_id]
 
     async def _hot_via_plugin(
         self,
@@ -356,13 +413,16 @@ def kick_douyin_task_dispatcher() -> None:
         request.urlopen(req, timeout=1.0).close()
 
 
+def _hot_term_sentence_id(term: dict[str, object]) -> str:
+    """Extract the normalized hot-term sentence id (matches task normalization)."""
+    return str(term.get("sentence_id") or term.get("sentenceId") or term.get("id") or "").strip()
+
+
 def _normalize_hot_task_items(hot_terms: list[dict[str, object]]) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     seen: set[str] = set()
     for term in hot_terms:
-        sentence_id = str(
-            term.get("sentence_id") or term.get("sentenceId") or term.get("id") or ""
-        ).strip()
+        sentence_id = _hot_term_sentence_id(term)
         if not sentence_id or sentence_id in seen:
             continue
         seen.add(sentence_id)

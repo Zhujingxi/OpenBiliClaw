@@ -96,6 +96,9 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
                 reply_count=3,
                 retweet_count=2,
                 bookmark_count=1,
+                rating_score=9.2,
+                rating_count=9959,
+                source_rank=1,
                 tags=["tag-a", "tag-b"],
                 source_context="feed",
                 candidate_tier="backfill",
@@ -122,6 +125,9 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
     assert item.reply_count == 3
     assert item.retweet_count == 2
     assert item.bookmark_count == 1
+    assert item.rating_score == 9.2
+    assert item.rating_count == 9959
+    assert item.source_rank == 1
 
 
 def test_discovery_candidate_row_defaults_missing_platform_to_bilibili() -> None:
@@ -134,6 +140,31 @@ def test_discovery_candidate_row_defaults_missing_platform_to_bilibili() -> None
     )
 
     assert item.source_platform == "bilibili"
+
+
+def test_catalog_metrics_round_trip_through_content_cache(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    item = DiscoveredContent(
+        bvid="326",
+        content_id="326",
+        content_url="https://bgm.tv/subject/326",
+        source_platform="bangumi",
+        source_strategy="bangumi-ranked",
+        content_type="subject",
+        title="攻壳机动队",
+        rating_score=9.2,
+        rating_count=9959,
+        source_rank=1,
+    )
+
+    db.cache_content(item.bvid, **item.to_cache_kwargs())
+
+    row = db.conn.execute(
+        "SELECT rating_score, rating_count, source_rank FROM content_cache WHERE item_key = ?",
+        ("bangumi:326",),
+    ).fetchone()
+    assert dict(row) == {"rating_score": 9.2, "rating_count": 9959, "source_rank": 1}
 
 
 def test_enqueue_discovery_candidates_replaces_invalid_json_payload(
@@ -252,14 +283,26 @@ def test_enqueue_discovery_candidates_can_bound_pending_rows_per_source(
 
     rows = db.conn.execute(
         """
-        SELECT content_id
+        SELECT content_id, status, eval_error
         FROM discovery_candidates
         WHERE source_platform = 'xiaohongshu'
         ORDER BY id ASC
         """
     ).fetchall()
     assert inserted == 5
-    assert [row["content_id"] for row in rows] == ["xhs-2", "xhs-3", "xhs-4"]
+    assert len(rows) == 5
+    assert [row["content_id"] for row in rows if row["status"] == "pending_eval"] == [
+        "xhs-2",
+        "xhs-3",
+        "xhs-4",
+    ]
+    assert [row["content_id"] for row in rows if row["status"] == "trimmed_capacity"] == [
+        "xhs-0",
+        "xhs-1",
+    ]
+    assert {row["eval_error"] for row in rows if row["status"] == "trimmed_capacity"} == {
+        "source_raw_ceiling:xiaohongshu"
+    }
 
 
 def test_source_cap_counts_evaluating_rows_without_deleting_them(
@@ -298,14 +341,20 @@ def test_source_cap_counts_evaluating_rows_without_deleting_them(
 
     rows = db.conn.execute(
         """
-        SELECT status, content_id
+        SELECT status, content_id, claim_token, eval_error
         FROM discovery_candidates
         WHERE source_platform = 'youtube'
         ORDER BY id ASC
         """
     ).fetchall()
-    assert len(rows) == 3
+    assert len(rows) == 6
     assert [row["status"] for row in rows].count("evaluating") == 2
+    assert [row["status"] for row in rows].count("pending_eval") == 1
+    assert [row["status"] for row in rows].count("trimmed_capacity") == 3
+    assert all(row["claim_token"] for row in rows if row["status"] == "evaluating")
+    assert {row["eval_error"] for row in rows if row["status"] == "trimmed_capacity"} == {
+        "source_raw_ceiling:youtube"
+    }
 
 
 def test_text_candidate_round_trips_body_text_and_content_type(tmp_path: Path) -> None:
@@ -376,3 +425,63 @@ def test_candidate_write_carries_social_metrics(tmp_path: Path) -> None:
     assert back.reply_count == 60
     assert back.retweet_count == 50
     assert back.bookmark_count == 40
+
+
+def _enqueue_one(db: Database, key: str) -> None:
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:{key}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=key,
+                title=key,
+            )
+        ]
+    )
+
+
+def test_reset_stale_evaluations_zero_minutes_releases_fresh_and_null_claims(
+    tmp_path: Path,
+) -> None:
+    """minutes=0 is the process-start sweep: seconds-old restart orphans and
+    un-ageable NULL claimed_at rows must all rejoin pending_eval."""
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    _enqueue_one(db, "BVFRESH")
+    _enqueue_one(db, "BVNULL")
+    rows = db.claim_discovery_candidates_for_eval(limit=2)
+    assert len(rows) == 2
+    db.conn.execute("UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'")
+    db.conn.commit()
+
+    released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=0)
+
+    assert released == 2
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 2
+    assert counts.get("evaluating", 0) == 0
+
+
+def test_reset_stale_evaluations_default_keeps_fresh_but_releases_null_claimed_at(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    _enqueue_one(db, "BVLIVE")
+    _enqueue_one(db, "BVNULL2")
+    rows = db.claim_discovery_candidates_for_eval(limit=2)
+    assert len(rows) == 2
+    db.conn.execute(
+        "UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL2'"
+    )
+    db.conn.commit()
+
+    released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30)
+
+    # The live (seconds-old) claim survives; the NULL claimed_at row cannot
+    # age out so the periodic sweep must release it.
+    assert released == 1
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 1
+    assert counts["evaluating"] == 1

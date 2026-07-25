@@ -13,6 +13,7 @@ import {
   buildNextCognitionHistoryState,
   buildVideoUrl,
   getDelightUiState,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
@@ -33,6 +34,7 @@ import {
   getPoolStatusSummary,
   getPopupState,
   probeMessageKey,
+  reconcileRecommendationReplacement,
   shouldDisplayProbeFromWebSocket,
   shouldSubmitChatOnEnter,
   shouldHydrateProbe,
@@ -42,10 +44,92 @@ import {
   normalizeRecommendation,
   normalizeProfileSummary,
   normalizeRuntimeStatus,
+  platformDisplayName,
+  resolveInitBangumiUsername,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
+
+test("formatRecommendationAuthorLine keeps the UP prefix Bilibili-only", () => {
+  // "UP 主" is Bilibili jargon — it stays on Bilibili cards.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "机械工厂" }),
+    "这位 UP：机械工厂",
+  );
+  // Missing platform still means Bilibili (legacy payloads).
+  assert.equal(formatRecommendationAuthorLine({ up_name: "机械工厂" }), "这位 UP：机械工厂");
+
+  // Every other source shows the bare name — 押井守 directed Ghost in the
+  // Shell, he is not an UP 主. Matches desktop / mobile web rendering.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bgm", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "youtube", up_name: "Veritasium" }),
+    "Veritasium",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "zhihu", author_name: "张三" }),
+    "张三",
+  );
+});
+
+test("formatRecommendationAuthorLine returns empty text when no creator is known", () => {
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "" }), "");
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili" }), "");
+  assert.equal(formatRecommendationAuthorLine({}), "");
+  assert.equal(formatRecommendationAuthorLine(undefined), "");
+  // Whitespace-only names must not render a dangling prefix.
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "   " }), "");
+});
+
+test("platformDisplayName maps known platforms and passes through unknown", () => {
+  assert.equal(platformDisplayName("bilibili"), "B 站");
+  assert.equal(platformDisplayName("ZHIHU"), "知乎");
+  assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("bgm"), "Bangumi");
+  assert.equal(platformDisplayName("newtube"), "newtube");
+  assert.equal(platformDisplayName(""), "");
+});
+
+test("Bangumi cards keep canonical subject links and catalog metadata", () => {
+  const item = normalizeRecommendation({
+    content_id: "253",
+    source_platform: "bangumi",
+    title: "Cowboy Bebop",
+    rating_score: 8.9,
+    rating_count: 12345,
+    source_rank: 12,
+  });
+  assert.equal(item.up_name, "");
+  assert.equal(buildContentUrl(item), "https://bgm.tv/subject/253");
+  assert.equal(item.rating_score, 8.9);
+  assert.equal(item.rating_count, 12345);
+  assert.equal(item.source_rank, 12);
+});
+
+test("empty reshuffle preserves the visible recommendation batch", () => {
+  const current = [{ id: 1, title: "正在看的推荐" }];
+  const preserved = reconcileRecommendationReplacement(current, []);
+  assert.equal(preserved.preserved, true);
+  assert.equal(preserved.items, current);
+
+  const incoming = [{ id: 2, title: "新一批推荐" }];
+  assert.deepEqual(reconcileRecommendationReplacement(current, incoming), {
+    items: incoming,
+    preserved: false,
+  });
+  assert.deepEqual(reconcileRecommendationReplacement([], []), {
+    items: [],
+    preserved: false,
+  });
+});
 
 test("buildVideoUrl builds bilibili video url from bvid", () => {
   assert.equal(
@@ -545,6 +629,8 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
 
   assert.deepEqual(item, {
     bvid: "BV1DELIGHT",
+    item_key: "",
+    content_id: "",
     title: "这条惊喜推荐还没起好标题",
     delight_reason: "这条可能会给你一点意外之喜。",
     delight_score: 0.72,
@@ -552,9 +638,21 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     cover_url: "https://i0.hdslb.com/bfs/archive/delight-cover.jpg",
     content_url: "",
     source_platform: "",
+    published_at: "",
+    published_label: "",
+    content_type: "",
+    body_text: "",
     state: "pending",
     response_message: "",
     chat_reply: "",
+    view_count: 0,
+    like_count: 0,
+    comment_count: 0,
+    favorite_count: 0,
+    danmaku_count: 0,
+    rating_score: 0,
+    rating_count: 0,
+    source_rank: 0,
     turns: [],
     composer_open: false,
     chat_draft: "",
@@ -581,34 +679,174 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
     bvid: "BV1SNOOZED",
     title: "先别出现",
   }, ["BV1SNOOZED"]);
+  const refreshedLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({ bvid: "BV1LIKED", state: "pending" }),
+    { bvid: "BV1LIKED", state: "liked", response_message: "好，这类多来点。" },
+  );
+  const sameStateLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({
+      bvid: "BV1LIKEDLOCAL",
+      state: "liked",
+      response_message: "本地已喜欢文案",
+    }),
+    { bvid: "BV1LIKEDLOCAL", state: "liked" },
+  );
 
   assert.equal(merged.title, "新标题");
   assert.equal(merged.delight_reason, "新理由");
   assert.equal(merged.state, "viewed");
   assert.equal(merged.response_message, "已打开，阿B 会把这次点击当成强信号。");
   assert.equal(ignored, current);
+  assert.equal(refreshedLiked?.state, "liked");
+  assert.equal(refreshedLiked?.response_message, "好，这类多来点。");
+  assert.equal(sameStateLiked?.response_message, "本地已喜欢文案");
 });
 
-test("getDelightUiState keeps handled delight visible with stable copy and highlight state", () => {
-  const uiState = getDelightUiState(
-    normalizeDelightCandidate({
-      bvid: "BV1DELIGHT",
-      title: "这条你会意外喜欢",
-      delight_reason: "它不完全像你最近常看的，但入口很准。",
-      delight_score: 0.88,
-      state: "viewed",
-    }),
+test("authoritative liked state does not inherit response copy from a different state", () => {
+  const currentViewed = normalizeDelightCandidate({
+    bvid: "BV1STATECHANGE",
+    state: "viewed",
+    response_message: "已打开，阿B 会把这次点击当成强信号。",
+  });
+  const merged = mergeDelightCandidate(currentViewed, {
+    bvid: "BV1STATECHANGE",
+    state: "liked",
+  });
+  const uiState = getDelightUiState(merged);
+
+  assert.equal(merged?.state, "liked");
+  assert.equal(merged?.response_message, "");
+  assert.equal(uiState.response_message, "好，这类多来点。");
+  assert.equal(uiState.show_status, true);
+  assert.equal(uiState.show_actions, true);
+  assert.equal(uiState.like_pressed, true);
+  assert.equal(uiState.like_disabled, true);
+});
+
+test("getDelightUiState projects status and actions independently for every state", () => {
+  const pending = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+  });
+  assert.deepEqual(pending, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "",
+  });
+
+  const liked = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "liked",
+  });
+  assert.deepEqual(liked, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: true,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "success",
+    response_message: "好，这类多来点。",
+  });
+
+  const viewed = getDelightUiState(
+    { bvid: "BV1DELIGHT", delight_score: 0.88, state: "viewed" },
     { highlightBvid: "BV1DELIGHT" },
   );
-
-  assert.deepEqual(uiState, {
+  assert.deepEqual(viewed, {
     visible: true,
     highlighted: true,
     handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
     score_label: "大概率会戳中你",
     response_tone: "success",
     response_message: "已打开，阿B 会把这次点击当成强信号。",
   });
+
+  const rejected = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "rejected",
+  });
+  assert.deepEqual(rejected, {
+    visible: true,
+    highlighted: false,
+    handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "记下了，这类惊喜先少来点。",
+  });
+
+  const chatted = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatted",
+  });
+  assert.deepEqual(chatted, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "这句已经记下，后面会更会试探。",
+  });
+
+  const chatting = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatting",
+  });
+  assert.equal(chatting.handled, false);
+  assert.equal(chatting.show_status, false);
+  assert.equal(chatting.show_actions, true);
+  assert.equal(chatting.like_pressed, false);
+  assert.equal(chatting.like_disabled, false);
+
+  assert.deepEqual(getDelightUiState({}), {
+    visible: false,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "",
+    response_tone: "info",
+    response_message: "",
+  });
+});
+
+test("popup delight renderer synchronizes liked ARIA and duplicate-action state", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /if \(uiState\.show_status\)/);
+  assert.match(popupJs, /if \(uiState\.show_actions\)/);
+  assert.match(
+    popupJs,
+    /likeButton\.setAttribute\("aria-pressed", uiState\.like_pressed \? "true" : "false"\)/,
+  );
+  assert.match(popupJs, /likeButton\.disabled = uiState\.like_disabled/);
 });
 
 test("getPopupState distinguishes offline uninitialized refreshing empty and ready states", () => {
@@ -618,11 +856,26 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
     items: [],
   });
 
+  // Missing runtime snapshot ≠ uninitialized: a transient /runtime-status
+  // failure on an initialized backend must not flash the init CTA.
   assert.deepEqual(getPopupState({ online: true, items: [] }), {
-    kind: "uninitialized",
-    message: "还没完成初始化，先运行 openbiliclaw init",
+    kind: "error",
+    message: "后端状态暂时没读到，稍后自动重试。",
     items: [],
   });
+
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
+      items: [],
+    },
+  );
 
   assert.deepEqual(
     getPopupState({
@@ -669,6 +922,74 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
   assert.equal(ready.kind, "ready");
   assert.equal(ready.items.length, 1);
   assert.equal(ready.items[0]?.bvid, "BV1ready");
+});
+
+test("getPopupState surfaces a degraded backend as its own actionable state", () => {
+  const degradedError = Object.assign(new Error("/recommendations request failed: 503"), {
+    status: 503,
+    details: {
+      status: "degraded",
+      reason: "llm_registry_unavailable",
+      issues: [
+        { field: "llm", message: "默认 provider `deepseek` 缺少 `api_key`。", severity: "blocking" },
+        { field: "llm", message: "LLM registry unavailable.", severity: "blocking" },
+      ],
+    },
+  });
+  // No runtime snapshot → cannot rule out an initialized backend → repair state.
+  assert.deepEqual(getPopupState({ online: true, items: [], error: degradedError }), {
+    kind: "degraded",
+    message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+    items: [],
+  });
+
+  // Degraded but NEVER initialized → guided-init journey (its first step is
+  // configuring the LLM provider); the degraded blocker rides along.
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      degraded: true,
+      message: "默认 provider `deepseek` 缺少 `api_key`。；LLM registry unavailable.",
+      items: [],
+    },
+  );
+
+  // Initialized backend that degraded later → pure repair state.
+  assert.equal(
+    getPopupState({
+      online: true,
+      items: [],
+      error: degradedError,
+      runtimeStatus: { initialized: true, recommendation_count: 12 },
+    }).kind,
+    "degraded",
+  );
+
+  // Envelope without issue detail still classifies, with fallback copy.
+  const bareDegraded = Object.assign(new Error("boom"), {
+    status: 503,
+    details: { status: "degraded" },
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: bareDegraded }).kind,
+    "degraded",
+  );
+
+  // Ordinary failures keep the generic error state.
+  const plainError = Object.assign(new Error("/recommendations request failed: 500"), {
+    status: 500,
+    details: null,
+  });
+  assert.equal(
+    getPopupState({ online: true, items: [], error: plainError }).kind,
+    "error",
+  );
 });
 
 test("getPopupState does not show init prompt while refresh or pool signals are active", () => {
@@ -726,7 +1047,7 @@ test("getPopupState shows the init CTA when uninitialized despite pending pre-in
     }),
     {
       kind: "uninitialized",
-      message: "还没完成初始化，先运行 openbiliclaw init",
+      message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
       items: [],
     },
   );
@@ -953,10 +1274,38 @@ test("getManualRefreshResultHint explains stale positive pool count after empty 
   assert.deepEqual(
     getManualRefreshResultHint({ itemCount: 0, hadAdvertisedInventory: true }),
     {
-      message: "池子状态刚刚同步，正在整理内容。",
+      message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
       tone: "info",
     },
   );
+  assert.deepEqual(
+    getManualRefreshResultHint({
+      itemCount: 0,
+      hadAdvertisedInventory: true,
+      preservedCurrent: true,
+    }),
+    {
+      message: "这次没换出新内容，当前推荐已保留。",
+      tone: "info",
+    },
+  );
+});
+
+test("popup manual refresh applies the preserved empty replacement", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const start = popupSource.indexOf("async function handleManualRefresh()");
+  const end = popupSource.indexOf("\nfunction bindTabs()", start);
+  const body = popupSource.slice(start, end);
+
+  assert.match(body, /reconcileRecommendationReplacement\(/);
+  assert.match(body, /state\.recommendations = replacement\.items/);
+  assert.match(body, /preservedCurrent: replacement\.preserved/);
+  assert.match(
+    body,
+    /const excludedBvids = state\.recommendations\.map\(\(item\) => item\?\.bvid\)\.filter\(Boolean\)/,
+  );
+  assert.match(body, /reshuffleRecommendations\(excludedBvids\)/);
+  assert.doesNotMatch(body, /state\.recommendations = result\.items/);
 });
 
 test("mergeRuntimeStatusEvent updates pool fields from runtime stream payload", () => {
@@ -1599,15 +1948,68 @@ test("getTabButtonState highlights current tab", () => {
 });
 
 test("getConnectionBadgeState returns compact status copy for popup header", () => {
-  assert.deepEqual(getConnectionBadgeState(true), {
+  assert.deepEqual(getConnectionBadgeState("online"), {
     tone: "online",
     label: "已连接",
   });
 
-  assert.deepEqual(getConnectionBadgeState(false), {
+  assert.deepEqual(getConnectionBadgeState("reconnecting"), {
+    tone: "reconnecting",
+    label: "重连中",
+  });
+
+  assert.deepEqual(getConnectionBadgeState("offline"), {
     tone: "offline",
     label: "未连接",
   });
+});
+
+test("popup failed chat turn renders durable error", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+
+  assert.match(popupSource, /status === "failed"/);
+  assert.match(popupSource, /const message = turn\.error \|\| "刚刚没发出去，换个说法再试试。"/);
+});
+
+test("popup inline failed turns render errors without completing or removing probes", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const functionSlice = (name: string, nextName: string) => {
+    const start = popupSource.indexOf(`function ${name}`);
+    const end = popupSource.indexOf(`function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} source body not found`);
+    return popupSource.slice(start, end);
+  };
+
+  const delight = functionSlice("expandDelightChat", "dismissMessageByBvid");
+  assert.ok(delight.indexOf('nextTurn.status === "failed"') < delight.indexOf('nextTurn.status === "completed"'));
+  const delightFailure = delight.slice(
+    delight.indexOf("const showFailure"),
+    delight.indexOf("const showReply"),
+  );
+  assert.match(delightFailure, /nextTurn\.error/);
+
+  const probe = functionSlice("sendInlineChat", "dismissMessage");
+  assert.ok(probe.indexOf('nextTurn.status === "failed"') < probe.indexOf('nextTurn.status === "completed"'));
+  assert.match(probe, /input\.closest\("\.message-chat-area"\)/);
+  assert.match(probe, /input\.disabled = true/);
+  const failureBranch = probe.slice(
+    probe.indexOf("const showFailure"),
+    probe.indexOf("const showReply"),
+  );
+  assert.match(failureBranch, /nextTurn\.error/);
+  assert.match(failureBranch, /forgetHandledProbe/);
+  assert.match(failureBranch, /input\.disabled = false/);
+  assert.match(failureBranch, /sendBtn\.disabled = false/);
+  assert.match(failureBranch, /input\.focus\(\)/);
+  assert.doesNotMatch(failureBranch, /chatArea\.remove|input\.remove|sendBtn\.remove/);
+  assert.doesNotMatch(failureBranch, /removeMessageFromState|itemEl\.remove/);
+  const beforeCompleted = probe.slice(0, probe.indexOf("const showReply"));
+  assert.doesNotMatch(beforeCompleted, /chatArea\.remove/);
+  const completedBranch = probe.slice(
+    probe.indexOf("const showReply"),
+    probe.indexOf("const settleTurn"),
+  );
+  assert.match(completedBranch, /chatArea\.remove\(\)/);
 });
 
 test("getHintBannerState normalizes supported tones", () => {
@@ -1620,4 +2022,53 @@ test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("weird"), {
     tone: "info",
   });
+});
+
+test("resolveInitBangumiUsername sends a deliberately typed username", () => {
+  // Successful prefill, then the user types a real name → send it.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: " sai " }),
+    "sai",
+  );
+});
+
+test("resolveInitBangumiUsername sends '' to clear a successfully prefilled value", () => {
+  // Explicit clear of a prefilled field is a deliberate reset → send "".
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: "" }),
+    "",
+  );
+});
+
+test("resolveInitBangumiUsername omits an untouched field so config is kept", () => {
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: true, value: "sai" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits an empty field when prefill failed", () => {
+  // Config fetch failed/never populated the field → an empty value must not
+  // erase a configured username.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits on early submission before any prefill", () => {
+  // Nothing touched, nothing prefilled (fetch still pending) → omit.
+  assert.equal(resolveInitBangumiUsername({}), null);
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername still sends a typed name when prefill failed", () => {
+  // A deliberately typed value is trustworthy even without a prior prefill.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "kite" }),
+    "kite",
+  );
 });

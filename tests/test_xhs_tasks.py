@@ -88,6 +88,69 @@ class TestXhsTaskQueue:
         # Should not return completed tasks
         assert queue.next_pending() is None
 
+    def test_merge_result_enriches_existing_note_without_readding_it(
+        self, queue: XhsTaskQueue
+    ) -> None:
+        assert queue.enqueue("bootstrap_profile", {"scopes": ["saved"]})
+        task = queue.next_pending()
+        assert task is not None
+        note = {
+            "scope": "saved",
+            "title": "partial saved",
+            "url": "https://www.xiaohongshu.com/explore/saved-partial",
+            "note_id": "saved-partial",
+        }
+
+        assert queue.merge_result(task["id"], notes=[note]) == [note]
+        assert (
+            queue.merge_result(
+                task["id"],
+                notes=[
+                    {
+                        **note,
+                        "title": "state title must not replace the partial title",
+                        "published_at": 1783492200000,
+                        "published_label": "3小时前",
+                    }
+                ],
+                complete=True,
+            )
+            == []
+        )
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert result["notes"][0]["title"] == "partial saved"
+        assert result["notes"][0]["published_at"] == 1783492200000
+        assert result["notes"][0]["published_label"] == "3小时前"
+
+    def test_merge_result_counts_disjoint_partial_pages(self, queue: XhsTaskQueue) -> None:
+        assert queue.enqueue("bootstrap_profile", {"scopes": ["saved"]})
+        task = queue.next_pending()
+        assert task is not None
+
+        first_page = [
+            {"scope": "saved", "note_id": f"first-{index}", "title": "first"} for index in range(5)
+        ]
+        second_page = [
+            {"scope": "saved", "note_id": f"second-{index}", "title": "second"}
+            for index in range(5)
+        ]
+        queue.merge_result(task["id"], notes=first_page, scope_counts={"saved": 5})
+        queue.merge_result(
+            task["id"],
+            notes=second_page,
+            scope_counts={"saved": 5},
+            complete=True,
+        )
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert len(result["notes"]) == 10
+        assert result["scope_counts"]["saved"] == 10
+
     def test_fail_marks_task_failed(self, queue: XhsTaskQueue) -> None:
         queue.enqueue("search", {"keyword": "x"})
         task = queue.next_pending()
@@ -233,7 +296,7 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     fake_config = SimpleNamespace(
         data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
         sources=SimpleNamespace(
             browser_cdp_url="",
             browser_headed=False,
@@ -280,7 +343,7 @@ class TestXhsTaskApi:
                 "urls": ["https://www.xiaohongshu.com/explore/x"],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 409
 
     def test_creator_crud(self, api_client: TestClient) -> None:
         # Add

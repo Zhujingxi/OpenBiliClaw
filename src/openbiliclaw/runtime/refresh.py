@@ -32,16 +32,47 @@ from openbiliclaw.soul.speculator import (
     build_probe_axis,
     choose_next_probe_candidate,
 )
+from openbiliclaw.sources.platforms import source_family as _source_family
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
+    from openbiliclaw.storage.database import PoolMaintenanceResult
 
 logger = logging.getLogger(__name__)
 
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _DEFAULT_CANDIDATE_EVAL_BATCH_SIZE = 45
+# CALIBRATION PROVENANCE: production pools are normally 300-500 rows. Eight
+# batches of 50 can converge one full pool in a tick while committing/releasing
+# the writer lock between batches. Larger backlogs continue on the next tick.
+_POOL_MAINTENANCE_BATCH_SIZE = 50
+_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK = 8
+# Even when readiness counts remain stable, time-based stale eligibility and
+# same-count topic/source replacement can change maintenance outcomes. A
+# 10-minute safety pass bounds that drift while avoiding full ranked scans on
+# every 60-second scheduler tick.
+_POOL_MAINTENANCE_SAFETY_SCAN_SECONDS = 10 * 60
+# Five minutes is the same order of magnitude as the supply cooldown ceiling,
+# bounding repeated diagnostic DB work while still guaranteeing at least one
+# full diagnostic for each source-exhaustion episode.
+_EMPTY_PLAN_DIAG_INTERVAL_SECONDS = 300.0
+
+
+class InitialPoolUnavailableError(RuntimeError):
+    """Initial discovery finished without producing a serviceable pool row."""
+
+    def __init__(self, *, discovered_count: int, pending_count: int = 0) -> None:
+        self.discovered_count = max(0, int(discovered_count))
+        self.pending_count = max(0, int(pending_count))
+        super().__init__(
+            "initial discovery produced "
+            f"{self.discovered_count} candidate(s), but none became serviceable "
+            f"after recommendation-copy generation (pending={self.pending_count})"
+        )
+
+
 _DISCOVERY_REPLENISH_LOW_WATERMARK_RATIO = 0.90
 _BILIBILI_EXPENSIVE_DISCOVERY_GAP_RATIO = 0.20
 _BILIBILI_EXPENSIVE_DISCOVERY_MIN_GAP = 20
@@ -68,6 +99,11 @@ _PLATFORM_SOURCE_ORDER = (
     "reddit",
 )
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
+# Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
+# per drain tick. Deliberately small so pool composition converges toward the
+# configured shares gently (≤3 rows/minute) instead of a disruptive bulk purge;
+# admission fills the freed slots with under-share supply the same tick.
+_POOL_REBALANCE_MAX_PER_TICK = 3
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
 
@@ -172,23 +208,19 @@ class SupportsEventDatabase(Protocol):
     def count_pool_raw_material_candidates(self) -> int: ...
     def count_pool_raw_material_by_source(self) -> dict[str, int]: ...
     def get_pool_distribution_counts(self) -> dict[str, dict[str, int]]: ...
-    def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int: ...
-    def trim_topic_group_overflow(self, *, max_per_group: int) -> int: ...
-    def trim_pool_to_target_count(
+    def maintain_pool_inventory(
         self,
         *,
         target: int,
-        source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def trim_pool_source_overflow(self, *, source_share_quotas: dict[str, int]) -> int: ...
-    def reactivate_under_quota_pool_sources(
-        self,
-        *,
-        target: int,
+        raw_ceiling: int,
         source_share_quotas: dict[str, int],
         raw_source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def evict_stale_pool_items(self, *, max_age_days: int = 14) -> int: ...
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+        recover_suppressed: bool = True,
+    ) -> PoolMaintenanceResult: ...
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]: ...
     def iter_servable_cover_urls(
         self, *, recent_hours: int = 12, limit: int = 300
@@ -261,6 +293,17 @@ class SupportsRecommendationEngine(Protocol):
         limit: int,
     ) -> int: ...
 
+    async def drain_pending_expression_copy(
+        self,
+        *,
+        profile: Any,
+        limit: int,
+    ) -> int: ...
+
+    async def precompute_delight_scores(self, *, profile: Any, limit: int) -> int: ...
+
+    async def classify_pool_backlog(self, *, profile: Any, limit: int) -> int: ...
+
     async def prewarm_supergroup_embeddings(self) -> int: ...
 
     async def prewarm_pool_mmr_embeddings(self, *, limit: int = 200) -> int: ...
@@ -284,6 +327,19 @@ class ContinuousRefreshController:
     recommendation_engine: SupportsRecommendationEngine
     event_hub: Any | None = None
     discovery_candidate_pipeline: Any | None = None
+    candidate_eval_coordinator: Any | None = None
+    expression_copy_coordinator: Any | None = None
+    # OpenClaw's bridge is intentionally one-shot: it has no daemon loop to
+    # own ExpressionCopyCoordinator.  When supplied, this callback finishes
+    # the durable copy stage synchronously after inline admission instead of
+    # scheduling the daemon-oriented precompute path.
+    one_shot_expression_copy_callback: Callable[[Any], Any] | None = None
+    # Non-daemon bridges can cap their first source/evaluation wave so an
+    # interactive request produces a serviceable batch before its own timeout.
+    # ``0`` preserves the existing uncapped inline behavior; API runtime
+    # controllers leave this at zero and use CandidateEvalCoordinator instead.
+    one_shot_inline_eval_limit: int = 0
+    llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
@@ -291,6 +347,7 @@ class ContinuousRefreshController:
     x_producer: Any | None = None
     zhihu_producer: Any | None = None
     reddit_producer: Any | None = None
+    bangumi_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -371,11 +428,25 @@ class ContinuousRefreshController:
     _manual_refresh_started_at: str = ""
     _manual_refresh_finished_at: str = ""
     _pending_replenishment_reasons: set[str] = field(default_factory=set, init=False)
-    # Last-tick fingerprint of pool maintenance state, used to demote
-    # the per-minute "reactivated=N" / "trim dropped=N top=X" log lines
-    # to DEBUG when nothing actually changed since the previous tick.
-    # INFO fires only when the count or top-group rotates.
-    _last_pool_maintenance_fingerprint: tuple[int, int, str] = (-1, -1, "")
+    # A cheap readiness fingerprint skips repeated ranked maintenance scans.
+    # Forced/post-refresh paths bypass it, and a periodic safety pass still
+    # catches stale-time or same-count composition changes.
+    _last_pool_maintenance_fingerprint: tuple[int, int, int, int, int] | None = field(
+        default=None,
+        init=False,
+    )
+    _last_pool_maintenance_scan_at: datetime | None = field(default=None, init=False)
+    _last_empty_plan_diag_at: datetime | None = field(default=None, init=False)
+    _last_empty_plan_fingerprint: tuple[int] | None = field(default=None, init=False)
+    _suppressed_empty_plan_count: int = field(default=0, init=False)
+    # Pool-share fairness (spec 2026-07-20, Phase 4): last per-family
+    # (available, target, deficit) snapshot. The per-source deficit summary is
+    # only logged when this changes, so a steady state stays quiet but any
+    # shift (e.g. an under-share source recovering) is visible in one line.
+    _last_source_deficit_snapshot: dict[str, tuple[int, int, int]] = field(
+        default_factory=dict,
+        init=False,
+    )
     _warned_pool_count_fallbacks: set[str] = field(default_factory=set, init=False)
     # Last pool_available count emitted via the runtime event stream so
     # popup-side ``mergeRuntimeStatusEvent`` only re-renders when the
@@ -397,6 +468,8 @@ class ContinuousRefreshController:
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
+    _startup_maintenance_completed: bool = field(default=False, init=False)
+    _last_pool_maintenance_succeeded: bool = field(default=False, init=False)
 
     _signal_event_types = [
         "view",
@@ -444,23 +517,55 @@ class ContinuousRefreshController:
         nickname = self._xhs_self_nickname()
         try:
             readiness = self.database.count_pool_readiness(xhs_self_nickname=nickname)
-            available = int(readiness.get("available", 0))
-            return {
-                "available": max(0, available),
-                "raw": max(0, int(readiness.get("raw", available))),
-                "pending": max(0, int(readiness.get("pending", 0))),
-                "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
-                "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
-            }
+            counts = self._normalize_pool_readiness(readiness)
         except Exception:
             available = int(self.database.count_pool_candidates(xhs_self_nickname=nickname))
-            return {
+            counts = {
                 "available": max(0, available),
                 "raw": max(0, available),
                 "pending": 0,
+                "admitted_pending_copy": 0,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
+        self._update_llm_inventory_state(counts["available"])
+        return counts
+
+    @staticmethod
+    def _normalize_pool_readiness(readiness: Mapping[str, int]) -> dict[str, int]:
+        """Normalize durable readiness fields for runtime/API payloads."""
+        available = int(readiness.get("available", 0))
+        return {
+            "available": max(0, available),
+            "raw": max(0, int(readiness.get("raw", available))),
+            "pending": max(0, int(readiness.get("pending", 0))),
+            "admitted_pending_copy": max(
+                0,
+                int(readiness.get("admitted_pending_copy", 0)),
+            ),
+            "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
+            "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
+        }
+
+    async def _pool_readiness_counts_async(self) -> dict[str, int]:
+        """Read readiness off-loop when the production DB worker is available."""
+        try:
+            readiness = await self._read_isolated_pool_readiness()
+        except Exception:
+            logger.debug("isolated runtime pool status read failed", exc_info=True)
+            readiness = None
+        if readiness is None:
+            return await asyncio.to_thread(self._pool_readiness_counts)
+        counts = self._normalize_pool_readiness(readiness)
+        self._update_llm_inventory_state(counts["available"])
+        return counts
+
+    def _update_llm_inventory_state(self, available: int) -> None:
+        """Synchronize refill admission from canonical durable availability."""
+        gate = self.llm_concurrency_gate
+        update = getattr(gate, "update_inventory", None)
+        if callable(update):
+            update(available=max(0, int(available)), target=self.pool_target_count)
 
     @staticmethod
     def _pool_count_payload(counts: dict[str, int]) -> dict[str, int]:
@@ -509,7 +614,7 @@ class ContinuousRefreshController:
                 min_delight_score=self._dynamic_delight_threshold(),
             )
         pool_counts = self._pool_readiness_counts()
-        return {
+        payload: dict[str, object] = {
             "initialized": self._is_initialized(),
             "recommendation_count": self.database.count_recommendations(),
             "pending_signal_events": self._pending_signal_events_count(state),
@@ -526,6 +631,19 @@ class ContinuousRefreshController:
             "pending_delight_count": pending_delight_count,
             "last_delight_notification_at": str(state.get("last_delight_notification_at", "")),
         }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        expression_status = getattr(self.expression_copy_coordinator, "status_payload", None)
+        if callable(expression_status):
+            with suppress(Exception):
+                payload.update(expression_status())
+        gate_status_payload = getattr(self.llm_concurrency_gate, "status_payload", None)
+        if callable(gate_status_payload):
+            with suppress(Exception):
+                payload.update(gate_status_payload())
+        return payload
 
     async def refresh_if_needed(self) -> dict[str, object]:
         """Refresh discovery candidates when thresholds are met.
@@ -564,7 +682,7 @@ class ContinuousRefreshController:
             if not self._is_initialized():
                 return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-            pool_at_cap = self._enforce_pool_cap()
+            pool_at_cap = await self._enforce_pool_cap_async()
             await self._publish_pool_status_if_changed()
             if pool_at_cap:
                 return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
@@ -587,6 +705,7 @@ class ContinuousRefreshController:
         target_pool_count: int,
         *,
         fully_parallel: bool = True,
+        progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
     ) -> int:
         """Backfill the initial discovery pool for guided init.
 
@@ -595,19 +714,40 @@ class ContinuousRefreshController:
         CLI's staged ``_INIT_DISCOVERY_PLAN`` backfill, but against this
         controller's live ``discovery_engine``/``database``. Cooperative
         cancel: ``async with`` releases the lock on ``CancelledError``.
-        Returns the total number of items discovered.
+        Discovery alone is not a completion boundary: rows also need
+        classification and recommendation copy before ``serve()`` can return
+        them.  This method therefore holds the refresh lock through the first
+        synchronous expression-copy drain and only succeeds once at least one
+        canonical pool row is serviceable. Returns the total number of items
+        discovered.
         """
+
+        async def _report(done: int, total: int, note: str) -> None:
+            if progress_callback is None:
+                return
+            result = progress_callback(done, total, note)
+            if inspect.isawaitable(result):
+                await result
+
+        target = max(0, int(target_pool_count))
+        if target == 0:
+            await _report(4, 4, "已跳过首轮内容池构建")
+            return 0
+
         discovered_count = 0
         async with self._refresh_lock:
+            copy_error: BaseException | None = None
             for strategies in _INIT_DISCOVERY_PLAN:
                 current = self.database.count_pool_candidates()
-                if current >= target_pool_count:
+                self._update_llm_inventory_state(current)
+                if current >= target:
                     break
-                request_limit = max(20, target_pool_count - current)
+                await _report(0, 4, "正在基于完整画像生成发现方向并抓取候选")
+                request_limit = max(20, target - current)
                 pool_snapshot = self._build_init_pool_snapshot(
                     profile,
                     current_pool_count=current,
-                    target_pool_count=target_pool_count,
+                    target_pool_count=target,
                 )
                 discovered = await self.discovery_engine.discover(
                     profile,
@@ -617,6 +757,63 @@ class ContinuousRefreshController:
                     pool_snapshot=pool_snapshot,
                 )
                 discovered_count += len(discovered)
+                current = self.database.count_pool_candidates()
+                self._update_llm_inventory_state(current)
+                await _report(
+                    2,
+                    4,
+                    f"已发现 {discovered_count} 条候选，正在生成首轮推荐文案",
+                )
+
+                if current < target:
+                    try:
+                        copied = await self.recommendation_engine.drain_pending_expression_copy(
+                            profile=profile,
+                            limit=max(1, target),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        copy_error = exc
+                        copied = max(0, int(getattr(exc, "completed", 0) or 0))
+                    current = self.database.count_pool_candidates()
+                    self._update_llm_inventory_state(current)
+                    await _report(
+                        3,
+                        4,
+                        f"已生成 {copied} 条推荐文案，正在验证首轮内容可用性",
+                    )
+
+                if current >= target:
+                    break
+
+            available = self.database.count_pool_candidates()
+            self._update_llm_inventory_state(available)
+            if available <= 0:
+                pending = 0
+                count_readiness = getattr(self.database, "count_pool_readiness", None)
+                if callable(count_readiness):
+                    with suppress(Exception):
+                        readiness = count_readiness(xhs_self_nickname=self._xhs_self_nickname())
+                        if isinstance(readiness, dict):
+                            pending = int(readiness.get("pending", 0) or 0)
+                if copy_error is not None:
+                    logger.warning(
+                        "guided-init expression copy failed before first pool row was ready: %s",
+                        copy_error,
+                    )
+                raise InitialPoolUnavailableError(
+                    discovered_count=discovered_count,
+                    pending_count=pending,
+                ) from copy_error
+
+            if copy_error is not None:
+                logger.warning(
+                    "guided-init expression copy partially failed after %d row(s) became ready: %s",
+                    available,
+                    copy_error,
+                )
+            await _report(4, 4, f"首轮内容池已就绪（{available} 条可直接浏览）")
         return discovered_count
 
     def _build_init_pool_snapshot(
@@ -681,7 +878,7 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-        pool_at_cap = self._enforce_pool_cap()
+        pool_at_cap = await self._enforce_pool_cap_async(force_scan=True)
         await self._publish_pool_status_if_changed()
         if pool_at_cap:
             return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
@@ -704,109 +901,221 @@ class ContinuousRefreshController:
         ``pool_target_count`` is a frontend-visible availability floor, not the
         raw material cap. Raw rows may exceed it until ``_raw_material_ceiling``.
         """
-        source_targets = self._source_target_counts()
-        raw_source_targets = self._raw_source_target_counts()
-
-        # Cross-source topic_group quota runs every tick, not just inside
-        # _run_refresh_plan: when pool sits at cap, refresh exits before
-        # discover, so the in-plan trim would never fire and pre-existing
-        # topic concentration would persist indefinitely. This call is a
-        # cheap SQL group-by + UPDATE, safe to run unconditionally.
+        self._last_pool_maintenance_succeeded = False
+        kwargs = self._pool_maintenance_kwargs()
+        bounded = callable(getattr(self.database, "maintain_pool_inventory_async", None))
+        last_at_target = False
         try:
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
+            for _batch_index in range(_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK if bounded else 1):
+                call_kwargs = dict(kwargs)
+                if bounded:
+                    call_kwargs["max_mutations"] = _POOL_MAINTENANCE_BATCH_SIZE
+                maintain = cast("Any", self.database.maintain_pool_inventory)
+                result = maintain(**call_kwargs)
+                last_at_target = self._record_pool_maintenance_result(result)
+                if not bool(getattr(result, "has_more", False)):
+                    break
+            return last_at_target
         except Exception:
-            logger.exception("trim_topic_group_overflow failed")
-
-        reactivate_fn = getattr(self.database, "reactivate_under_quota_pool_sources", None)
-        if callable(reactivate_fn):
-            try:
-                reactivated = reactivate_fn(
-                    target=self.pool_target_count,
-                    source_share_quotas=source_targets,
-                    raw_source_share_quotas=raw_source_targets,
-                )
-                if reactivated > 0:
-                    # Demote to DEBUG when the count is identical to the
-                    # previous tick — pool sitting in steady-state with
-                    # the same N items reactivating each minute is noise,
-                    # not signal. INFO fires only when N changes (real
-                    # state transition: pool drained to refill, or new
-                    # source surge).
-                    last_reactivated = self._last_pool_maintenance_fingerprint[1]
-                    log_fn = logger.info if reactivated != last_reactivated else logger.debug
-                    log_fn(
-                        "enforce_pool_cap: reactivated=%s under-quota source items",
-                        reactivated,
-                    )
-                    self._last_pool_maintenance_fingerprint = (
-                        self._last_pool_maintenance_fingerprint[0],
-                        reactivated,
-                        self._last_pool_maintenance_fingerprint[2],
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("reactivate_under_quota_pool_sources failed")
-
-        pool_available = self.database.count_pool_candidates(
-            xhs_self_nickname=self._xhs_self_nickname()
-        )
-
-        trim_source_overflow_fn = getattr(self.database, "trim_pool_source_overflow", None)
-        if callable(trim_source_overflow_fn) and pool_available >= self.pool_target_count:
-            try:
-                source_overflow_suppressed = trim_source_overflow_fn(
-                    source_share_quotas=raw_source_targets,
-                )
-                if source_overflow_suppressed > 0:
-                    logger.info(
-                        "enforce_pool_cap: suppressed=%s over-quota source items",
-                        source_overflow_suppressed,
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("trim_pool_source_overflow failed")
-        elif callable(trim_source_overflow_fn):
-            logger.debug(
-                "enforce_pool_cap: skipped source overflow trim below target "
-                "pool_available=%s target=%s",
-                pool_available,
-                self.pool_target_count,
-            )
-        raw_ceiling = self._raw_material_ceiling()
-        trimmed = 0
-        try:
-            trimmed = self.database.trim_pool_to_target_count(
-                target=raw_ceiling,
-                source_share_quotas=raw_source_targets,
-            )
-        except Exception:
-            logger.exception("trim_pool_to_target_count failed")
-        if trimmed > 0:
+            logger.exception("bounded pool maintenance failed")
             pool_available = self.database.count_pool_candidates(
                 xhs_self_nickname=self._xhs_self_nickname()
             )
-            logger.info(
-                "enforce_pool_cap: raw_trimmed=%s, pool_available=%s, target=%s, raw_ceiling=%s",
-                trimmed,
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        else:
-            logger.debug(
-                "enforce_pool_cap: no raw trim needed, "
-                "pool_available=%s, target=%s, raw_ceiling=%s",
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        return pool_available >= self.pool_target_count
+            self._update_llm_inventory_state(pool_available)
+            return pool_available >= self.pool_target_count
+
+    def _pool_maintenance_kwargs(self) -> dict[str, object]:
+        """Build the canonical arguments shared by sync and async runners."""
+        return {
+            "target": self.pool_target_count,
+            "raw_ceiling": self._raw_material_ceiling(),
+            "source_share_quotas": self._source_target_counts(),
+            "raw_source_share_quotas": self._raw_source_target_counts(),
+            "max_per_topic_group": max(3, self.pool_target_count // 10),
+            "max_per_explore_cluster": 3,
+            "stale_max_age_days": 14,
+            "xhs_self_nickname": self._xhs_self_nickname(),
+        }
+
+    def _record_pool_maintenance_result(self, result: PoolMaintenanceResult) -> bool:
+        """Publish one batch's metrics and update the in-memory inventory gate."""
+        log_fn = logger.error if result.rolled_back else logger.info
+        log_fn(
+            "pool_maintenance available=%s->%s target=%s raw=%s->%s/%s "
+            "mutations=%s has_more=%s lock_wait_ms=%.1f total_ms=%.1f "
+            "rolled_back=%s reason=%s",
+            result.available_before,
+            result.available_after,
+            result.target,
+            result.raw_before,
+            result.raw_after,
+            result.raw_ceiling,
+            getattr(result, "mutation_count", 0),
+            getattr(result, "has_more", False),
+            float(getattr(result, "lock_wait_ms", 0.0)),
+            float(getattr(result, "total_ms", 0.0)),
+            result.rolled_back,
+            result.reason,
+        )
+        logger.debug(
+            "pool_maintenance_detail protected_available=%s recovered_suppressed=%s "
+            "trimmed_stale=%s trimmed_explore_cluster=%s trimmed_ready_reserve=%s "
+            "trimmed_evaluated=%s trimmed_raw=%s trimmed_by_source=%s "
+            "deferred_topic_trim=%s deferred_source_trim=%s deferred_stale_trim=%s "
+            "deferred_explore_cluster_trim=%s untrimmed_raw_excess=%s "
+            "recovery_ms=%.1f stale_ms=%.1f explore_ms=%.1f topic_ms=%.1f "
+            "source_ms=%.1f raw_ms=%.1f write_ms=%.1f",
+            result.protected_available,
+            result.recovered_suppressed,
+            result.trimmed_stale,
+            result.trimmed_explore_cluster,
+            result.trimmed_ready_reserve,
+            result.trimmed_evaluated,
+            result.trimmed_raw,
+            result.trimmed_by_source,
+            result.deferred_topic_trim,
+            result.deferred_source_trim,
+            result.deferred_stale_trim,
+            result.deferred_explore_cluster_trim,
+            result.untrimmed_raw_excess,
+            float(getattr(result, "recovery_ms", 0.0)),
+            float(getattr(result, "stale_trim_ms", 0.0)),
+            float(getattr(result, "explore_trim_ms", 0.0)),
+            float(getattr(result, "topic_trim_ms", 0.0)),
+            float(getattr(result, "source_trim_ms", 0.0)),
+            float(getattr(result, "raw_trim_ms", 0.0)),
+            float(getattr(result, "write_ms", 0.0)),
+        )
+        if result.rolled_back:
+            self._update_llm_inventory_state(result.available_before)
+            return result.available_before >= self.pool_target_count
+        self._last_pool_maintenance_succeeded = True
+        self._update_llm_inventory_state(result.available_after)
+        return result.at_target
+
+    @staticmethod
+    def _pool_maintenance_fingerprint(
+        counts: dict[str, int],
+    ) -> tuple[int, int, int, int, int]:
+        """Return the stable inventory fields that gate heavy maintenance."""
+        return (
+            max(0, int(counts.get("available", 0))),
+            max(0, int(counts.get("raw", 0))),
+            max(0, int(counts.get("pending", 0))),
+            max(0, int(counts.get("pending_eval", 0))),
+            max(0, int(counts.get("evaluated_pending", 0))),
+        )
+
+    async def _read_isolated_pool_readiness(self) -> dict[str, int] | None:
+        """Read readiness on the serve worker when the database supports it."""
+        reader = getattr(self.database, "count_pool_readiness_isolated_async", None)
+        if not callable(reader):
+            return None
+        counts = await reader(xhs_self_nickname=self._xhs_self_nickname())
+        return {str(key): max(0, int(value)) for key, value in counts.items()}
+
+    async def _enforce_pool_cap_async(self, *, force_scan: bool = False) -> bool:
+        """Run SQLite-heavy pool maintenance without blocking the API loop.
+
+        Production uses the database-owned, single-thread maintenance worker.
+        Each call mutates at most 50 rows, commits, and returns ``has_more``;
+        this coroutine explicitly yields between batches. The interactive
+        serve worker is separate, so a blocked maintenance batch cannot queue a
+        recommendation read behind it.
+        """
+        runner = getattr(self.database, "maintain_pool_inventory_async", None)
+        if not callable(runner):
+            # Test doubles and legacy adapters retain the old off-loop bridge.
+            return await asyncio.to_thread(self._enforce_pool_cap)
+
+        self._last_pool_maintenance_succeeded = False
+        if not force_scan:
+            try:
+                pre_counts = await self._read_isolated_pool_readiness()
+            except Exception:
+                logger.debug("pool maintenance fingerprint read failed", exc_info=True)
+                pre_counts = None
+            if pre_counts is not None:
+                fingerprint = self._pool_maintenance_fingerprint(pre_counts)
+                last_scan = self._last_pool_maintenance_scan_at
+                safety_due = (
+                    last_scan is None
+                    or (self._now() - last_scan).total_seconds()
+                    >= _POOL_MAINTENANCE_SAFETY_SCAN_SECONDS
+                )
+                if fingerprint == self._last_pool_maintenance_fingerprint and not safety_due:
+                    assert last_scan is not None
+                    pool_available = fingerprint[0]
+                    self._last_pool_maintenance_succeeded = True
+                    self._update_llm_inventory_state(pool_available)
+                    logger.debug(
+                        "pool maintenance skipped unchanged fingerprint=%s safety_age_s=%.1f",
+                        fingerprint,
+                        (self._now() - last_scan).total_seconds(),
+                    )
+                    return pool_available >= self.pool_target_count
+
+        kwargs = self._pool_maintenance_kwargs()
+        last_at_target = False
+        has_more = False
+        for _batch_index in range(_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK):
+            try:
+                result = await runner(
+                    **kwargs,
+                    max_mutations=_POOL_MAINTENANCE_BATCH_SIZE,
+                )
+            except Exception as exc:
+                if "Deferred" in type(exc).__name__ or "writer busy" in str(exc).lower():
+                    logger.info("pool maintenance deferred: %s", exc)
+                else:
+                    logger.exception("bounded pool maintenance worker failed")
+                readiness_reader = getattr(
+                    self.database,
+                    "count_pool_readiness_isolated_async",
+                    None,
+                )
+                if callable(readiness_reader):
+                    counts = await readiness_reader(xhs_self_nickname=self._xhs_self_nickname())
+                    pool_available = max(0, int(counts.get("available", 0)))
+                else:
+                    pool_available = await asyncio.to_thread(
+                        self.database.count_pool_candidates,
+                        xhs_self_nickname=self._xhs_self_nickname(),
+                    )
+                self._update_llm_inventory_state(pool_available)
+                return pool_available >= self.pool_target_count
+
+            last_at_target = self._record_pool_maintenance_result(result)
+            has_more = bool(getattr(result, "has_more", False))
+            if not has_more:
+                break
+            await asyncio.sleep(0)
+        if has_more:
+            self._last_pool_maintenance_fingerprint = None
+        elif self._last_pool_maintenance_succeeded:
+            try:
+                after_counts = await self._read_isolated_pool_readiness()
+            except Exception:
+                logger.debug("post-maintenance fingerprint read failed", exc_info=True)
+                after_counts = None
+            if after_counts is not None:
+                self._last_pool_maintenance_fingerprint = self._pool_maintenance_fingerprint(
+                    after_counts
+                )
+                self._last_pool_maintenance_scan_at = self._now()
+        return last_at_target
+
+    def run_startup_maintenance(self) -> None:
+        """Run the host's pre-service pool repair at most once per controller."""
+        if self._startup_maintenance_completed:
+            return
+        try:
+            self._enforce_pool_cap()
+        except Exception:
+            return
+        if not self._last_pool_maintenance_succeeded:
+            return
+        self._startup_maintenance_completed = True
 
     async def trigger_manual_refresh(self, *, reason: str = "manual") -> dict[str, object]:
         """Schedule one background manual refresh without blocking the caller."""
@@ -925,6 +1234,8 @@ class ContinuousRefreshController:
             return None
         return {
             "bvid": str(candidate.get("bvid", "")),
+            "item_key": str(candidate.get("item_key", "")),
+            "content_id": str(candidate.get("content_id", "") or candidate.get("bvid", "")),
             "title": str(candidate.get("title", "")),
             "delight_reason": str(candidate.get("delight_reason", "")),
             "delight_score": float(candidate.get("delight_score", 0.0) or 0.0),
@@ -932,6 +1243,17 @@ class ContinuousRefreshController:
             "cover_url": str(candidate.get("cover_url", "")),
             "content_url": str(candidate.get("content_url", "")),
             "source_platform": str(candidate.get("source_platform", "") or "bilibili"),
+            "published_at": str(candidate.get("published_at", "") or ""),
+            "published_label": str(candidate.get("published_label", "") or ""),
+            "content_type": str(candidate.get("content_type", "") or "video"),
+            "body_text": str(candidate.get("body_text", "") or ""),
+            "view_count": int(candidate.get("view_count", 0) or 0),
+            "like_count": int(candidate.get("like_count", 0) or 0),
+            "comment_count": int(candidate.get("comment_count", 0) or 0),
+            "danmaku_count": int(candidate.get("danmaku_count", 0) or 0),
+            "favorite_count": int(
+                candidate.get("favorite_count", 0) or candidate.get("collect_count", 0) or 0
+            ),
         }
 
     def _load_disliked_topic_phrases(self) -> list[str]:
@@ -975,10 +1297,10 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return 0
         profile = await self.soul_engine.get_profile()
-        return await self.recommendation_engine.precompute_pool_copy(
-            profile=profile,
-            limit=0,
-        )
+        delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+        if callable(delight):
+            return int(await delight(profile=profile, limit=30))
+        return int(await self.recommendation_engine.precompute_pool_copy(profile=profile, limit=0))
 
     @staticmethod
     def _normalize_replenishment_reason(reason: str) -> str:
@@ -1043,6 +1365,36 @@ class ContinuousRefreshController:
             logger.exception("precompute_pool_copy task failed")
             return 0
 
+    async def _safe_one_shot_expression_copy(self, *, profile: Any) -> int:
+        """Finish a non-daemon copy drain without creating background work."""
+
+        callback = self.one_shot_expression_copy_callback
+        if callback is None:
+            return 0
+        try:
+            result = callback(profile)
+            if inspect.isawaitable(result):
+                result = await result
+            return max(0, int(result or 0))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("one-shot expression-copy drain failed")
+            return 0
+
+    @staticmethod
+    def _post_admission_copy_stage_is_owned(drain_result: object) -> bool:
+        """Return whether a pipeline drain already ran its copy-stage owner.
+
+        ``DiscoveryCandidatePipeline`` returns a mapping-compatible result with
+        a structured post-admission receipt. Older test doubles and compatible
+        third-party pipelines return a plain mapping, which deliberately means
+        no owner was reported and therefore preserves the controller fallback.
+        """
+
+        receipt = getattr(drain_result, "post_admission_copy", None)
+        return bool(getattr(receipt, "owns_copy_stage", False))
+
     async def _safe_prewarm_pool_mmr_embeddings(self) -> int:
         """Warm MMR embeddings without blocking refresh completion."""
         try:
@@ -1071,7 +1423,7 @@ class ContinuousRefreshController:
 
             ┌─ _loop_refresh()           60s   LLM-heavy, may take minutes
             ├─ _loop_pool_precompute()   60s   v0.3.60+ — drain pool_expression
-            ├─ _loop_candidate_eval()    60s   drain pending raw candidates
+            ├─ candidate_eval             event continuous candidate evaluator
             ├─ _loop_soul_pipeline()     60s   profile updates, speculator
             ├─ _loop_bilibili_producer() 60s   Bili extension search fallback under cooldown
             ├─ _loop_xhs_producer()      60s   xhs keyword generation
@@ -1080,11 +1432,13 @@ class ContinuousRefreshController:
             ├─ _loop_x_producer()        60s   X (Twitter) discovery when under quota
             ├─ _loop_zhihu_producer()    60s   Zhihu discovery when under quota
             ├─ _loop_reddit_producer()   60s   Reddit command-backed discovery when under quota
+            ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
         """
+        self.run_startup_maintenance()
         if self._llm_work_allowed():
             with suppress(Exception):
                 await self.prepare_delight_candidates()
@@ -1099,10 +1453,20 @@ class ContinuousRefreshController:
             if callable(bind_soul):
                 with suppress(Exception):
                     bind_soul(self.soul_engine)
+        candidate_eval_loop = (
+            self.candidate_eval_coordinator.run_forever()
+            if self.candidate_eval_coordinator is not None
+            else self._loop_candidate_eval()
+        )
+        expression_copy_loop = (
+            self.expression_copy_coordinator.run_forever()
+            if self.expression_copy_coordinator is not None
+            else self._loop_pool_precompute()
+        )
         tasks = [
             asyncio.create_task(self._loop_refresh()),
-            asyncio.create_task(self._loop_pool_precompute()),
-            asyncio.create_task(self._loop_candidate_eval()),
+            asyncio.create_task(expression_copy_loop, name="expression_copy"),
+            asyncio.create_task(candidate_eval_loop, name="candidate_eval"),
             asyncio.create_task(self._loop_soul_pipeline()),
             asyncio.create_task(self._loop_bilibili_producer()),
             asyncio.create_task(self._loop_xhs_producer()),
@@ -1111,6 +1475,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_x_producer()),
             asyncio.create_task(self._loop_zhihu_producer()),
             asyncio.create_task(self._loop_reddit_producer()),
+            asyncio.create_task(self._loop_bangumi_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -1119,6 +1484,12 @@ class ContinuousRefreshController:
         try:
             await asyncio.gather(*tasks)
         finally:
+            candidate_stop = getattr(self.candidate_eval_coordinator, "stop", None)
+            if callable(candidate_stop):
+                await candidate_stop()
+            expression_stop = getattr(self.expression_copy_coordinator, "stop", None)
+            if callable(expression_stop):
+                await expression_stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1211,16 +1582,23 @@ class ContinuousRefreshController:
             before_pool_count = int(
                 self.database.count_pool_candidates(xhs_self_nickname=self._xhs_self_nickname())
             )
+            self._update_llm_inventory_state(before_pool_count)
         except Exception:
             before_pool_count = -1
         try:
-            await engine.precompute_pool_copy(
-                profile=profile,
-                limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH,
-            )
+            if self.expression_copy_coordinator is None:
+                await engine.precompute_pool_copy(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
+            else:
+                await engine.classify_pool_backlog(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
         except Exception:
-            logger.exception("Periodic precompute drain failed")
+            logger.exception("Periodic classify drain failed")
             return
+        if self.expression_copy_coordinator is not None:
+            self.expression_copy_coordinator.notify("safety_wake")
         if before_pool_count >= 0:
             await self._publish_precompute_replenishment_if_needed(
                 before_pool_count=before_pool_count,
@@ -1382,6 +1760,16 @@ class ContinuousRefreshController:
                 continue
             with suppress(Exception):
                 await self._tick_reddit_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
+    async def _loop_bangumi_producer(self) -> None:
+        """Bangumi production — official anonymous API discovery when under quota."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_bangumi_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
     async def _loop_keyword_planner(self) -> None:
@@ -1657,6 +2045,23 @@ class ContinuousRefreshController:
         else:
             await produce_fn()
 
+    async def _tick_bangumi_producer(self) -> None:
+        """Invoke Bangumi discovery when its source-family quota has a deficit."""
+        producer = self.bangumi_producer
+        if producer is None or not self._is_initialized():
+            return
+        deficit = self._source_deficit("bangumi")
+        if deficit <= 0:
+            return
+        produce_fn = getattr(producer, "produce_if_due", None)
+        if not callable(produce_fn):
+            return
+        limit = max(1, min(deficit, self.discovery_limit))
+        if _call_accepts_limit(produce_fn):
+            await produce_fn(limit=limit)
+        else:
+            await produce_fn()
+
     async def _tick_soul_pipeline(self) -> None:
         """Invoke ProfileUpdatePipeline.tick() if the soul engine exposes one.
 
@@ -1687,6 +2092,7 @@ class ContinuousRefreshController:
         pool_available = self.database.count_pool_candidates(
             xhs_self_nickname=self._xhs_self_nickname()
         )
+        self._update_llm_inventory_state(pool_available)
         pool_below_target = pool_available < self.pool_target_count
 
         if pool_below_target:
@@ -1726,6 +2132,26 @@ class ContinuousRefreshController:
         return int(pool_available) < low_watermark
 
     def _log_empty_refresh_plan_diagnostics(self, *, pool_available: int) -> None:
+        now = self._now()
+        fingerprint = (max(0, int(pool_available)),)
+        last_at = self._last_empty_plan_diag_at
+        full_diagnostics_due = (
+            last_at is None
+            or fingerprint != self._last_empty_plan_fingerprint
+            or (now - last_at).total_seconds() >= _EMPTY_PLAN_DIAG_INTERVAL_SECONDS
+        )
+        if not full_diagnostics_due:
+            self._suppressed_empty_plan_count += 1
+            logger.debug(
+                "refresh plan empty (suppressed diagnostics, %d since last full)",
+                self._suppressed_empty_plan_count,
+            )
+            return
+
+        suppressed_count = self._suppressed_empty_plan_count
+        self._last_empty_plan_diag_at = now
+        self._last_empty_plan_fingerprint = fingerprint
+        self._suppressed_empty_plan_count = 0
         try:
             readiness = self._pool_readiness_counts()
         except Exception:
@@ -1769,12 +2195,13 @@ class ContinuousRefreshController:
                 requested_by_source[source] = -1
 
         logger.info(
-            "refresh plan empty: pool_available=%s raw=%s pending=%s "
+            "refresh plan empty: pool_available=%s raw=%s pending=%s suppressed=%s "
             "source_available=%s source_raw=%s source_targets=%s raw_targets=%s "
             "requested_by_source=%s",
             pool_available,
             readiness.get("raw", "?"),
             readiness.get("pending", "?"),
+            suppressed_count,
             source_available,
             source_raw,
             source_targets,
@@ -1802,6 +2229,10 @@ class ContinuousRefreshController:
     ) -> dict[str, int]:
         """Drain one pending discovery-candidate batch through the shared evaluator."""
 
+        notify = getattr(self.candidate_eval_coordinator, "notify", None)
+        if callable(notify):
+            notify(reason)
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
         return await self._drain_discovery_candidates_and_precompute(
             reason=reason,
             batch_size=batch_size,
@@ -1826,6 +2257,13 @@ class ContinuousRefreshController:
             logger.debug("candidate eval drain skipped: reason=locked caller=%s", reason)
             return {"evaluated": 0, "cached": 0, "rejected": 0}
         async with self._discovery_drain_lock:
+            # Pool-share fairness (spec 2026-07-20, Phase 3/4): before measuring
+            # the pool, gently evict a few over-share rows if an under-share
+            # source has supply waiting, and log the deficit summary. This frees
+            # slots the same tick so the admission below (and the pool_at_cap
+            # gate) reflect the freed room. Shared with the coordinator assembly
+            # via the same entry point (D7).
+            self.run_pool_share_maintenance()
             try:
                 pool_available = self.database.count_pool_candidates(
                     xhs_self_nickname=self._xhs_self_nickname()
@@ -1833,6 +2271,7 @@ class ContinuousRefreshController:
             except TypeError:
                 pool_available = self.database.count_pool_candidates()
             before_pool_count = int(pool_available)
+            self._update_llm_inventory_state(before_pool_count)
             if int(pool_available) >= self.pool_target_count:
                 logger.debug(
                     "candidate eval drain skipped: reason=pool_at_cap "
@@ -1865,11 +2304,18 @@ class ContinuousRefreshController:
             rejected = int(drain_result.get("rejected", 0) or 0)
             failed = int(drain_result.get("failed", 0) or 0)
             waiting = int(drain_result.get("waiting", 0) or 0)
+            post_admission_copy_owned = self._post_admission_copy_stage_is_owned(drain_result)
         if cached > 0 and precompute:
-            await self._safe_precompute_pool_copy(profile=profile)
-            await self._publish_precompute_replenishment_if_needed(
-                before_pool_count=before_pool_count,
-            )
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify(f"candidate_admitted:{cached}")
+            elif self.one_shot_expression_copy_callback is not None:
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
+            else:
+                await self._safe_precompute_pool_copy(profile=profile)
+                await self._publish_precompute_replenishment_if_needed(
+                    before_pool_count=before_pool_count
+                )
         if evaluated or cached or rejected or failed:
             logger.info(
                 "candidate eval drain done: caller=%s evaluated=%s cached=%s rejected=%s failed=%s",
@@ -1947,15 +2393,7 @@ class ContinuousRefreshController:
         pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
-        # v0.3.47+: per-strategy expression precompute tasks. Each strategy's
-        # `discover()` blocks on a slow LLM eval batch (8-16 minutes
-        # observed in production). Without this, popup copy precompute was
-        # gated until ALL strategies finished — i.e. ~30 min of latency
-        # for fresh items. Now: as soon as a strategy yields content we
-        # kick a precompute task; ``self._precompute_lock`` inside
-        # ``RecommendationEngine`` serialises them so two tasks don't
-        # double-spend LLM tokens on the same un-precomputed candidates.
-        precompute_tasks: list[asyncio.Task[Any]] = []
+        post_admission_copy_owned = False
 
         await self._publish_event(
             {
@@ -1977,6 +2415,7 @@ class ContinuousRefreshController:
                 current_pool_count=current_pool_count,
                 pool_below_target=initial_pool_below_target,
             )
+            effective_limit = self._bounded_one_shot_inline_eval_limit(effective_limit)
             strategy_limits = self._requested_strategy_limits(
                 strategies=strategies,
                 requested_limit=requested_limit,
@@ -2095,11 +2534,27 @@ class ContinuousRefreshController:
                         )
                     else:
                         produced_count = await pipeline.produce_and_enqueue(**produce_kwargs)
-                    drain_result = await self._drain_discovery_candidates_and_precompute(
-                        reason="refresh",
-                        profile=profile,
-                        batch_size=effective_limit,
-                        precompute=False,
+                    coordinator_notify = getattr(self.candidate_eval_coordinator, "notify", None)
+                    if callable(coordinator_notify):
+                        # API runtime wires ``pipeline.on_candidates_enqueued`` to
+                        # this coordinator.  That callback is the one immediate
+                        # wake for every successful enqueue; doing an inline
+                        # drain here would create a second durable claim owner
+                        # and could take the 3×30 cap to 180 rows.
+                        drain_result = {"evaluated": 0, "cached": 0, "rejected": 0}
+                    else:
+                        # One-shot / legacy compositions deliberately have no
+                        # live coordinator, so preserve their bounded inline
+                        # drain semantics.
+                        drain_result = await self._drain_discovery_candidates_and_precompute(
+                            reason="refresh",
+                            profile=profile,
+                            batch_size=effective_limit,
+                            precompute=False,
+                        )
+                    post_admission_copy_owned = (
+                        post_admission_copy_owned
+                        or self._post_admission_copy_stage_is_owned(drain_result)
                     )
                     discovered_count = int(produced_count or 0)
                     admitted_count = int(drain_result.get("cached", 0) or 0)
@@ -2143,58 +2598,36 @@ class ContinuousRefreshController:
 
             if admitted_count > 0:
                 replenished_topics.extend(self._extract_topics(topic_items))
-                # Fire expression precompute now (in parallel with the next
-                # strategy's discovery LLM call). The lock inside the engine
-                # queues this if a previous task is still running.
-                precompute_tasks.append(
-                    self._track_task(
-                        "precompute_pool_copy",
-                        self._safe_precompute_pool_copy(profile=profile),
-                    )
-                )
+                if self.expression_copy_coordinator is not None:
+                    self.expression_copy_coordinator.notify(f"refresh_admitted:{admitted_count}")
 
         if flattened_strategies:
-            self.database.trim_explore_cluster_overflow(max_per_cluster=3)
-            # Cap each topic_group at ~10% of pool target so a single hot
-            # topic (e.g. 人工智能 from related_chain) can't accumulate
-            # hundreds of fresh candidates across rounds and starve other
-            # sources/topics. Floor at 3 to keep small pools usable.
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
-            self.database.evict_stale_pool_items(max_age_days=14)
             # Snapshot delight count BEFORE precompute so we can detect
             # net new above-threshold delights and push a refresh event
             # to the popup (no per-item chrome notification — popup
             # re-fetches /api/delight/pending-batch when this fires).
             delight_count_before = self._safe_count_delight_candidates()
-            # v0.3.47+: drain the per-strategy precompute tasks fired
-            # eagerly above. They have already been running in parallel
-            # with discovery's later strategies, so this awaits whatever
-            # is still pending instead of starting from scratch. If the
-            # discovery loop produced nothing precompute-eligible (e.g.
-            # all rejected at eval), fall back to one synchronous call so
-            # any earlier-cycle backlog still gets cleared.
-            if precompute_tasks:
-                await asyncio.gather(*precompute_tasks, return_exceptions=True)
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify("refresh_complete")
+            elif self.one_shot_expression_copy_callback is not None:
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
             # Pre-warm supergroup-merge embeddings so the popup's "换一批"
-            # hot path always hits the L1/L2 cache. New labels added by
-            # this refresh round get warmed before the user clicks.
-            # Warm embedding-derived caches in the background. They are
-            # latency optimizations for later serve() calls, not
-            # requirements for this refresh result to become visible.
-            # Keeping them off the refresh lock prevents slow local
-            # embedding backends from leaving the popup stuck at "正在补货".
-            self._track_task(
-                "prewarm_supergroup_embeddings",
-                self._safe_prewarm_supergroup_embeddings(),
-            )
-            self._track_task(
-                "prewarm_pool_mmr_embeddings",
-                self._safe_prewarm_pool_mmr_embeddings(),
-            )
+            # hot path always hits the L1/L2 cache. These are daemon latency
+            # optimizations, not part of a one-shot adapter's completed
+            # operation; OpenClaw deliberately leaves no provider-backed
+            # background task behind after returning.
+            if self.one_shot_expression_copy_callback is None:
+                self._track_task(
+                    "prewarm_supergroup_embeddings",
+                    self._safe_prewarm_supergroup_embeddings(),
+                )
+                self._track_task(
+                    "prewarm_pool_mmr_embeddings",
+                    self._safe_prewarm_pool_mmr_embeddings(),
+                )
             delight_count_after = self._safe_count_delight_candidates()
             net_new_delights = max(0, delight_count_after - delight_count_before)
             if net_new_delights > 0:
@@ -2214,21 +2647,12 @@ class ContinuousRefreshController:
             await self._publish_delight_if_available()
             await self._publish_probe_if_available()
 
-            # v0.3.66+: enforce the absolute pool cap at the end of every
-            # refresh plan. The earlier trim_topic_group_overflow /
-            # trim_explore_cluster_overflow / evict_stale calls only bound
-            # per-axis concentration (topic, cluster, age) — none of them
-            # cap the total count. Long-running discovery cycles (10-30
-            # min for the LLM eval batch) also block the periodic
-            # _enforce_pool_cap tick in run_forever, so the popup
-            # routinely saw pool_available_count drift well past
-            # pool_target_count (e.g. 668 with target=600 in production).
-            # _enforce_pool_cap also runs reactivate_under_quota and
-            # source-share-aware trim, so this is the right place to land
-            # the freshly-discovered items into their final shape before
-            # the popup re-fetches.
+            # Land all newly durable admissions through the one atomic
+            # topic/source/stale/raw maintenance boundary before the popup
+            # re-fetches. No separately committed destructive pass belongs
+            # in this refresh plan.
             try:
-                self._enforce_pool_cap()
+                await self._enforce_pool_cap_async(force_scan=True)
             except Exception:
                 logger.exception("post-refresh enforce_pool_cap failed")
 
@@ -2293,20 +2717,27 @@ class ContinuousRefreshController:
         steady-state ticks don't spam the WebSocket stream.
         """
         try:
-            pool_counts = self._pool_readiness_counts()
+            pool_counts = await self._pool_readiness_counts_async()
             current = int(pool_counts["available"])
         except Exception:
             return
         if current == self._last_published_pool_count:
             return
         self._last_published_pool_count = current
-        await self._publish_event(
-            {
-                "type": "pool_status",
-                **self._pool_count_payload(pool_counts),
-                "pool_target_count": int(self.pool_target_count),
-            }
-        )
+        payload: dict[str, object] = {
+            "type": "pool_status",
+            **self._pool_count_payload(pool_counts),
+            "pool_target_count": int(self.pool_target_count),
+        }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        await self._publish_event(payload)
+        if current < int(self.pool_target_count):
+            notify = getattr(self.candidate_eval_coordinator, "notify", None)
+            if callable(notify):
+                notify("inventory_consumed")
 
     def _safe_count_delight_candidates(self) -> int:
         """Best-effort count of pending delight candidates (returns 0 on any
@@ -2339,6 +2770,8 @@ class ContinuousRefreshController:
                 "phase": "ready",
                 "message": "发现了一条你可能会意外喜欢的内容",
                 "bvid": candidate.get("bvid", ""),
+                "item_key": candidate.get("item_key", ""),
+                "content_id": candidate.get("content_id", "") or candidate.get("bvid", ""),
                 "title": candidate.get("title", ""),
                 "delight_reason": candidate.get("delight_reason", ""),
                 "delight_score": candidate.get("delight_score", 0.0),
@@ -2346,6 +2779,19 @@ class ContinuousRefreshController:
                 "cover_url": candidate.get("cover_url", ""),
                 "content_url": candidate.get("content_url", ""),
                 "source_platform": candidate.get("source_platform", "bilibili"),
+                "published_at": str(candidate.get("published_at", "") or ""),
+                "published_label": str(candidate.get("published_label", "") or ""),
+                "content_type": candidate.get("content_type", "video"),
+                "body_text": candidate.get("body_text", ""),
+                # Engagement stats so a live-pushed delight card shows the same
+                # ▶/👍/💬 row as the pending-batch path (0 = not fetched). Passed
+                # through as-is like the other row fields; the client coerces.
+                "view_count": candidate.get("view_count", 0),
+                "like_count": candidate.get("like_count", 0),
+                "comment_count": candidate.get("comment_count", 0),
+                "danmaku_count": candidate.get("danmaku_count", 0),
+                "favorite_count": candidate.get("favorite_count", 0)
+                or candidate.get("collect_count", 0),
             }
         )
 
@@ -2637,6 +3083,157 @@ class ContinuousRefreshController:
     def _source_deficit(self, source_family: str) -> int:
         return self._source_requested_count(source_family)
 
+    def _waiting_supply_by_family(self) -> dict[str, int]:
+        """Return admission-waiting candidate counts per family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 8 / D9): counts every
+        non-terminal stage (``pending_eval`` + ``evaluating`` + ``evaluated``),
+        not just ``evaluated`` — an orphan occupier pins the pool full, so an
+        under-share source never reaches ``evaluated`` and eviction would never
+        fire if we only counted the last stage. Falls back to the older
+        evaluated-only counter if the wider one is unavailable.
+        """
+        count_fn = getattr(
+            self.database, "count_admission_waiting_discovery_candidates_by_source", None
+        )
+        if not callable(count_fn):
+            count_fn = getattr(
+                self.database, "count_evaluated_discovery_candidates_by_source", None
+            )
+        if not callable(count_fn):
+            return {}
+        try:
+            counts = count_fn()
+        except Exception:
+            logger.debug("waiting-supply-by-source snapshot failed", exc_info=True)
+            return {}
+        return {str(family): int(count) for family, count in dict(counts).items()}
+
+    def _rebalance_pool_shares(self) -> int:
+        """Gently free over-share slots for under-share sources with supply waiting.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3). Runs inside the drain
+        tick before admission. Only acts when the visible pool is at/over
+        target AND some under-share source has ``evaluated`` supply waiting to
+        take a freed slot. Evicts at most ``_POOL_REBALANCE_MAX_PER_TICK`` (3)
+        rows from the single most over-share source — the lowest-scored oldest
+        rows — so the pool converges toward the configured shares at a calm,
+        quality-preserving rate. Never touches under-share or at-share sources.
+        """
+        demote_fn = getattr(self.database, "demote_lowest_ranked_pool_rows", None)
+        if not callable(demote_fn):
+            return 0
+        try:
+            available_total = self.database.count_pool_candidates(
+                xhs_self_nickname=self._xhs_self_nickname()
+            )
+        except TypeError:
+            available_total = self.database.count_pool_candidates()
+        except Exception:
+            logger.debug("pool rebalance pool-count read failed", exc_info=True)
+            return 0
+        if int(available_total) < self.pool_target_count:
+            return 0
+
+        target_counts = self._source_target_counts()
+        available_by_source = self._count_pool_available_candidates_by_source()
+        waiting_by_source = self._waiting_supply_by_family()
+
+        # Budget = how many freed slots an under-share source could actually
+        # fill soon (deficit clamped by its admission-waiting supply — any of
+        # pending_eval / evaluating / evaluated, see _waiting_supply_by_family).
+        fillable = 0
+        for family, target in target_counts.items():
+            deficit = int(target) - self._platform_source_count(available_by_source, family)
+            if deficit > 0:
+                fillable += min(deficit, int(waiting_by_source.get(family, 0)))
+        if fillable <= 0:
+            return 0
+
+        # Pick the single most over-share source. Candidate families are the
+        # configured targets PLUS any family actually holding visible slots but
+        # absent from target_counts — a source the user disabled leaves stranded
+        # rows that must count as fully over-share (target 0), else those rows
+        # permanently squat the pool and an under-share source's deficit can
+        # never be freed (spec D8). Available keys are normalized to families
+        # first so a disabled bilibili surfacing under its four strategy names
+        # merges to one "bilibili" overage (note: _pool_source_family口径).
+        candidate_families: set[str] = set(target_counts)
+        for source_key in available_by_source:
+            candidate_families.add(_source_family(source_key, source_key))
+        over_share: list[tuple[int, str]] = []
+        for family in candidate_families:
+            overage = self._platform_source_count(available_by_source, family) - int(
+                target_counts.get(family, 0)
+            )
+            if overage > 0:
+                over_share.append((overage, family))
+        if not over_share:
+            return 0
+        over_share.sort(reverse=True)
+        overage, family = over_share[0]
+
+        demote_count = min(_POOL_REBALANCE_MAX_PER_TICK, overage, fillable)
+        if demote_count <= 0:
+            return 0
+        try:
+            demoted = int(demote_fn(source_family=family, limit=demote_count) or 0)
+        except Exception:
+            logger.debug("pool rebalance demotion failed", exc_info=True)
+            return 0
+        if demoted:
+            logger.info(
+                "pool rebalance: demoted %d over-share '%s' row(s) (overage=%d) to free "
+                "slots for %d under-share row(s) waiting admission",
+                demoted,
+                family,
+                overage,
+                fillable,
+            )
+        return demoted
+
+    def run_pool_share_maintenance(self) -> None:
+        """Run share rebalance + deficit summary once per candidate-eval tick.
+
+        Pool-share fairness (spec 2026-07-20, Phase 3/4, wired per D7). This is
+        the single entry point invoked by BOTH candidate-eval assemblies —
+        legacy ``_loop_candidate_eval`` → ``_drain_discovery_candidates_and_precompute``
+        and the production ``CandidateEvalCoordinator`` (via its pre-admit
+        hook). The two are mutually exclusive at ``run_forever`` wiring
+        (``coordinator.run_forever()`` XOR ``_loop_candidate_eval()``), so this
+        never double-runs in a single tick. Errors are swallowed so pool
+        maintenance can never break the eval loop.
+        """
+        with suppress(Exception):
+            self._rebalance_pool_shares()
+        with suppress(Exception):
+            self._log_source_deficit_summary()
+
+    def _log_source_deficit_summary(self) -> None:
+        """Log a one-line per-source available/target/deficit summary on change.
+
+        Pool-share fairness (spec 2026-07-20, Phase 4). This排查 cost us three
+        layers of silent skips; a change-throttled INFO line makes the share
+        picture legible without spamming the log every steady tick.
+        """
+        target_counts = self._source_target_counts()
+        if not target_counts:
+            return
+        available_by_source = self._count_pool_available_candidates_by_source()
+        snapshot: dict[str, tuple[int, int, int]] = {}
+        for family, target in target_counts.items():
+            available = self._platform_source_count(available_by_source, family)
+            deficit = self._source_deficit(family)
+            snapshot[family] = (available, int(target), int(deficit))
+        if snapshot == self._last_source_deficit_snapshot:
+            return
+        self._last_source_deficit_snapshot = snapshot
+        summary = " | ".join(
+            f"{family} {available}/{target} (deficit {deficit})"
+            for family, (available, target, deficit) in sorted(snapshot.items())
+        )
+        logger.info("pool source shares: %s", summary)
+
     # ── keyword planner deficit / catalyst口径 (P1.6) ─────────────────────
     # The unified keyword planner reuses these so its "real deficit" shares the
     # exact available-pool deficit口径 that drives pool replenishment, instead of
@@ -2754,11 +3351,19 @@ class ContinuousRefreshController:
             )
         except TypeError:
             current_global_available = self.database.count_pool_candidates()
-        global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
+        # Keep the durable inventory observation, but do NOT clamp per-source
+        # deficit by the global headroom. Pool-share fairness spec (2026-07-20,
+        # invariant 2): once the global pool is full, an over-supplied source
+        # (e.g. reddit 169/25) would zero out every under-share source's
+        # deficit via ``min(available_deficit, global_available_deficit)``,
+        # starving its producer forever. Own-share deficit is now bounded only
+        # by the per-source raw ceiling; admission stays globally capped so the
+        # visible pool never overshoots ``pool_target_count``.
+        self._update_llm_inventory_state(current_global_available)
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)
         raw_headroom = max(0, raw_target - current_raw)
-        requested_by_available = max(0, min(available_deficit, global_available_deficit))
+        requested_by_available = available_deficit
         if requested_by_available <= 0:
             return 0
         if raw_headroom > 0:
@@ -2837,6 +3442,8 @@ class ContinuousRefreshController:
                 stranded.append("zhihu")
             elif source == "reddit" and self.reddit_producer is None:
                 stranded.append("reddit")
+            elif source == "bangumi" and self.bangumi_producer is None:
+                stranded.append("bangumi")
             elif source not in {
                 "bilibili",
                 "xiaohongshu",
@@ -2845,6 +3452,7 @@ class ContinuousRefreshController:
                 "twitter",
                 "zhihu",
                 "reddit",
+                "bangumi",
             }:
                 # Unknown source family with an explicit share.
                 stranded.append(source)
@@ -2930,6 +3538,26 @@ class ContinuousRefreshController:
         except (TypeError, ValueError):
             configured = 1
         return min(_MAX_DISCOVERY_BACKFILL_PER_REFRESH, max(1, configured))
+
+    def _bounded_one_shot_inline_eval_limit(self, requested_limit: int) -> int:
+        """Cap a non-daemon refresh's first supply/evaluation wave when configured.
+
+        The API runtime has a live ``CandidateEvalCoordinator`` which can keep
+        draining the raw queue after the HTTP response returns.  OpenClaw's
+        short-lived adapter has no such owner, so its bootstrap opts into a
+        small first wave that can reach durable copy within the adapter timeout.
+        """
+
+        requested = max(1, int(requested_limit))
+        if self.candidate_eval_coordinator is not None:
+            return requested
+        try:
+            configured = int(self.one_shot_inline_eval_limit)
+        except (TypeError, ValueError):
+            configured = 0
+        if configured <= 0:
+            return requested
+        return min(requested, configured)
 
     def _candidate_eval_drain_batch_size(self, batch_size: int | None) -> int:
         default = min(

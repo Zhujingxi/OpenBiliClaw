@@ -175,9 +175,9 @@ async def test_get_nav_info_parses_login_payload() -> None:
 @pytest.mark.asyncio
 async def test_get_nav_info_raises_on_nonzero_code() -> None:
     client = BilibiliAPIClient(cookie="SESSDATA=abc")
-    client._client = FakeAsyncClient({"code": -101, "message": "账号未登录"})
+    client._client = FakeAsyncClient({"code": -400, "message": "请求错误"})
 
-    with pytest.raises(BilibiliAPIError, match="账号未登录"):
+    with pytest.raises(BilibiliAPIError, match="请求错误"):
         await client.get_nav_info()
 
 
@@ -186,13 +186,36 @@ async def test_get_nav_info_surfaces_session_expired_for_code_minus_101(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     client = BilibiliAPIClient(cookie="SESSDATA=expired")
-    client._client = FakeAsyncClient({"code": -101, "message": "账号未登录"})
+    client._client = FakeAsyncClient(
+        {"code": -101, "message": "Cookie=secret; private response body"}
+    )
     caplog.set_level("WARNING", logger="openbiliclaw.bilibili.api")
 
     with pytest.raises(BilibiliAuthExpiredError, match="session expired.*-101"):
         await client.get_nav_info()
 
     assert "re-authenticate" in caplog.text
+    assert "secret" not in caplog.text
+    assert "private response body" not in caplog.text
+
+
+async def test_get_json_maps_minus_101_from_any_endpoint_without_remote_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=expired")
+    client._client = FakeAsyncClient(
+        {"code": -101, "message": "Cookie=secret; private response body"}
+    )
+    caplog.set_level("WARNING", logger="openbiliclaw.bilibili.api")
+
+    with pytest.raises(BilibiliAuthExpiredError) as captured:
+        await client._get_json("/x/v3/fav/folder/created/list-all")
+
+    assert captured.value.code == -101
+    assert "secret" not in str(captured.value)
+    assert "private response body" not in str(captured.value)
+    assert "secret" not in caplog.text
+    assert "private response body" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -788,3 +811,56 @@ async def test_get_video_info_returns_defaults_when_data_is_null() -> None:
     assert info.title == ""
     assert info.up_name == ""
     assert info.view_count == 0
+
+
+def test_client_bypasses_env_and_system_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B站 traffic must never inherit env/system proxies: proxy exit IPs trip
+    B站 risk control and a valid cookie reads as "not logged in" (field
+    report 2026-07). trust_env stays off; proxy=None means direct."""
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def _capture(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        captured.update(kwargs)
+        return real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("openbiliclaw.bilibili.api.httpx.AsyncClient", _capture)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+
+    assert captured["trust_env"] is False
+    assert captured["proxy"] is None
+    assert client._proxy is None
+
+
+def test_client_honors_explicit_proxy_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def _capture(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        captured.update(kwargs)
+        return real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("openbiliclaw.bilibili.api.httpx.AsyncClient", _capture)
+
+    client = BilibiliAPIClient(cookie="", proxy="http://10.0.0.1:8080")
+
+    assert captured["proxy"] == "http://10.0.0.1:8080"
+    assert captured["trust_env"] is False
+    assert client._proxy == "http://10.0.0.1:8080"
+
+
+def test_csrf_token_tolerates_non_rfc_chrome_cookie_segment() -> None:
+    client = BilibiliAPIClient(
+        cookie="bad segment; CURRENT_FNVAL=4048; SESSDATA=session; bili_jct=csrf-token"
+    )
+
+    assert client._csrf_token() == "csrf-token"
+
+
+def test_csrf_token_requires_exact_cookie_names() -> None:
+    client = BilibiliAPIClient(cookie="MY_SESSDATA=x; old_bili_jct=y")
+
+    with pytest.raises(BilibiliAuthExpiredError):
+        client._csrf_token()

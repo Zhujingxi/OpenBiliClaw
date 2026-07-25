@@ -1,9 +1,9 @@
 ; Inno Setup script for the OpenBiliClaw Windows installer.
 ;
 ; Compile on Windows (Inno Setup 6):
-;     iscc /DMyAppVersion=0.3.152 packaging\openbiliclaw.iss
+;     iscc /DMyAppVersion=0.3.184 packaging\openbiliclaw.iss
 ; Produces:
-;     dist\release\OpenBiliClaw-windows-0.3.152-Setup.exe
+;     dist\release\OpenBiliClaw-windows-0.3.184-Setup.exe
 ;
 ; Expects the PyInstaller onedir output at dist\OpenBiliClaw\ with a bundled
 ; ollama.exe + lib\ runners already staged inside it. The GitHub Actions
@@ -17,6 +17,13 @@
 
 #ifndef MyAppVersionInfoVersion
   #define MyAppVersionInfoVersion MyAppVersion
+#endif
+
+; Installer filename variant suffix, e.g. iscc /DMyAppVariantSuffix=-with-embedding
+; Lets the lean and with-embedding installers coexist in one Release without
+; clobbering each other. Defaults to empty (lean).
+#ifndef MyAppVariantSuffix
+  #define MyAppVariantSuffix ""
 #endif
 
 #define MyAppName "OpenBiliClaw"
@@ -55,7 +62,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Script lives in packaging\; resolve [Files] Source + OutputDir from repo root.
 SourceDir=..
 OutputDir=dist\release
-OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}-Setup
+OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}{#MyAppVariantSuffix}-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -74,7 +81,11 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; Always launch the executable we just installed. This is intentionally not a
+; postinstall checkbox and is not skipped for silent upgrades: PrepareToInstall
+; stopped the old process tree, so a successful setup must hand off to the
+; freshly written {app} binary instead of leaving the old version running.
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait
 
 ; NOTE: user data (config.toml, data\, logs\) lives under
 ; %USERPROFILE%\OpenBiliClaw, the same root used by the one-line / AI installers,

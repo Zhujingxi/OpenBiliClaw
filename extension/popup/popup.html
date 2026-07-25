@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenBiliClaw</title>
+  <link rel="icon" type="image/png" href="../icons/icon128.png">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     /* The popup toggles visibility via the `hidden` property, but nearly every
@@ -166,37 +167,13 @@
     }
 
     .brand-mark {
-      position: relative;
       width: 42px;
       height: 42px;
       border-radius: 14px;
-      background:
-        linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(255, 239, 247, 0.94));
+      display: block;
+      object-fit: cover;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 12px 24px rgba(251, 114, 153, 0.18);
       flex-shrink: 0;
-    }
-
-    .brand-mark::before,
-    .brand-mark::after {
-      content: "";
-      position: absolute;
-      border-radius: 999px;
-    }
-
-    .brand-mark::before {
-      inset: 10px 9px 10px 11px;
-      border: 3px solid var(--brand);
-      border-top-color: transparent;
-      transform: rotate(18deg);
-    }
-
-    .brand-mark::after {
-      width: 10px;
-      height: 10px;
-      right: 7px;
-      top: 8px;
-      background: linear-gradient(145deg, var(--sky), #86c5ff);
-      box-shadow: 0 0 0 4px rgba(90, 169, 255, 0.14);
     }
 
     .eyebrow {
@@ -308,6 +285,10 @@
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 255, 250, 0.92));
     }
 
+    .status-badge[data-tone="reconnecting"] {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 249, 235, 0.94));
+    }
+
     .status-badge[data-tone="offline"] {
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 245, 247, 0.92));
     }
@@ -319,6 +300,11 @@
       background: var(--success);
       box-shadow: 0 0 0 4px rgba(48, 185, 128, 0.14);
       flex-shrink: 0;
+    }
+
+    .status-dot.reconnecting {
+      background: #d28a25;
+      box-shadow: 0 0 0 4px rgba(210, 138, 37, 0.14);
     }
 
     .status-dot.offline {
@@ -742,6 +728,15 @@
       letter-spacing: 0.02em;
     }
 
+    .delight-banner-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.05);
+    }
+
     .delight-banner-counter {
       font-size: 10px;
       font-weight: 600;
@@ -833,6 +828,15 @@
       padding: 2px 6px;
       border-radius: 999px;
       background: rgba(168, 85, 247, 0.12);
+      align-self: flex-start;
+    }
+    .message-delight-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: #6b7280;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(107, 114, 128, 0.12);
       align-self: flex-start;
     }
     .message-delight-title {
@@ -1366,6 +1370,16 @@
       color: #d93f00;
     }
 
+    .recommendation-source-corner.source-platform-bangumi {
+      background: rgba(105, 80, 161, 0.82);
+      color: #fff;
+    }
+
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-bangumi {
+      background: rgba(105, 80, 161, 0.12);
+      color: #6950a1;
+    }
+
     .recommendation-title {
       font-size: 17px;
       line-height: 1.38;
@@ -1387,6 +1401,14 @@
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+      font-size: 10px;
+      line-height: 1.5;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    .recommendation-stats {
+      margin-top: 4px;
       font-size: 10px;
       line-height: 1.5;
       color: var(--text-muted);
@@ -1427,18 +1449,6 @@
         width: 30px;
         height: 30px;
         border-radius: 10px;
-      }
-
-      .brand-mark::before {
-        inset: 7px 6px 7px 8px;
-        border-width: 2.5px;
-      }
-
-      .brand-mark::after {
-        width: 7px;
-        height: 7px;
-        right: 5px;
-        top: 6px;
       }
 
       .hero h1 {
@@ -1606,6 +1616,13 @@
         width: 28px;
         height: 28px;
       }
+
+      /* The labelled 手机版 pill must keep its intrinsic width — a forced
+         28px box makes the label overflow onto the neighbouring buttons. */
+      .hero-actions button.mobile-button {
+        width: auto;
+        padding: 0 8px;
+      }
     }
 
     .recommendation-actions {
@@ -1687,6 +1704,11 @@
 
     .comment-input::placeholder,
     .chat-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .recommendation-published-time {
+      margin-left: 6px;
       color: var(--text-muted);
     }
 
@@ -2165,6 +2187,7 @@
     }
     .speculative-item .spec-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       margin-top: 4px;
     }
@@ -2245,6 +2268,7 @@
 
     .probe-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -2259,6 +2283,11 @@
       transition: all 0.15s ease;
     }
 
+    .probe-btn:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .probe-btn.is-confirm {
       background: rgba(63, 185, 80, 0.15);
       color: #1a7f37;
@@ -2266,6 +2295,15 @@
     }
     .probe-btn.is-confirm:hover {
       background: rgba(63, 185, 80, 0.25);
+    }
+
+    .probe-btn.is-neutral {
+      background: var(--warning-soft);
+      color: #9a6420;
+      border-color: rgba(235, 190, 140, 0.45);
+    }
+    .probe-btn.is-neutral:hover {
+      background: rgba(255, 189, 110, 0.3);
     }
 
     .probe-btn.is-reject {
@@ -3033,6 +3071,48 @@
       font-weight: 400;
     }
 
+    .init-checklist li .init-repair-btn {
+      margin: 6px 0 0 24px;
+      padding: 5px 12px;
+      border: 1px solid var(--border, #d8d8e0);
+      border-radius: 10px;
+      background: var(--surface, #fff);
+      color: var(--text-primary, #1a1a2e);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .init-checklist li .init-repair-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .init-checklist li .init-embed-pull {
+      margin: 6px 0 0 24px;
+    }
+
+    .init-checklist li .init-embed-pull-bar {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(120, 120, 140, 0.2);
+      overflow: hidden;
+    }
+
+    .init-checklist li .init-embed-pull-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #fb7299, #5aa9ff);
+      transition: width 0.4s ease;
+    }
+
+    .init-checklist li .init-embed-pull-label {
+      margin: 4px 0 0;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
     .init-start-btn {
       width: 100%;
       padding: 10px 14px;
@@ -3050,6 +3130,29 @@
       cursor: not-allowed;
     }
 
+    .init-control-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .init-control-actions .init-start-btn {
+      flex: 1;
+      width: auto;
+    }
+
+    .init-cancel-btn {
+      padding: 10px 12px;
+      border: 1px solid var(--border, #d8d8e0);
+      border-radius: 12px;
+      background: var(--surface, #fff);
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .init-cancel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
     .init-checklist li.init-hint-row {
       color: var(--text-secondary);
       font-size: 11px;
@@ -3062,6 +3165,20 @@
       line-height: 1.6;
       color: var(--text-secondary);
       text-align: center;
+    }
+
+    /* Liveness / expectation line under the progress bar (init-progress
+       Phase 2): quiet while fresh, amber once >90s without backend activity. */
+    .init-stall-hint {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .init-stall-hint.stale {
+      color: #b45309;
     }
 
     .init-sources {
@@ -3126,6 +3243,13 @@
       background: linear-gradient(90deg, #fb7299, #5aa9ff);
       transition: width 0.4s ease;
     }
+
+    .init-progress-bar.indeterminate {
+      background-size: 220% 100%;
+      animation: init-progress-shimmer 1.35s linear infinite;
+    }
+
+    @keyframes init-progress-shimmer { to { background-position: -220% 0; } }
 
     .init-progress-label {
       margin-top: 6px;
@@ -3615,6 +3739,22 @@
       color: var(--text-secondary);
     }
 
+    /* Same treatment as the sibling icon buttons — the 手机版 label (not
+       color) is what makes the entry discoverable. */
+    .mobile-button {
+      width: auto;
+      padding: 0 10px;
+      gap: 5px;
+    }
+
+    .mobile-button-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+
     .message-badge {
       position: absolute;
       top: -4px;
@@ -3906,6 +4046,7 @@
 
     .message-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -4052,6 +4193,476 @@
       gap: 12px;
     }
 
+    .settings-section[hidden] {
+      display: none;
+    }
+
+    .settings-routing-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .settings-section-head,
+    .settings-llm-chain-head,
+    .settings-llm-instance-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .settings-section-head h3,
+    .settings-llm-chain-head h4 {
+      margin: 0;
+    }
+
+    .settings-llm-chain-head h4 {
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .settings-llm-chain-head p {
+      margin: 3px 0 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .settings-llm-instance-list,
+    .settings-llm-chain-list,
+    .settings-llm-module-summary {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .settings-llm-instance-card {
+      display: grid;
+      gap: 9px;
+      min-width: 0;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.7);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .settings-llm-instance-card:hover {
+      border-color: rgba(90, 169, 255, 0.58);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .settings-llm-instance-card[data-enabled="false"] {
+      background: rgba(244, 247, 252, 0.72);
+      opacity: 0.78;
+    }
+
+    .settings-llm-instance-title {
+      min-width: 0;
+    }
+
+    .settings-llm-instance-title strong,
+    .settings-llm-instance-title code {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-llm-instance-title strong {
+      color: var(--text-main);
+      font-size: 13px;
+    }
+
+    .settings-llm-instance-title code {
+      margin-top: 2px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+    }
+
+    .settings-llm-badges,
+    .settings-llm-instance-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .settings-llm-instance-actions .settings-secondary-btn {
+      min-height: 34px;
+      padding-inline: 11px;
+    }
+
+    .settings-llm-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      font-weight: 750;
+    }
+
+    .settings-llm-badge[data-tone="success"] {
+      border-color: rgba(26, 122, 74, 0.25);
+      background: var(--lime-soft);
+      color: #1a7a4a;
+    }
+
+    .settings-llm-instance-meta,
+    .settings-llm-instance-probe {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .settings-llm-instance-meta {
+      display: grid;
+      gap: 2px;
+    }
+
+    .settings-llm-instance-probe[data-tone="success"] { color: #1a7a4a; }
+    .settings-llm-instance-probe[data-tone="error"] { color: #c0404e; }
+    .settings-llm-instance-probe[data-tone="pending"] { color: #2f6fb8; }
+
+    .settings-llm-empty {
+      margin: 0;
+      padding: 14px 12px;
+      border: 1px dashed var(--line);
+      border-radius: 11px;
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      line-height: 1.5;
+      text-align: center;
+    }
+
+    .settings-llm-chain-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .settings-llm-chain-item {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255, 255, 255, 0.52);
+    }
+
+    .settings-llm-chain-position {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .settings-llm-chain-copy {
+      min-width: 0;
+    }
+
+    .settings-llm-chain-copy strong,
+    .settings-llm-chain-copy small {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-llm-chain-copy strong {
+      color: var(--text-main);
+      font-size: 12px;
+    }
+
+    .settings-llm-chain-copy small {
+      margin-top: 2px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+    }
+
+    .settings-llm-chain-actions {
+      display: flex;
+      gap: 3px;
+    }
+
+    .settings-llm-icon-btn,
+    .settings-instance-dialog-close {
+      display: inline-grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .settings-llm-icon-btn:hover,
+    .settings-instance-dialog-close:hover {
+      border-color: var(--line);
+      background: var(--surface-soft);
+      color: var(--text-main);
+    }
+
+    .settings-llm-icon-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .settings-llm-icon-btn svg,
+    .settings-instance-dialog-close svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .settings-llm-chain-add {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .settings-llm-chain-add select {
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 12px;
+    }
+
+    .settings-routing-modules {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .settings-llm-module-row {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 9px;
+      background: var(--surface-soft);
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-llm-module-row strong {
+      color: var(--text-main);
+      font-size: 11px;
+    }
+
+    .settings-instance-dialog {
+      position: fixed;
+      inset: 0;
+      z-index: 140;
+      display: grid;
+      align-items: end;
+    }
+
+    .settings-instance-dialog[hidden] {
+      display: none;
+    }
+
+    .settings-instance-dialog-backdrop {
+      position: absolute;
+      inset: 0;
+      border: 0;
+      background: rgba(28, 39, 58, 0.42);
+      backdrop-filter: blur(4px);
+    }
+
+    .settings-instance-dialog-panel {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+      width: 100%;
+      max-height: 94vh;
+      overflow-y: auto;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      border-radius: 20px 20px 0 0;
+      background: var(--surface-strong);
+      box-shadow: 0 -16px 40px rgba(28, 39, 58, 0.18);
+    }
+
+    .settings-instance-dialog-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .settings-instance-dialog-kicker {
+      margin: 0 0 3px;
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .settings-instance-dialog-head h3 {
+      margin: 0;
+      color: var(--text-main);
+      font-size: 16px;
+    }
+
+    .settings-instance-dialog-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .settings-instance-dialog-form .is-full {
+      grid-column: 1 / -1;
+    }
+
+    .settings-instance-dialog-form .settings-field > span {
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .settings-model-discovery-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: stretch;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .settings-model-discovery-btn {
+      min-height: 40px;
+      padding-inline: 12px;
+      white-space: nowrap;
+    }
+
+    .settings-model-discovery-btn:disabled {
+      opacity: 0.58;
+      cursor: wait;
+    }
+
+    .settings-model-discovery-status {
+      min-height: 15px;
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-model-discovery-status[data-tone="success"] {
+      color: #1a7a4a;
+    }
+
+    .settings-model-discovery-status[data-tone="error"] {
+      color: #c0404e;
+    }
+
+    .settings-model-discovery-status[data-tone="pending"] {
+      color: #2f6fb8;
+    }
+
+    .settings-instance-dialog-form .settings-field-row > span {
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .settings-instance-dialog-form .settings-field-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--brand);
+    }
+
+    .settings-instance-dialog-form [hidden] {
+      display: none;
+    }
+
+    .settings-instance-id-hint,
+    .settings-instance-form-error {
+      grid-column: 1 / -1;
+      margin: -4px 0 0;
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .settings-instance-id-hint {
+      color: var(--text-secondary);
+    }
+
+    .settings-instance-form-error {
+      min-height: 16px;
+      margin: 0;
+      color: #c0404e;
+    }
+
+    .settings-instance-dialog-actions {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 8px;
+    }
+
+    .settings-instance-dialog-actions .settings-secondary-btn,
+    .settings-instance-dialog-actions .settings-save {
+      min-height: 42px;
+    }
+
+    .settings-overlay.has-instance-dialog {
+      overflow: hidden;
+    }
+
+    @media (max-width: 430px) {
+      .settings-model-discovery-control {
+        grid-template-columns: 1fr;
+      }
+
+      .settings-model-discovery-btn {
+        width: 100%;
+      }
+    }
+
+    .settings-secondary-btn:focus-visible,
+    .settings-llm-icon-btn:focus-visible,
+    .settings-instance-dialog-close:focus-visible,
+    .settings-llm-chain-add select:focus-visible,
+    .settings-save:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .settings-source-card {
       border-radius: 18px;
     }
@@ -4144,6 +4755,20 @@
       line-height: 1.5;
     }
 
+    .settings-hint-warning {
+      background: rgba(248, 113, 113, 0.12);
+      color: #b91c1c;
+    }
+
+    /* Overseas-egress advisory (backend-authored, inserted by
+       applySourceNetworkHint). Amber so it reads as actionable rather than as
+       one more informational hint. */
+    .source-network-hint {
+      background: rgba(234, 179, 8, 0.14);
+      border: 1px solid rgba(234, 179, 8, 0.38);
+      color: var(--text-primary);
+    }
+
     .settings-status-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4211,6 +4836,32 @@
     .settings-probe-status[data-tone="error"] {
       color: #c0404e;
     }
+
+    /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
+       closed browser, a throttled platform, YouTube needing no login at all — is
+       not a failure, and painting it red sends users off to delete a cookie that
+       was working fine. Distinct from the muted "pending" grey too, so a final
+       verdict never reads as "still probing". */
+    .settings-probe-status[data-tone="neutral"] {
+      color: #2f6fb8;
+    }
+
+    .source-verify-row {
+      align-items: center;
+      margin: -4px 0 2px;
+    }
+
+    .source-verify-btn {
+      padding: 4px 10px;
+      font-size: 11.5px;
+    }
+
+    .source-verify-btn:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .source-verify-btn:disabled:hover { border-color: var(--line); }
 
     .settings-link {
       color: var(--brand-strong);
@@ -4352,6 +5003,9 @@
       justify-content: center;
       min-width: 38px;
     }
+    #watchLaterSyncAll,
+    #favoritesSyncAll { min-inline-size: 190px; }
+    .saved-card-sync { min-inline-size: 68px; }
     .saved-toggle svg,
     .delight-save-toggle svg { width: 16px; height: 16px; }
     .saved-toggle.watch-later-btn[aria-pressed="true"],
@@ -4370,6 +5024,7 @@
     /* ── Favorites view (收藏夹) ───────────────────────────── */
     .saved-card {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 10px;
       padding: 8px 10px;
@@ -4438,6 +5093,116 @@
       background: var(--brand-soft, rgba(200,85,61,0.1));
       color: var(--brand, #c8553d);
     }
+    .saved-sync-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .saved-sync-status {
+      min-height: 1.4em;
+      color: var(--text-muted, #777);
+      font-size: 11px;
+    }
+    .saved-card-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .saved-card-feedback {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 1 0 100%;
+    }
+    .saved-card-feedback button {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      min-height: 36px;
+      padding: 7px;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-muted, #888);
+      box-shadow: none;
+      cursor: pointer;
+      transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+    }
+    .saved-card-feedback button svg {
+      width: 18px;
+      height: 18px;
+    }
+    .saved-card-feedback button[aria-pressed="true"] {
+      background: transparent;
+      color: var(--brand, #c8553d);
+      box-shadow: none;
+    }
+    .saved-card-feedback button:hover { background: var(--brand-soft, rgba(200,85,61,0.1)); color: var(--brand, #c8553d); }
+    .saved-card-feedback button:active { background: var(--brand-soft, rgba(200,85,61,0.1)); color: var(--brand, #c8553d); transform: scale(0.94); }
+    .saved-card-feedback button:disabled { opacity: 0.45; cursor: default; }
+    .saved-card-feedback button:focus-visible { outline: 2px solid var(--brand, #c8553d); outline-offset: 2px; }
+    .saved-card-feedback .cross-toggle { margin-left: auto; }
+    .saved-card-feedback .saved-toggle.watch-later-btn[aria-pressed="true"] { background: transparent; color: var(--brand, #c8553d); }
+    .saved-card-feedback .saved-toggle.favorite-btn[aria-pressed="true"] { background: transparent; color: #e8a33d; }
+    .saved-card-feedback .saved-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
+    .saved-card-sync,
+    .saved-card-remove {
+      min-height: 36px;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 8px;
+      cursor: pointer;
+      color: var(--text-muted, #777);
+      background: transparent;
+    }
+    .saved-card-sync { color: var(--brand, #c8553d); }
+    .saved-card-sync:disabled { opacity: 0.45; cursor: not-allowed; }
+    .saved-card-sync:focus-visible,
+    .saved-card-remove:focus-visible,
+    .saved-sync-toolbar button:focus-visible {
+      outline: 2px solid var(--brand, #c8553d);
+      outline-offset: 2px;
+    }
+    .saved-sync-line {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      margin-top: 5px;
+      min-width: 0;
+      font-size: 10px;
+    }
+    .saved-sync-chip {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: rgba(120, 128, 145, 0.12);
+    }
+    .saved-sync-chip[data-tone="success"] { color: #1a7a4a; background: var(--lime-soft); }
+    .saved-sync-chip[data-tone="warning"] { color: #8a6520; background: var(--warning-soft); }
+    .saved-sync-chip[data-tone="error"] { color: #c0404e; background: rgba(239, 122, 134, 0.15); }
+    .saved-sync-chip[data-tone="info"] { color: var(--brand, #c8553d); background: var(--brand-soft); }
+    .saved-sync-target {
+      overflow: hidden;
+      color: var(--text-muted, #777);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @media (max-width: 520px), (pointer: coarse) {
+      .saved-toggle,
+      .delight-save-toggle { min-width: 44px; min-height: 44px; }
+      .saved-card-sync,
+      .saved-card-remove,
+      .saved-card-feedback button,
+      .saved-sync-toolbar button,
+      .saved-load-retry { min-width: 44px; min-height: 44px; }
+    }
 
   </style>
 </head>
@@ -4446,7 +5211,7 @@
     <header class="hero">
       <div class="hero-top">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true"></div>
+          <img class="brand-mark" src="../icons/icon128.png" alt="" aria-hidden="true">
           <div class="brand-copy">
             <p class="eyebrow">Bilibili Content Lens</p>
             <div class="brand-title-row">
@@ -4459,11 +5224,12 @@
           </div>
         </div>
         <div class="hero-actions">
-          <button id="openWebButton" class="webui-button" type="button" title="在浏览器中打开 Web 版" aria-label="在浏览器中打开 Web 版">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <button id="openWebButton" class="webui-button" type="button" title="电脑版：在浏览器中打开 Web 版" aria-label="电脑版入口：在浏览器中打开 Web 版">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M9 20.5h6"/><path d="M12 17v3.5"/></svg>
           </button>
-          <button id="mobileQrButton" class="mobile-button" type="button" title="手机打开" aria-label="显示移动端二维码">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h2v2h-2zM18 14h3M14 18h3M19 18h2v3h-5"/></svg>
+          <button id="mobileQrButton" class="mobile-button" type="button" title="手机版：扫码在手机上使用" aria-label="手机版入口：显示移动端二维码">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
+            <span class="mobile-button-label">手机版</span>
           </button>
           <button id="messagesButton" class="messages-button" type="button" title="消息" aria-label="查看消息">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -4545,6 +5311,7 @@
         <div id="emptyState" class="empty-state" hidden>
           <h3 id="emptyTitle">还没刷出新东西</h3>
           <p id="emptyText">稍等一下，新的推荐马上来。</p>
+          <button id="emptyAction" type="button" class="init-start-btn" hidden></button>
           <div id="initPanel" class="init-panel" hidden>
             <div id="initSources" class="init-sources" hidden></div>
             <ul id="initChecklist" class="init-checklist"></ul>
@@ -4552,10 +5319,14 @@
               <div class="init-progress-track">
                 <div id="initProgressBar" class="init-progress-bar"></div>
               </div>
-              <p id="initProgressLabel" class="init-progress-label"></p>
+              <p id="initProgressLabel" class="init-progress-label" role="status" aria-live="polite" aria-atomic="true"></p>
             </div>
-            <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
-            <p id="initStartReason" class="init-start-reason" hidden></p>
+            <p id="initStallHint" class="init-stall-hint" hidden></p>
+            <div class="init-control-actions">
+              <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
+              <button id="initCancelBtn" type="button" class="init-cancel-btn" hidden>取消</button>
+            </div>
+            <p id="initStartReason" class="init-start-reason" hidden role="status" aria-live="polite" aria-atomic="true"></p>
           </div>
         </div>
         <div id="recommendationList" class="recommendation-list"></div>
@@ -4564,8 +5335,12 @@
       <section id="viewWatchLater" class="view" role="tabpanel" aria-labelledby="tabWatchLater" hidden>
         <div class="view-intro">
           <p class="view-kicker">Watch later</p>
-          <h2>稍后再看</h2>
+          <h2 data-saved-heading tabindex="-1">稍后再看</h2>
           <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
+          <div class="saved-sync-toolbar">
+            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="watchLaterEmpty" class="empty-state" hidden>
           <h3>还没有稍后再看的内容</h3>
@@ -4577,8 +5352,12 @@
       <section id="viewFavorites" class="view" role="tabpanel" aria-labelledby="tabFavorites" hidden>
         <div class="view-intro">
           <p class="view-kicker">Favorites</p>
-          <h2>我的收藏</h2>
+          <h2 data-saved-heading tabindex="-1">我的收藏</h2>
           <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
+          <div class="saved-sync-toolbar">
+            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="favoritesEmpty" class="empty-state" hidden>
           <h3>还没有收藏</h3>
@@ -4787,8 +5566,56 @@
       </div>
 
       <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
-      <!-- LLM Provider -->
       <div class="settings-section">
+        <div class="settings-section-head">
+          <div>
+            <h3>LLM 实例与调用链</h3>
+          </div>
+          <button id="cfgAddLlmInstance" class="settings-secondary-btn" type="button">新建实例</button>
+        </div>
+        <p class="settings-hint">每个实例独立保存 Provider 类型、模型、Base URL 与凭据；同一种 Provider 也可以创建多个渠道。插件内可维护默认 fallback 链，模块自定义链继续在 PC Web 配置。</p>
+        <div id="cfgLlmRoutingSummary" class="settings-routing-summary">
+          <div id="cfgLlmInstanceList" class="settings-llm-instance-list" aria-live="polite"></div>
+
+          <div class="settings-llm-chain-head">
+            <div>
+              <h4>默认调用链</h4>
+              <p>按顺序请求；失败、超时或限流时自动尝试下一项。</p>
+            </div>
+            <button id="cfgProbeLlmChain" class="settings-secondary-btn" type="button">测试整链</button>
+          </div>
+          <ol id="cfgLlmDefaultChain" class="settings-llm-chain-list" aria-live="polite"></ol>
+          <div class="settings-llm-chain-add">
+            <select id="cfgLlmDefaultChainPicker" aria-label="选择要加入默认调用链的实例"></select>
+            <button id="cfgAddLlmDefaultChainItem" class="settings-secondary-btn" type="button">加入末尾</button>
+          </div>
+          <span id="cfgProbeLlmChainStatus" class="settings-probe-status" aria-live="polite"></span>
+
+          <div>
+            <div class="settings-llm-chain-head">
+              <div>
+                <h4>模块路由</h4>
+                <p>继承默认链，或在 PC Web 设置独立 fallback 顺序。</p>
+              </div>
+            </div>
+            <div id="cfgLlmModuleSummary" class="settings-llm-module-summary"></div>
+          </div>
+        </div>
+        <div class="settings-field">
+          <label for="cfgLlmConcurrencyV2">LLM 并发数</label>
+          <input id="cfgLlmConcurrencyV2" type="number" min="1" max="16" step="1" placeholder="4">
+        </div>
+        <div class="settings-field">
+          <label for="cfgLlmTimeoutV2">单实例超时（秒）</label>
+          <input id="cfgLlmTimeoutV2" type="number" min="10" max="600" step="10" placeholder="300">
+        </div>
+        <div class="settings-probe-row">
+          <button id="cfgOpenDesktopModels" class="settings-secondary-btn" type="button">打开桌面配置页</button>
+        </div>
+      </div>
+
+      <!-- LLM Provider -->
+      <div class="settings-section" hidden aria-hidden="true">
         <h3><span class="section-icon">&#x1F916;</span> LLM 模型</h3>
         <div class="settings-field">
           <label for="cfgLlmProvider">默认 Provider</label>
@@ -4804,7 +5631,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmConcurrency">LLM 并发数</label>
-          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="3">
+          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="4">
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeout">LLM 超时 (秒)</label>
@@ -4824,9 +5651,14 @@
           </select>
         </div>
         <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，不再自动尝试其它 Provider。</p>
+        <p id="cfgLlmFallbackSameWarning" class="settings-hint settings-hint-warning" hidden>备选与默认 Provider 相同时永远不会生效，保存会被拒绝；请换一个不同类型的 Provider 或留空关闭 fallback。</p>
         <div class="settings-probe-row">
           <button id="cfgProbeLlm" class="settings-secondary-btn" type="button">测试 LLM</button>
           <span id="cfgProbeLlmStatus" class="settings-probe-status" aria-live="polite"></span>
+        </div>
+        <div class="settings-probe-row">
+          <button id="cfgProbeLlmFallback" class="settings-secondary-btn" type="button">测试备选 Provider</button>
+          <span id="cfgProbeLlmFallbackStatus" class="settings-probe-status" aria-live="polite"></span>
         </div>
         <!-- OpenAI -->
         <div class="settings-provider-fields" data-provider="openai">
@@ -4890,6 +5722,7 @@
             <label for="cfgDeepseekReasoning">Reasoning Effort</label>
             <select id="cfgDeepseekReasoning">
               <option value="">关闭</option>
+              <option value="medium">medium（默认）</option>
               <option value="high">high</option>
               <option value="max">max</option>
             </select>
@@ -4963,6 +5796,7 @@
             <option value="gemini">Gemini</option>
             <option value="ollama">Ollama (本地)</option>
             <option value="openai_compatible">OpenAI 协议兼容 (Together/vLLM/Azure 等)</option>
+            <option value="dashscope">DashScope 阿里百炼 (qwen3-vl 多模态)</option>
           </select>
         </div>
         <div class="settings-field">
@@ -4996,10 +5830,15 @@
           <label for="cfgEmbeddingSimilarity">相似度阈值 (0~1)</label>
           <input id="cfgEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
         </div>
+        <div class="settings-field-row">
+          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
+          <label for="cfgEmbeddingMultimodalEnabled">启用封面视觉加成 (image-only)</label>
+        </div>
+        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面图会单独编码为向量，为惊喜推荐的“封面对味度”加一点分；纯文本模型（如 bge-m3）自动跳过、零成本。默认关闭。</p>
       </div>
 
       <!-- Module LLM Overrides -->
-      <div class="settings-section">
+      <div class="settings-section" hidden aria-hidden="true">
         <h3><span class="section-icon">&#x1F9E0;</span> 模块模型覆盖</h3>
         <p class="settings-hint">
           留空时继承默认 Provider；只在需要给画像、发现、推荐表达或评估单独指定模型时填写。
@@ -5084,6 +5923,10 @@
           <label for="cfgBilibiliEnabled">启用 Bilibili discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgBilibiliStatus" data-source-status="bilibili"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgBiliAuth">认证方式</label>
           <select id="cfgBiliAuth">
@@ -5113,6 +5956,10 @@
           <label for="cfgXhsEnabled">启用小红书 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgXhsStatus" data-source-status="xiaohongshu"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgXhsDailySearchBudget">小红书每日搜索任务</label>
           <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
@@ -5121,6 +5968,7 @@
           <label for="cfgXhsDailyCreatorBudget">小红书每日创作者任务</label>
           <input id="cfgXhsDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgXhsTaskInterval">小红书任务间隔秒数</label>
           <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="45">
@@ -5134,6 +5982,10 @@
           <label for="cfgDouyinEnabled">启用抖音 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgDouyinStatus" data-source-status="douyin"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgDouyinCookie">Cookie</label>
           <textarea id="cfgDouyinCookie" placeholder="从浏览器复制 Cookie 字符串（登录抖音后插件会自动同步）"></textarea>
@@ -5154,6 +6006,7 @@
           <label for="cfgDouyinDailyFeedBudget">抖音每日推荐流任务</label>
           <input id="cfgDouyinDailyFeedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgDouyinRequestInterval">抖音 direct 请求间隔秒数</label>
           <input id="cfgDouyinRequestInterval" type="number" min="0" step="1" placeholder="2">
@@ -5167,6 +6020,10 @@
           <label for="cfgYoutubeEnabled">启用 YouTube discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgYoutubeStatus" data-source-status="youtube"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgYoutubeDailySearchBudget">YouTube 搜索 query 预算</label>
           <input id="cfgYoutubeDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
@@ -5179,6 +6036,7 @@
           <label for="cfgYoutubeDailyChannelBudget">YouTube 订阅频道预算</label>
           <input id="cfgYoutubeDailyChannelBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgYoutubeRequestInterval">YouTube 请求间隔秒数</label>
           <input id="cfgYoutubeRequestInterval" type="number" min="0" step="1" placeholder="2">
@@ -5197,6 +6055,10 @@
           <label for="cfgTwitterEnabled">启用 X discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgTwitterStatus" data-source-status="twitter"><span class="src-dot">●</span> <span class="src-detail">X 来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgTwitterCookie">Cookie</label>
           <textarea id="cfgTwitterCookie" placeholder="从浏览器复制 Cookie 字符串（登录 x.com 后插件会自动同步，需含 auth_token 和 ct0）"></textarea>
@@ -5217,6 +6079,7 @@
           <label for="cfgTwitterDailyCreatorBudget">X 每日订阅作者任务</label>
           <input id="cfgTwitterDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgTwitterRequestInterval">X 请求间隔秒数</label>
           <input id="cfgTwitterRequestInterval" type="number" min="0" step="1" placeholder="3">
@@ -5235,6 +6098,10 @@
           <label for="cfgZhihuEnabled">启用知乎 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgZhihuStatus" data-source-status="zhihu"><span class="src-dot">●</span> <span class="src-detail">知乎来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label>知乎 discovery 分支</label>
           <div class="settings-field-row">
@@ -5278,6 +6145,7 @@
           <label for="cfgZhihuDailyRelatedBudget">知乎每日相关扩展</label>
           <input id="cfgZhihuDailyRelatedBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgZhihuRequestInterval">知乎请求间隔秒数</label>
           <input id="cfgZhihuRequestInterval" type="number" min="0" step="1" placeholder="3">
@@ -5296,6 +6164,10 @@
           <label for="cfgRedditEnabled">启用 Reddit 来源</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgRedditStatus" data-source-status="reddit"><span class="src-dot">●</span> <span class="src-detail">Reddit 来源状态加载中…</span></p>
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field">
           <label for="cfgRedditBackend">后端</label>
           <select id="cfgRedditBackend">
@@ -5304,6 +6176,10 @@
             <option value="opencli">OpenCLI extension</option>
             <option value="auto">自动选择命令后端</option>
           </select>
+        </div>
+        <div class="settings-field">
+          <label for="cfgRedditCookie">Cookie</label>
+          <textarea id="cfgRedditCookie" placeholder="从浏览器复制 Cookie 字符串（登录 reddit.com 后插件会自动同步，需含 reddit_session）；留空不覆盖"></textarea>
         </div>
         <div class="settings-field">
           <label>Reddit discovery 分支</label>
@@ -5340,6 +6216,7 @@
           <label for="cfgRedditDailyRelatedBudget">Reddit 每日相关条目</label>
           <input id="cfgRedditDailyRelatedBudget" type="number" min="0" step="1" placeholder="300">
         </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。</p>
         <div class="settings-field">
           <label for="cfgRedditRequestInterval">Reddit 任务轮询间隔秒数</label>
           <input id="cfgRedditRequestInterval" type="number" min="0" step="1" placeholder="3">
@@ -5361,6 +6238,49 @@
           <input id="cfgSourcesBrowserHeaded" type="checkbox">
           <label for="cfgSourcesBrowserHeaded">通用网页回退浏览器显示窗口</label>
         </div>
+      </div>
+
+      <div class="settings-section settings-source-card" data-source-card="bangumi">
+        <h3><span class="section-icon">B</span> Bangumi</h3>
+        <div class="settings-field-row">
+          <input id="cfgBangumiEnabled" type="checkbox">
+          <label for="cfgBangumiEnabled">启用 Bangumi 来源</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgBangumiStatus" data-source-status="bangumi"><span class="src-dot">●</span> <span class="src-detail">Bangumi 来源状态加载中…</span></p>
+        <div class="settings-field">
+          <label for="cfgBangumiUsername">公开用户名（可留空）</label>
+          <input id="cfgBangumiUsername" type="text" maxlength="128" autocomplete="off" placeholder="例如 sai">
+        </div>
+        <div class="settings-field">
+          <label for="cfgBangumiAccessToken">个人令牌（可留空）</label>
+          <input id="cfgBangumiAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="填写以自动识别当前用户并读取私密收藏">
+          <div class="settings-field-row">
+            <input id="cfgBangumiClearToken" type="checkbox">
+            <label for="cfgBangumiClearToken">清除已保存的令牌（本次保存清空并降级为匿名公开发现）</label>
+          </div>
+          <p class="settings-hint">Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a>。</p>
+        </div>
+        <div class="settings-field">
+          <label>内容发现分支</label>
+          <div class="settings-field-row"><input id="cfgBangumiModeSearch" type="checkbox"><label for="cfgBangumiModeSearch">搜索</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiModeRanked" type="checkbox"><label for="cfgBangumiModeRanked">排名</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiModeLatest" type="checkbox"><label for="cfgBangumiModeLatest">按日期浏览（可能含未播条目）</label></div>
+        </div>
+        <div class="settings-field">
+          <label>条目类型</label>
+          <div class="settings-field-row"><input id="cfgBangumiTypeAnime" type="checkbox"><label for="cfgBangumiTypeAnime">动画</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeBook" type="checkbox"><label for="cfgBangumiTypeBook">书籍</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeGame" type="checkbox"><label for="cfgBangumiTypeGame">游戏</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeMusic" type="checkbox"><label for="cfgBangumiTypeMusic">音乐</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeReal" type="checkbox"><label for="cfgBangumiTypeReal">三次元</label></div>
+        </div>
+        <div class="settings-field"><label for="cfgBangumiDailySearchBudget">每日搜索条目</label><input id="cfgBangumiDailySearchBudget" type="number" min="0" step="1" placeholder="300"></div>
+        <div class="settings-field"><label for="cfgBangumiDailyRankedBudget">每日排名条目</label><input id="cfgBangumiDailyRankedBudget" type="number" min="0" step="1" placeholder="100"></div>
+        <div class="settings-field"><label for="cfgBangumiDailyLatestBudget">每日日期条目</label><input id="cfgBangumiDailyLatestBudget" type="number" min="0" step="1" placeholder="100"></div>
+        <div class="settings-field"><label for="cfgBangumiRequestInterval">请求间隔秒数</label><input id="cfgBangumiRequestInterval" type="number" min="0" step="1" placeholder="1"></div>
+        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="60"></div>
+        <div class="settings-field"><label for="cfgBangumiBootstrapLimit">初始化公开收藏上限</label><input id="cfgBangumiBootstrapLimit" type="number" min="1" step="1" placeholder="300"></div>
+        <p class="settings-hint">官方公开只读 API，无需 Cookie。用户名只用于导入主动公开的收藏；留空仍可使用内容发现。</p>
       </div>
 
       <div class="settings-section settings-source-card" data-source-card="pool">
@@ -5393,6 +6313,10 @@
           <label for="cfgPoolShareReddit">候选池 Reddit 占比</label>
           <input id="cfgPoolShareReddit" type="number" min="1" step="1" placeholder="1">
         </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareBangumi">候选池 Bangumi 占比</label>
+          <input id="cfgPoolShareBangumi" type="number" min="1" step="1" placeholder="1">
+        </div>
         <div class="settings-actions">
           <button id="cfgSuggestPoolShares" class="settings-save" type="button">按已有信号建议比例</button>
         </div>
@@ -5404,10 +6328,17 @@
       <div class="settings-section">
         <h3><span class="section-icon">&#x2699;&#xFE0F;</span> 通用</h3>
         <div class="settings-field">
+          <label for="cfgBackendScheme">后端协议</label>
+          <select id="cfgBackendScheme">
+            <option value="http">HTTP（仅本机 / 局域网）</option>
+            <option value="https">HTTPS</option>
+          </select>
+        </div>
+        <div class="settings-field">
           <label for="cfgBackendHost">后端地址</label>
           <input id="cfgBackendHost" type="text" placeholder="127.0.0.1">
           <p class="settings-hint">
-            默认 127.0.0.1（本机）。Chrome Web Store / AMO 包默认只声明本机后端权限；局域网或远程后端需要带对应 host 权限的开发者构建或后续可选授权。
+            默认 127.0.0.1（本机）。局域网或远程地址保存时会请求该地址的精确访问权限；公网地址必须使用 HTTPS。
           </p>
         </div>
         <div class="settings-field">
@@ -5416,6 +6347,13 @@
           <p class="settings-hint">
             默认 8420。修改后需用 <code>openbiliclaw start --port &lt;同一端口&gt;</code> 启动后端。
           </p>
+        </div>
+        <div class="settings-field" id="extLoginField">
+          <label for="cfgExtDeviceKey">设备访问密钥</label>
+          <p class="settings-hint" id="cfgExtLoginStatus">检测认证状态…</p>
+          <input id="cfgExtDeviceKey" type="password" placeholder="obc_ext_…" autocomplete="off">
+          <button id="cfgExtLoginBtn" type="button" class="settings-inline-btn">配对</button>
+          <p class="settings-hint">在后端运行 <code>openbiliclaw ext-key generate</code> 获取；密钥只保存在本扩展中。</p>
         </div>
         <div class="settings-field" id="authControlField">
           <label>局域网访问密码</label>
@@ -5436,6 +6374,15 @@
           <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
           <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
         </div>
+        <div class="settings-field" id="savedSyncControlField">
+          <label>保存与平台同步</label>
+          <div class="settings-field-row">
+            <input id="cfgSavedAutoSync" type="checkbox">
+            <label for="cfgSavedAutoSync">保存时自动同步到对应平台</label>
+          </div>
+          <p class="settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
+          <p id="cfgSavedAutoSyncStatus" class="settings-probe-status" aria-live="polite"></p>
+        </div>
         <div class="settings-field">
           <label for="cfgLanguage">语言</label>
           <select id="cfgLanguage">
@@ -5450,6 +6397,23 @@
         <div class="settings-field">
           <label for="cfgStorageDbPath">SQLite 数据库路径</label>
           <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxyMode">海外网络模式</label>
+          <select id="cfgNetworkProxyMode">
+            <option value="direct">直连（忽略系统代理）</option>
+            <option value="system" selected>跟随系统代理</option>
+            <option value="custom">自定义代理</option>
+          </select>
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxy">自定义代理地址</label>
+          <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
+        </div>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外服务（海外 AI 服务、需要海外出网的内容来源、更新检查）；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。哪些来源需要海外出网，见各来源卡片的接入状态。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
+          <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
         </div>
       </div>
       </div>
@@ -5475,12 +6439,13 @@
             <strong id="backendUpdateLastCheck">—</strong>
           </div>
         </div>
-        <p class="settings-hint">自动更新只作用于 git / AI 安装的后端源码：开启并保存后，后台定时检查可信 backend tag，满足安全条件才会快进、同步依赖并重启后端；安装包版本会提示下载新版安装包；浏览器扩展由商店自动更新或由 GitHub zip 用户手动重载。</p>
+        <p class="settings-hint">自动更新只作用于 git / AI 安装的后端源码：开启并保存后，后台定时检查可信 backend tag，满足安全条件才会快进、同步依赖并重启后端；安装包版本会提示下载新版安装包；Docker 版会提示拉取新镜像；浏览器扩展由商店自动更新或由 GitHub zip 用户手动重载。</p>
         <div class="settings-actions">
           <button id="backendUpdateCheck" type="button" class="settings-secondary-btn">立即检查</button>
           <button id="backendUpdateApply" type="button" class="settings-secondary-btn" hidden>立即应用</button>
           <a id="backendUpdateDownload" class="settings-secondary-btn" href="https://github.com/whiteguo233/OpenBiliClaw/releases" target="_blank" rel="noopener" hidden>前往下载新安装包</a>
         </div>
+        <p class="settings-hint" id="backendUpdateModeHint" hidden></p>
         <p class="settings-hint">最近错误：<span id="backendUpdateError">—</span></p>
         <div class="settings-status-cell">
           <span>插件版本</span>
@@ -5536,6 +6501,20 @@
           <label for="cfgDiscoveryLimit">单轮发现上限</label>
           <input id="cfgDiscoveryLimit" type="number" min="1" max="60" step="1" placeholder="30">
         </div>
+        <div class="settings-field">
+          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
+          <select id="cfgKeywordGenerationMode">
+            <option value="legacy">经典</option>
+            <option value="hybrid">混合</option>
+            <option value="inspiration">灵感</option>
+          </select>
+        </div>
+        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
+        <div class="settings-field">
+          <label for="cfgCandidateEvalConcurrency">候选评估并发</label>
+          <input id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3">
+        </div>
+        <p class="settings-hint">范围 1–3，默认 3（每批最多 30 条、最多 90 条在途）；后端会为聊天等交互保留一个全局 LLM 槽位，实际并发可能更低。</p>
         <div class="settings-field-row">
           <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
           <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>
@@ -5659,6 +6638,117 @@
       <div class="settings-actions">
         <button id="settingsSave" class="settings-save" type="button">保存配置</button>
       </div>
+
+      <div id="cfgLlmInstanceDialog" class="settings-instance-dialog" role="dialog" aria-modal="true" aria-labelledby="cfgLlmInstanceDialogTitle" hidden>
+        <button class="settings-instance-dialog-backdrop" type="button" tabindex="-1" data-close-llm-instance-dialog aria-label="关闭实例编辑器"></button>
+        <section class="settings-instance-dialog-panel" tabindex="-1">
+          <div class="settings-instance-dialog-head">
+            <div>
+              <p class="settings-instance-dialog-kicker">LLM endpoint</p>
+              <h3 id="cfgLlmInstanceDialogTitle">新建 LLM 实例</h3>
+            </div>
+            <button id="cfgCloseLlmInstanceDialog" class="settings-instance-dialog-close" type="button" aria-label="关闭实例编辑器">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+            </button>
+          </div>
+          <div class="settings-instance-dialog-form">
+            <label class="settings-field">
+              <span>实例名称</span>
+              <input id="cfgLlmInstanceName" autocomplete="off" placeholder="例如：DeepSeek 官方">
+            </label>
+            <label class="settings-field">
+              <span>实例 ID</span>
+              <input id="cfgLlmInstanceId" autocomplete="off" spellcheck="false" placeholder="deepseek-main" aria-describedby="cfgLlmInstanceIdHint">
+            </label>
+            <p id="cfgLlmInstanceIdHint" class="settings-instance-id-hint">保存实例后 ID 不可修改；调用链通过它稳定引用实例。</p>
+            <label class="settings-field">
+              <span>Provider 类型</span>
+              <select id="cfgLlmInstanceProviderType" translate="no">
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="ollama">Ollama</option>
+                <option value="openai_compatible">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label class="settings-field">
+              <span>状态</span>
+              <select id="cfgLlmInstanceEnabled">
+                <option value="on">启用</option>
+                <option value="off">停用</option>
+              </select>
+            </label>
+            <label class="settings-field is-full">
+              <span>模型</span>
+              <div class="settings-model-discovery-control">
+                <input id="cfgLlmInstanceModel" list="cfgLlmInstanceModelOptions" autocomplete="off" spellcheck="false" placeholder="选择接口返回的模型，或直接手填" aria-describedby="cfgLlmInstanceModelDiscoveryStatus">
+                <button id="cfgRefreshLlmInstanceModels" class="settings-secondary-btn settings-model-discovery-btn" type="button">获取模型</button>
+              </div>
+              <datalist id="cfgLlmInstanceModelOptions"></datalist>
+              <small id="cfgLlmInstanceModelDiscoveryStatus" class="settings-model-discovery-status" aria-live="polite">OpenAI 兼容端点可从 /models 获取；接口不支持时仍可手填。</small>
+            </label>
+            <label class="settings-field is-full">
+              <span>Base URL</span>
+              <input id="cfgLlmInstanceBaseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="官方渠道可留空；兼容网关必须填写">
+            </label>
+            <label class="settings-field is-full">
+              <span>API Key</span>
+              <input id="cfgLlmInstanceApiKey" type="password" autocomplete="new-password" placeholder="输入 API Key">
+            </label>
+            <label id="cfgLlmInstanceClearApiKeyField" class="settings-field-row is-full" hidden>
+              <input id="cfgLlmInstanceClearApiKey" type="checkbox">
+              <span>清除已保存的 API Key</span>
+            </label>
+            <label class="settings-field" data-llm-instance-field="openai-auth">
+              <span>OpenAI 认证方式</span>
+              <select id="cfgLlmInstanceAuthMode">
+                <option value="api_key">API Key</option>
+                <option value="codex_oauth">Codex OAuth</option>
+              </select>
+            </label>
+            <label class="settings-field" data-llm-instance-field="openai-protocol">
+              <span>API 协议</span>
+              <select id="cfgLlmInstanceApiFlavor">
+                <option value="">chat/completions（默认）</option>
+                <option value="responses">responses</option>
+              </select>
+            </label>
+            <label class="settings-field" data-llm-instance-field="reasoning">
+              <span>Reasoning effort</span>
+              <input id="cfgLlmInstanceReasoning" list="cfgLlmInstanceReasoningOptions" autocomplete="off" spellcheck="false" placeholder="Auto（留空不显式指定）" aria-describedby="cfgLlmInstanceReasoningHint">
+              <datalist id="cfgLlmInstanceReasoningOptions">
+                <option value="none"></option>
+                <option value="minimal"></option>
+                <option value="low"></option>
+                <option value="medium"></option>
+                <option value="high"></option>
+                <option value="xhigh"></option>
+                <option value="max"></option>
+              </datalist>
+              <small id="cfgLlmInstanceReasoningHint" class="settings-model-discovery-status">协议没有 Effort 枚举接口；这里是本地建议，也支持手填。</small>
+            </label>
+            <label class="settings-field" data-llm-instance-field="ollama">
+              <span>Ollama 上下文窗口</span>
+              <input id="cfgLlmInstanceNumCtx" type="number" min="0" inputmode="numeric" placeholder="0（服务默认）">
+            </label>
+            <label class="settings-field is-full" data-llm-instance-field="openrouter">
+              <span>HTTP Referer</span>
+              <input id="cfgLlmInstanceReferer" type="url" autocomplete="off" placeholder="https://example.com">
+            </label>
+            <label class="settings-field is-full" data-llm-instance-field="openrouter">
+              <span>X-Title</span>
+              <input id="cfgLlmInstanceTitle" autocomplete="off" placeholder="OpenBiliClaw">
+            </label>
+          </div>
+          <p id="cfgLlmInstanceFormError" class="settings-instance-form-error" role="alert" aria-live="assertive"></p>
+          <div class="settings-instance-dialog-actions">
+            <button id="cfgCancelLlmInstance" class="settings-secondary-btn" type="button">取消</button>
+            <button id="cfgSaveLlmInstance" class="settings-save" type="button">保存实例</button>
+          </div>
+        </section>
+      </div>
     </div>
 
     <footer id="footerHintBar" class="footer" data-tone="info">
@@ -5673,6 +6763,11 @@
     </footer>
   </div>
 
+  <!-- Shared with the desktop page and the setup wizard; copied into the
+       package by scripts/build.mjs because MV3's CSP forbids loading it from
+       the backend. A classic script, so it runs before the deferred module
+       below and popup.js can read it as a global. -->
+  <script src="shared/source-status.js"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

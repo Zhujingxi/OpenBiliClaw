@@ -10,18 +10,32 @@
 import {
   buildActionHintFromClickTarget,
   createBehaviorEvent,
+  isTapAuthoritativeAction,
   isTrackableCardElement,
   normalizeActionSignal,
 } from "../shared/behavior.js";
 import type { BehaviorEvent, PlatformAdapter } from "../shared/types.js";
+import { isDuplicateSearch, normalizeSearchQuery } from "../shared/platforms/search-query.ts";
 import { VideoDwellTracker } from "./video-dwell-tracker.js";
 
 const HOVER_DELAY_MS = 800;
 const SCROLL_DEBOUNCE_MS = 600;
 const HOVER_THROTTLE_MS = 200;
 
+// Late-rendered <video>: many SPAs insert the player after the route change,
+// so a single post-navigation attach misses it. Retry on a bounded timer,
+// cancelled on the next navigation.
+const _VIDEO_ATTACH_RETRY_MS = 500;
+const _VIDEO_ATTACH_MAX_RETRIES = 20;
+
 /** Event types that carry a DOM snapshot (navigation + strong signals). */
 const SNAPSHOT_TYPES = new Set(["snapshot", "view", "like", "coin", "favorite", "comment"]);
+
+/** Positive actions whose pressed-state click means a withdrawal (retraction). */
+const RETRACTABLE_ACTIONS = new Set(["like", "favorite", "follow"]);
+
+/** Evidence strength for a retraction — matches the backend's 0.2 default. */
+const RETRACTION_SIGNAL_STRENGTH = 0.2;
 
 function sendEvent(event: BehaviorEvent): void {
   chrome.runtime.sendMessage({ action: "BEHAVIOR_EVENT", data: event });
@@ -38,6 +52,7 @@ export function startCollector(adapter: PlatformAdapter): void {
   let scrollTimer: number | null = null;
   let lastScrollEventAt = 0;
   let lastHoverCheckAt = 0;
+  let videoAttachRetryTimer: number | null = null;
   const hoverTimers = new WeakMap<Element, number>();
   const trackedVideos = new WeakSet<HTMLVideoElement>();
 
@@ -78,9 +93,33 @@ export function startCollector(adapter: PlatformAdapter): void {
     return Number.isFinite(video.duration) ? Number(video.duration.toFixed(2)) : null;
   };
 
-  const enterDwellIfVideoPage = (url: string): void => {
-    if (!isVideoPage(url)) return;
-    dwellTracker.enter(url, readVideoDuration());
+  // Last content-page URL we emitted a `view` for — dedups SPA re-renders
+  // within a dwell session so a single note/answer/post/status emits once.
+  let lastViewedContentUrl: string | null = null;
+
+  const enterDwellIfTrackedPage = (url: string): void => {
+    const pageType = adapter.detectPageType(url);
+    if (!(adapter.dwellPageTypes ?? ["video"]).includes(pageType)) return;
+
+    if (pageType === "video") {
+      // Play-state gated (Phase 3): segments driven by play/pause/bind.
+      dwellTracker.enter(url, readVideoDuration(), "playback");
+      return;
+    }
+
+    // Content page — visibility gated. Begin a segment on entry only when
+    // the tab is not hidden; a hidden entry stays segment-closed until the
+    // visibilitychange:visible transition (hidden-tab state machine).
+    dwellTracker.enter(url, null, "visible");
+    if (!document.hidden) {
+      dwellTracker.beginSegment();
+    }
+    // These platforms otherwise emit zero views — synthesise one carrying
+    // metadata.content_id from the adapter's extractor (via createEvent).
+    if (lastViewedContentUrl !== url) {
+      lastViewedContentUrl = url;
+      sendEvent(createEvent("view"));
+    }
   };
 
   const createEvent = (
@@ -104,6 +143,31 @@ export function startCollector(adapter: PlatformAdapter): void {
     sendEvent(createEvent("snapshot", { reason }));
   };
 
+  // Shared search-emit guard for both the Enter-key path and the
+  // URL-derived path: a nav to a search result page follows the keypress
+  // for the same query within a second, so collapse identical normalized
+  // queries seen within the dedup window into one `search` event.
+  let lastSearch: { query: string; ts: number } | null = null;
+
+  const emitSearch = (query: string): void => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    const nowMs = Date.now();
+    if (isDuplicateSearch(lastSearch, trimmed, nowMs)) return;
+    lastSearch = { query: normalizeSearchQuery(trimmed), ts: nowMs };
+    sendEvent(createEvent("search", { query: trimmed }));
+  };
+
+  // URL-derived capture: on navigation to a search result page, the query
+  // lives in the URL (covers Enter, search-button clicks, suggestion
+  // clicks). Null (e.g. X `/explore`) emits nothing.
+  const maybeEmitUrlSearch = (url: string): void => {
+    if (adapter.detectPageType(url) !== "search") return;
+    if (typeof adapter.extractSearchQuery !== "function") return;
+    const query = adapter.extractSearchQuery(url);
+    if (query) emitSearch(query);
+  };
+
   const observeSearch = (): void => {
     document.addEventListener("keydown", (event) => {
       const target = event.target as HTMLInputElement | null;
@@ -112,7 +176,7 @@ export function startCollector(adapter: PlatformAdapter): void {
 
       const query = target.value?.trim();
       if (!query) return;
-      sendEvent(createEvent("search", { query }));
+      emitSearch(query);
     });
   };
 
@@ -232,6 +296,35 @@ export function startCollector(adapter: PlatformAdapter): void {
       const actionType = adapter.inferActionType(actionHint);
 
       if (!actionType) return;
+
+      // Clicking an already-active like/favorite/follow control withdraws it.
+      // A retraction is a neutralization, not a positive vote.
+      if (actionHint.pressed === true && RETRACTABLE_ACTIONS.has(actionType)) {
+        if (isTapAuthoritativeAction(adapter, "retraction")) {
+          // The MAIN-world tap emits the authoritative retraction; suppress
+          // the DOM duplicate (no event).
+          return;
+        }
+        sendEvent(
+          createEvent("feedback", {
+            ...targetMetadata,
+            feedback_type: "retraction",
+            retracted_action: actionType,
+            signal_strength: RETRACTION_SIGNAL_STRENGTH,
+            targetText: actionHint.text?.trim().slice(0, 100) ?? targetText,
+            href,
+            actionLabel: actionHint.ariaLabel,
+          }),
+        );
+        return;
+      }
+
+      // Positive strong signal. When the platform's MAIN-world tap is the
+      // authoritative source for this action, suppress the DOM emission so we
+      // neither double-count the tap nor record "opened the menu = an event"
+      // false actions (e.g. clicking Reply/Repost only opens a composer).
+      if (isTapAuthoritativeAction(adapter, actionType)) return;
+
       const action = normalizeActionSignal(actionType, {
         ...targetMetadata,
         targetText: actionHint.text?.trim().slice(0, 100) ?? targetText,
@@ -242,12 +335,15 @@ export function startCollector(adapter: PlatformAdapter): void {
     }, { capture: true });
   };
 
-  const attachVideoListeners = (): void => {
+  // Returns true when a <video> matching the selector is present (freshly
+  // attached OR already tracked), false when none exists yet.
+  const attachVideoListeners = (): boolean => {
     const selector = adapter.videoSelector;
-    if (!selector) return;
+    if (!selector) return false;
 
     const video = document.querySelector(selector);
-    if (!(video instanceof HTMLVideoElement) || trackedVideos.has(video)) return;
+    if (!(video instanceof HTMLVideoElement)) return false;
+    if (trackedVideos.has(video)) return true;
 
     const buildVideoMetadata = (): Record<string, unknown> => ({
       ...adapter.buildEventMetadata(window.location.href),
@@ -257,11 +353,18 @@ export function startCollector(adapter: PlatformAdapter): void {
 
     let seekStartTime = video.currentTime;
 
+    // Drive the segmented dwell tracker off play-state so watch_seconds
+    // counts only time the video was actually playing.
     video.addEventListener("play", () => {
+      dwellTracker.beginSegment();
       sendEvent(createEvent("view", buildVideoMetadata()));
     });
     video.addEventListener("pause", () => {
+      dwellTracker.endSegment();
       sendEvent(createEvent("pause", buildVideoMetadata()));
+    });
+    video.addEventListener("ended", () => {
+      dwellTracker.endSegment();
     });
     video.addEventListener("seeking", () => {
       seekStartTime = video.currentTime;
@@ -283,11 +386,41 @@ export function startCollector(adapter: PlatformAdapter): void {
       }
     });
 
+    // Autoplay never fires `play`; if the element is already playing at
+    // bind time, begin a segment immediately.
+    if (!video.paused && !video.ended) {
+      dwellTracker.beginSegment();
+    }
+
     trackedVideos.add(video);
+    return true;
+  };
+
+  const cancelVideoAttachRetry = (): void => {
+    if (videoAttachRetryTimer !== null) {
+      window.clearTimeout(videoAttachRetryTimer);
+      videoAttachRetryTimer = null;
+    }
+  };
+
+  const scheduleVideoAttachRetry = (url: string, attempt: number): void => {
+    if (attempt > _VIDEO_ATTACH_MAX_RETRIES) return;
+    videoAttachRetryTimer = window.setTimeout(() => {
+      videoAttachRetryTimer = null;
+      // Navigated away since scheduling — abandon this retry chain.
+      if (window.location.href !== url || !isVideoPage(url)) return;
+      if (attachVideoListeners()) return;
+      scheduleVideoAttachRetry(url, attempt + 1);
+    }, _VIDEO_ATTACH_RETRY_MS);
   };
 
   const rebindPageObservers = (reason: string): void => {
-    attachVideoListeners();
+    cancelVideoAttachRetry();
+    const attached = attachVideoListeners();
+    const url = window.location.href;
+    if (!attached && isVideoPage(url)) {
+      scheduleVideoAttachRetry(url, 1);
+    }
     sendSnapshot(reason);
   };
 
@@ -304,10 +437,14 @@ export function startCollector(adapter: PlatformAdapter): void {
         // sees the previous URL — the buildEvent adapter uses that URL
         // to compose the click event.
         dwellTracker.flush(`navigation:${methodName}`);
+        cancelVideoAttachRetry();
         currentUrl = nextUrl;
         window.setTimeout(() => {
+          // Enter dwell before rebinding so a bind-time (autoplay) segment
+          // begin lands on the freshly-created session.
+          enterDwellIfTrackedPage(nextUrl);
+          maybeEmitUrlSearch(nextUrl);
           rebindPageObservers(`navigation:${methodName}`);
-          enterDwellIfVideoPage(nextUrl);
         }, 0);
       }
       return result;
@@ -321,10 +458,12 @@ export function startCollector(adapter: PlatformAdapter): void {
       const nextUrl = window.location.href;
       if (nextUrl === currentUrl) return;
       dwellTracker.flush("navigation:popstate");
+      cancelVideoAttachRetry();
       currentUrl = nextUrl;
       window.setTimeout(() => {
+        enterDwellIfTrackedPage(nextUrl);
+        maybeEmitUrlSearch(nextUrl);
         rebindPageObservers("navigation:popstate");
-        enterDwellIfVideoPage(nextUrl);
       }, 0);
     });
     // Final quick-exit signal when the user closes the tab.
@@ -333,11 +472,21 @@ export function startCollector(adapter: PlatformAdapter): void {
     });
   };
 
+  const observeVisibility = (): void => {
+    // Content-page (visible-mode) dwell is gated by tab visibility; the
+    // tracker ignores this for playback sessions.
+    document.addEventListener("visibilitychange", () => {
+      dwellTracker.handleVisibilityChange(document.hidden);
+    });
+  };
+
   observeClicks();
   observeSearch();
   observeScroll();
   observeHover();
   observeNavigation();
+  observeVisibility();
+  enterDwellIfTrackedPage(currentUrl);
+  maybeEmitUrlSearch(currentUrl);
   rebindPageObservers("initial-load");
-  enterDwellIfVideoPage(currentUrl);
 }

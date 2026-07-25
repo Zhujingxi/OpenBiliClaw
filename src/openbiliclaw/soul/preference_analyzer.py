@@ -14,13 +14,17 @@ from openbiliclaw.llm.json_utils import (
     parse_llm_json_tolerant,
 )
 from openbiliclaw.llm.prompts import build_preference_analysis_prompt
-from openbiliclaw.llm.service import LLMServiceError
-from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.llm.service import LLMServiceError, is_llm_rate_limit_error
+from openbiliclaw.llm.task_options import call_accepts_keyword, without_core_memory_kwargs
 from openbiliclaw.soul.event_filters import filter_events_by_satisfaction
 from openbiliclaw.soul.taxonomy import SupportsEmbed, resolve_category
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
+
+    # Observer invoked once per completed chunk with (done, total). Purely
+    # observational — see _emit_progress: its failures never abort analysis.
+    ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,20 @@ logger = logging.getLogger(__name__)
 _DISLIKED_TOPICS_STORE_CAP = 128
 
 DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE = 200
+# A partial chunk only returns at most 25 interests, three observations and two
+# hypotheses. Giving every local-model chunk the global 16K structured-output
+# ceiling can turn a malformed/non-terminating JSON response into many minutes
+# of needless generation. Four thousand tokens comfortably fit this bounded
+# schema; the unchunked path and final profile keep the larger shared budget.
+PREFERENCE_CHUNK_MAX_TOKENS = 4096
+# Some OpenAI-compatible reasoning models ignore the per-call request to turn
+# thinking off and can spend the entire 4K chunk budget before emitting JSON.
+# Retry that specific, observable finish_reason=length failure once with the
+# normal structured-output ceiling; all other malformed output keeps the 4K
+# guard that protects local models from unbounded generation.
+PREFERENCE_REASONING_FALLBACK_MAX_TOKENS = DEFAULT_STRUCTURED_MAX_TOKENS
+PREFERENCE_RATE_LIMIT_MAX_RETRIES = 2
+PREFERENCE_RATE_LIMIT_RETRY_SECONDS = 65.0
 MAX_CONCURRENT_PREFERENCE_CHUNKS = 16
 INIT_COGNITION_CONTEXT_KEY = "_init_cognition_context"
 _INIT_AWARENESS_CANDIDATES_CAP = 12
@@ -54,8 +72,26 @@ _COMPACT_METADATA_KEYS = frozenset(
         "feedback_type",
         "reaction",
         "signal_strength",
+        # Retraction discount flag (Phase 0): kept so the budget-overflow /
+        # refusal-retry compact path still surfaces the undo + folded strength.
+        "retracted",
+        # Comment / danmaku text (Phase 2/3): the user's own first-person
+        # interest expression must survive the compact path, not just the
+        # whole-batch JSON dump.
+        "comment_text",
+        "comment_kind",
     }
 )
+
+# Legal enum values for style fields. LLMs sometimes dump placeholders like
+# "unknown" that schema-defy these; those get coerced to "" so UIs fall back
+# to their "still observing" copy instead of rendering the garbage verbatim.
+_LEGAL_DURATIONS = frozenset({"short", "medium", "long", ""})
+_LEGAL_PACES = frozenset({"fast", "moderate", "slow", ""})
+_STYLE_TASTE_FIELDS = ("quality_sensitivity", "humor_preference", "depth_preference")
+# Case-insensitive placeholders the LLM emits when it has no signal. Treated as
+# absent for text fields so downstream fallback copy applies.
+_UNKNOWN_PLACEHOLDERS = frozenset({"unknown", "none", "n/a", "未知"})
 
 
 class SupportsCoreMemoryTask(Protocol):
@@ -104,12 +140,28 @@ class PreferenceAnalyzer:
                 "PreferenceAnalyzer requires a service with complete_structured_task()."
             )
 
+    @staticmethod
+    async def _emit_progress(callback: ProgressCallback | None, done: int, total: int) -> None:
+        """Fire a progress observer, swallowing any error at WARNING.
+
+        The observer only watches chunk completion — it must never abort the
+        analysis (init-progress spec invariant 4 / pitfall "will this failure
+        be swallowed").
+        """
+        if callback is None:
+            return
+        try:
+            await callback(done, total)
+        except Exception:
+            logger.warning("preference progress_callback raised; ignoring", exc_info=True)
+
     async def analyze_events(
         self,
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, object]:
         """Run structured extraction and merge the result with existing preference state.
 
@@ -129,6 +181,7 @@ class PreferenceAnalyzer:
                 events=events,
                 existing_preference=existing_preference,
                 chunk_size=event_chunk_size,
+                progress_callback=progress_callback,
             )
 
         whole_batch_prompt = build_preference_analysis_prompt(
@@ -150,11 +203,15 @@ class PreferenceAnalyzer:
                 events=events,
                 existing_preference=existing_preference,
                 chunk_size=initial_chunk_size,
+                progress_callback=progress_callback,
             )
-        return await self._analyze_events_single(
+        result = await self._analyze_events_single(
             events=events,
             existing_preference=existing_preference,
         )
+        # Un-chunked path has a single natural completion point.
+        await self._emit_progress(progress_callback, 1, 1)
+        return result
 
     def _maybe_filter_events(
         self,
@@ -247,6 +304,7 @@ class PreferenceAnalyzer:
         user_input: str,
         max_tokens: int,
         caller: str,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Run preference extraction without dynamic core-memory system suffixes."""
         kwargs: dict[str, Any] = {
@@ -257,6 +315,8 @@ class PreferenceAnalyzer:
         }
         complete = cast("Any", self.registry.complete_structured_task)
         kwargs.update(without_core_memory_kwargs(complete))
+        if reasoning_effort is not None and call_accepts_keyword(complete, "reasoning_effort"):
+            kwargs["reasoning_effort"] = reasoning_effort
         return cast("LLMResponse", await complete(**kwargs))
 
     def _prompt_char_count(self, messages: list[dict[str, str]]) -> int:
@@ -363,6 +423,7 @@ class PreferenceAnalyzer:
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         chunk_size: int,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, object]:
         """Split events into bounded concurrent chunk batches, then fold."""
         import asyncio as _asyncio
@@ -389,15 +450,76 @@ class PreferenceAnalyzer:
                 events=chunk,
                 existing_preference={},
             )
-            try:
-                response = await self._complete_cacheable_preference_task(
-                    system_instruction=messages[0]["content"],
-                    user_input=messages[1]["content"],
-                    max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,
-                    caller="soul.preference.chunk",
-                )
-            except (LLMProviderError, LLMServiceError) as exc:
-                raise PreferenceAnalysisError(str(exc)) from exc
+            response: LLMResponse | None = None
+            max_tokens = PREFERENCE_CHUNK_MAX_TOKENS
+            rate_limit_retries = 0
+            reasoning_budget_retried = False
+            while True:
+                try:
+                    response = await self._complete_cacheable_preference_task(
+                        system_instruction=messages[0]["content"],
+                        user_input=messages[1]["content"],
+                        max_tokens=max_tokens,
+                        caller="soul.preference.chunk",
+                        # Preference extraction is a bounded JSON classify task;
+                        # provider reasoning can add thousands of invisible
+                        # tokens, latency and TPM pressure without improving the
+                        # schema. Final profile prose keeps provider defaults.
+                        reasoning_effort="",
+                    )
+                    break
+                except (LLMProviderError, LLMServiceError) as exc:
+                    message = str(exc).lower()
+                    reasoning_exhausted = (
+                        "returned reasoning but no final content" in message
+                        and "finish_reason=length" in message
+                    )
+                    if (
+                        reasoning_exhausted
+                        and not reasoning_budget_retried
+                        and max_tokens < PREFERENCE_REASONING_FALLBACK_MAX_TOKENS
+                    ):
+                        reasoning_budget_retried = True
+                        max_tokens = PREFERENCE_REASONING_FALLBACK_MAX_TOKENS
+                        logger.warning(
+                            "preference chunk reasoning exhausted %d-token budget; "
+                            "retrying once with %d tokens",
+                            PREFERENCE_CHUNK_MAX_TOKENS,
+                            max_tokens,
+                        )
+                        continue
+                    non_retryable_quota = any(
+                        marker in message
+                        for marker in (
+                            "402",
+                            "payment required",
+                            "insufficient_quota",
+                            "insufficient balance",
+                            "quota exceeded",
+                            "out of credit",
+                            "credit exhausted",
+                            "余额不足",
+                            "账户余额",
+                        )
+                    )
+                    if (
+                        is_llm_rate_limit_error(exc)
+                        and not non_retryable_quota
+                        and rate_limit_retries < PREFERENCE_RATE_LIMIT_MAX_RETRIES
+                    ):
+                        delay = PREFERENCE_RATE_LIMIT_RETRY_SECONDS
+                        rate_limit_retries += 1
+                        logger.warning(
+                            "preference chunk rate-limited; retrying in %.0fs (%d/%d)",
+                            delay,
+                            rate_limit_retries,
+                            PREFERENCE_RATE_LIMIT_MAX_RETRIES,
+                        )
+                        await _asyncio.sleep(delay)
+                        continue
+                    raise PreferenceAnalysisError(str(exc)) from exc
+            if response is None:  # pragma: no cover - loop always returns or raises
+                raise PreferenceAnalysisError("preference chunk returned no response")
             raw = self._parse_response(response.content, log_error=False)
             return raw, await self._normalize_and_resolve(raw)
 
@@ -455,10 +577,12 @@ class PreferenceAnalyzer:
                     return []
                 return [await _run_chunk_once([compact])]
             midpoint = max(1, len(chunk) // 2)
-            left, right = await _asyncio.gather(
-                _run_chunk_resilient(chunk[:midpoint]),
-                _run_chunk_resilient(chunk[midpoint:]),
-            )
+            # Recovery must not fan out again underneath the bounded top-level
+            # scheduler. Concurrent recursive halves used to queue 4/8/… calls
+            # behind LLMService.concurrency; one 429 then released the whole
+            # queue into the provider cooldown and produced a retry storm.
+            left = await _run_chunk_resilient(chunk[:midpoint])
+            right = await _run_chunk_resilient(chunk[midpoint:])
             return [*left, *right]
 
         async def _run_chunk_resilient(
@@ -497,12 +621,98 @@ class PreferenceAnalyzer:
                     return []
                 return await _split_or_compact_chunk(chunk)
 
-        outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
-        for batch_start in range(0, len(chunks), MAX_CONCURRENT_PREFERENCE_CHUNKS):
-            batch = chunks[batch_start : batch_start + MAX_CONCURRENT_PREFERENCE_CHUNKS]
-            outcome_groups.extend(
-                await _asyncio.gather(*(_run_chunk_resilient(chunk) for chunk in batch))
+        # Each top-level chunk completing is a natural progress point. A shared
+        # counter (bumped between the resilient run and the callback await, with
+        # no interleaving await) yields a strictly increasing done 1..N even
+        # under concurrent gather. Per-chunk start/done/abort lines (with the
+        # 1-based index + wall time) go to the logger so ``openbiliclaw.log``
+        # shows exactly which chunk is in flight — a chunk that logs "started"
+        # without a matching "done" is the one that stalled or was cancelled by
+        # the init timeout.
+        import time as _time
+
+        total_chunks = len(chunks)
+        done_chunks = 0
+
+        async def _run_and_report(
+            index: int,
+            chunk: list[dict[str, object]],
+        ) -> list[tuple[dict[str, object], dict[str, object]]]:
+            nonlocal done_chunks
+            started = _time.monotonic()
+            logger.info(
+                "preference chunk %d/%d started: events=%d",
+                index,
+                total_chunks,
+                len(chunk),
             )
+            try:
+                result = await _run_chunk_resilient(chunk)
+            except _asyncio.CancelledError:
+                logger.info(
+                    "preference chunk %d/%d cancelled after %.1fs",
+                    index,
+                    total_chunks,
+                    _time.monotonic() - started,
+                )
+                raise
+            except BaseException as exc:
+                logger.warning(
+                    "preference chunk %d/%d failed after %.1fs: %s",
+                    index,
+                    total_chunks,
+                    _time.monotonic() - started,
+                    exc,
+                )
+                raise
+            done_chunks += 1
+            logger.info(
+                "preference chunk %d/%d done in %.1fs (%d/%d complete)",
+                index,
+                total_chunks,
+                _time.monotonic() - started,
+                done_chunks,
+                total_chunks,
+            )
+            await self._emit_progress(progress_callback, done_chunks, total_chunks)
+            return result
+
+        configured_concurrency = getattr(self.registry, "concurrency", None)
+        try:
+            configured_chunk_limit = (
+                int(configured_concurrency)
+                if configured_concurrency is not None
+                else MAX_CONCURRENT_PREFERENCE_CHUNKS
+            )
+        except (TypeError, ValueError):
+            configured_chunk_limit = MAX_CONCURRENT_PREFERENCE_CHUNKS
+        chunk_limit = max(1, min(MAX_CONCURRENT_PREFERENCE_CHUNKS, configured_chunk_limit))
+        logger.info(
+            "preference chunk fanout bounded at %d (configured LLM concurrency=%r)",
+            chunk_limit,
+            configured_concurrency,
+        )
+        outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
+        for batch_start in range(0, len(chunks), chunk_limit):
+            batch = list(
+                enumerate(
+                    chunks[batch_start : batch_start + chunk_limit],
+                    start=batch_start + 1,
+                )
+            )
+            tasks = [_asyncio.create_task(_run_and_report(idx, chunk)) for idx, chunk in batch]
+            try:
+                outcome_groups.extend(await _asyncio.gather(*tasks))
+            except BaseException:
+                # asyncio.gather propagates the first exception but deliberately
+                # leaves siblings running. An init terminal must be a real task
+                # boundary: cancel and drain the rest before the coordinator
+                # releases its run lock and restarts background work.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await _asyncio.gather(*tasks, return_exceptions=True)
+                raise
         outcomes = [item for group in outcome_groups for item in group]
 
         # Fold each chunk's normalized preference into the running merge
@@ -792,12 +1002,21 @@ class PreferenceAnalyzer:
         )[:_DISLIKED_TOPICS_STORE_CAP]
 
         default_preference = self._default_preference()
-        style = self._as_dict(default_preference["style"]).copy()
-        style.update(self._as_dict(existing_preference.get("style", {})))
-        style.update(self._as_dict(new_preference.get("style", {})))
-        context = self._as_dict(default_preference["context"]).copy()
-        context.update(self._as_dict(existing_preference.get("context", {})))
-        context.update(self._as_dict(new_preference.get("context", {})))
+        style_raw = self._as_dict(default_preference["style"]).copy()
+        style_raw.update(self._as_dict(existing_preference.get("style", {})))
+        style_raw.update(self._as_dict(new_preference.get("style", {})))
+        context_raw = self._as_dict(default_preference["context"]).copy()
+        context_raw.update(self._as_dict(existing_preference.get("context", {})))
+        context_raw.update(self._as_dict(new_preference.get("context", {})))
+        openness_raw = new_preference.get(
+            "exploration_openness",
+            existing_preference.get("exploration_openness", 0.5),
+        )
+        style, context, exploration_openness = self._finalize_taste(
+            style_raw=style_raw,
+            context_raw=context_raw,
+            openness_raw=openness_raw,
+        )
 
         # Preserve speculative_interests from new analysis (for speculator seeding)
         speculative = self._as_list(new_preference.get("speculative_interests", []))
@@ -810,14 +1029,7 @@ class PreferenceAnalyzer:
             ),
             "style": style,
             "context": context,
-            "exploration_openness": self._clamp_weight(
-                self._to_float(
-                    new_preference.get(
-                        "exploration_openness",
-                        existing_preference.get("exploration_openness", 0.5),
-                    )
-                )
-            ),
+            "exploration_openness": exploration_openness,
             "disliked_topics": disliked_topics,
             "favorite_up_users": favorite_up_users,
             "speculative_interests": speculative,
@@ -878,10 +1090,15 @@ class PreferenceAnalyzer:
 
     def _normalize_preference(self, raw_preference: dict[str, object]) -> dict[str, object]:
         normalized = self._default_preference()
-        style = self._as_dict(normalized["style"]).copy()
-        style.update(self._as_dict(raw_preference.get("style")))
-        context = self._as_dict(normalized["context"]).copy()
-        context.update(self._as_dict(raw_preference.get("context")))
+        style_raw = self._as_dict(normalized["style"]).copy()
+        style_raw.update(self._as_dict(raw_preference.get("style")))
+        context_raw = self._as_dict(normalized["context"]).copy()
+        context_raw.update(self._as_dict(raw_preference.get("context")))
+        style, context, exploration_openness = self._finalize_taste(
+            style_raw=style_raw,
+            context_raw=context_raw,
+            openness_raw=raw_preference.get("exploration_openness", 0.5),
+        )
         normalized["interests"] = [
             self._normalize_interest(item)
             for item in self._as_list(raw_preference.get("interests", []))
@@ -889,9 +1106,7 @@ class PreferenceAnalyzer:
         ]
         normalized["style"] = style
         normalized["context"] = context
-        normalized["exploration_openness"] = self._clamp_weight(
-            self._to_float(raw_preference.get("exploration_openness", 0.5))
-        )
+        normalized["exploration_openness"] = exploration_openness
         normalized["disliked_topics"] = self._as_str_list(raw_preference.get("disliked_topics", []))
         normalized["favorite_up_users"] = self._as_str_list(
             raw_preference.get("favorite_up_users", [])
@@ -1044,6 +1259,103 @@ class PreferenceAnalyzer:
             except ValueError:
                 return 0.0
         return 0.0
+
+    @staticmethod
+    def _parse_float(raw_value: object) -> tuple[float, bool]:
+        """Parse a float, reporting whether the value was numerically valid.
+
+        Unlike ``_to_float`` (which silently maps non-numeric garbage to 0.0),
+        the second tuple element is ``False`` when the input could not be
+        parsed, so callers can substitute a field-appropriate default instead
+        of a misleading 0.0.
+        """
+        if isinstance(raw_value, bool):
+            return float(raw_value), True
+        if isinstance(raw_value, (int, float)):
+            return float(raw_value), True
+        if isinstance(raw_value, str):
+            try:
+                return float(raw_value), True
+            except ValueError:
+                return 0.0, False
+        return 0.0, False
+
+    def _normalize_style(self, raw_style: object) -> tuple[dict[str, object], list[str]]:
+        """Validate a style dict against the schema, returning the clean dict
+        and the names of any fields that had to be corrected."""
+        raw = self._as_dict(raw_style)
+        default = self._as_dict(self._default_preference()["style"])
+        style: dict[str, object] = dict(default)
+        corrected: list[str] = []
+
+        for field, legal in (
+            ("preferred_duration", _LEGAL_DURATIONS),
+            ("preferred_pace", _LEGAL_PACES),
+        ):
+            raw_value = raw.get(field, "")
+            text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
+            if text in legal:
+                style[field] = text
+            else:
+                style[field] = ""
+                corrected.append(field)
+
+        for field in _STYLE_TASTE_FIELDS:
+            value, ok = self._parse_float(raw.get(field, default[field]))
+            if ok:
+                # A literal numeric 0 is legal (user with genuinely low taste
+                # on this axis); only non-numeric / unparseable values reset.
+                style[field] = self._clamp_weight(value)
+            else:
+                style[field] = 0.5
+                corrected.append(field)
+
+        return style, corrected
+
+    def _normalize_context_dict(self, raw_context: object) -> tuple[dict[str, object], list[str]]:
+        """Strip context text fields and coerce unknown-ish placeholders to ""
+        so UIs fall back to their observing-in-progress copy."""
+        raw = self._as_dict(raw_context)
+        default = self._as_dict(self._default_preference()["context"])
+        context: dict[str, object] = dict(default)
+        corrected: list[str] = []
+        for key in {*default, *raw}:
+            value = raw.get(key, default.get(key, ""))
+            if isinstance(value, str):
+                text = value.strip()
+                if text.lower() in _UNKNOWN_PLACEHOLDERS:
+                    corrected.append(key)
+                    text = ""
+                context[key] = text
+            else:
+                context[key] = value
+        return context, corrected
+
+    def _finalize_taste(
+        self,
+        *,
+        style_raw: dict[str, object],
+        context_raw: dict[str, object],
+        openness_raw: object,
+    ) -> tuple[dict[str, object], dict[str, object], float]:
+        """Validate style / context / exploration_openness together and emit a
+        single WARNING listing every field coerced from schema-defying output."""
+        style, style_corrected = self._normalize_style(style_raw)
+        context, context_corrected = self._normalize_context_dict(context_raw)
+        openness_value, openness_ok = self._parse_float(openness_raw)
+        openness_corrected: list[str] = []
+        if openness_ok:
+            openness = self._clamp_weight(openness_value)
+        else:
+            openness = 0.5
+            openness_corrected.append("exploration_openness")
+        corrected = [*style_corrected, *context_corrected, *openness_corrected]
+        if corrected:
+            logger.warning(
+                "偏好分析：LLM 输出不符合 schema,已纠偏字段 %s(重置为默认值/空)",
+                ", ".join(corrected),
+            )
+        return style, context, openness
 
     @staticmethod
     def _clamp_weight(value: float) -> float:

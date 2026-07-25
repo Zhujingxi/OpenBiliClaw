@@ -45,12 +45,39 @@ def test_desktop_source_status_rows_separate_source_and_access_state() -> None:
 
 def test_desktop_source_status_js_has_pending_and_unsaved_states() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    shared = (ROOT / "src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
 
-    assert 'unverified: { tone: "pending"' in js
-    assert "状态待验证" in js
+    # The state -> tone table moved into the module the extension side panel and
+    # the setup wizard load too; the page keeps only its own scheduling states.
+    assert 'unverified: { tone: "pending"' in shared
+    assert "状态待验证" in shared
     assert "SOURCE_ENABLE_SELECT_IDS" in js
     assert "source-row-unsaved" in js
     assert "保存后生效" in js
+
+
+def test_desktop_source_status_labels_distinguish_local_readiness() -> None:
+    shared = (ROOT / "src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'ready: { tone: "ready", label: "凭据已就绪" }' in shared
+    assert 'login_required: { tone: "warning", label: "需要登录" }' in shared
+    assert 'error: { tone: "danger", label: "检查失败" }' in shared
+
+    # This page must not re-declare the table it just started sharing — a second
+    # copy is what let it drift from the side panel in the first place (D6).
+    assert "const SOURCE_ACCESS_STATE" not in js
+    assert "globalThis.OpenBiliClawSourceStatus" in js
+
+
+def test_desktop_page_loads_the_shared_source_status_module() -> None:
+    """The page is a classic script, so the shared module must precede it."""
+    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+
+    shared_at = html.find('src="/shared/source-status.js"')
+    app_at = html.find('src="/web/assets/js/app.js"')
+    assert shared_at > 0, "desktop page does not load the shared module"
+    assert shared_at < app_at, "the shared module must load before app.js"
 
 
 def test_desktop_cookie_fields_are_override_only() -> None:
@@ -83,7 +110,13 @@ def test_desktop_current_credentials_render_in_collapsed_panels() -> None:
     ):
         assert f'data-source-credential="{source_key}"' in html
 
-    assert "/sources/credentials?reveal_keys=true" in js
-    assert "CURRENT_CREDENTIAL_KEYS" in js
+    assert 'sourceCredentials: "/sources/credentials"' in js
+    assert "reveal_keys=true" not in js
+    # Status rows and credential rows now walk the same roster from the shared
+    # module; they used to be two identical hand-kept arrays in this one file.
+    assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert "renderSourceCredentials" in js
     assert "source-credential-value" in html
+    assert "后端不会把原始 Cookie、令牌或 API Key 回传到页面" in html
+    assert "source-credential-copy" not in html
+    assert "已复制当前凭据" not in js

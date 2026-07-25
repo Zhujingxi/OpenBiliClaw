@@ -46,6 +46,26 @@ def test_feedback_like_is_positive() -> None:
     assert (category, reason) == ("positive", "explicit_engagement")
 
 
+def test_feedback_retraction_is_neutral() -> None:
+    """An unlike/unbookmark is a neutralization, never a negative preference."""
+    category, reason = classify_event_satisfaction(
+        {"event_type": "feedback", "metadata": {"feedback_type": "retraction"}}
+    )
+    assert (category, reason) == ("neutral", "retraction")
+
+
+def test_feedback_retraction_wins_over_negative_signals() -> None:
+    """The retraction rule must be checked BEFORE any feedback-negative rule —
+    a retraction carrying an incidental thumbs_down still classifies neutral."""
+    category, reason = classify_event_satisfaction(
+        {
+            "event_type": "feedback",
+            "metadata": {"feedback_type": "retraction", "reaction": "thumbs_down"},
+        }
+    )
+    assert (category, reason) == ("neutral", "retraction")
+
+
 def test_feedback_comment_is_neutral_direct_feedback() -> None:
     category, reason = classify_event_satisfaction(
         {"event_type": "feedback", "metadata": {"feedback_type": "comment"}}
@@ -126,10 +146,71 @@ def test_click_falls_back_to_duration_key() -> None:
     assert (category, reason) == ("positive", "meaningful_dwell")
 
 
+# --- Content-page (duration-less) dwell ---
+
+
+def test_content_page_dwell_engaged_reading_is_positive() -> None:
+    """A duration-less content_page_exit with >=30s visible reading is positive."""
+    category, reason = classify_event_satisfaction(
+        {
+            "event_type": "click",
+            "metadata": {"watch_seconds": 45, "dwell_source": "content_page_exit"},
+        }
+    )
+    assert (category, reason) == ("positive", "engaged_reading")
+
+
+def test_content_page_dwell_quick_exit_is_negative() -> None:
+    """<5s on a content page reuses the quick-exit negative rule."""
+    category, reason = classify_event_satisfaction(
+        {
+            "event_type": "click",
+            "metadata": {"watch_seconds": 3, "dwell_source": "content_page_exit"},
+        }
+    )
+    assert (category, reason) == ("negative", "quick_exit")
+
+
+def test_content_page_dwell_between_bands_is_neutral() -> None:
+    """5s..30s reading is neutral — read a bit but not engaged."""
+    category, reason = classify_event_satisfaction(
+        {
+            "event_type": "click",
+            "metadata": {"watch_seconds": 12, "dwell_source": "content_page_exit"},
+        }
+    )
+    assert category == "neutral"
+
+
+def test_video_dwell_classification_unchanged_by_content_rule() -> None:
+    """Regression: video_page_exit dwell still uses the ratio-based rule.
+    18s on a 60s video is meaningful; 18s content-reading is below the 30s
+    reading bar (neutral) — the two rules must not bleed."""
+    video_cat, video_reason = classify_event_satisfaction(
+        {
+            "event_type": "click",
+            "metadata": {
+                "watch_seconds": 18,
+                "video_duration_seconds": 60,
+                "dwell_source": "video_page_exit",
+            },
+        }
+    )
+    assert (video_cat, video_reason) == ("positive", "meaningful_dwell")
+
+    content_cat, _ = classify_event_satisfaction(
+        {
+            "event_type": "click",
+            "metadata": {"watch_seconds": 18, "dwell_source": "content_page_exit"},
+        }
+    )
+    assert content_cat == "neutral"
+
+
 # --- Passive browse ---
 
 
-@pytest.mark.parametrize("event_type", ["snapshot", "scroll", "hover", "search"])
+@pytest.mark.parametrize("event_type", ["snapshot", "scroll", "hover", "search", "reshuffle"])
 def test_passive_browse_events_are_neutral(event_type: str) -> None:
     category, reason = classify_event_satisfaction({"event_type": event_type})
     assert (category, reason) == ("neutral", "passive_browse")

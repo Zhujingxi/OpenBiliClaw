@@ -2,6 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runtimeAssetCandidates } from "../src/shared/asset-prefix.ts";
+
+test("dynamic asset paths support both unpacked Chrome layouts", () => {
+  assert.deepEqual(runtimeAssetCandidates("main/dy-fetch-tap.js", "dist/"), [
+    "dist/main/dy-fetch-tap.js",
+    "main/dy-fetch-tap.js",
+  ]);
+  assert.deepEqual(runtimeAssetCandidates("main/dy-fetch-tap.js", ""), [
+    "main/dy-fetch-tap.js",
+  ]);
+});
 
 test("manifest icon assets exist", () => {
   const root = process.cwd();
@@ -100,15 +111,31 @@ test("Firefox manifest declares required data collection categories", () => {
   );
 });
 
+test("Firefox manifest uses the project-owned AMO Gecko ID", () => {
+  const root = process.cwd();
+  const manifest = JSON.parse(
+    readFileSync(join(root, "manifest.firefox.json"), "utf8"),
+  ) as {
+    browser_specific_settings?: { gecko?: { id?: string } };
+  };
+
+  assert.equal(
+    manifest.browser_specific_settings?.gecko?.id,
+    "openbiliclaw-firefox@whiteguo233.github.io",
+  );
+});
+
 test("Chrome and Firefox manifests avoid all-sites host permission", () => {
   const root = process.cwd();
   const chromeManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
     host_permissions?: string[];
+    optional_host_permissions?: string[];
   };
   const firefoxManifest = JSON.parse(
     readFileSync(join(root, "manifest.firefox.json"), "utf8"),
   ) as {
     host_permissions?: string[];
+    optional_host_permissions?: string[];
   };
 
   for (const manifest of [chromeManifest, firefoxManifest]) {
@@ -117,6 +144,7 @@ test("Chrome and Firefox manifests avoid all-sites host permission", () => {
     assert.equal(manifest.host_permissions?.includes("<all_urls>"), false);
     assert.equal(manifest.host_permissions?.includes("http://127.0.0.1/*"), true);
     assert.equal(manifest.host_permissions?.includes("http://localhost/*"), true);
+    assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
     assert.equal(manifest.host_permissions?.includes("*://*.bilibili.com/*"), true);
     assert.equal(manifest.host_permissions?.includes("*://*.xiaohongshu.com/*"), true);
     assert.equal(manifest.host_permissions?.includes("*://*.douyin.com/*"), true);

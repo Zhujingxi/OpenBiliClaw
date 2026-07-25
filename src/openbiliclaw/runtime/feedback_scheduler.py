@@ -8,6 +8,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
+from openbiliclaw.llm.base import classify_llm_unavailability
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +62,25 @@ class FeedbackBatchScheduler:
             if callable(process):
                 try:
                     await process()
-                except Exception:
-                    logger.exception("post-feedback batch processing failed")
+                except Exception as exc:
+                    kind = classify_llm_unavailability(exc)
+                    if kind == "no_provider":
+                        logger.info(
+                            "post-feedback batch skipped: no chat LLM provider "
+                            "configured yet (retry next cycle)"
+                        )
+                    elif kind == "model_not_found":
+                        logger.warning(
+                            "post-feedback batch deferred: configured chat model not "
+                            "found (pull the local model or fix the model name); "
+                            "retry next cycle"
+                        )
+                    elif kind == "rate_limited":
+                        logger.warning(
+                            "post-feedback batch deferred: LLM provider "
+                            "rate-limited/cooling down (retry next cycle)"
+                        )
+                    else:
+                        logger.exception("post-feedback batch processing failed")
             if not self._dirty:
                 return

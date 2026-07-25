@@ -10,10 +10,11 @@ required.
   - ``database`` — owns the SQLite connection
   - ``memory_manager`` — owns file-backed memory layers
   - ``event_hub`` — holds live WebSocket subscriber queues
+  - ``extension_native_save_broker`` — owns durable extension save jobs
   - ``presence`` — tracks shared extension runtime-stream presence
 
 **Swappable components** (rebuilt on hot-reload):
-  - ``llm_registry``, ``llm_service``, ``bilibili_client``
+  - ``llm_registry``, ``llm_service``, ``bilibili_client``, ``saved_sync_service``
   - ``soul_engine``, ``dialogue``
   - ``discovery_engine``, ``recommendation_engine``
   - ``runtime_controller``, ``account_sync_service``
@@ -23,6 +24,7 @@ required.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
+_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:
@@ -128,6 +131,41 @@ def _build_yt_scraper_client() -> Any:
     from openbiliclaw.youtube.client import YtScraperClient
 
     return YtScraperClient()
+
+
+def _build_account_sync_x_components(
+    config: Any,
+    database: Any,
+) -> tuple[Any | None, Any | None]:
+    """Build the client and credential-bound health store for scheduled X sync.
+
+    Reuses ``resolve_x_cookie`` exactly as init/discovery do; returns
+    ``(None, None)`` when the source is disabled or no cookie is available so
+    account_sync's X path stays fully inert.
+    """
+    try:
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+        from openbiliclaw.storage.x_health import XSourceHealthStore
+
+        twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+        if twitter_cfg is None or not bool(getattr(twitter_cfg, "enabled", False)):
+            return None, None
+        cookie_env = str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
+        cookie = resolve_x_cookie(data_dir=config.data_path, cookie_env=cookie_env)
+        if not cookie:
+            return None, None
+        return (
+            XClient(cookie=cookie),
+            XSourceHealthStore(
+                database,
+                credential_fingerprint=credential_fingerprint("twitter", cookie),
+            ),
+        )
+    except Exception:
+        logger.debug("account_sync: X components construction skipped", exc_info=True)
+        return None, None
 
 
 def build_youtube_discovery_producer(
@@ -252,6 +290,9 @@ class RuntimeContext:
     database: Any = None
     memory_manager: Any = None
     event_hub: Any = None
+    # Stable, test-injectable execution bridge. Production adapter registration
+    # is intentionally owned by the native-save runtime wiring layer.
+    extension_native_save_broker: Any = None
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # v0.3.63+: tracks every detached ``asyncio.create_task`` spawned by
     # the runtime (refresh manual / per-strategy precompute, recommendation
@@ -260,6 +301,14 @@ class RuntimeContext:
     # are constructed so old detached work doesn't compete with the freshly
     # built runtime for SQLite writes / LLM tokens.
     task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
+    llm_concurrency_gate: Any = None
+    pool_inventory_commit_callback: Any = field(init=False, repr=False, compare=False)
+    _pool_inventory_commit_subscribers: list[Any] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     # Lazily-built guided-init coordinator (gui-init spec §5). Not a constructor
     # arg; created on first access bound to THIS ctx so it always reads the
     # current database / runtime_controller even after a hot-reload swaps them
@@ -275,6 +324,8 @@ class RuntimeContext:
     llm_registry: Any = None
     llm_service: Any = None
     bilibili_client: Any = None
+    bangumi_client: Any = None
+    saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
     discovery_engine: Any = None
@@ -282,6 +333,122 @@ class RuntimeContext:
     runtime_controller: Any = None
     account_sync_service: Any = None
     auto_update_service: Any = None
+
+    def __post_init__(self) -> None:
+        """Initialize stable callbacks and local-only saved-list behavior."""
+        self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+
+        if self.database is None:
+            return
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
+        from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveBroker
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
+
+        if self.extension_native_save_broker is None:
+
+            async def wake_platform(platform_slug: str) -> None:
+                publish = getattr(self.event_hub, "publish", None)
+                if callable(publish):
+                    with suppress(Exception):
+                        await publish({"type": f"{platform_slug}_task_available"})
+
+            self.extension_native_save_broker = ExtensionNativeSaveBroker(
+                self.database,
+                wake_platform=wake_platform,
+            )
+        if self.saved_sync_service is None:
+            self.saved_sync_service = SavedSyncService(
+                self.database,
+                NativeSaveRouter(
+                    build_extension_native_save_adapters(self.extension_native_save_broker)
+                ),
+                task_starter=lambda name, coro: self.task_registry.track(name, coro),
+            )
+
+    def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
+        """Register a stable post-commit observer once for this context."""
+        if callback not in self._pool_inventory_commit_subscribers:
+            self._pool_inventory_commit_subscribers.append(callback)
+
+    async def _handle_pool_inventory_commit(
+        self,
+        counts: dict[str, int] | None = None,
+    ) -> None:
+        """Synchronize committed inventory, reusing serve counts when supplied."""
+        controller = self.runtime_controller
+        if counts is not None and "available" in counts:
+            update_inventory = getattr(controller, "_update_llm_inventory_state", None)
+            if callable(update_inventory):
+                update_inventory(max(0, int(counts.get("available", 0))))
+            else:
+                update = getattr(self.llm_concurrency_gate, "update_inventory", None)
+                if callable(update):
+                    update(
+                        available=max(0, int(counts.get("available", 0))),
+                        target=max(0, int(getattr(controller, "pool_target_count", 0))),
+                    )
+        else:
+            readiness = getattr(controller, "_pool_readiness_counts", None)
+            if callable(readiness):
+                try:
+                    result = readiness()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("post-commit inventory synchronization failed")
+            else:
+                self._sync_inventory_without_controller()
+
+        for callback in tuple(self._pool_inventory_commit_subscribers):
+            try:
+                signature = inspect.signature(callback)
+                accepts_counts = any(
+                    parameter.kind
+                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    for parameter in signature.parameters.values()
+                ) or any(
+                    parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                    for parameter in signature.parameters.values()
+                )
+            except (TypeError, ValueError):
+                accepts_counts = False
+            try:
+                result = callback(counts) if accepts_counts else callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("post-commit inventory subscriber failed")
+
+    def _sync_inventory_without_controller(self) -> None:
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        update = getattr(self.llm_concurrency_gate, "update_inventory", None)
+        if not callable(count_pool) or not callable(update):
+            return
+        try:
+            nickname = ""
+            load_state = getattr(self.memory_manager, "load_discovery_runtime_state", None)
+            if callable(load_state):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    nickname = str(info.get("nickname", "") or "").strip()
+            try:
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except TypeError:
+                available = int(count_pool())
+            controller_target = getattr(self.runtime_controller, "pool_target_count", None)
+            scheduler = getattr(getattr(self, "config", None), "scheduler", None)
+            target = (
+                controller_target
+                if controller_target is not None
+                else getattr(scheduler, "pool_target_count", 0)
+            )
+            update(available=max(0, available), target=max(0, int(target)))
+        except Exception:
+            logger.exception("post-commit inventory fallback synchronization failed")
 
     @property
     def init_coordinator(self) -> Any:
@@ -304,18 +471,29 @@ class RuntimeContext:
     def background_llm_work_allowed(self) -> bool:
         """Return whether daemon-owned background LLM / embedding work may run.
 
-        While a guided init is active, ALL daemon-owned background loops
-        (account_sync, continuous refresh, soul pipeline ticks) pause so they
-        can't race init's explicit analyze/build/backfill or double-process
-        signals (gui-init D1). Init's own work bypasses this gate — it calls
-        ``soul_engine`` / ``run_init_backfill`` directly, neither of which
-        consults ``llm_work_allowed``.
+        Before the first full profile exists, and while a guided init is active,
+        ALL daemon-owned background loops (account_sync, continuous refresh,
+        soul pipeline ticks) pause.  This keeps account-sync from fetching and
+        analysing the same bootstrap history before the user presses Start,
+        then racing or duplicating guided init's explicit analyze/build/backfill
+        work. Init's own work bypasses this gate — it calls ``soul_engine`` /
+        ``run_init_backfill`` directly, neither of which consults
+        ``llm_work_allowed``.
         """
         try:
             if self.database is not None and self.init_coordinator.init_active():
                 return False
         except Exception:
             pass
+        try:
+            profile_ready = getattr(getattr(self, "soul_engine", None), "is_profile_ready", None)
+            if callable(profile_ready) and not bool(profile_ready()):
+                return False
+        except Exception:
+            # A broken readiness read is not permission to start background LLM
+            # work against an unknown profile state.  Guided init remains
+            # available because its explicit calls bypass this predicate.
+            return False
         scheduler = getattr(getattr(self, "config", None), "scheduler", None)
         return _gate(scheduler, self.presence)
 
@@ -370,6 +548,7 @@ class RuntimeContext:
             TrendingStrategy,
         )
         from openbiliclaw.llm import build_llm_registry
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
         from openbiliclaw.llm.registry import build_embedding_service
         from openbiliclaw.llm.service import LLMService, module_overrides_from_config
         from openbiliclaw.llm.usage_recorder import UsageRecorder
@@ -377,6 +556,12 @@ class RuntimeContext:
         from openbiliclaw.runtime.account_sync import AccountSyncService
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
         from openbiliclaw.runtime.updater import AutoUpdateService
+        from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
         from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
 
@@ -385,12 +570,25 @@ class RuntimeContext:
         new_usage_recorder = UsageRecorder(sink=self.database)
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
+        new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
+        new_inventory_available: int | None = None
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            try:
+                state = self.memory_manager.load_discovery_runtime_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                nickname = str(info.get("nickname", "")) if isinstance(info, dict) else ""
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except (AttributeError, TypeError):
+                available = int(count_pool())
+            new_inventory_available = max(0, available)
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             module_overrides=new_module_overrides,
             concurrency=llm_concurrency,
+            concurrency_gate=new_llm_gate,
         )
 
         # 2. Bilibili client
@@ -398,7 +596,29 @@ class RuntimeContext:
             cookie=resolve_runtime_cookie(
                 data_dir=new_config.data_path,
                 configured_cookie=new_config.bilibili.cookie,
+            ),
+            proxy=new_config.bilibili.proxy or None,
+        )
+        bangumi_cfg = getattr(getattr(new_config, "sources", None), "bangumi", None)
+        new_bangumi_client: Any = None
+        if bool(getattr(bangumi_cfg, "enabled", False)):
+            from openbiliclaw.sources.bangumi_client import BangumiClient
+
+            new_bangumi_client = BangumiClient(
+                access_token=str(getattr(bangumi_cfg, "access_token", "") or "") or None,
+                request_interval_seconds=float(
+                    getattr(bangumi_cfg, "request_interval_seconds", 1.0)
+                ),
             )
+        new_saved_sync_service = SavedSyncService(
+            self.database,
+            NativeSaveRouter(
+                (
+                    *build_extension_native_save_adapters(self.extension_native_save_broker),
+                    BilibiliNativeSaveAdapter(new_bilibili_client),
+                )
+            ),
+            task_starter=lambda name, coro: self.task_registry.track(name, coro),
         )
 
         # 3. Soul engine (reuses stable memory_manager)
@@ -425,6 +645,7 @@ class RuntimeContext:
             satisfaction_filter_enabled=satisfaction_filter_enabled,
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
+            llm_concurrency_gate=new_llm_gate,
             speculation_interval_minutes=int(
                 getattr(new_config.scheduler, "speculation_interval_minutes", 10)
             ),
@@ -478,6 +699,7 @@ class RuntimeContext:
             feedback_batch_threshold=int(
                 getattr(new_config.scheduler, "feedback_batch_threshold", 3)
             ),
+            database=self.database,
         )
 
         # 4. Embedding service
@@ -528,7 +750,7 @@ class RuntimeContext:
         # 7. Discovery engine + strategies
         concurrency = DiscoveryConcurrencyController(
             bilibili_request_concurrency=2,
-            llm_evaluation_concurrency=2,
+            llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         )
         new_discovery_engine = ContentDiscoveryEngine(
             llm_service=new_llm_service,
@@ -607,6 +829,7 @@ class RuntimeContext:
         # twitter_cli / x_client are imported, so non-X installs (where the
         # optional ``openbiliclaw[x]`` extra is absent) never touch them.
         twitter_cfg = getattr(getattr(new_config, "sources", None), "twitter", None)
+        new_x_client: object | None = None
         if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
             from openbiliclaw.discovery.strategies.x import (
                 XCreatorStrategy,
@@ -622,6 +845,7 @@ class RuntimeContext:
                 cookie_env=str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
             )
             x_client = XClient(cookie=x_cookie)
+            new_x_client = x_client
             twitter_adapter = XAdapter(
                 client=x_client,
                 search=XSearchStrategy(client=x_client, llm_service=new_llm_service),
@@ -657,6 +881,7 @@ class RuntimeContext:
         new_x_producer: Any = None
         new_zhihu_producer: Any = None
         new_reddit_producer: Any = None
+        new_bangumi_producer: Any = None
         if hasattr(self.database, "conn"):
             from openbiliclaw.runtime.bilibili_producer import BilibiliExtensionSearchProducer
             from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
@@ -736,6 +961,7 @@ class RuntimeContext:
                 database=self.database,
                 soul_engine=new_soul_engine,
                 llm_service=new_llm_service,
+                candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.zhihu_producer import build_zhihu_discovery_producer
@@ -763,6 +989,29 @@ class RuntimeContext:
                 candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
             )
+            if new_bangumi_client is not None:
+                from openbiliclaw.runtime.bangumi_producer import BangumiDiscoveryProducer
+
+                new_bangumi_producer = BangumiDiscoveryProducer(
+                    database=self.database,
+                    soul_engine=new_soul_engine,
+                    client=new_bangumi_client,
+                    access_token=str(getattr(bangumi_cfg, "access_token", "") or ""),
+                    enabled=bool(getattr(bangumi_cfg, "enabled", False))
+                    and bool(getattr(sched_cfg, "enabled", True)),
+                    subject_types=tuple(
+                        getattr(bangumi_cfg, "subject_types", ("anime", "book", "game"))
+                    ),
+                    source_modes=tuple(
+                        getattr(bangumi_cfg, "source_modes", ("search", "ranked", "latest"))
+                    ),
+                    daily_search_budget=int(getattr(bangumi_cfg, "daily_search_budget", 300)),
+                    daily_ranked_budget=int(getattr(bangumi_cfg, "daily_ranked_budget", 100)),
+                    daily_latest_budget=int(getattr(bangumi_cfg, "daily_latest_budget", 100)),
+                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 60)),
+                    candidate_pipeline=new_candidate_pipeline,
+                    keyword_fetch=new_keyword_fetch,
+                )
 
         # P1.6: unified keyword planner — deficit-pulled merged keyword
         # generation. Built as its OWN object (the controller has no
@@ -770,6 +1019,30 @@ class RuntimeContext:
         # passed to the controller, which launches its loop in run_forever and
         # injects its own deficit / catalyst口径. Flag-off (default) → the loop
         # no-ops → zero behavior change.
+        inspiration_provider = None
+        if bool(getattr(discovery_cfg, "inspiration_search_enabled", False)):
+            from openbiliclaw.config import derive_inspiration_breadth_params
+            from openbiliclaw.discovery.inspiration_provider import (
+                build_inspiration_search_provider,
+                build_platform_source_backends,
+            )
+
+            inspiration_params = derive_inspiration_breadth_params(
+                getattr(discovery_cfg, "inspiration_breadth", "medium")
+            )
+            inspiration_provider = build_inspiration_search_provider(
+                getattr(discovery_cfg, "inspiration_search_backends", None),
+                database=self.database,
+                platform_backends=build_platform_source_backends(
+                    new_config,
+                    bilibili_client=new_bilibili_client,
+                    x_client=new_x_client,
+                    bangumi_client=new_bangumi_client,
+                ),
+                platforms_per_probe=int(inspiration_params.platforms_per_probe),
+                riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+                pages_per_probe=int(inspiration_params.search_pages_per_probe),
+            )
         from openbiliclaw.runtime.keyword_planner import KeywordPlanner
 
         new_keyword_planner = KeywordPlanner(
@@ -780,6 +1053,7 @@ class RuntimeContext:
             pool_target_count=new_config.scheduler.pool_target_count,
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
             embedding_service=new_embedding_service,
+            inspiration_provider=inspiration_provider,
         )
 
         new_runtime_controller = ContinuousRefreshController(
@@ -811,6 +1085,7 @@ class RuntimeContext:
             x_producer=new_x_producer,
             zhihu_producer=new_zhihu_producer,
             reddit_producer=new_reddit_producer,
+            bangumi_producer=new_bangumi_producer,
             scheduler_config=new_config.scheduler,
             presence=self.presence,
             # gui-init D1: pause the controller's background loops while a guided
@@ -818,15 +1093,139 @@ class RuntimeContext:
             # init's own run_init_backfill bypasses _llm_work_allowed.
             init_active_check=lambda: self.init_coordinator.init_active(),
             task_registry=self.task_registry,
+            llm_concurrency_gate=new_llm_gate,
         )
 
+        from openbiliclaw.runtime.candidate_eval import (
+            CandidateEvalCoordinator,
+            CandidateEvalSnapshot,
+            effective_candidate_eval_workers,
+        )
+
+        def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
+            readiness = new_runtime_controller._pool_readiness_counts()  # noqa: SLF001
+            new_runtime_controller._update_llm_inventory_state(  # noqa: SLF001
+                int(readiness.get("available", 0))
+            )
+            status_counts = self.database.count_discovery_candidates_by_status()
+            return CandidateEvalSnapshot(
+                available=int(readiness.get("available", 0)),
+                target=int(new_config.scheduler.pool_target_count),
+                pending_eval=int(status_counts.get("pending_eval", 0)),
+                evaluating=int(status_counts.get("evaluating", 0)),
+                evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
+                admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
+            )
+
+        async def _request_candidate_supply(reason: str) -> dict[str, object]:
+            await new_runtime_controller.request_replenishment(reason=reason)
+            return await new_runtime_controller.refresh_if_needed()
+
+        async def _precompute_committed_candidates() -> None:
+            expression_coordinator.notify("candidate_commit")
+
+        from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
+
+        async def _drain_expression_copy(limit: int) -> int:
+            profile = await new_soul_engine.get_profile()
+            if profile is None:
+                return 0
+            before = int(_candidate_eval_snapshot().available)
+            completed = await new_recommendation_engine.drain_pending_expression_copy(
+                profile=cast("Any", profile), limit=limit
+            )
+            await new_runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
+                before_pool_count=before
+            )
+            return int(completed)
+
+        expression_coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
+            drain_callback=_drain_expression_copy,
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.expression_copy_coordinator = expression_coordinator
+        set_copy_callback = getattr(new_recommendation_engine, "set_copy_pending_callback", None)
+        if callable(set_copy_callback):
+            set_copy_callback(expression_coordinator.notify)
+
+        candidate_eval_workers = effective_candidate_eval_workers(
+            int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
+            llm_concurrency,
+        )
+        new_candidate_eval_coordinator = CandidateEvalCoordinator(
+            pipeline=new_candidate_pipeline,
+            snapshot_provider=_candidate_eval_snapshot,
+            profile_provider=cast("Any", getattr(new_soul_engine, "get_profile", lambda: None)),
+            worker_count=candidate_eval_workers,
+            batch_size=30,
+            supply_callback=_request_candidate_supply,
+            post_commit_callback=_precompute_committed_candidates,
+            on_admitted=lambda count: expression_coordinator.notify(f"candidate_admitted:{count}"),
+            work_allowed=lambda: (
+                new_runtime_controller._is_initialized()  # noqa: SLF001
+                and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
+            ),
+            # Pool-share fairness (spec 2026-07-20, D7): run the controller's
+            # share rebalance + deficit summary each coordinator tick before
+            # admission. The coordinator assembly replaces _loop_candidate_eval,
+            # so without this the Phase 3/4 hooks are dead code in production.
+            # Guarded for controllers/test doubles lacking the helper.
+            pre_admit_hook=getattr(new_runtime_controller, "run_pool_share_maintenance", None),
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.candidate_eval_coordinator = new_candidate_eval_coordinator
+        new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
+            new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
+        )
+        # Pool-share fairness (spec 2026-07-20, Phase 2): let admission see the
+        # per-family visible-pool targets so under-share sources win freed slots
+        # ahead of an over-supplied source's backlog. Bound after controller
+        # construction so the pipeline reuses the controller's canonical
+        # ``_source_target_counts`` (family-keyed) share口径. Guarded so test
+        # doubles / alternate controllers without the helper keep legacy (None)
+        # admission instead of raising at bootstrap.
+        _source_target_counts = getattr(new_runtime_controller, "_source_target_counts", None)
+        if callable(_source_target_counts):
+            new_candidate_pipeline.source_share_targets = _source_target_counts
+        for producer in (
+            new_douyin_producer,
+            new_youtube_producer,
+            new_zhihu_producer,
+            new_bangumi_producer,
+        ):
+            if producer is not None:
+                producer.candidate_evaluation_owned_by_coordinator = True
+        set_pool_commit_callback = getattr(
+            new_recommendation_engine,
+            "set_pool_inventory_commit_callback",
+            None,
+        )
+        if callable(set_pool_commit_callback):
+            set_pool_commit_callback(self.pool_inventory_commit_callback)
+
         # 9. Account sync
+        account_sync_x_client, account_sync_x_health = _build_account_sync_x_components(
+            new_config,
+            self.database,
+        )
         new_account_sync = AccountSyncService(
             memory_manager=self.memory_manager,
             bilibili_client=new_bilibili_client,
             soul_engine=new_soul_engine,
             sync_interval_hours=new_config.scheduler.account_sync_interval_hours,
             llm_work_allowed=self.background_llm_work_allowed,
+            database=self.database,
+            x_client=account_sync_x_client,
+            # A separate store instance shares the producer's one-row DB state
+            # but is fingerprint-bound to this exact client's cookie. That keeps
+            # cooldown global without crediting a success to a different cookie
+            # if configuration changes during a rebuild.
+            x_health_store=account_sync_x_health,
         )
 
         # 10. Dialogue (with source management tools)
@@ -867,10 +1266,15 @@ class RuntimeContext:
 
         # ── Atomic swap ─────────────────────────────────────────────
         # All construction succeeded → assign attributes.
+        new_llm_gate.reconfigure(llm_concurrency)
+        self.llm_concurrency_gate = new_llm_gate
         self.config = new_config
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
         self.bilibili_client = new_bilibili_client
+        old_bangumi_client = self.bangumi_client
+        self.bangumi_client = new_bangumi_client
+        self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
         self.discovery_engine = new_discovery_engine
@@ -878,6 +1282,16 @@ class RuntimeContext:
         self.runtime_controller = new_runtime_controller
         self.account_sync_service = new_account_sync
         self.auto_update_service = new_auto_update
+        if old_bangumi_client is not None and old_bangumi_client is not new_bangumi_client:
+            close = getattr(old_bangumi_client, "aclose", None)
+            if callable(close):
+                with suppress(RuntimeError):
+                    self.task_registry.track("close_old_bangumi_client", close())
+        if new_inventory_available is not None:
+            new_llm_gate.update_inventory(
+                available=new_inventory_available,
+                target=int(new_config.scheduler.pool_target_count),
+            )
         # Drop the cached init prerequisite probes (chat/bilibili) — config or
         # cookie just changed, so the next /api/init pre-flight must re-probe
         # against the new provider/cookie instead of a stale TTL value (gui-init
@@ -888,7 +1302,7 @@ class RuntimeContext:
 
         logger.info(
             "Hot-reload complete — rebuilt %d swappable components",
-            11,
+            12,
         )
 
     async def restart_background_tasks(
@@ -898,41 +1312,88 @@ class RuntimeContext:
         run_post_reload_llm_work: bool = True,
     ) -> None:
         """Cancel old background tasks and start new ones from current components."""
-        # Cancel existing tasks
+        # Cancel existing tasks. A third-party/provider coroutine may swallow
+        # cancellation; never let a config hot-reload (which precedes guided
+        # init reservation) wait forever and look like a dead POST /api/init.
+        stuck_tasks: set[str] = set()
+        current_loop = asyncio.get_running_loop()
         for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
+                # TestClient and embedded hosts may reuse RuntimeContext across
+                # event-loop lifetimes. A pending Task owned by a closed/foreign
+                # loop cannot be awaited or safely cancelled from this loop;
+                # retain ownership and, crucially, do not start a duplicate.
+                task_loop = task.get_loop()
+                if task_loop is not current_loop:
+                    if task.done():
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            logger.warning(
+                                "Stale %s from a prior event loop exited with an error",
+                                attr,
+                                exc_info=True,
+                            )
+                    else:
+                        stuck_tasks.add(attr)
+                        logger.warning(
+                            "Cannot cancel stale %s owned by a different event loop; "
+                            "leaving it attached and suppressing duplicate startup",
+                            attr,
+                        )
+                    continue
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                done, _ = await asyncio.wait(
+                    {task}, timeout=_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS
+                )
+                if task not in done:
+                    stuck_tasks.add(attr)
+                    logger.warning("Timed out cancelling stale %s during hot-reload", attr)
+                    continue
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.warning(
+                        "Stale %s exited with an error during hot-reload", attr, exc_info=True
+                    )
 
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the
         # next hot-reload's ``cancel_all`` cleanly stops them too.
         if run_post_reload_llm_work:
             run_forever = getattr(self.runtime_controller, "run_forever", None)
-            app.state.refresh_task = (
-                self.task_registry.track("refresh_loop", run_forever())
-                if callable(run_forever)
-                else None
-            )
+            if "refresh_task" not in stuck_tasks:
+                app.state.refresh_task = (
+                    self.task_registry.track("refresh_loop", run_forever())
+                    if callable(run_forever)
+                    else None
+                )
 
             sync_forever = getattr(self.account_sync_service, "run_forever", None)
-            app.state.account_sync_task = (
-                self.task_registry.track("account_sync_loop", sync_forever())
-                if callable(sync_forever)
-                else None
-            )
+            if "account_sync_task" not in stuck_tasks:
+                app.state.account_sync_task = (
+                    self.task_registry.track("account_sync_loop", sync_forever())
+                    if callable(sync_forever)
+                    else None
+                )
         else:
-            app.state.refresh_task = None
-            app.state.account_sync_task = None
+            if "refresh_task" not in stuck_tasks:
+                app.state.refresh_task = None
+            if "account_sync_task" not in stuck_tasks:
+                app.state.account_sync_task = None
 
         update_forever = getattr(self.auto_update_service, "run_forever", None)
-        app.state.auto_update_task = (
-            self.task_registry.track("auto_update_loop", update_forever())
-            if callable(update_forever)
-            else None
-        )
+        if "auto_update_task" not in stuck_tasks:
+            app.state.auto_update_task = (
+                self.task_registry.track("auto_update_loop", update_forever())
+                if callable(update_forever)
+                else None
+            )
 
         llm_work_allowed = run_post_reload_llm_work and self.background_llm_work_allowed()
 
@@ -992,13 +1453,28 @@ class RuntimeContext:
                 # freshly-built engine so pool-fill resumes immediately.
                 # precompute_pool_copy spawns classify + delight detached
                 # internally, so one call restarts the whole trio.
-                precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
-                if callable(precompute):
+                classify = getattr(self.recommendation_engine, "classify_pool_backlog", None)
+                delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+                if callable(classify):
                     self.task_registry.track(
-                        "post_reload_precompute_pool_copy",
-                        self._safe_post_reload_precompute(precompute, profile),
+                        "post_reload_classify_pool_backlog",
+                        classify(profile=profile, limit=60),
                     )
-                    logger.debug("post-reload classify/copy drain scheduled as background task")
+                if callable(delight):
+                    self.task_registry.track(
+                        "post_reload_precompute_delight_scores",
+                        delight(profile=profile, limit=30),
+                    )
+                coordinator = getattr(self.runtime_controller, "expression_copy_coordinator", None)
+                if coordinator is not None:
+                    coordinator.notify("hot_reload")
+                else:
+                    precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
+                    if callable(precompute):
+                        self.task_registry.track(
+                            "post_reload_precompute_pool_copy",
+                            self._safe_post_reload_precompute(precompute, profile),
+                        )
             except Exception:
                 pass  # Profile not initialized yet — skip silently
 

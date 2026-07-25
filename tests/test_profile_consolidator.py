@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from openbiliclaw.soul.consolidator import ProfileConsolidator
+from openbiliclaw.storage.database import Database
 
 
 class _FakeLayer:
@@ -985,6 +986,67 @@ async def test_revert_restores_archived_interests(tmp_path: Path) -> None:
         "低权重C",
     ]
     assert [item["name"] for item in preference["archived_interests"]] == ["旧归档"]
+
+
+async def test_consolidation_migrates_keyword_interest_labels_and_reverts(
+    tmp_path: Path,
+) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("智能体开发", 0.97),
+                _interest("智能体开发与实现", 0.88),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    db = Database(tmp_path / "keywords.db")
+    db.initialize()
+    db.insert_pending_keywords(
+        "bilibili",
+        ["智能体开发 经验", "智能体开发与实现 实战"],
+        "digest",
+        metadata_by_keyword={
+            "智能体开发 经验": {"source_interest": "智能体开发"},
+            "智能体开发与实现 实战": {"source_interest": "智能体开发与实现"},
+        },
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {
+                    "cluster_id": "L1",
+                    "op": "merge",
+                    "members": ["智能体开发", "智能体开发与实现"],
+                    "canonical": "智能体开发",
+                }
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(
+        memory=memory,
+        llm_service=llm,
+        embedding_service=_StubEmbedding([["智能体开发", "智能体开发与实现"]]),
+        data_dir=tmp_path,
+        database=db,
+    )
+
+    report = await consolidator.run(dry_run=False)
+
+    snapshot = db.get_keyword_interest_coverage_snapshot()
+    assert "智能体开发与实现" not in snapshot
+    assert snapshot["智能体开发"]["generated_keyword_count"] == 2
+
+    record_path = tmp_path / "consolidation_runs" / f"{report.run_id}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["keyword_interest_rename_map"] == {"智能体开发与实现": "智能体开发"}
+
+    assert consolidator.revert(report.run_id)
+    reverted = db.get_keyword_interest_coverage_snapshot()
+    assert reverted["智能体开发"]["generated_keyword_count"] == 1
+    assert reverted["智能体开发与实现"]["generated_keyword_count"] == 1
 
 
 async def test_dislike_merge_keeps_frontmost_position(tmp_path: Path) -> None:

@@ -171,6 +171,12 @@ LLM_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+# Local Ollama is intentionally NOT offered here as a chat provider
+# (v0.3.176+): the bundled Ollama is embedding-only (bge-m3), and small
+# local chat models don't clear the content-pipeline quality bar. Ollama
+# chat stays supported in the backend registry / desktop settings page,
+# and ``resolve_human_llm_choice`` still parses ``"ollama"`` for
+# non-interactive / backward-compat installs — it's just off the menu.
 HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
     ("deepseek", "DeepSeek 官方 ★默认推荐", "deepseek-v4-flash"),
     ("openai_compatible", "★ 中转站 / OpenAI 协议兼容服务", "relay preset"),
@@ -178,7 +184,6 @@ HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
     ("gemini", "Gemini 官方", "gemini-2.5-flash"),
     ("claude", "Claude 官方", "claude-sonnet-4-6"),
     ("openrouter", "OpenRouter 聚合", "openai/gpt-5-nano"),
-    ("ollama", "本地 Ollama", "qwen2.5:7b"),
 )
 
 HUMAN_OPENAI_COMPAT_PRESETS: tuple[str, ...] = (
@@ -200,6 +205,12 @@ PROVIDER_MODEL_DEFAULTS: dict[str, str] = {
     "claude": "claude-sonnet-4-6",
     "openrouter": "openai/gpt-5-nano",
     "ollama": "qwen2.5:7b",
+}
+
+PROVIDER_BASE_URL_DEFAULTS: dict[str, str] = {
+    "deepseek": "https://api.deepseek.com",
+    "ollama": "http://127.0.0.1:11434/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
 }
 
 
@@ -308,7 +319,10 @@ def resolve_human_llm_choice(raw: str) -> str | None:
         "compat": "openai_compatible",
     }
     menu_providers = {key for key, _label, _model in HUMAN_LLM_MENU}
-    return aliases.get(value, value if value in menu_providers else None)
+    # ``ollama`` is off the interactive menu (embedding-only bundle) but
+    # still accepted by name for non-interactive / backward-compat installs.
+    accepted = menu_providers | {"ollama"}
+    return aliases.get(value, value if value in accepted else None)
 
 
 def _resolve_human_openai_compatible_preset(raw: str) -> str | None:
@@ -360,9 +374,7 @@ def _prompt_secret(
         try:
             value = str(secret_input_func(f"{prompt}{suffix}: ")).strip()
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
         if value:
             return value
         if existing:
@@ -381,9 +393,7 @@ def read_secret_no_echo(prompt: str) -> str:
         try:
             return getpass.getpass(prompt)
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
 
 
 def _collect_human_openai_compatible_llm(
@@ -447,9 +457,7 @@ def collect_human_llm_config(
 
     provider: str | None = None
     while provider is None:
-        provider = resolve_human_llm_choice(
-            str(input_func("LLM provider [1 DeepSeek]: "))
-        )
+        provider = resolve_human_llm_choice(str(input_func("LLM provider [1 DeepSeek]: ")))
         if provider is None:
             print("Unknown provider choice. Please choose a number from the menu.")
 
@@ -814,11 +822,7 @@ def apply_human_install_answers_to_args(
         args.bilibili_favorite_limit = answers.bilibili_favorite_limit
     if args.bilibili_follow_limit is None:
         args.bilibili_follow_limit = answers.bilibili_follow_limit
-    if (
-        answers.cookie_mode == "manual"
-        and answers.bilibili_cookie
-        and not args.bilibili_cookie
-    ):
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
         args.bilibili_cookie = answers.bilibili_cookie
     args.wait_for_extension_cookie = answers.cookie_mode == "extension"
 
@@ -929,12 +933,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embedding-base-url",
         default=None,
-        help="Custom base_url for the embedding provider (writes into the matching [llm.<provider>] block).",
+        help="Custom base_url for the dedicated [llm.embedding] provider.",
     )
     parser.add_argument(
         "--embedding-api-key",
         default=None,
-        help="Custom API key for the embedding provider (writes into the matching [llm.<provider>] block).",
+        help="Custom API key for the dedicated [llm.embedding] provider.",
     )
     parser.add_argument(
         "--module-override",
@@ -1449,10 +1453,12 @@ async def main() -> None:
 
         cfg = load_config()
         registry = build_llm_registry(cfg)
-        provider = str(cfg.llm.default_provider or registry.default_provider).strip().lower()
+        instance_id = str(registry.default_provider or "").strip().lower()
+        provider = str(registry.provider_type(instance_id) or instance_id).strip().lower()
         result["services"]["llm"]["provider"] = provider
+        result["services"]["llm"]["instance_id"] = instance_id
         response = await registry.complete_provider(
-            provider,
+            instance_id,
             [{"role": "user", "content": "Reply with OK only."}],
             temperature=0,
             max_tokens=8,
@@ -1552,7 +1558,9 @@ def _normalize_service_entry(raw: Any) -> dict[str, Any]:
     return entry
 
 
-def _service_check_command_failed_result(command: list[str], result: CommandResult) -> dict[str, Any]:
+def _service_check_command_failed_result(
+    command: list[str], result: CommandResult
+) -> dict[str, Any]:
     error = (result.stderr or result.stdout or "service check command failed").strip()
     services = {
         "llm": {
@@ -1809,18 +1817,15 @@ def read_simple_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
-def set_toml_string_value(content: str, section: str, key: str, value: str) -> str:
-    """Rewrite ``key = "..."`` under ``[section]`` with the new value.
+def set_toml_raw_value(content: str, section: str, key: str, rendered_value: str) -> str:
+    """Rewrite one scalar/array value under ``[section]``.
 
     This is a minimal line-based editor; it preserves the rest of the file as
     much as possible so operators can keep their own comments. It does not
-    handle multi-line strings or inline tables, which is fine because the
-    OpenBiliClaw config template uses only single-line string values for the
-    fields we need to update.
+    handle multi-line values or inline tables.
     """
 
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    new_line = f'{key} = "{escaped}"'
+    new_line = f"{key} = {rendered_value}"
     section_header = f"[{section}]"
 
     lines = content.splitlines()
@@ -1870,11 +1875,32 @@ def set_toml_string_value(content: str, section: str, key: str, value: str) -> s
     return "\n".join(lines) + trailing_newline
 
 
+def set_toml_string_value(content: str, section: str, key: str, value: str) -> str:
+    """Rewrite ``key = "..."`` under ``[section]`` with the new value."""
+
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return set_toml_raw_value(content, section, key, f'"{escaped}"')
+
+
 def update_config_secret(config_path: Path, section: str, key: str, value: str) -> None:
     """Patch a single secret value inside config.toml."""
 
     original = config_path.read_text(encoding="utf-8")
     updated = set_toml_string_value(original, section, key, value)
+    if updated != original:
+        config_path.write_text(updated, encoding="utf-8")
+
+
+def update_config_raw_value(
+    config_path: Path,
+    section: str,
+    key: str,
+    rendered_value: str,
+) -> None:
+    """Patch a pre-rendered TOML scalar or array value."""
+
+    original = config_path.read_text(encoding="utf-8")
+    updated = set_toml_raw_value(original, section, key, rendered_value)
     if updated != original:
         config_path.write_text(updated, encoding="utf-8")
 
@@ -1927,6 +1953,138 @@ def clear_config_value(config_path: Path, section: str, key: str) -> bool:
     return changed
 
 
+def _uses_llm_instance_routing(data: dict[str, Any]) -> bool:
+    llm = data.get("llm", {})
+    if not isinstance(llm, dict):
+        return False
+    try:
+        routing_version = int(llm.get("routing_version", 0) or 0)
+    except (TypeError, ValueError):
+        routing_version = 0
+    return bool(
+        routing_version >= 2 or isinstance(llm.get("instances"), dict) or "default_chain" in llm
+    )
+
+
+def _llm_instance_id_for_provider(
+    data: dict[str, Any],
+    provider: str,
+    *,
+    model: str = "",
+) -> str:
+    """Find the first globally ordered instance matching adapter and model."""
+
+    llm = data.get("llm", {})
+    if not isinstance(llm, dict):
+        return ""
+    instances = llm.get("instances", {})
+    if not isinstance(instances, dict):
+        return ""
+    order = [
+        *(
+            [str(item) for item in llm.get("default_chain", [])]
+            if isinstance(llm.get("default_chain"), list)
+            else []
+        ),
+        *[str(instance_id) for instance_id in instances],
+    ]
+    seen: set[str] = set()
+    normalized_provider = provider.strip().lower()
+    for instance_id in order:
+        if instance_id in seen:
+            continue
+        seen.add(instance_id)
+        instance = instances.get(instance_id)
+        if not isinstance(instance, dict):
+            continue
+        instance_type = str(instance.get("provider_type", "") or "").strip().lower()
+        instance_model = str(instance.get("model", "") or "").strip()
+        if instance_type == normalized_provider and (not model or instance_model == model):
+            return instance_id
+    return ""
+
+
+def _ensure_llm_instance(project_dir: Path, provider: str) -> str:
+    """Return/create the v2 instance used by bootstrap for *provider*."""
+
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    instance_id = _llm_instance_id_for_provider(data, provider)
+    if instance_id:
+        return instance_id
+
+    llm = data.get("llm", {})
+    instances = llm.get("instances", {}) if isinstance(llm, dict) else {}
+    instance_id = provider.replace("_", "-")
+    suffix = 2
+    while isinstance(instances, dict) and instance_id in instances:
+        instance_id = f"{provider.replace('_', '-')}-{suffix}"
+        suffix += 1
+    section = f"llm.instances.{instance_id}"
+    display_names = {
+        "openai": "OpenAI",
+        "claude": "Claude",
+        "gemini": "Gemini",
+        "deepseek": "DeepSeek",
+        "ollama": "Ollama",
+        "openrouter": "OpenRouter",
+        "openai_compatible": "OpenAI-compatible",
+    }
+    update_config_secret(
+        config_path,
+        section,
+        "name",
+        display_names.get(provider, provider),
+    )
+    update_config_secret(config_path, section, "provider_type", provider)
+    update_config_raw_value(config_path, section, "enabled", "true")
+    default_model = PROVIDER_MODEL_DEFAULTS.get(provider, "")
+    if default_model:
+        update_config_secret(config_path, section, "model", default_model)
+    default_base_url = PROVIDER_BASE_URL_DEFAULTS.get(provider, "")
+    if default_base_url:
+        update_config_secret(config_path, section, "base_url", default_base_url)
+    if provider == "openrouter":
+        update_config_secret(config_path, section, "x_title", "OpenBiliClaw")
+    if provider in {
+        "openai",
+        "claude",
+        "gemini",
+        "deepseek",
+        "openrouter",
+    }:
+        update_config_secret(config_path, section, "reasoning_effort", "medium")
+    return instance_id
+
+
+def _llm_provider_config_from_data(
+    data: dict[str, Any],
+) -> tuple[str, str, dict[str, Any], bool]:
+    """Return (provider type, instance ID, endpoint config, is_native)."""
+
+    llm = data.get("llm", {})
+    if not isinstance(llm, dict):
+        return "deepseek", "", {}, False
+    if _uses_llm_instance_routing(data):
+        instances = llm.get("instances", {})
+        chain = llm.get("default_chain", [])
+        instance_id = (
+            str(chain[0])
+            if isinstance(chain, list) and chain
+            else next(iter(instances), "")
+            if isinstance(instances, dict)
+            else ""
+        )
+        instance = instances.get(instance_id, {}) if isinstance(instances, dict) else {}
+        if not isinstance(instance, dict):
+            instance = {}
+        provider = str(instance.get("provider_type", "") or "").strip().lower() or "deepseek"
+        return provider, instance_id, instance, True
+    provider = str(llm.get("default_provider", "") or "").strip().lower() or "deepseek"
+    provider_cfg = llm.get(provider, {})
+    return provider, provider, provider_cfg if isinstance(provider_cfg, dict) else {}, False
+
+
 def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
     """Copy API keys + Bilibili cookie from an existing OpenBiliClaw checkout."""
 
@@ -1941,28 +2099,130 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
     else:
         source_data = read_simple_toml(source_config)
         llm_section = source_data.get("llm", {})
-        provider = llm_section.get("default_provider")
-        if provider:
-            update_config_secret(project_dir / "config.toml", "llm", "default_provider", provider)
-            summary["reused"].append("llm.default_provider")
+        target_config = project_dir / "config.toml"
+        target_data = read_simple_toml(target_config)
+        source_native = _uses_llm_instance_routing(source_data)
+        target_native = _uses_llm_instance_routing(target_data)
 
-        for name in REMOTE_PROVIDERS:
-            provider_cfg = llm_section.get(name, {})
-            api_key = str(provider_cfg.get("api_key", "")).strip()
-            if api_key:
-                update_config_secret(project_dir / "config.toml", f"llm.{name}", "api_key", api_key)
-                summary["reused"].append(f"llm.{name}.api_key")
-            for field_name in ("model", "base_url"):
-                value = str(provider_cfg.get(field_name, "")).strip()
-                if not value:
-                    continue
-                update_config_secret(
-                    project_dir / "config.toml",
-                    f"llm.{name}",
-                    field_name,
-                    value,
+        if source_native and target_native:
+            raw_instances = (
+                llm_section.get("instances", {}) if isinstance(llm_section, dict) else {}
+            )
+            if isinstance(raw_instances, dict):
+                for instance_id, raw_instance in raw_instances.items():
+                    if not isinstance(raw_instance, dict):
+                        continue
+                    section = f"llm.instances.{instance_id}"
+                    for field_name in (
+                        "name",
+                        "provider_type",
+                        "api_key",
+                        "model",
+                        "base_url",
+                        "auth_mode",
+                        "api_flavor",
+                        "http_referer",
+                        "x_title",
+                        "reasoning_effort",
+                    ):
+                        if field_name not in raw_instance:
+                            continue
+                        update_config_secret(
+                            target_config,
+                            section,
+                            field_name,
+                            str(raw_instance.get(field_name, "") or ""),
+                        )
+                    update_config_raw_value(
+                        target_config,
+                        section,
+                        "enabled",
+                        "true" if bool(raw_instance.get("enabled", True)) else "false",
+                    )
+                    if "num_ctx" in raw_instance:
+                        try:
+                            num_ctx = max(0, int(raw_instance.get("num_ctx", 0) or 0))
+                        except (TypeError, ValueError):
+                            num_ctx = 0
+                        update_config_raw_value(
+                            target_config,
+                            section,
+                            "num_ctx",
+                            str(num_ctx),
+                        )
+                    summary["reused"].append(f"llm.instances.{instance_id}")
+            source_chain = llm_section.get("default_chain", [])
+            if isinstance(source_chain, list) and source_chain:
+                update_config_raw_value(
+                    target_config,
+                    "llm",
+                    "default_chain",
+                    json.dumps([str(item) for item in source_chain], ensure_ascii=False),
                 )
-                summary["reused"].append(f"llm.{name}.{field_name}")
+                summary["reused"].append("llm.default_chain")
+            source_routes = llm_section.get("routes", {})
+            if isinstance(source_routes, dict):
+                for module, raw_route in source_routes.items():
+                    if module not in {"soul", "discovery", "recommendation", "evaluation"}:
+                        continue
+                    if not isinstance(raw_route, dict):
+                        continue
+                    section = f"llm.routes.{module}"
+                    inherit = bool(raw_route.get("inherit", True))
+                    update_config_raw_value(
+                        target_config,
+                        section,
+                        "inherit",
+                        "true" if inherit else "false",
+                    )
+                    chain = raw_route.get("chain", [])
+                    update_config_raw_value(
+                        target_config,
+                        section,
+                        "chain",
+                        json.dumps(
+                            [str(item) for item in chain] if isinstance(chain, list) else [],
+                            ensure_ascii=False,
+                        ),
+                    )
+        else:
+            provider, _instance_id, primary_cfg, _native = _llm_provider_config_from_data(
+                source_data
+            )
+            if provider:
+                if target_native:
+                    apply_provider_override(project_dir, provider)
+                    summary["reused"].append("llm.default_chain")
+                else:
+                    update_config_secret(
+                        target_config,
+                        "llm",
+                        "default_provider",
+                        provider,
+                    )
+                    summary["reused"].append("llm.default_provider")
+
+            provider_configs: dict[str, dict[str, Any]] = {}
+            if source_native:
+                provider_configs[provider] = primary_cfg
+            elif isinstance(llm_section, dict):
+                provider_configs = {
+                    name: raw
+                    for name in SUPPORTED_PROVIDERS
+                    if isinstance((raw := llm_section.get(name)), dict)
+                }
+            for name, provider_cfg in provider_configs.items():
+                if target_native:
+                    instance_id = _ensure_llm_instance(project_dir, name)
+                    section = f"llm.instances.{instance_id}"
+                else:
+                    section = f"llm.{name}"
+                for field_name in ("api_key", "model", "base_url"):
+                    value = str(provider_cfg.get(field_name, "") or "").strip()
+                    if not value:
+                        continue
+                    update_config_secret(target_config, section, field_name, value)
+                    summary["reused"].append(f"{section}.{field_name}")
 
         bilibili_section = source_data.get("bilibili", {})
         cookie_value = str(bilibili_section.get("cookie", "")).strip()
@@ -1993,19 +2253,77 @@ def persist_cookie_file(project_dir: Path, cookie: str) -> None:
 
 
 def apply_provider_override(project_dir: Path, provider: str) -> None:
-    update_config_secret(project_dir / "config.toml", "llm", "default_provider", provider)
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    if not _uses_llm_instance_routing(data):
+        update_config_secret(config_path, "llm", "default_provider", provider)
+        return
+    instance_id = _ensure_llm_instance(project_dir, provider)
+    refreshed = read_simple_toml(config_path).get("llm", {})
+    current_chain = (
+        [str(item) for item in refreshed.get("default_chain", [])]
+        if isinstance(refreshed, dict) and isinstance(refreshed.get("default_chain"), list)
+        else []
+    )
+    chain = [instance_id, *[item for item in current_chain if item != instance_id]]
+    update_config_raw_value(
+        config_path,
+        "llm",
+        "default_chain",
+        json.dumps(chain, ensure_ascii=False),
+    )
+    update_config_raw_value(
+        config_path,
+        f"llm.instances.{instance_id}",
+        "enabled",
+        "true",
+    )
 
 
 def apply_llm_api_key(project_dir: Path, provider: str, api_key: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "api_key", api_key)
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    section = (
+        f"llm.instances.{_ensure_llm_instance(project_dir, provider)}"
+        if _uses_llm_instance_routing(data)
+        else f"llm.{provider}"
+    )
+    update_config_secret(config_path, section, "api_key", api_key)
 
 
 def apply_llm_base_url(project_dir: Path, provider: str, base_url: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "base_url", base_url)
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    section = (
+        f"llm.instances.{_ensure_llm_instance(project_dir, provider)}"
+        if _uses_llm_instance_routing(data)
+        else f"llm.{provider}"
+    )
+    update_config_secret(config_path, section, "base_url", base_url)
 
 
 def apply_llm_model(project_dir: Path, provider: str, model: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "model", model)
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    section = (
+        f"llm.instances.{_ensure_llm_instance(project_dir, provider)}"
+        if _uses_llm_instance_routing(data)
+        else f"llm.{provider}"
+    )
+    update_config_secret(config_path, section, "model", model)
+
+
+def clear_llm_base_url(project_dir: Path, provider: str) -> bool:
+    """Clear one provider endpoint's Base URL in legacy or v2 config."""
+
+    config_path = project_dir / "config.toml"
+    data = read_simple_toml(config_path)
+    section = (
+        f"llm.instances.{_ensure_llm_instance(project_dir, provider)}"
+        if _uses_llm_instance_routing(data)
+        else f"llm.{provider}"
+    )
+    return clear_config_value(config_path, section, "base_url")
 
 
 def should_auto_wire_embedding(
@@ -2025,9 +2343,9 @@ def should_auto_wire_embedding(
     """
     if mode == "docker":
         return False
-    explicitly_disabled = embedding_provider_arg is not None and not (
-        embedding_provider_arg or ""
-    ).strip()
+    explicitly_disabled = (
+        embedding_provider_arg is not None and not (embedding_provider_arg or "").strip()
+    )
     if explicitly_disabled:
         return False
     return not effective_provider.strip()
@@ -2138,14 +2456,98 @@ def parse_module_override(spec: str) -> tuple[str, str, str]:
 
 
 def apply_module_overrides(project_dir: Path, specs: list[str]) -> dict[str, Any]:
-    """Write each --module-override into config.toml under [llm.<module>]."""
+    """Write module overrides in legacy or v2 instance-route form."""
 
     config_path = project_dir / "config.toml"
     written: list[str] = []
     for spec in specs:
         module, provider, model = parse_module_override(spec)
-        update_config_secret(config_path, f"llm.{module}", "provider", provider)
-        update_config_secret(config_path, f"llm.{module}", "model", model)
+        data = read_simple_toml(config_path)
+        if not _uses_llm_instance_routing(data):
+            update_config_secret(config_path, f"llm.{module}", "provider", provider)
+            update_config_secret(config_path, f"llm.{module}", "model", model)
+            written.append(f"llm.{module}={provider or 'default'}:{model or 'default'}")
+            continue
+
+        route_section = f"llm.routes.{module}"
+        if not provider and not model:
+            update_config_raw_value(config_path, route_section, "inherit", "true")
+            update_config_raw_value(config_path, route_section, "chain", "[]")
+            written.append(f"llm.routes.{module}=inherit")
+            continue
+        default_provider, default_instance_id, _default_cfg, _native = (
+            _llm_provider_config_from_data(data)
+        )
+        effective_provider = provider or default_provider
+        instance_id = (
+            _llm_instance_id_for_provider(data, effective_provider, model=model)
+            if model
+            else ""
+        )
+        if not instance_id:
+            instance_id = _llm_instance_id_for_provider(data, effective_provider)
+        if not instance_id:
+            instance_id = _ensure_llm_instance(project_dir, effective_provider)
+            data = read_simple_toml(config_path)
+        llm = data.get("llm", {})
+        instances = llm.get("instances", {}) if isinstance(llm, dict) else {}
+        instance_cfg = instances.get(instance_id, {}) if isinstance(instances, dict) else {}
+        current_model = (
+            str(instance_cfg.get("model", "") or "") if isinstance(instance_cfg, dict) else ""
+        )
+        if model and model != current_model:
+            base_id = f"{module}-{effective_provider.replace('_', '-')}"
+            derived_id = base_id
+            suffix = 2
+            while isinstance(instances, dict) and derived_id in instances:
+                derived_id = f"{base_id}-{suffix}"
+                suffix += 1
+            derived_section = f"llm.instances.{derived_id}"
+            if isinstance(instance_cfg, dict):
+                for field_name in (
+                    "api_key",
+                    "base_url",
+                    "auth_mode",
+                    "api_flavor",
+                    "http_referer",
+                    "x_title",
+                    "reasoning_effort",
+                ):
+                    update_config_secret(
+                        config_path,
+                        derived_section,
+                        field_name,
+                        str(instance_cfg.get(field_name, "") or ""),
+                    )
+            update_config_secret(
+                config_path,
+                derived_section,
+                "name",
+                f"{module} · {effective_provider}",
+            )
+            update_config_secret(
+                config_path,
+                derived_section,
+                "provider_type",
+                effective_provider,
+            )
+            update_config_secret(config_path, derived_section, "model", model)
+            update_config_raw_value(config_path, derived_section, "enabled", "true")
+            instance_id = derived_id
+        else:
+            update_config_raw_value(
+                config_path,
+                f"llm.instances.{instance_id or default_instance_id}",
+                "enabled",
+                "true",
+            )
+        update_config_raw_value(config_path, route_section, "inherit", "false")
+        update_config_raw_value(
+            config_path,
+            route_section,
+            "chain",
+            json.dumps([instance_id], ensure_ascii=False),
+        )
         written.append(f"llm.{module}={provider or 'default'}:{model or 'default'}")
     return {"modules": written}
 
@@ -2155,10 +2557,7 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
 
     config_path = project_dir / "config.toml"
     data = read_simple_toml(config_path)
-    llm_section = data.get("llm", {})
-    provider = str(llm_section.get("default_provider", "") or "").strip() or "deepseek"
-
-    provider_cfg = llm_section.get(provider, {})
+    provider, instance_id, provider_cfg, native = _llm_provider_config_from_data(data)
     api_key = str(provider_cfg.get("api_key", "") or "").strip()
     bilibili_section = data.get("bilibili", {})
     cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
@@ -2172,17 +2571,23 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
             cookie_on_disk = False
 
     missing: list[str] = []
+    field_prefix = f"llm.instances.{instance_id}" if native and instance_id else f"llm.{provider}"
     if provider in REMOTE_PROVIDERS and not api_key:
-        missing.append(f"llm.{provider}.api_key")
+        missing.append(f"{field_prefix}.api_key")
     if provider == "openai_compatible":
         base_url = str(provider_cfg.get("base_url", "") or "").strip()
         if not base_url:
-            missing.append("llm.openai_compatible.base_url")
+            missing.append(f"{field_prefix}.base_url")
+    if provider == "ollama":
+        model = str(provider_cfg.get("model", "") or "").strip()
+        if not model:
+            missing.append(f"{field_prefix}.model")
     if not (cookie_inline or cookie_on_disk):
         missing.append("bilibili.cookie")
 
     return {
         "provider": provider,
+        "instance_id": instance_id if native else "",
         "missing": missing,
         "has_cookie_inline": bool(cookie_inline),
         "has_cookie_file": cookie_on_disk,
@@ -2678,9 +3083,23 @@ config_path = Path("/app/runtime/config.toml")
 cookie_path = Path("/app/runtime/data/bilibili_cookie.json")
 data = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
 llm = data.get("llm", {})
-provider = str(llm.get("default_provider", "") or "").strip() or "deepseek"
 remote = {"openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"}
-provider_cfg = llm.get(provider, {})
+instances = llm.get("instances", {}) if isinstance(llm.get("instances"), dict) else {}
+chain = llm.get("default_chain", []) if isinstance(llm.get("default_chain"), list) else []
+try:
+    routing_version = int(llm.get("routing_version", 0) or 0)
+except (TypeError, ValueError):
+    routing_version = 0
+native = bool(instances or "default_chain" in llm or routing_version >= 2)
+instance_id = str(chain[0]) if native and chain else ""
+provider_cfg = instances.get(instance_id, {}) if native else {}
+provider = (
+    str(provider_cfg.get("provider_type", "") or "").strip()
+    if native
+    else str(llm.get("default_provider", "") or "").strip()
+) or "deepseek"
+if not native:
+    provider_cfg = llm.get(provider, {})
 api_key = str(provider_cfg.get("api_key", "") or "").strip()
 base_url = str(provider_cfg.get("base_url", "") or "").strip()
 bilibili = data.get("bilibili", {})
@@ -2692,14 +3111,16 @@ if cookie_path.exists():
     except json.JSONDecodeError:
         cookie_on_disk = False
 missing = []
+field_prefix = f"llm.instances.{instance_id}" if native and instance_id else f"llm.{provider}"
 if provider in remote and not api_key:
-    missing.append(f"llm.{provider}.api_key")
+    missing.append(f"{field_prefix}.api_key")
 if provider == "openai_compatible" and not base_url:
-    missing.append("llm.openai_compatible.base_url")
+    missing.append(f"{field_prefix}.base_url")
 if not (cookie_inline or cookie_on_disk):
     missing.append("bilibili.cookie")
 print(json.dumps({
     "provider": provider,
+    "instance_id": instance_id if native else "",
     "missing": missing,
     "has_cookie_inline": bool(cookie_inline),
     "has_cookie_file": cookie_on_disk,
@@ -2724,6 +3145,93 @@ def detect_docker_missing_secrets(_project_dir: Path) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # Health check
+
+
+# ── Reused-cookie live validation (init-progress spec Phase 3) ──────────────
+# ``--reuse-from`` copies the old install's Bilibili cookie by file existence
+# only. B站 cookies expire within weeks; a stale one used to surface only when
+# init later failed with empty_history. Once the backend is healthy, its
+# /api/init-status prerequisites already run a REAL validate_cookie probe
+# (runtime/init_prereqs.py) — consume that instead of adding a second
+# validation path.
+
+STALE_COOKIE_MISSING_ENTRY = "bilibili.cookie (stale — reused cookie failed live validation)"
+
+
+def _init_status_url(host: str, port: int) -> str:
+    return _health_url(host, port).replace("/api/health", "/api/init-status")
+
+
+def fetch_init_status(host: str, port: int, timeout: float = 30.0) -> dict[str, Any] | None:
+    """GET /api/init-status; None when unreachable / malformed (indeterminate).
+
+    The timeout is generous because the endpoint runs live provider probes
+    (chat + bilibili + embedding) on a not-yet-initialized backend.
+    """
+    try:
+        with urllib.request.urlopen(_init_status_url(host, port), timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reused_cookie_stale(init_status: dict[str, Any] | None) -> bool | None:
+    """True/False from the live probe; None when indeterminate.
+
+    Only an explicit ``failed`` counts as stale — ``checking`` / a missing
+    field / an unreachable endpoint must NOT downgrade the install (never
+    claim a staleness we didn't observe; the generic install.sh disclaimer
+    covers the couldn't-validate case).
+    """
+    if not isinstance(init_status, dict):
+        return None
+    prereq = init_status.get("prerequisites")
+    if not isinstance(prereq, dict):
+        return None
+    check = str(prereq.get("bilibili_check", "") or "")
+    if check == "ok":
+        return False
+    if check == "failed":
+        return True
+    return None
+
+
+def apply_reused_cookie_validation(
+    final_status: dict[str, Any],
+    *,
+    reuse_summary: dict[str, Any] | None,
+    init_status: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fold the live cookie probe into the final status summary.
+
+    When THIS run reused a Bilibili cookie and the backend's live probe says
+    it's dead, append a self-describing ``missing`` entry and flag the status
+    so ``backend_healthy_label`` downgrades to ``needs_secrets`` instead of
+    reporting ``complete`` for an install whose init can only fail.
+    """
+    reused = reuse_summary.get("reused") if isinstance(reuse_summary, dict) else None
+    cookie_reused = any(
+        item in ("bilibili.cookie", "data/bilibili_cookie.json") for item in (reused or [])
+    )
+    if not cookie_reused:
+        return final_status
+    if _reused_cookie_stale(init_status) is not True:
+        return final_status
+    updated = dict(final_status)
+    missing = list(updated.get("missing") or [])
+    if STALE_COOKIE_MISSING_ENTRY not in missing:
+        missing.append(STALE_COOKIE_MISSING_ENTRY)
+    updated["missing"] = missing
+    updated["reused_cookie_stale"] = True
+    return updated
+
+
+def backend_healthy_label(final_status: dict[str, Any]) -> str:
+    """Status label for the backend-healthy summary block."""
+    if final_status.get("reused_cookie_stale"):
+        return "needs_secrets"
+    return "complete" if not final_status.get("missing") else "running_with_missing_secrets"
 
 
 def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECONDS) -> bool:
@@ -2786,6 +3294,7 @@ def run(args: argparse.Namespace) -> int:
         emit(BootstrapResult("error", str(exc), {"step": "config"}))
         return 2
 
+    reuse_summary: dict[str, Any] | None = None
     if args.reuse_from:
         try:
             reuse_summary = reuse_config_secrets(project_dir, Path(args.reuse_from))
@@ -2798,8 +3307,8 @@ def run(args: argparse.Namespace) -> int:
         try:
             current = detect_missing_secrets(project_dir)
             provider = str(current.get("provider") or "deepseek")
-            provider_cfg = (
-                read_simple_toml(project_dir / "config.toml").get("llm", {}).get(provider, {})
+            _provider, _instance_id, provider_cfg, _native = _llm_provider_config_from_data(
+                read_simple_toml(project_dir / "config.toml")
             )
             answers = collect_human_install_wizard(
                 existing_provider=provider,
@@ -2854,7 +3363,7 @@ def run(args: argparse.Namespace) -> int:
         # silently keep routing to that gateway.
         # Reset the field to "" so the OpenAI SDK falls back to its
         # built-in https://api.openai.com/v1.
-        if clear_config_value(project_dir / "config.toml", "llm.openai", "base_url"):
+        if clear_llm_base_url(project_dir, "openai"):
             emit(
                 BootstrapResult(
                     "ok",
@@ -2985,7 +3494,15 @@ def run(args: argparse.Namespace) -> int:
     # service from inside a container would be wrong.
     ollama_models_needed: list[str] = []
     if (args.provider or status["provider"]) == "ollama":
-        ollama_models_needed.append((args.llm_model or "llama3").strip())
+        configured_ollama_model = str(
+            read_simple_toml(project_dir / "config.toml")
+            .get("llm", {})
+            .get("ollama", {})
+            .get("model", "")
+            or ""
+        ).strip()
+        if configured_ollama_model:
+            ollama_models_needed.append(configured_ollama_model)
     if (args.embedding_provider or "").strip() == "ollama":
         ollama_models_needed.append((args.embedding_model or "bge-m3").strip())
     # When we auto-wired Ollama for embedding (Claude / DeepSeek /
@@ -3073,6 +3590,22 @@ def run(args: argparse.Namespace) -> int:
             status_detector = detect_docker_missing_secrets
 
         final_status = status_detector(project_dir)
+        # Live-validate a reused cookie against the backend's real probe
+        # (init-progress spec Phase 3): a stale cookie must surface NOW as
+        # needs_secrets, not 30s into init as empty_history.
+        if reuse_summary is not None:
+            final_status = apply_reused_cookie_validation(
+                final_status,
+                reuse_summary=reuse_summary,
+                init_status=fetch_init_status(args.host, args.port),
+            )
+            if final_status.get("reused_cookie_stale"):
+                emit(BootstrapResult("needs_secrets", "reused_cookie_stale", final_status))
+                info(
+                    "The Bilibili cookie reused from the previous install failed live "
+                    "validation (expired/invalid). Log in to bilibili.com again and let "
+                    "the browser extension sync a fresh cookie, or pass --bilibili-cookie."
+                )
         if args.wait_for_extension_cookie and final_status["missing"] == ["bilibili.cookie"]:
             emit(
                 BootstrapResult(
@@ -3101,7 +3634,7 @@ def run(args: argparse.Namespace) -> int:
             args,
             embedding_touched=embedding_touched,
         )
-        label = "complete" if not final_status["missing"] else "running_with_missing_secrets"
+        label = backend_healthy_label(final_status)
         if not final_status["missing"] and init_decisions["missing"] and not args.skip_init:
             label = "needs_decisions"
         health_details = {

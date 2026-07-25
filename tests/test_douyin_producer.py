@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.discovery.engine import DiscoveredContent
@@ -11,6 +11,9 @@ from openbiliclaw.runtime.douyin_producer import (
     douyin_runtime_hot_budget,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 class _FakeSoulEngine:
     async def get_profile(self) -> dict[str, object]:
@@ -18,8 +21,14 @@ class _FakeSoulEngine:
 
 
 class _FakeCandidatePipeline:
-    def __init__(self, *, pool_full: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        pool_full: bool = False,
+        on_candidates_enqueued: Callable[[int], None] | None = None,
+    ) -> None:
         self._pool_full = pool_full
+        self.on_candidates_enqueued = on_candidates_enqueued
         self.enqueued: list[tuple[list[object], str]] = []
         self.drains: list[int] = []
 
@@ -28,7 +37,10 @@ class _FakeCandidatePipeline:
 
     def enqueue_candidates(self, items: list[object], *, source_context: str = "") -> int:
         self.enqueued.append((list(items), source_context))
-        return len(items)
+        inserted = len(items)
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def drain_pending(self, *, profile: object, batch_size: int = 30) -> dict[str, int]:
         self.drains.append(batch_size)
@@ -69,7 +81,7 @@ async def test_douyin_producer_invokes_discovery_with_cache_options() -> None:
     assert options.sources == ("search", "hot")
     assert options.cache is True
     assert options.evaluate is True
-    assert options.keywords_per_run == 1
+    assert options.keywords_per_run == 3
 
 
 async def test_douyin_producer_enqueues_raw_candidates_when_pipeline_is_available() -> None:
@@ -103,6 +115,39 @@ async def test_douyin_producer_enqueues_raw_candidates_when_pipeline_is_availabl
     assert result["discovered"] == 2
     assert result["enqueued"] == 2
     assert result["cached"] == 2
+
+
+async def test_douyin_producer_defers_to_coordinator_owned_candidate_evaluation() -> None:
+    notifications: list[int] = []
+    pipeline = _FakeCandidatePipeline(
+        on_candidates_enqueued=notifications.append,
+    )
+    raw_items = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
+
+    async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=raw_items,
+            cached=False,
+            source_counts={"dy-plugin-search": 2},
+        )
+
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        sources=("search", "hot"),
+        candidate_pipeline=pipeline,
+        candidate_evaluation_owned_by_coordinator=True,
+    )
+
+    result = await producer.produce_if_due(limit=12)
+
+    assert pipeline.enqueued == [(raw_items, "douyin")]
+    assert notifications == [2]
+    assert pipeline.drains == []
+    assert result["enqueued"] == 2
+    assert "cached" not in result
 
 
 async def test_douyin_producer_stamps_strategy_score_threshold_before_enqueue() -> None:
@@ -431,6 +476,60 @@ async def test_douyin_flag_on_empty_store_skips(tmp_path: Any) -> None:
     result = await producer.produce_if_due(limit=12)
     assert result["reason"] == "no_keywords"
     assert _dy_statuses(db) == {}
+
+
+class _StubCoordinator:
+    """Records the claim ``n`` and hands back that many stub keywords."""
+
+    def __init__(self, available: int = 5) -> None:
+        self.available = available
+        self.claim_calls: list[int] = []
+        self.used: list[list[Any]] = []
+
+    def should_claim(self) -> bool:
+        return True
+
+    def claim(self, platform: str, n: int | None = None) -> list[Any]:
+        count = self.available if n is None else int(n)
+        self.claim_calls.append(count)
+        return [SimpleNamespace(keyword=f"kw-{i}", id=i) for i in range(min(count, self.available))]
+
+    def mark_used(self, claimed: list[Any]) -> None:
+        self.used.append(list(claimed))
+
+    def mark_failed(self, claimed: list[Any]) -> None:  # pragma: no cover - not hit here
+        pass
+
+    def rollback(self, claimed: Any) -> None:  # pragma: no cover - not hit here
+        pass
+
+
+async def test_douyin_producer_claims_exactly_keywords_per_run() -> None:
+    seen: list[DouyinDiscoveryOptions] = []
+    coordinator = _StubCoordinator(available=5)
+
+    async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
+        seen.append(options)
+        return DouyinDiscoveryResult(items=[SimpleNamespace()], cached=True, source_counts={})
+
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        keywords_per_run=3,
+        keyword_fetch=coordinator,
+    )
+
+    result = await producer.produce_if_due(limit=12)
+
+    assert result["reason"] == "ok"
+    # Claim count is aligned with the search count — no unsearched words burned.
+    assert coordinator.claim_calls == [3]
+    # Exactly the claimed words flow into the strategy's seed keywords.
+    assert sorted(seen[0].keywords) == ["kw-0", "kw-1", "kw-2"]
+    assert seen[0].keywords_per_run == 3
+    assert len(coordinator.used[0]) == 3
 
 
 async def test_douyin_flag_on_feed_only_run_does_not_claim(tmp_path: Any) -> None:

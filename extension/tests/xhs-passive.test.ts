@@ -237,6 +237,49 @@ test("extractNoteMetadataFromAnchor reads visible metric chips", () => {
     collect_count: 1_234,
     comment_count: 3_000,
   });
+  assert.equal("published_at" in meta!, false);
+});
+
+test("extractNoteMetadataFromAnchor returns null when the title selector fully misses (degradation contract)", () => {
+  // Locked behavior (passive.ts): an empty title → null, so blank cards never
+  // reach the backend and never waste LLM classification budget. This is the
+  // deliberate fail-closed contract, NOT changed to "return partial data".
+  const card = new FakeDomElement({ selectorMap: {} }); // no title/author/cover match
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-empty?xsec_token=tok",
+    closestElement: card,
+  });
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+  assert.equal(meta, null);
+});
+
+test("extractNoteMetadataFromAnchor returns partial data when only some selectors miss (no throw)", () => {
+  // Title present, author + cover selectors miss → partial metadata, not an
+  // exception. Missing metric chips simply stay absent (never 0-valued keys).
+  const titleEl = new FakeDomElement({ textContent: "只有标题的笔记" });
+  const card = new FakeDomElement({
+    selectorMap: {
+      ".title, .note-title, [class*='title'] span, [class*='title']": [titleEl],
+      // author, cover, metrics deliberately absent
+    },
+  });
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-partial?xsec_token=tok",
+    closestElement: card,
+  });
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+  assert.deepEqual(meta, {
+    url: "https://www.xiaohongshu.com/explore/note-partial?xsec_token=tok",
+    title: "只有标题的笔记",
+    author: "",
+    cover_url: "",
+  });
 });
 
 test("dedupeObservedUrls removes previously reported URLs", () => {
@@ -289,4 +332,30 @@ test("filterSelfAuthoredNotes is a no-op when self.nickname is empty", () => {
   ];
   const self: XhsSelfInfo = { user_id: "uid", nickname: "" };
   assert.equal(filterSelfAuthoredNotes(notes, self).length, 1);
+});
+
+test("extractNoteMetadataFromAnchor rejects data: lazy-load placeholder covers", () => {
+  // Background tabs never upgrade lazy images past the inline data: PNG —
+  // storing the placeholder as cover_url yields cards that can never render.
+  const titleEl = new FakeDomElement({ textContent: "占位符测试" });
+  const cover = new FakeDomElement({
+    attrs: { src: "data:image/png;base64,iVBORw0KGgo" },
+  });
+  const card = new FakeDomElement({
+    selectorMap: {
+      ".title, .note-title, [class*='title'] span, [class*='title']": [titleEl],
+      "img.cover, .cover img, img[src*='xhscdn'], img[src*='sns-img'], img": [cover],
+    },
+  });
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-ph?xsec_token=tok",
+    closestElement: card,
+  });
+
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+
+  assert.equal(meta?.cover_url, "");
 });

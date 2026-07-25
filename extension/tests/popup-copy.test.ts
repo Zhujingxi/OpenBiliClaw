@@ -54,7 +54,9 @@ test("popup avoidance probe contract is wired", () => {
 
   assert.match(popupHtml, /profileSpeculativeAvoidances/);
   assert.match(popupJs, /avoidance\.probe/);
-  assert.match(popupJs, /确实不喜欢/);
+  assert.match(popupJs, /确认避雷/);
+  assert.match(popupJs, /搁置避雷/);
+  assert.match(popupJs, /不是雷点/);
   assert.match(popupJs, /avoidance_probe/);
   assert.match(serviceWorker, /avoidance\.probe/);
 });

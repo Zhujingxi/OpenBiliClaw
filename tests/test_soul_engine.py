@@ -133,7 +133,10 @@ async def test_analyze_events_updates_preference_layer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: Path) -> None:
+async def test_build_initial_profile_reads_preference_and_saves_soul(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()
     memory.get_layer("preference").data.update(
@@ -160,6 +163,20 @@ async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: P
         )
     )
     engine = SoulEngine(llm=registry, memory=memory)
+    probe_calls: list[str] = []
+
+    async def _record_interest_probe(*_args: object, **_kwargs: object) -> None:
+        probe_calls.append("interest")
+
+    async def _record_avoidance_probe(*_args: object, **_kwargs: object) -> None:
+        probe_calls.append("avoidance")
+
+    monkeypatch.setattr(engine._speculator, "force_tick", _record_interest_probe)
+    monkeypatch.setattr(
+        engine._avoidance_speculator,
+        "force_tick",
+        _record_avoidance_probe,
+    )
 
     profile = await engine.build_initial_profile(
         history=[
@@ -177,6 +194,9 @@ async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: P
     assert saved["surface"]["cognitive_style"] == ["会先看结构", "偏好把问题讲透"]
     assert saved["interest"]["likes"][0]["domain"] == "知识"
     assert saved["interest"]["likes"][0]["specifics"][0]["name"] == "科技"
+    # Profile persistence is the strict init barrier. RuntimeContext schedules
+    # optional probes only after guided init leaves the load-bearing stages.
+    assert probe_calls == []
 
 
 @pytest.mark.asyncio
@@ -192,8 +212,9 @@ async def test_init_cognition_context_is_ephemeral_and_feeds_profile_build(
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
+        progress_callback: object | None = None,
     ) -> dict[str, object]:
-        del events, existing_preference, event_chunk_size
+        del events, existing_preference, event_chunk_size, progress_callback
         return {
             "interests": [{"name": "AI 工具链", "category": "科技", "weight": 0.81}],
             "style": {},
@@ -575,6 +596,99 @@ async def test_process_feedback_batch_updates_preference_after_threshold(
     assert result["preference_updated"] is True
     assert memory.get_layer("preference").data["interests"][0]["name"] == "纪录片"
     assert memory.load_feedback_state()["last_processed_feedback_event_id"] > 0
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_ignores_retractions_for_threshold(tmp_path: Path) -> None:
+    """3 retraction rows alone must NOT reach the feedback_batch_threshold —
+    retraction is a neutralization, not preference-learning input."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"withdrawn {index}",
+                "metadata": {"feedback_type": "retraction", "retracted_action": "like"},
+            }
+        )
+
+    result = await engine.process_feedback_batch_if_needed()
+
+    assert result["triggered"] is False
+    assert result["feedback_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_excludes_retractions_from_count_and_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mix of 2 dislikes + 2 retractions counts 2 (below threshold=3), and
+    when it does fire the analysis input carries no retraction rows."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    # Interleave so a naive "last N" slice would include retractions.
+    rows = [
+        ("dislike", "dis 0"),
+        ("retraction", "ret 0"),
+        ("dislike", "dis 1"),
+        ("retraction", "ret 1"),
+    ]
+    for feedback_type, title in rows:
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": title,
+                "metadata": {"feedback_type": feedback_type},
+            }
+        )
+
+    # 2 real feedback rows < threshold(3) → below threshold.
+    below = await engine.process_feedback_batch_if_needed()
+    assert below["triggered"] is False
+    assert below["feedback_count"] == 2
+
+    # Add one more real dislike → 3 real rows, fires; input excludes retractions.
+    await memory.propagate_event(
+        {
+            "event_type": "feedback",
+            "title": "dis 2",
+            "metadata": {"feedback_type": "dislike"},
+        }
+    )
+
+    captured: list[dict[str, object]] = []
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        del existing_preference, event_chunk_size
+        captured.extend(events)
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    fired = await engine.process_feedback_batch_if_needed()
+    assert fired["triggered"] is True
+    assert fired["feedback_count"] == 3
+    assert len(captured) == 3
+    for event in captured:
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            assert metadata.get("feedback_type") != "retraction"
+        assert "ret " not in str(event.get("title", ""))
 
 
 @pytest.mark.asyncio
@@ -996,6 +1110,118 @@ async def test_learn_from_dialogue_updates_preference_for_single_high_confidence
     candidates = memory.load_insight_candidates()
     assert candidates[0]["applied"] is True
     assert memory.get_layer("preference").data["interests"][0]["name"] == "国际时事"
+
+
+@pytest.mark.asyncio
+async def test_learn_from_dialogue_new_dislike_triggers_pool_purge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import openbiliclaw.soul.dislike_writeback as dislike_writeback
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    profile_build_started = asyncio.Event()
+    release_profile_build = asyncio.Event()
+    purge_started = asyncio.Event()
+
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+    ) -> list[dict[str, object]]:
+        del assistant_reply, core_memory
+        return [
+            {
+                "kind": "dislike",
+                "content": "电脑使用技巧",
+                "confidence": 0.95,
+                "evidence": user_message,
+            }
+        ]
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+    ) -> dict[str, object]:
+        del existing_preference
+        assert events[0]["metadata"]["kind"] == "dislike"
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": ["电脑使用技巧"],
+            "favorite_up_users": [],
+        }
+
+    async def fake_build(
+        *,
+        history: list[dict[str, object]],
+        preference: dict[str, object],
+        awareness_notes: list[dict[str, object]],
+        active_insights: list[dict[str, object]],
+    ) -> SoulProfile:
+        del history, awareness_notes, active_insights
+        profile_build_started.set()
+        await release_profile_build.wait()
+        return SoulProfile.from_dict(
+            {
+                "personality_portrait": "你明确希望避开重复的电脑技巧内容。" * 12,
+                "core_traits": ["直接"],
+                "cognitive_style": ["明确表达边界"],
+                "motivational_drivers": ["减少重复内容"],
+                "current_phase": "正在校准推荐边界。",
+                "values": ["有效"],
+                "life_stage": "持续校准内容口味",
+                "deep_needs": ["推荐边界被尊重"],
+                "preferences": preference,
+            }
+        )
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_purge_pool_for_new_dislikes(**kwargs: object) -> list[str]:
+        calls.append(dict(kwargs))
+        purge_started.set()
+        return []
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", fake_extract)
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+    monkeypatch.setattr(
+        dislike_writeback,
+        "purge_pool_for_new_dislikes",
+        fake_purge_pool_for_new_dislikes,
+    )
+
+    learn_task = asyncio.create_task(
+        engine.learn_from_dialogue(
+            user_message="不要再给我推荐电脑使用技巧。",
+            assistant_reply="明白，我会避开这类内容。",
+            session="popup",
+        )
+    )
+    await asyncio.wait_for(profile_build_started.wait(), timeout=1)
+    await asyncio.wait_for(purge_started.wait(), timeout=1)
+    assert not learn_task.done()
+    release_profile_build.set()
+    result = await learn_task
+    await engine.wait_for_pending_edits()
+
+    assert result["preference_updated"] is True
+    assert result["profile_rebuilt"] is True
+    assert calls == [
+        {
+            "newly_added": ["电脑使用技巧"],
+            "all_dislikes": ["电脑使用技巧"],
+            "database": memory._database,
+            "embedding_service": engine._embedding_service,
+            "llm_service": engine._llm_service,
+        }
+    ]
 
 
 @pytest.mark.asyncio

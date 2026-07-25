@@ -5,6 +5,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 const BV_PATTERN = /(BV[0-9A-Za-z]{10})/;
 
@@ -62,11 +63,25 @@ export function inferBilibiliActionType(hint: ActionHint): string | null {
 
 export const bilibiliAdapter: PlatformAdapter = {
   sourcePlatform: "bilibili",
+  // The MAIN-world interact tap (`main/bili-interact-tap.ts`) emits the
+  // authoritative comment / like / favorite / coin / retraction after the
+  // corresponding Bilibili write succeeds. The DOM path must not double-count
+  // those writes (and cannot infer Bilibili's class-only pressed state).
+  // Share / follow have no tap and stay DOM-sourced.
+  tapAuthoritativeActions: new Set([
+    "comment",
+    "like",
+    "favorite",
+    "coin",
+    "retraction",
+  ]),
   detectPageType: detectBilibiliPageType,
   extractContentId: extractBvid,
+  extractSearchQuery: (url) => queryParam(url, "keyword"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: "video",
+  dwellPageTypes: ["video"],
   inferActionType: inferBilibiliActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { bvid: extractBvid(url) };

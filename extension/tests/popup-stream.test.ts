@@ -19,6 +19,10 @@ test("createRuntimeStreamUrl converts backend http url to websocket runtime stre
     createRuntimeStreamUrl("http://127.0.0.1:19090/api"),
     "ws://127.0.0.1:19090/api/runtime-stream",
   );
+  assert.equal(
+    createRuntimeStreamUrl("https://api.example.com/api", "short-session"),
+    "wss://api.example.com/api/runtime-stream?token=short-session",
+  );
 });
 
 class FakeWebSocket {
@@ -34,6 +38,12 @@ class FakeWebSocket {
   }
 
   close() {}
+}
+
+class ClosingFakeWebSocket extends FakeWebSocket {
+  override close() {
+    this.onclose?.();
+  }
 }
 
 test("runtime stream client dispatches parsed events", async () => {
@@ -109,11 +119,29 @@ test("runtime stream client calls onDisconnect when socket closes after being co
   client.disconnect();
 });
 
+test("runtime stream client does not report an intentional shutdown as a disconnect", () => {
+  let disconnectCount = 0;
+  const client = createRuntimeStreamClient({
+    backendUrl: "http://127.0.0.1:8420/api",
+    WebSocketImpl: ClosingFakeWebSocket as never,
+    onDisconnect() {
+      disconnectCount += 1;
+    },
+  });
+
+  client.connect();
+  FakeWebSocket.latest?.onopen?.();
+  client.disconnect();
+
+  assert.equal(disconnectCount, 0);
+});
+
 test("runtime stream client resolves backend URL dynamically when no explicit backendUrl is given", async () => {
   FakeWebSocket.latest = null;
   const client = createRuntimeStreamClient({
     backendUrl: null,
     resolveBackendUrl: async () => "http://127.0.0.1:19090/api",
+    resolveSessionToken: async () => "session-token",
     WebSocketImpl: FakeWebSocket as never,
   });
 
@@ -121,7 +149,10 @@ test("runtime stream client resolves backend URL dynamically when no explicit ba
   // resolveBackendUrl is async — wait one microtask flush before checking.
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(FakeWebSocket.latest?.url, "ws://127.0.0.1:19090/api/runtime-stream");
+  assert.equal(
+    FakeWebSocket.latest?.url,
+    "ws://127.0.0.1:19090/api/runtime-stream?token=session-token",
+  );
   client.disconnect();
 });
 

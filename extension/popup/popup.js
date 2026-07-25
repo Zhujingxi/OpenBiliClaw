@@ -7,7 +7,9 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   buildVideoUrl,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -28,7 +30,10 @@ import {
   normalizeProbeType,
   normalizeRuntimeStatus,
   normalizeProfileSummary,
+  platformDisplayName,
   probeMessageKey,
+  reconcileRecommendationReplacement,
+  resolveInitBangumiUsername,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -37,14 +42,24 @@ import {
   validateCommentInput,
 } from "./popup-helpers.js";
 import { createRuntimeStreamClient } from "./popup-stream.js";
-import { createOfflineBackendPoller } from "./popup-connection-poller.js";
+import {
+  createBackendConnectionCoordinator,
+  createOfflineBackendPoller,
+} from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
+  describeInitFailure,
   describeInitReason,
+  describeInitStatusReason,
   describeInitStartError,
+  embeddingRepairStartAccepted,
   initProgressView,
+  INIT_EXPECTATION_HINT,
+  INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  shouldAttachRunningInitProgress,
+  stalenessView,
 } from "./popup-init-control.js";
 import {
   getBackendBaseUrl,
@@ -55,13 +70,30 @@ import {
   updateBackendEndpoint,
 } from "./popup-backend-config.js";
 import { initAuthControl } from "./popup-auth-control.js";
+import { initExtLogin } from "./popup-ext-login.js";
+import { clearPopupSession, readPopupSessionToken } from "./popup-device-auth.js";
 import { initAutostartControl } from "./popup-autostart-control.js";
 import {
   createQrSvgMarkup,
   getMobileQrViewState,
   isLoopbackMobileHost,
 } from "./popup-qr.js";
-import { createSavedToggleRegistry } from "./popup-saved-sync.js";
+import {
+  createSavedToggleRegistry,
+  captureSavedFocus,
+  createRetainedSavedListState,
+  createSavedSubmissionFence,
+  createSavedTaskCoordinator,
+  createSavedSyncTaskTracker,
+  getSavedSyncPresentation,
+  isSavedSyncEligibleStatus,
+  normalizeCanonicalSavedItem,
+  partitionSavedQueueResults,
+  restoreSavedFocus,
+  sanitizeSavedSyncTask,
+  summarizeSavedSyncResults,
+  updateSavedBatchButtonState,
+} from "./popup-saved-sync.js";
 import {
   installEmbeddingBannerAutoRefresh,
   shouldShowEmbeddingBanner,
@@ -73,9 +105,12 @@ import {
   fetchUpdateStatus,
   checkBackendUpdate,
   applyBackendUpdate,
+  cancelInit,
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
+  discoverConfigModels,
+  fetchEmbeddingRepairStatus,
   fetchHealth,
   fetchInitStatus,
   fetchPendingDelight,
@@ -87,6 +122,7 @@ import {
   fetchSourcesStatus,
   markDelightSent,
   probeConfigService,
+  startEmbeddingRepair,
   startInit,
   readCachedConfigSnapshot,
   reportRecommendationClick,
@@ -101,14 +137,14 @@ import {
   submitFeedback,
   submitInsightFeedback,
   updateConfig,
-  addToWatchLater,
-  removeFromWatchLater,
-  watchLaterStatus,
-  fetchWatchLater,
-  addToFavorite,
-  removeFromFavorite,
-  favoriteStatus,
-  fetchFavorites,
+  fetchSavedItems,
+  pollSavedSyncTask,
+  removeSavedItem,
+  saveItem,
+  savedItemStatus,
+  sendBehaviorEvents,
+  syncSavedItems,
+  verifySource,
 } from "./popup-api.js";
 
 const state = {
@@ -130,6 +166,13 @@ const state = {
   runtimeStatus: null,
   runtimeEvent: null,
   runtimeConfig: null,
+  llmDraft: null,
+  llmProbeResults: new Map(),
+  llmEditingInstanceId: "",
+  initBangumiUsername: "",
+  initBangumiUsernameTouched: false,
+  initBangumiUsernamePrefilled: false,
+  initBangumiToken: "",
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -177,13 +220,16 @@ const elements = {
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
+  emptyAction: document.getElementById("emptyAction"),
   initPanel: document.getElementById("initPanel"),
   initSources: document.getElementById("initSources"),
   initChecklist: document.getElementById("initChecklist"),
   initProgress: document.getElementById("initProgress"),
   initProgressBar: document.getElementById("initProgressBar"),
   initProgressLabel: document.getElementById("initProgressLabel"),
+  initStallHint: document.getElementById("initStallHint"),
   initStartBtn: document.getElementById("initStartBtn"),
+  initCancelBtn: document.getElementById("initCancelBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
@@ -206,6 +252,10 @@ const elements = {
   watchLaterEmpty: document.getElementById("watchLaterEmpty"),
   favoritesList: document.getElementById("favoritesList"),
   favoritesEmpty: document.getElementById("favoritesEmpty"),
+  watchLaterSyncAll: document.getElementById("watchLaterSyncAll"),
+  watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus"),
+  favoritesSyncAll: document.getElementById("favoritesSyncAll"),
+  favoritesSyncStatus: document.getElementById("favoritesSyncStatus"),
   profileEmpty: document.getElementById("profileEmpty"),
   profileEmptyTitle: document.getElementById("profileEmptyTitle"),
   profileEmptyText: document.getElementById("profileEmptyText"),
@@ -263,7 +313,10 @@ async function setProxyImageSrc(image, coverUrl) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
   const origin = await getBackendOrigin();
-  image.src = `${origin}${path}`;
+  const token = await readPopupSessionToken();
+  let url = `${origin}${path}`;
+  if (token) url += `&token=${encodeURIComponent(token)}`;
+  image.src = url;
   return true;
 }
 
@@ -275,6 +328,7 @@ async function setProxyImageSrc(image, coverUrl) {
 // cover can't stall the whole batch (the rest keep warming in the background).
 async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
   const origin = await getBackendOrigin();
+  const token = await readPopupSessionToken();
   const loaders = (Array.isArray(items) ? items : [])
     .map((item) => {
       const path = item?.cover_url ? buildImageProxyPath(item.cover_url) : null;
@@ -284,7 +338,9 @@ async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
         img.decoding = "async";
         img.addEventListener("load", () => resolve(), { once: true });
         img.addEventListener("error", () => resolve(), { once: true });
-        img.src = `${origin}${path}`;
+        let url = `${origin}${path}`;
+        if (token) url += `&token=${encodeURIComponent(token)}`;
+        img.src = url;
       });
     })
     .filter(Boolean);
@@ -298,13 +354,26 @@ let recommendationAutoLoadUserArmed = false;
 let recommendationAutoLoadTouchY = null;
 let recommendationAutoLoadIntentInitialized = false;
 let runtimeStreamClient = null;
-const offlineBackendPoller = createOfflineBackendPoller({
+let offlineBackendPoller = null;
+const backendConnectionCoordinator = createBackendConnectionCoordinator({
+  checkBackendStatus,
+  onStatusChange(status) {
+    state.online = status !== "offline";
+    setStatus(status);
+    if (status === "offline") {
+      offlineBackendPoller?.start();
+      return;
+    }
+    offlineBackendPoller?.stop();
+  },
+});
+offlineBackendPoller = createOfflineBackendPoller({
   isOnline: () => state.online,
   checkBackendStatus,
   onOnline: async () => {
-    if (!state.online) {
-      state.online = true;
-      setStatus(true);
+    const wasOnline = state.online;
+    backendConnectionCoordinator.markHttpReachable();
+    if (!wasOnline) {
       setHint("后端连上了，正在刷新。", "success");
     }
     scheduleRecommendationsRefresh({ delayMs: 0 });
@@ -336,6 +405,12 @@ const WATCH_LATER_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
 const FAVORITE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
+const THUMBS_UP_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
+const THUMBS_DOWN_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
+const MESSAGE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
 
 const CHAT_PLACEHOLDERS = [
   // 想法与内容判断类
@@ -394,7 +469,7 @@ function setHint(message, tone = "info") {
   renderActivityCard();
 }
 
-function setStatus(online) {
+function setStatus(status) {
   if (
     !(elements.statusBadge instanceof HTMLElement) ||
     !(elements.statusDot instanceof HTMLElement) ||
@@ -402,9 +477,10 @@ function setStatus(online) {
   ) {
     return;
   }
-  const badgeState = getConnectionBadgeState(online);
+  const badgeState = getConnectionBadgeState(status);
   elements.statusBadge.dataset.tone = badgeState.tone;
   elements.statusDot.classList.toggle("offline", badgeState.tone === "offline");
+  elements.statusDot.classList.toggle("reconnecting", badgeState.tone === "reconnecting");
   elements.statusLabel.textContent = badgeState.label;
 }
 
@@ -426,6 +502,17 @@ function renderRuntimeToggles(config = state.runtimeConfig) {
 function applyRuntimeConfig(config) {
   if (!config) return;
   state.runtimeConfig = config;
+  if (!state.initBangumiUsernameTouched) {
+    state.initBangumiUsername = String(config.sources?.bangumi?.username || "").trim();
+    // Mark that a successful /api/config prefill populated the field, so an
+    // explicit clear afterwards is a deliberate reset (sends username="") while
+    // an untouched or never-prefilled empty field omits it (keeps configured).
+    state.initBangumiUsernamePrefilled = true;
+    const input = document.getElementById("initBangumiUsername");
+    if (input instanceof HTMLInputElement) {
+      input.value = state.initBangumiUsername;
+    }
+  }
   renderRuntimeToggles(config);
 }
 
@@ -537,54 +624,261 @@ function setActiveTab(tabName) {
   }
 }
 
-async function toggleWatchLaterSaved(bvid) {
-  return watchLaterToggles.toggle(bvid, {
-    add: addToWatchLater,
-    remove: removeFromWatchLater,
+function normalizePopupSavedItem(itemOrBvid) {
+  const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+  return {
+    ...item,
+    ...normalizeCanonicalSavedItem(item),
+  };
+}
+
+async function toggleWatchLaterSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return watchLaterToggles.toggle(item.item_key, {
+    add: () => saveItem("watch_later", item),
+    remove: () => removeSavedItem("watch_later", item.item_key),
   });
 }
 
-async function toggleFavoriteSaved(bvid) {
-  return favoriteToggles.toggle(bvid, {
-    add: addToFavorite,
-    remove: removeFromFavorite,
+async function toggleFavoriteSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return favoriteToggles.toggle(item.item_key, {
+    add: () => saveItem("favorite", item),
+    remove: () => removeSavedItem("favorite", item.item_key),
   });
 }
 
-function bindWatchLaterToggle(button, bvid, labels = {}) {
-  watchLaterToggles.registerButton(bvid, button, labels);
-  void watchLaterToggles.hydrateStatus(bvid, watchLaterStatus);
-  return button;
-}
-
-function bindFavoriteToggle(button, bvid, labels = {}) {
-  favoriteToggles.registerButton(bvid, button, labels);
-  void favoriteToggles.hydrateStatus(bvid, favoriteStatus);
-  return button;
-}
-
-// ── Watch-later view (稍后再看) ──────────────────────────────────
-async function loadWatchLater() {
-  const list = elements.watchLaterList;
-  const empty = elements.watchLaterEmpty;
-  if (!(list instanceof HTMLElement)) return;
-  let data = null;
+async function toggleSavedWithFeedback(label, itemOrBvid, registry, toggle) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  setHint(`正在更新${label}…`, "info");
   try {
-    data = await fetchWatchLater(100, 0);
+    await toggle(item);
+    setHint(
+      registry.isSaved(item.item_key) ? `已保存到${label}` : `已从${label}移除`,
+      "success",
+    );
   } catch {
-    data = null;
+    // The registry has already restored the previous optimistic state.
+    setHint(`${label}更新失败，请确认本地后端正在运行后重试。`, "error");
   }
-  const items = Array.isArray(data?.items) ? data.items : [];
+}
+
+function bindWatchLaterToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  watchLaterToggles.registerButton(item.item_key, button, labels);
+  void watchLaterToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("watch_later", itemKey),
+  );
+  return button;
+}
+
+function bindFavoriteToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  favoriteToggles.registerButton(item.item_key, button, labels);
+  void favoriteToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("favorite", itemKey),
+  );
+  return button;
+}
+
+// ── Platform-neutral saved views ─────────────────────────────────
+const savedListStates = {
+  watch_later: createRetainedSavedListState(),
+  favorite: createRetainedSavedListState(),
+};
+const savedPendingFocus = { watch_later: null, favorite: null };
+function createSavedTaskRuntime() {
+  const tracker = createSavedSyncTaskTracker({ poll: (taskId) => pollSavedSyncTask(taskId) });
+  return {
+    tracker,
+    submissions: createSavedSubmissionFence(),
+    coordinator: createSavedTaskCoordinator({
+      tracker,
+      fetchTask: (taskId) => pollSavedSyncTask(taskId),
+    }),
+  };
+}
+const savedTaskRuntimes = {
+  watch_later: createSavedTaskRuntime(),
+  favorite: createSavedTaskRuntime(),
+};
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.resumeAll();
+  }
+});
+window.addEventListener("pagehide", () => {
+  for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
+}, { once: true });
+
+function syncEligible(item, listKind = "") {
+  const runtime = savedTaskRuntimes[listKind];
+  return isSavedSyncEligibleStatus(item?.sync_status, item?.error_code, item?.sync_task_id)
+    && !runtime?.submissions.has(item?.item_key)
+    && !runtime?.coordinator.owns(item?.item_key);
+}
+
+function savedSyncDetail(item) {
+  return getSavedSyncPresentation(
+    item?.sync_status,
+    item?.error_code,
+    item?.resolved_target,
+    item?.error_message,
+    item?.sync_task_id,
+  ).detail;
+}
+
+async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
+  if (button?.disabled) return;
+  const runtime = savedTaskRuntimes[listKind];
+  const coordinator = runtime.coordinator;
+  const selected = (Array.isArray(items) ? items : []).filter((item) => syncEligible(item, listKind));
+  if (!selected.length) return;
+  const platforms = Array.from(new Set(selected.map((item) => (
+    platformDisplayName(item.source_platform || item.item_key?.split(":", 1)[0])
+  ))));
+  if (confirmBatch && !window.confirm(
+    `将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`,
+  )) return;
+  const selectedKeys = selected.map((item) => item.item_key);
+  if (!runtime.submissions.claim(selectedKeys)) return;
+
+  let submitted = false;
+  if (button) {
+    const focusRoot = button.closest?.(".view") || button.parentElement;
+    savedPendingFocus[listKind] = captureSavedFocus(focusRoot, button)
+      || { kind: "list", action: "sync-all" };
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "同步中…";
+  }
+  if (status) {
+    status.removeAttribute("role");
+    status.setAttribute("aria-busy", "true");
+    status.textContent = `正在同步 ${selected.length} 项…`;
+  }
+  try {
+    const task = sanitizeSavedSyncTask(
+      await syncSavedItems(listKind, selectedKeys),
+    );
+    if (!task.task_id) throw new Error("同步任务缺少 task_id，请重试。");
+    coordinator.track(task, selectedKeys, {
+      onProgress: () => {
+        if (status) status.textContent = `正在同步 ${selected.length} 项…`;
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
+      },
+      onTerminal: (terminalTask) => {
+        if (status) status.removeAttribute("aria-busy");
+        if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
+        void reload();
+      },
+    });
+    submitted = true;
+    if (status) status.textContent = `同步任务已提交 · ${selected.length} 项`;
+  } catch (error) {
+    if (status) {
+      status.role = "alert";
+      status.textContent = error?.message || "同步失败，请稍后重试。";
+    }
+  } finally {
+    runtime.submissions.release(selectedKeys);
+    if (!submitted && button) {
+      button.disabled = false;
+      button.setAttribute("aria-disabled", "false");
+      button.removeAttribute("aria-busy");
+    }
+    if (!submitted && status) status.removeAttribute("aria-busy");
+    await reload();
+  }
+}
+
+async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
+  if (!(list instanceof HTMLElement)) return;
+  const focusRoot = list.closest?.(".view") || list;
+  const focusToken = captureSavedFocus(focusRoot) || savedPendingFocus[listKind];
+  const retained = savedListStates[listKind];
+  const coordinator = savedTaskRuntimes[listKind].coordinator;
+  const hadLoadError = Boolean(retained.snapshot().error);
+  try {
+    const data = await fetchSavedItems(listKind, 100, 0);
+    retained.commit({
+      items: Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [],
+      total: data?.total,
+    });
+    await coordinator.recover(retained.snapshot().items, {
+      onProgress: () => {
+        if (status) status.textContent = "正在同步已恢复的任务…";
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
+      },
+      onTerminal: (task) => {
+        if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步已完成";
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      },
+    });
+    if (status && hadLoadError) {
+      status.removeAttribute("role");
+      status.replaceChildren();
+    }
+  } catch (error) {
+    retained.fail(error);
+    if (status) {
+      status.role = "alert";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "saved-load-retry";
+      retry.dataset.savedListAction = "retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", (event) => {
+        savedPendingFocus[listKind] = captureSavedFocus(focusRoot, event.currentTarget);
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      });
+      status.replaceChildren(
+        document.createTextNode(`${retained.snapshot().error} `),
+        retry,
+      );
+    }
+  }
+  const { items } = retained.snapshot();
   list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
+  if (empty instanceof HTMLElement) empty.hidden = items.length > 0;
   for (const item of items) {
-    watchLaterToggles.setSaved(item.bvid, true);
-    list.appendChild(buildWatchLaterCard(item));
+    toggles.setSaved(item.item_key, true);
+    list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
+  if (restoreSavedFocus(focusRoot, focusToken)) savedPendingFocus[listKind] = null;
+  const pendingCount = items.filter((item) => syncEligible(item, listKind)).length;
+  if (syncAll instanceof HTMLButtonElement) {
+    syncAll.textContent = `同步未同步内容（${pendingCount}）`;
+    updateSavedBatchButtonState(syncAll, pendingCount);
+    syncAll.onclick = () => runSavedSync(
+      listKind, items, syncAll, status,
+      () => loadSavedList(listKind, { list, empty, syncAll, status, toggles }),
+      true,
+    );
+  }
+}
+
+async function loadWatchLater() {
+  return loadSavedList("watch_later", {
+    list: elements.watchLaterList,
+    empty: elements.watchLaterEmpty,
+    syncAll: elements.watchLaterSyncAll,
+    status: elements.watchLaterSyncStatus,
+    toggles: watchLaterToggles,
+  });
 }
 
 // Optimistic saved-card removal shared by the watch-later and favorites
@@ -594,9 +888,10 @@ async function loadWatchLater() {
 // whenever the DELETE queued behind slow same-origin requests (covers via
 // image-proxy compete for Chrome's 6-connection limit) or failed, clicking
 // looked like it did nothing.
-function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list, empty }) {
+function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, toggles, list, empty, onRemoved }) {
   remove.addEventListener("click", async () => {
     if (remove.disabled) return;
+    savedPendingFocus[listKind] = captureSavedFocus(list.closest?.(".view") || list, remove);
     remove.disabled = true;
     const anchor = card.nextElementSibling;
     card.remove();
@@ -604,10 +899,11 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
       empty.hidden = false;
     }
     try {
-      await requestRemove(bvid);
-      toggles.setSaved(bvid, false);
+      await requestRemove(itemKey);
+      toggles.setSaved(itemKey, false);
+      if (typeof onRemoved === "function") await onRemoved();
     } catch (error) {
-      console.error("saved-card remove failed:", bvid, error);
+      console.error("saved-card remove failed:", itemKey, error);
       if (list instanceof HTMLElement) {
         list.insertBefore(card, anchor?.parentElement === list ? anchor : null);
       }
@@ -619,24 +915,103 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
   });
 }
 
-function buildWatchLaterCard(item) {
+async function postSavedFeedback(item, feedbackType, note = "") {
+  const contentId = item.content_id || item.bvid || "";
+  const res = await sendBehaviorEvents([{
+    type: "feedback",
+    source_platform: item.source_platform || "bilibili",
+    title: item.title || "",
+    url: buildContentUrl(item) || item.content_url || "",
+    timestamp: Date.now(),
+    metadata: {
+      feedback_type: feedbackType,
+      bvid: contentId,
+      content_id: contentId,
+      feedback_note: note,
+      saved_feedback: true,
+    },
+  }]);
+  if (!res || !(res.accepted >= 1)) {
+    const reason = res?.rejected?.[0]?.reason;
+    throw new Error(reason === "not_initialized"
+      ? "画像尚未就绪，暂时无法记录反馈。"
+      : "反馈未被接受，请稍后重试。");
+  }
+  return res;
+}
+
+async function handleSavedCardFeedback(item, feedbackType, clicked, other) {
+  if (clicked.disabled || other.disabled) return;
+  const previousPressed = [clicked, other].map((button) => (
+    button.getAttribute("aria-pressed")
+  ));
+  clicked.setAttribute("aria-pressed", "true");
+  other.setAttribute("aria-pressed", "false");
+  clicked.disabled = true;
+  other.disabled = true;
+  setHint(
+    feedbackType === "like" ? "正在记录喜欢…" : "正在记录不感兴趣…",
+    "info",
+  );
+  try {
+    await postSavedFeedback(item, feedbackType);
+    setHint(
+      feedbackType === "like" ? "记下了，这类多来点。" : "记下了，这类先少来点。",
+      "success",
+    );
+  } catch (error) {
+    [clicked, other].forEach((button, index) => {
+      const pressed = previousPressed[index];
+      if (pressed === null) button.removeAttribute("aria-pressed");
+      else button.setAttribute("aria-pressed", pressed);
+    });
+    setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+  } finally {
+    clicked.disabled = false;
+    other.disabled = false;
+  }
+}
+
+function buildSavedCard(listKind, item, { list, empty, toggles }) {
+  if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
+    || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+    item = { ...item, sync_status: "syncing" };
+  }
   const card = document.createElement("article");
   card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
+  card.dataset.itemKey = item.item_key;
 
   const body = document.createElement("button");
   body.type = "button";
   body.className = "saved-card-open";
+  body.dataset.savedAction = "open";
   const media = buildSavedCardMedia(item);
   const copy = document.createElement("span");
   copy.className = "saved-card-copy";
   const title = document.createElement("p");
   title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
+  title.textContent = item.title || item.content_id;
   const up = document.createElement("p");
   up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
+  up.textContent = item.author_name || item.up_name || "";
+  const syncLine = document.createElement("span");
+  syncLine.className = "saved-sync-line";
+  const presentation = getSavedSyncPresentation(
+    item.sync_status,
+    item.error_code,
+    item.resolved_target,
+    item.error_message,
+    item.sync_task_id,
+  );
+  const chip = document.createElement("span");
+  chip.className = "saved-sync-chip";
+  chip.dataset.tone = presentation.tone;
+  chip.textContent = presentation.label;
+  const target = document.createElement("span");
+  target.className = "saved-sync-target";
+  target.textContent = savedSyncDetail(item);
+  syncLine.append(chip, target);
+  copy.append(title, up, syncLine);
   body.append(copy);
   body.prepend(media);
   body.addEventListener("click", () => {
@@ -647,17 +1022,122 @@ function buildWatchLaterCard(item) {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "saved-card-remove";
+  remove.dataset.savedAction = "remove";
   remove.textContent = "移除";
-  remove.title = "移出稍后再看";
+  remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
+  const onRemoved = listKind === "watch_later" ? loadWatchLater : loadFavorites;
   bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromWatchLater,
-    toggles: watchLaterToggles,
-    list: elements.watchLaterList,
-    empty: elements.watchLaterEmpty,
+    listKind,
+    itemKey: item.item_key,
+    requestRemove: (itemKey) => removeSavedItem(listKind, itemKey),
+    toggles,
+    list,
+    empty,
+    onRemoved,
   });
 
-  card.append(body, remove);
+  const actions = document.createElement("span");
+  actions.className = "saved-card-actions";
+  if (presentation.actionable || presentation.busy) {
+    const sync = document.createElement("button");
+    sync.type = "button";
+    sync.className = "saved-card-sync";
+    sync.dataset.savedAction = "sync";
+    sync.textContent = presentation.actionLabel;
+    sync.disabled = presentation.busy;
+    sync.setAttribute("aria-disabled", String(presentation.busy));
+    sync.setAttribute("aria-label", presentation.busy ? `${presentation.label}，请稍候` : presentation.actionLabel);
+    if (presentation.actionable) {
+      sync.addEventListener("click", () => runSavedSync(
+        listKind,
+        [item],
+        sync,
+        listKind === "watch_later" ? elements.watchLaterSyncStatus : elements.favoritesSyncStatus,
+        listKind === "watch_later" ? loadWatchLater : loadFavorites,
+      ));
+    }
+    actions.append(sync);
+  }
+  actions.append(remove);
+
+  const feedbackActions = document.createElement("div");
+  feedbackActions.className = "saved-card-feedback";
+  feedbackActions.setAttribute("aria-label", "反馈与保存操作");
+
+  const like = document.createElement("button");
+  like.type = "button";
+  like.className = "feedback-icon-btn";
+  like.dataset.savedAction = "like";
+  like.setAttribute("aria-label", "喜欢");
+  like.title = "喜欢";
+  like.setAttribute("aria-pressed", "false");
+  like.innerHTML = THUMBS_UP_ICON_SVG;
+
+  const dislike = document.createElement("button");
+  dislike.type = "button";
+  dislike.className = "feedback-icon-btn";
+  dislike.dataset.savedAction = "dislike";
+  dislike.setAttribute("aria-label", "不感兴趣");
+  dislike.title = "不感兴趣";
+  dislike.setAttribute("aria-pressed", "false");
+  dislike.innerHTML = THUMBS_DOWN_ICON_SVG;
+
+  like.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "like", like, dislike);
+  });
+  dislike.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "dislike", dislike, like);
+  });
+
+  const comment = document.createElement("button");
+  comment.type = "button";
+  comment.className = "feedback-icon-btn";
+  comment.dataset.savedAction = "comment";
+  comment.setAttribute("aria-label", "聊一聊");
+  comment.title = "聊一聊";
+  comment.innerHTML = MESSAGE_ICON_SVG;
+  comment.addEventListener("click", async () => {
+    const draft = window.prompt("想围绕这条聊什么？");
+    if (draft === null) return;
+    const note = draft.trim();
+    if (!note) {
+      setHint("先写一句想聊的内容，再提交这条反馈。", "warning");
+      return;
+    }
+    comment.disabled = true;
+    setHint("正在提交聊天线索…", "info");
+    try {
+      await postSavedFeedback(item, "comment", note);
+      setHint("已提交聊天线索。", "success");
+    } catch (error) {
+      setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+    } finally {
+      comment.disabled = false;
+    }
+  });
+
+  // The card already belongs to listKind (managed by 移除), so show only the
+  // other list's toggle: watch_later → 收藏; favorite → 稍后再看.
+  const crossIsFavorite = listKind === "watch_later";
+  const toggleCross = () => {
+    if (crossIsFavorite) return toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
+    return toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
+  };
+  const crossToggle = createActionButton(
+    "",
+    `feedback-icon-btn saved-toggle cross-toggle ${crossIsFavorite ? "favorite-btn" : "watch-later-btn"}`,
+    toggleCross,
+  );
+  crossToggle.dataset.savedAction = crossIsFavorite ? "favorite" : "watch-later";
+  crossToggle.innerHTML = crossIsFavorite ? FAVORITE_ICON_SVG : WATCH_LATER_ICON_SVG;
+  if (crossIsFavorite) {
+    bindFavoriteToggle(crossToggle, item);
+  } else {
+    bindWatchLaterToggle(crossToggle, item);
+  }
+
+  feedbackActions.append(like, dislike, comment, crossToggle);
+  card.append(body, actions, feedbackActions);
   return card;
 }
 
@@ -676,70 +1156,14 @@ function buildSavedCardMedia(item) {
   return media;
 }
 
-// ── Favorites view (收藏夹) ─────────────────────────────────────
 async function loadFavorites() {
-  const list = elements.favoritesList;
-  const empty = elements.favoritesEmpty;
-  if (!(list instanceof HTMLElement)) return;
-  let data = null;
-  try {
-    data = await fetchFavorites(100, 0);
-  } catch {
-    data = null;
-  }
-  const items = Array.isArray(data?.items) ? data.items : [];
-  list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
-  for (const item of items) {
-    favoriteToggles.setSaved(item.bvid, true);
-    list.appendChild(buildFavoriteCard(item));
-  }
-}
-
-function buildFavoriteCard(item) {
-  const card = document.createElement("article");
-  card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
-
-  const body = document.createElement("button");
-  body.type = "button";
-  body.className = "saved-card-open";
-  const media = buildSavedCardMedia(item);
-  const copy = document.createElement("span");
-  copy.className = "saved-card-copy";
-  const title = document.createElement("p");
-  title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
-  const up = document.createElement("p");
-  up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
-  body.append(copy);
-  body.prepend(media);
-  body.addEventListener("click", () => {
-    const url = buildContentUrl(item);
-    if (url) window.open(url, "_blank");
-  });
-
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "saved-card-remove";
-  remove.textContent = "移除";
-  remove.title = "取消收藏";
-  bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromFavorite,
-    toggles: favoriteToggles,
+  return loadSavedList("favorite", {
     list: elements.favoritesList,
     empty: elements.favoritesEmpty,
+    syncAll: elements.favoritesSyncAll,
+    status: elements.favoritesSyncStatus,
+    toggles: favoriteToggles,
   });
-
-  card.append(body, remove);
-  return card;
 }
 
 function showRecommendationEmptyState(title, message) {
@@ -753,6 +1177,10 @@ function showRecommendationEmptyState(title, message) {
   elements.emptyState.hidden = false;
   elements.emptyTitle.textContent = title;
   elements.emptyText.textContent = message;
+  // Only the degraded branch re-shows the action button after this reset.
+  if (elements.emptyAction instanceof HTMLElement) {
+    elements.emptyAction.hidden = true;
+  }
   // The guided-init panel is only for the uninitialized state; the
   // uninitialized branch re-shows it via renderInitPanelIdle().
   if (elements.initPanel instanceof HTMLElement) {
@@ -794,10 +1222,29 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
-function _setInitReason(text) {
+function _setInitCancelButton(visible, enabled = visible) {
+  if (!(elements.initCancelBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.initCancelBtn.hidden = !visible;
+  elements.initCancelBtn.disabled = !enabled;
+  if (!elements.initCancelBtn.dataset.bound) {
+    elements.initCancelBtn.dataset.bound = "1";
+    elements.initCancelBtn.addEventListener("click", () => {
+      void handleCancelInitClick();
+    });
+  }
+}
+
+function _setInitReason(text, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
     elements.initStartReason.hidden = !text;
+    elements.initStartReason.setAttribute("role", text && assertive ? "alert" : "status");
+    elements.initStartReason.setAttribute(
+      "aria-live",
+      text && assertive ? "assertive" : "polite",
+    );
   }
 }
 
@@ -826,7 +1273,85 @@ function _renderInitChecklist(status, selected = null) {
       hint.textContent = row.hint;
       li.append(hint);
     }
+    if (row.key === "embedding" && !row.ok) {
+      const pull = row.pull || {};
+      const repair = row.repair || {};
+      if (pull.active) {
+        const wrap = document.createElement("div");
+        wrap.className = "init-embed-pull";
+        const bar = document.createElement("div");
+        bar.className = "init-embed-pull-bar";
+        const fill = document.createElement("div");
+        fill.className = "init-embed-pull-fill";
+        fill.style.width = `${Math.max(1, Math.min(99, Number(pull.pct) || 1))}%`;
+        bar.append(fill);
+        wrap.append(bar);
+        if (pull.label) {
+          const label = document.createElement("p");
+          label.className = "init-embed-pull-label";
+          label.textContent = pull.label;
+          wrap.append(label);
+        }
+        li.append(wrap);
+      } else if (repair.repairable) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "init-repair-btn";
+        btn.textContent = repair.label || "修复向量模型";
+        btn.addEventListener("click", () =>
+          void _handleChecklistEmbeddingRepair(btn, selected),
+        );
+        li.append(btn);
+      }
+    }
     elements.initChecklist.append(li);
+  }
+}
+
+// Start server-side embedding repair and keep the checklist synchronized with
+// the existing init-status progress fields until repair settles.
+async function _handleChecklistEmbeddingRepair(btn, selected = null) {
+  if (!(btn instanceof HTMLButtonElement)) return;
+  btn.disabled = true;
+  btn.textContent = "修复中…";
+  try {
+    const kicked = await startEmbeddingRepair();
+    if (!embeddingRepairStartAccepted(kicked)) {
+      btn.disabled = false;
+      btn.textContent = "重试";
+      const detail =
+        kicked && kicked.status === 403
+          ? "只能在本机操作向量模型修复。"
+          : kicked && kicked.status === 404
+            ? "当前后端版本不支持向量模型修复，请先升级后端。"
+            : kicked && kicked.detail
+              ? kicked.detail
+              : "向量模型修复未能开始，请稍后重试。";
+      setHint(detail, "error");
+      return;
+    }
+  } catch {
+    btn.disabled = false;
+    btn.textContent = "重试";
+    setHint("向量模型修复请求失败，请稍后重试。", "error");
+    return;
+  }
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    let status;
+    try {
+      status = await fetchInitStatus();
+    } catch {
+      continue;
+    }
+    if (!status) continue;
+    _renderInitChecklist(status, selected);
+    const prereq = status.prerequisites || {};
+    if (prereq.embedding_ready) return;
+    const stillPulling =
+      Boolean(prereq.embedding_repair_running) ||
+      prereq.embedding_check === "repairing";
+    if (!stillPulling && i > 1) return;
   }
 }
 
@@ -857,6 +1382,75 @@ function _renderInitSources() {
     row.append(box, span);
     elements.initSources.append(row);
   }
+  const bangumiRow = document.createElement("label");
+  bangumiRow.className = "init-source-row";
+  const bangumiLabel = document.createElement("span");
+  bangumiLabel.textContent = "Bangumi 公开用户名（可留空，仅启用发现）";
+  const bangumiInput = document.createElement("input");
+  bangumiInput.id = "initBangumiUsername";
+  bangumiInput.maxLength = 128;
+  bangumiInput.autocomplete = "off";
+  bangumiInput.disabled = true;
+  bangumiInput.value = state.initBangumiUsername;
+  bangumiInput.addEventListener("input", () => {
+    state.initBangumiUsername = bangumiInput.value;
+    state.initBangumiUsernameTouched = true;
+  });
+  bangumiRow.append(bangumiLabel, bangumiInput);
+  elements.initSources.append(bangumiRow);
+
+  // Optional personal access token: identifies the account via /v0/me and reads
+  // private collections. When set, the username above is auto-resolved.
+  const bangumiTokenRow = document.createElement("label");
+  bangumiTokenRow.className = "init-source-row";
+  const bangumiTokenLabel = document.createElement("span");
+  bangumiTokenLabel.textContent = "Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）";
+  const bangumiTokenInput = document.createElement("input");
+  bangumiTokenInput.id = "initBangumiToken";
+  bangumiTokenInput.type = "password";
+  bangumiTokenInput.maxLength = 512;
+  bangumiTokenInput.autocomplete = "off";
+  bangumiTokenInput.disabled = true;
+  bangumiTokenInput.value = state.initBangumiToken;
+  bangumiTokenInput.addEventListener("input", () => {
+    state.initBangumiToken = bangumiTokenInput.value;
+  });
+  bangumiTokenRow.append(bangumiTokenLabel, bangumiTokenInput);
+  elements.initSources.append(bangumiTokenRow);
+  const bangumiTokenHint = document.createElement("p");
+  bangumiTokenHint.className = "init-sources-hint";
+  // Spell out the three-way choice: the backend accepts a token, an explicit
+  // public username, OR the account the extension reads off a logged-in
+  // bgm.tv page. Leaving both fields empty is a valid path, and users who
+  // aren't told that assume Bangumi needs a token they haven't got.
+  const bangumiTokenLink = document.createElement("a");
+  bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
+  bangumiTokenLink.target = "_blank";
+  bangumiTokenLink.rel = "noopener noreferrer";
+  bangumiTokenLink.textContent = "生成个人令牌";
+  const bangumiTokenDocLink = document.createElement("a");
+  bangumiTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌";
+  bangumiTokenDocLink.target = "_blank";
+  bangumiTokenDocLink.rel = "noopener noreferrer";
+  bangumiTokenDocLink.textContent = "取令牌步骤";
+  bangumiTokenHint.append(
+    document.createTextNode(
+      "Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；" +
+        "公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，" +
+        "扩展会自动识别账号（只拿到账号名，可能未经校验）。",
+    ),
+    bangumiTokenLink,
+    document.createTextNode("（约 1 年有效，视同密码保管）·"),
+    bangumiTokenDocLink,
+  );
+  elements.initSources.append(bangumiTokenHint);
+
+  elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+    const checked = Boolean(event.currentTarget.checked);
+    bangumiInput.disabled = !checked;
+    bangumiTokenInput.disabled = !checked;
+  });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
   hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -877,6 +1471,31 @@ function _readSelectedInitSources() {
   return selected;
 }
 
+function _readInitBangumiUsername() {
+  state.initBangumiUsername = String(
+    document.getElementById("initBangumiUsername")?.value || "",
+  ).trim();
+  return state.initBangumiUsername;
+}
+
+function _readInitBangumiToken() {
+  state.initBangumiToken = String(
+    document.getElementById("initBangumiToken")?.value || "",
+  ).trim();
+  return state.initBangumiToken;
+}
+
+// Decide what Bangumi username (if any) guided init should send, delegating the
+// omit-vs-clear rule to the shared pure helper. Returns the trimmed value to
+// send, or null to omit it so the backend keeps the configured username.
+function _resolveInitBangumiUsernameForSubmit(value) {
+  return resolveInitBangumiUsername({
+    touched: state.initBangumiUsernameTouched,
+    prefilled: state.initBangumiUsernamePrefilled,
+    value,
+  });
+}
+
 // Idle entry: source checkboxes + the actionable button + a one-line note.
 // Conditions are checked ON CLICK (no slow upfront probe / blank panel);
 // failures are surfaced only after a click that doesn't pass.
@@ -892,11 +1511,22 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
+    // Expectation management: total time is highly variable, so orient the
+    // user about that variability instead of quoting a duration.
+    const expectation = document.createElement("li");
+    expectation.className = "init-hint-row";
+    expectation.textContent = INIT_EXPECTATION_HINT;
+    elements.initChecklist.append(expectation);
   }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = true;
   }
+  if (elements.initStallHint instanceof HTMLElement) {
+    elements.initStallHint.hidden = true;
+    elements.initStallHint.classList.remove("stale");
+  }
   _setInitStartButton("开始初始化", true);
+  _setInitCancelButton(false);
   _setInitReason("");
 }
 
@@ -913,27 +1543,68 @@ function renderInitProgress(status) {
     elements.initChecklist.replaceChildren();
   }
   const progress = initProgressView(status);
+  // The one reassurance a waiting user needs, said once: after v0.3.180 a run
+  // that keeps producing results is literally never interrupted.
+  if (elements.initChecklist instanceof HTMLElement && progress.active) {
+    const patience = document.createElement("li");
+    patience.className = "init-hint-row";
+    patience.textContent = INIT_RUNNING_HINT;
+    elements.initChecklist.append(patience);
+  }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
-      elements.initProgressBar.style.width = `${progress.pct}%`;
+      elements.initProgressBar.style.width = progress.indeterminate ? "100%" : `${progress.pct}%`;
+      elements.initProgressBar.classList.toggle("indeterminate", progress.indeterminate);
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
-        ? `初始化未完成：${describeInitReason(status && status.reason) || progress.failedReason || "请稍后重试"}`
+        ? `初始化未完成：${describeInitFailure(status, progress)}`
+        : progress.partial
+          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.indeterminate
+            ? progress.stageLabel || "正在初始化"
+            : `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
+      elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
+      elements.initProgressLabel.setAttribute(
+        "aria-live",
+        progress.failed ? "assertive" : "polite",
+      );
+    }
+  }
+  // Liveness line under the bar: "● 进行中 (+ observed elapsed / counts)" while
+  // the backend keeps writing; amber stall copy after >90s of silence.
+  if (elements.initStallHint instanceof HTMLElement) {
+    if (progress.active) {
+      const staleness = stalenessView(status);
+      const text = staleness.fresh
+        ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
+        : staleness.text;
+      elements.initStallHint.textContent = text;
+      elements.initStallHint.classList.toggle("stale", !staleness.fresh);
+      elements.initStallHint.hidden = !text;
+    } else {
+      elements.initStallHint.hidden = true;
+      elements.initStallHint.classList.remove("stale");
     }
   }
   if (progress.active) {
     _setInitStartButton("初始化进行中…", false);
+    _setInitCancelButton(true);
     _setInitReason("");
   } else if (progress.failed) {
     _setInitStartButton("重试初始化", true);
+    _setInitCancelButton(false);
     _setInitReason("");
+  } else if (progress.partial) {
+    _setInitStartButton("画像已生成", false);
+    _setInitCancelButton(false);
+    _setInitReason(describeInitStatusReason(status), false);
   } else {
     _setInitStartButton("已初始化", false);
+    _setInitCancelButton(false);
     _setInitReason("");
   }
 }
@@ -944,7 +1615,11 @@ async function pollInitProgress() {
   let status = null;
   try {
     status = await fetchInitStatus();
-  } catch {
+  } catch (error) {
+    _setInitReason(
+      `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`,
+      false,
+    );
     clearInitPolling();
     initPollTimer = setTimeout(() => {
       void pollInitProgress();
@@ -962,10 +1637,61 @@ async function pollInitProgress() {
   clearInitPolling();
   if (status.initialized) {
     state.profileLoaded = false;
-    setHint("初始化完成！正在加载画像和推荐…", "success");
+    setHint(
+      status.partial_success
+        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        : "初始化完成！正在加载画像和推荐…",
+      status.partial_success ? "warning" : "success",
+    );
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
   }
+}
+
+async function handleCancelInitClick() {
+  if (elements.initCancelBtn instanceof HTMLButtonElement) {
+    elements.initCancelBtn.disabled = true;
+    elements.initCancelBtn.textContent = "取消中…";
+  }
+  try {
+    await cancelInit();
+    _setInitReason("已发送取消请求，正在安全结束当前步骤…", false);
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+  } catch (error) {
+    if (error?.status === 409) {
+      clearInitPolling();
+      initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+    } else {
+      _setInitReason(error?.details?.detail || error?.message || "取消请求失败。");
+    }
+  } finally {
+    if (elements.initCancelBtn instanceof HTMLButtonElement) {
+      elements.initCancelBtn.textContent = "取消";
+      elements.initCancelBtn.disabled = false;
+    }
+  }
+}
+
+// Boot-time re-attach: when the popup opens while a run is already live, the
+// uninitialized branch would otherwise paint the idle panel and never poll
+// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
+// and, ONLY if a run is in flight, take over with the progress view + poll.
+// The idle path is left untouched (renderInitProgress would clobber it). This
+// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+async function maybeAttachRunningInitProgress() {
+  let status;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    return false;
+  }
+  if (!shouldAttachRunningInitProgress(status)) {
+    return false;
+  }
+  renderInitProgress(status);
+  _startInitProgressPoll();
+  return true;
 }
 
 function _startInitProgressPoll() {
@@ -981,11 +1707,24 @@ function _startInitProgressPoll() {
 async function handleStartInitClick() {
   // Snapshot the source selection BEFORE we replace the panel contents.
   const selectedSources = _readSelectedInitSources();
+  const bangumiUsername = _readInitBangumiUsername();
+  const bangumiUsernameOption = _resolveInitBangumiUsernameForSubmit(bangumiUsername);
+  const bangumiToken = _readInitBangumiToken();
+  // Only send a token when the user typed one; omit otherwise so the backend
+  // keeps any configured token (empty string would clear a stored token).
+  const bangumiTokenOption = bangumiToken ? bangumiToken : null;
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
     return;
   }
+  // No client-side Bangumi-only admission check here on purpose. The backend
+  // owns a THREE-tier account ladder (token → explicit username →
+  // browser-extension-reported identity); a local "username or token required"
+  // copy of it can't see the third tier and silently blocked zero-config
+  // extension users from ever reaching /api/init. The backend answers 409
+  // no_profile_signal_sources when all three are genuinely missing, and the
+  // startInit catch below renders it via describeInitStartError.
   _setInitStartButton("检查中…", false);
   _setInitReason("");
   if (elements.initChecklist instanceof HTMLElement) {
@@ -1028,7 +1767,7 @@ async function handleStartInitClick() {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(
-      describeInitReason(status.reason) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
+      describeInitStatusReason(status) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
     );
     return;
   }
@@ -1036,15 +1775,30 @@ async function handleStartInitClick() {
   // All conditions pass → start with the chosen sources. The backend
   // re-validates in its critical section, so a race can still 409 — surface
   // that and let the user retry.
+  let startResult;
   try {
-    await startInit({ force: false, sources: selectedSources });
+    startResult = await startInit({
+      force: false,
+      sources: selectedSources,
+      bangumiUsername: bangumiUsernameOption,
+      bangumiToken: bangumiTokenOption,
+    });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));
     return;
   }
-  setHint("初始化已开始，正在拉取数据…", "info");
+  // The 202 response may carry backend warnings (e.g. Bangumi selected without a
+  // public username → discovery-only). Surface them instead of the generic
+  // "已开始" note so the user knows the run is proceeding with a caveat.
+  const startWarnings = Array.isArray(startResult?.warnings)
+    ? startResult.warnings.filter((text) => typeof text === "string" && text.trim())
+    : [];
+  setHint(
+    startWarnings.length ? startWarnings.join(" ") : "初始化已开始，正在拉取数据…",
+    "info",
+  );
   renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
   _startInitProgressPoll();
 }
@@ -1297,6 +2051,39 @@ function isAvoidanceProbeType(type) {
   return normalizeProbeType(type) === "avoidance.probe";
 }
 
+function probeActionDescriptors(type) {
+  return isAvoidanceProbeType(type)
+    ? [
+        { action: "confirm", label: "确认避雷", className: "is-confirm" },
+        { action: "defer", label: "搁置避雷", className: "is-neutral" },
+        { action: "reject", label: "不是雷点", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ]
+    : [
+        { action: "confirm", label: "确认喜欢", className: "is-confirm" },
+        { action: "defer", label: "暂时搁置", className: "is-neutral" },
+        { action: "reject", label: "确认不喜欢", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ];
+}
+
+function probeResponseMessage(type, responseType, domain) {
+  const isAvoidance = isAvoidanceProbeType(type);
+  if (responseType === "defer") {
+    return isAvoidance
+      ? `好，「${domain}」先搁置，过阵子再确认是不是雷点。`
+      : `好，「${domain}」先搁置，过阵子再问。`;
+  }
+  if (responseType === "confirm") {
+    return isAvoidance
+      ? `好，「${domain}」会作为避雷方向处理。`
+      : `好，「${domain}」记住了。`;
+  }
+  return isAvoidance
+    ? `好，「${domain}」不记成避雷。`
+    : `好，「${domain}」会作为不喜欢处理。`;
+}
+
 function isChallengeProbe(probe) {
   const mode = String(probe?.probe_mode || "").toLowerCase();
   return Boolean(probe?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -1443,6 +2230,20 @@ function connectRuntimeStream() {
       ) {
         setHint(String(event.message || ""), "success");
       }
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.activeDelights.findIndex((item) => item?.bvid === bvid);
+        if (index >= 0) {
+          state.activeDelights[index] = {
+            ...state.activeDelights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          syncDelightHead();
+          renderDelightSlot();
+        }
+      }
       // Live guided-init progress (gui-init F1): drive the recommend-tab
       // progress bar from the run's stage events.
       if (event.type === "init_progress" || event.type === "init_failed") {
@@ -1451,7 +2252,12 @@ function connectRuntimeStream() {
       // Init completed: re-fetch everything including profile
       if (event.type === "init_completed") {
         state.profileLoaded = false;
-        setHint("初始化完成！正在加载画像和推荐…", "success");
+        setHint(
+          event.partial_success
+            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            : "初始化完成！正在加载画像和推荐…",
+          event.partial_success ? "warning" : "success",
+        );
         scheduleRecommendationsRefresh();
         void loadProfileSummary({ force: true });
       }
@@ -1466,21 +2272,24 @@ function connectRuntimeStream() {
     },
     onConnect() {
       const wasOnline = state.online;
-      offlineBackendPoller.stop();
-      if (!wasOnline) {
-        state.online = true;
-        setStatus(true);
-        setHint("后端连上了，正在刷新。", "success");
+      const { reconnected } = backendConnectionCoordinator.markStreamConnected();
+      if (!wasOnline || reconnected) {
+        setHint(
+          reconnected && wasOnline ? "实时连接已恢复，正在刷新。" : "后端连上了，正在刷新。",
+          "success",
+        );
         scheduleRecommendationsRefresh({ delayMs: 0 });
       }
     },
     onDisconnect() {
-      if (state.online) {
-        state.online = false;
-        setStatus(false);
+      void backendConnectionCoordinator.markStreamDisconnected().then((result) => {
+        if (!result.applied) return;
+        if (result.reachable) {
+          setHint("实时连接正在恢复，后端功能仍可用。");
+          return;
+        }
         setHint("后端连接断了，等重连上会自动恢复。", "error");
-      }
-      offlineBackendPoller.start();
+      });
     },
   });
   client.connect();
@@ -1752,22 +2561,21 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     if ((item.status || "active") === "active" && item.domain) {
       const actions = document.createElement("div");
       actions.className = "spec-actions";
-
-      const confirmBtn = document.createElement("button");
-      confirmBtn.className = "probe-btn is-confirm";
-      confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "喜欢";
-      confirmBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "confirm", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      const rejectBtn = document.createElement("button");
-      rejectBtn.className = "probe-btn is-reject";
-      rejectBtn.textContent = isAvoidance ? "不是" : "不喜欢";
-      rejectBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "reject", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      actions.append(confirmBtn, rejectBtn);
+      for (const { action: responseType, label, className } of probeActionDescriptors(
+        probeType,
+      ).filter(({ action }) => action !== "chat")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `probe-btn ${className}`;
+        button.textContent = label;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.dataset.responseType = responseType;
+        button.addEventListener("click", () =>
+          handleSpecResponse(item.domain, responseType, row, probeType),
+        );
+        actions.append(button);
+      }
       row.append(actions);
     }
 
@@ -1800,9 +2608,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
       rowEl.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "spec-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `好，「${domain}」记住了。` : `好，「${domain}」先不看了。`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       rowEl.append(msg);
       setTimeout(() => rowEl.remove(), 2500);
     }
@@ -1873,23 +2679,16 @@ function renderProbeCard() {
 
   const actions = document.createElement("div");
   actions.className = "probe-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleProbeResponse("confirm"));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleProbeResponse("reject"));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591a\u804a\u804a";
-  chatBtn.addEventListener("click", () => handleProbeResponse("chat"));
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
+  for (const descriptor of probeActionDescriptors("interest.probe")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.addEventListener("click", () => handleProbeResponse(descriptor.action));
+    actions.append(button);
+  }
   card.append(actions);
 
   // Insert at the top of the speculative interests container
@@ -1928,9 +2727,7 @@ async function handleProbeResponse(responseType) {
       probeCard.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "probe-result";
-      msg.textContent = responseType === "confirm"
-        ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002`
-        : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`;
+      msg.textContent = probeResponseMessage("interest.probe", responseType, domain);
       probeCard.append(msg);
       setTimeout(() => probeCard.remove(), 3000);
     }
@@ -2112,14 +2909,14 @@ function bindStarButton() {
 async function renderMobileQrPanel() {
   const endpoint = await getBackendEndpointConfig();
 
-  // When the configured host is loopback, try to get the server's
-  // detected LAN IP from the health endpoint so the QR code shows
-  // an address that mobile devices can actually reach.
+  // When the configured host is loopback, ask the lightweight QR endpoint
+  // for the server's detected LAN IP. Unlike the full readiness endpoint,
+  // this endpoint does not wait for embedding readiness before the QR code can be rendered.
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
       const base = `http://${endpoint.host}:${endpoint.port}`;
-      const resp = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(2000) });
+      const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();
         if (data.lan_ip && !isLoopbackMobileHost(data.lan_ip)) {
@@ -2127,7 +2924,7 @@ async function renderMobileQrPanel() {
         }
       }
     } catch {
-      // Health fetch failed — fall through with original endpoint.
+      // QR-info fetch failed — fall through with original endpoint.
     }
   }
 
@@ -2216,9 +3013,43 @@ function bindMobileQr() {
   }
 }
 
+// Single delegated click handler for every message card's action buttons.
+// Bound once on the (persistent) container so it survives the frequent
+// container.replaceChildren() re-renders that used to orphan per-button
+// listeners and silently drop clicks.
+function onMessageActionClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const btn = target.closest("[data-msg-action]");
+  if (!(btn instanceof HTMLElement) || btn.disabled) return;
+  const card = btn.closest(".message-item");
+  if (!(card instanceof HTMLElement)) return;
+  const domain = card.dataset.domain || "";
+  const type = card.dataset.type || "interest.probe";
+  const action = btn.dataset.msgAction;
+  if (action === "dismiss") {
+    dismissMessage(domain, type);
+  } else if (action === "chat") {
+    expandInlineChat(card, domain, type);
+  } else if (action === "confirm" || action === "defer" || action === "reject") {
+    // Guard against a double-click firing the API twice before the card is
+    // replaced with its success state; clear on settle so an error path (card
+    // kept) can be retried (success replaces the card, so it's moot there).
+    if (card.dataset.responding === "1") return;
+    card.dataset.responding = "1";
+    void handleMessageResponse(domain, action, type).finally(() => {
+      delete card.dataset.responding;
+    });
+  }
+}
+
 function renderMessagesList() {
   const container = elements.messagesList;
   if (!(container instanceof HTMLElement)) return;
+  if (!container.dataset.actionsDelegated) {
+    container.dataset.actionsDelegated = "1";
+    container.addEventListener("click", onMessageActionClick);
+  }
   container.replaceChildren();
 
   if (state.messages.length === 0) {
@@ -2247,11 +3078,16 @@ function buildMessageCard(probe) {
   item.dataset.type = type;
 
   // Dismiss button (×)
+  // Actions are wired via ONE delegated listener on the messages container
+  // (see renderMessagesList) rather than per-button, so a background re-render
+  // \u2014 chat-turn polling, the post-fetch re-render in openMessagesPanel, or
+  // another card's response \u2014 can't orphan the handler and swallow the click
+  // (field report 2026-07-06: "\u8FD9\u4E2A\u6309\u94AE\u6709\u65F6\u5019\u6CA1\u53CD\u5E94").
   const dismiss = document.createElement("button");
   dismiss.className = "message-dismiss";
   dismiss.textContent = "\u00D7";
   dismiss.title = "\u5173\u95ED";
-  dismiss.addEventListener("click", () => dismissMessage(probe.domain, type));
+  dismiss.dataset.msgAction = "dismiss";
   item.append(dismiss);
 
   const eyebrow = document.createElement("div");
@@ -2303,31 +3139,71 @@ function buildMessageCard(probe) {
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "confirm", type));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "reject", type));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.addEventListener("click", () => expandInlineChat(item, probe.domain, type));
-
-  if (probe.chat_status === "pending") {
-    confirmBtn.disabled = true;
-    rejectBtn.disabled = true;
-    chatBtn.disabled = true;
+  for (const descriptor of probeActionDescriptors(type)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.dataset.msgAction = descriptor.action;
+    button.disabled = probe.chat_status === "pending";
+    actions.append(button);
   }
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
   item.append(actions);
   return item;
+}
+
+// ── Engagement stats ───────────────────────────────────────────
+// Condense a raw count into Chinese-style 万/亿 units. Empty string for
+// non-positive values so callers render nothing.
+function formatCountCn(n) {
+  const value = Math.floor(Number(n) || 0);
+  if (value <= 0) return "";
+  if (value >= 100000000)
+    return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (value >= 10000)
+    return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(value);
+}
+
+// Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
+// > 0 appear; when nothing qualifies the result is "" (render nothing).
+function recommendationStats(item) {
+  const segments = [];
+  const sourceRank = Math.trunc(Number(item?.source_rank) || 0);
+  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
+  if (item?.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+  if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
+  return segments.join(" · ");
+}
+
+// Append a muted stats line to `parent` when the item has any positive
+// engagement count. No-op (renders nothing) otherwise.
+function appendRecommendationStats(parent, item) {
+  const text = recommendationStats(item);
+  if (!text) return;
+  const stats = document.createElement("div");
+  stats.className = "recommendation-stats";
+  stats.textContent = text;
+  parent.append(stats);
+}
+
+function appendPublishedTime(parent, item) {
+  const text = formatPublishedTime(item);
+  if (!text) return;
+  const time = document.createElement("span");
+  time.className = "recommendation-published-time";
+  time.textContent = text;
+  if (item.published_at && Number.isFinite(Date.parse(item.published_at))) {
+    time.title = new Date(item.published_at).toLocaleString();
+  }
+  parent.append(time);
 }
 
 // ── Delight (surprise recommendation) card ─────────────────────
@@ -2377,10 +3253,16 @@ function buildDelightCard(delight) {
     textCol.append(hookBadge);
   }
 
+  const platformChip = document.createElement("span");
+  platformChip.className = "message-delight-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  textCol.append(platformChip);
+
   const title = document.createElement("div");
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
   textCol.append(title);
+  appendPublishedTime(textCol, delight);
 
   top.append(textCol);
   item.append(top);
@@ -2397,6 +3279,8 @@ function buildDelightCard(delight) {
     reason.textContent = delight.delight_reason;
     item.append(reason);
   }
+
+  appendRecommendationStats(item, delight);
 
   if (delight.chat_status === "pending") {
     item.append(createChatThinkingPlaceholder("阿B 正在品你这句话"));
@@ -2512,6 +3396,17 @@ function expandDelightChat(itemEl, delight) {
       });
       const ca = itemEl.querySelector(".message-chat-area");
       if (ca) ca.remove();
+      const showFailure = (nextTurn) => {
+        thinking.remove();
+        const errorEl = document.createElement("div");
+        errorEl.className = "message-chat-reply";
+        errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+        itemEl.append(errorEl);
+        sendBtn.disabled = false;
+        if (actions) actions.hidden = false;
+        applyTurnToMessage(nextTurn);
+        applyTurnToDelight(nextTurn);
+      };
       const showReply = (nextTurn) => {
         thinking.remove();
         const replyEl = document.createElement("div");
@@ -2522,14 +3417,21 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
+      const settleTurn = (nextTurn) => {
+        if (nextTurn.status === "failed") {
+          showFailure(nextTurn);
+          return;
+        }
+        if (nextTurn.status === "completed") showReply(nextTurn);
+      };
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         applyTurnToMessage(turn);
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate(nextTurn) {
             if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-              showReply(nextTurn);
+              settleTurn(nextTurn);
             }
           },
         });
@@ -2628,8 +3530,12 @@ function createChatThinkingPlaceholder(label) {
 async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.probe") {
   const message = input.value.trim();
   if (!message) return;
+  const chatArea = input.closest(".message-chat-area");
+  if (!chatArea || !input.isConnected || !sendBtn.isConnected) return;
   const isAvoidance = isAvoidanceProbeType(type);
 
+  chatArea.querySelector(".message-chat-reply.is-error")?.remove();
+  input.disabled = true;
   sendBtn.disabled = true;
   const turnId = createClientTurnId(isAvoidance ? "avoidance_probe" : "probe");
   rememberHandledProbe(domain, type);
@@ -2651,12 +3557,24 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       message,
     });
 
-    // Remove chat area, show result, then remove card after delay
-    const chatArea = itemEl.querySelector(".message-chat-area");
-    if (chatArea) chatArea.remove();
+    // Completed turns remove the card after showing the reply. Failed turns
+    // restore the handled/retry state and keep the card visible.
+    const showFailure = (nextTurn) => {
+      forgetHandledProbe(domain, type);
+      thinking.remove();
+      input.disabled = false;
+      sendBtn.disabled = false;
+      const errorEl = document.createElement("div");
+      errorEl.className = "message-chat-reply is-error";
+      errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+      chatArea.append(errorEl);
+      applyTurnToMessage(nextTurn);
+      input.focus();
+    };
 
     const showReply = (nextTurn) => {
       thinking.remove();
+      chatArea.remove();
       const replyEl = document.createElement("div");
       replyEl.className = "message-chat-reply";
       replyEl.textContent =
@@ -2670,14 +3588,22 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       }, 4000);
     };
 
+    const settleTurn = (nextTurn) => {
+      if (nextTurn.status === "failed") {
+        showFailure(nextTurn);
+        return;
+      }
+      if (nextTurn.status === "completed") showReply(nextTurn);
+    };
+
     if (turn.status === "completed" || turn.status === "failed") {
-      showReply(turn);
+      settleTurn(turn);
     } else {
       applyTurnToMessage(turn);
       pollChatTurnUntilSettled(turn.turn_id, {
         onUpdate(nextTurn) {
           if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-            showReply(nextTurn);
+            settleTurn(nextTurn);
           }
         },
       });
@@ -2686,12 +3612,14 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
     console.error("Inline chat failed:", err);
     forgetHandledProbe(domain, type);
     thinking.remove();
+    input.disabled = false;
     sendBtn.disabled = false;
     // Show error hint inline
     const errEl = document.createElement("div");
-    errEl.className = "message-chat-reply";
+    errEl.className = "message-chat-reply is-error";
     errEl.textContent = "\u540E\u53F0\u6B63\u5FD9\uFF0C\u7B49\u4E00\u4E0B\u518D\u804A\u3002";
-    itemEl.append(errEl);
+    chatArea.append(errEl);
+    input.focus();
     setTimeout(() => errEl.remove(), 3000);
   }
 }
@@ -2737,9 +3665,7 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
       item.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "message-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002` : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       item.append(msg);
       setTimeout(() => {
         item.remove();
@@ -3059,6 +3985,14 @@ function renderInterestTree(container, domains, fallback) {
   }
 }
 
+// Placeholders the LLM emits when it has no signal. Treated as absent so the
+// panel falls back to its "still observing" copy instead of rendering garbage.
+const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
+
+function isUnknownishText(value) {
+  return UNKNOWNISH_TEXT.has(String(value ?? "").trim().toLowerCase());
+}
+
 function renderStylePreference(container, style) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -3077,8 +4011,10 @@ function renderStylePreference(container, style) {
     ["时长偏好", durationLabels[style.preferred_duration] || style.preferred_duration],
     ["节奏偏好", paceLabels[style.preferred_pace] || style.preferred_pace],
   ];
+  let hasAny = false;
   for (const [label, value] of textFields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-text-row";
     const lbl = document.createElement("span");
@@ -3097,6 +4033,7 @@ function renderStylePreference(container, style) {
   ];
   for (const [label, value] of barFields) {
     if (typeof value !== "number") continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-bar-row";
     const lbl = document.createElement("span");
@@ -3113,6 +4050,12 @@ function renderStylePreference(container, style) {
     pct.textContent = `${Math.round(value * 100)}%`;
     row.append(lbl, track, pct);
     container.append(row);
+  }
+  if (!hasAny) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "内容口味还在摸索中。";
+    container.append(fb);
   }
 }
 
@@ -3136,7 +4079,7 @@ function renderContextMode(container, ctx) {
   ];
   let hasAny = false;
   for (const [label, value] of fields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
     hasAny = true;
     const row = document.createElement("div");
     row.className = "context-row";
@@ -4035,7 +4978,7 @@ function renderChatTurn(turn) {
     return;
   }
   if (status === "failed") {
-    const message = turn.reply || "刚刚没发出去，换个说法再试试。";
+    const message = turn.error || "刚刚没发出去，换个说法再试试。";
     if (assistantPart instanceof HTMLElement) {
       replaceChatThinkingPlaceholder(assistantPart, message);
     } else {
@@ -4352,8 +5295,6 @@ function renderDelightSlot() {
   }
 
   const delight = head;
-  const isHandled = uiState.handled;
-  const isChatting = delight.state === "chatting";
   const isExpanded = Boolean(delight.expanded);
 
   // Banner with thumbnail. Collapsed = ~64px row showing thumbnail +
@@ -4404,6 +5345,11 @@ function renderDelightSlot() {
   kicker.className = "delight-banner-kicker";
   kicker.textContent = `✨ ${delight.delight_hook || "惊喜推荐"}`;
   kickerLine.append(kicker);
+  const platformChip = document.createElement("span");
+  platformChip.className = "delight-banner-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  kickerLine.append(platformChip);
+  appendPublishedTime(kickerLine, delight);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";
@@ -4481,7 +5427,7 @@ function renderDelightSlot() {
       body.append(reason);
     }
 
-    if (uiState.response_message) {
+    if (uiState.show_status) {
       const response = document.createElement("p");
       response.className = "delight-banner-response";
       response.dataset.tone = uiState.response_tone;
@@ -4550,6 +5496,9 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "like", delight.title);
         } catch (err) {
           console.error("Delight like failed:", err);
+          setHint("这次喜欢还没记上，可以再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
         setHint("好，这类多来点。", "success");
         updateDelightHead({
@@ -4561,6 +5510,8 @@ function renderDelightSlot() {
         renderDelightSlot();
       },
     );
+    likeButton.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+    likeButton.disabled = uiState.like_disabled;
 
     const rejectButton = createActionButton(
       "不感兴趣",
@@ -4594,35 +5545,22 @@ function renderDelightSlot() {
     // \u7A0D\u540E\u518D\u770B = \u65F6\u949F\u56FE\u6807\uFF08\u72B6\u6001\u8D70 aria-pressed + CSS\uFF0C\u4E0D\u505A\u5B57\u5F62\u66FF\u6362\uFF09
     const delightWatchLaterButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle watch-later-btn", async () => {
-        try {
-          await toggleWatchLaterSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("稍后再看", delight, watchLaterToggles, toggleWatchLaterSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
-      bindWatchLaterToggle(btn, delight.bvid);
+      bindWatchLaterToggle(btn, delight);
       return btn;
     })();
 
     // \u6536\u85CF = \u661F\u661F\u56FE\u6807\uFF0C\u4E0E\u7A0D\u540E\u518D\u770B\u76F8\u4E92\u72EC\u7ACB
     const delightFavoriteButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle favorite-btn", async () => {
-        try {
-          await toggleFavoriteSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("收藏", delight, favoriteToggles, toggleFavoriteSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
-      bindFavoriteToggle(btn, delight.bvid);
+      bindFavoriteToggle(btn, delight);
       return btn;
     })();
-
-    if (isHandled || isChatting) {
-      rejectButton.disabled = true;
-      likeButton.disabled = true;
-    }
 
     actions.append(
       openButton,
@@ -4632,7 +5570,9 @@ function renderDelightSlot() {
       rejectButton,
       chatButton,
     );
-    body.append(actions);
+    if (uiState.show_actions) {
+      body.append(actions);
+    }
 
     if (delight.composer_open) {
       const composer = document.createElement("div");
@@ -4766,11 +5706,37 @@ function renderDelightSlot() {
       dismissAll.type = "button";
       dismissAll.className = "delight-banner-dismiss-all";
       dismissAll.textContent = `全部稍后看 (${queueLength})`;
-      dismissAll.addEventListener("click", (event) => {
+      dismissAll.addEventListener("click", async (event) => {
         event.stopPropagation();
-        for (const d of state.activeDelights) rememberDismissedDelight(d.bvid);
-        clearDelightQueue();
-        setHint("都收起来了，需要时去邮箱里翻。", "info");
+        if (dismissAll.disabled) return;
+        dismissAll.disabled = true;
+        dismissAll.textContent = "本地保存中…";
+        const snapshot = state.activeDelights.map((item) => normalizePopupSavedItem(item));
+        const results = await Promise.allSettled(
+          snapshot.map((item) => saveItem("watch_later", item)),
+        );
+        const partition = partitionSavedQueueResults(snapshot, results);
+        let syncing = 0;
+        partition.saved.forEach(({ item, itemKey, value }) => {
+          if (itemKey) {
+            watchLaterToggles.setSaved(itemKey, true);
+          }
+          if (value?.sync_task_id && ["pending", "syncing"].includes(value?.sync_status)) {
+            syncing += 1;
+            savedTaskRuntimes.watch_later.coordinator.track({
+              task_id: value.sync_task_id,
+              items: [{ item_key: itemKey, status: value.sync_status }],
+            }, [itemKey], {
+              onTerminal: () => { void loadWatchLater(); },
+            });
+          }
+          rememberDismissedDelight(item.bvid || item.content_id);
+        });
+        const saved = partition.savedCount;
+        const failed = partition.failedCount;
+        state.activeDelights = partition.remaining;
+        syncDelightHead();
+        setHint(`本地保存 ${saved} · 同步中 ${syncing} · 失败 ${failed}`, failed ? "warning" : "success");
         renderDelightSlot();
       });
       body.append(dismissAll);
@@ -4961,7 +5927,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -4987,9 +5953,11 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = `这位 UP：${item.up_name}`;
+    metaLine.textContent = formatRecommendationAuthorLine(item);
+    appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
+    appendRecommendationStats(content, item);
     preview.append(cover, content);
 
     const feedbackStatus = document.createElement("p");
@@ -5055,28 +6023,20 @@ function renderRecommendations(items, { append = false } = {}) {
       }),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleWatchLaterSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
         });
         btn.innerHTML = WATCH_LATER_ICON_SVG;
         btn.classList.add("saved-toggle", "watch-later-btn");
-        bindWatchLaterToggle(btn, item.bvid);
+        bindWatchLaterToggle(btn, item);
         return btn;
       })(),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleFavoriteSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
         });
         btn.innerHTML = FAVORITE_ICON_SVG;
         btn.classList.add("saved-toggle", "favorite-btn");
-        bindFavoriteToggle(btn, item.bvid);
+        bindFavoriteToggle(btn, item);
         return btn;
       })(),
       createActionButton("少来点", "action-button action-secondary", async () => {
@@ -5235,6 +6195,16 @@ function renderRecommendationState(stateShape) {
     return;
   }
 
+  if (stateShape.kind === "degraded") {
+    showRecommendationEmptyState("AI 服务配置需要修复", stateShape.message);
+    if (elements.emptyAction instanceof HTMLElement) {
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
+    return;
+  }
+
   if (stateShape.kind === "error") {
     showRecommendationEmptyState("推荐暂时没刷出来", stateShape.message);
     setHint("后端连上了，但推荐接口这会儿没回。", "error");
@@ -5244,10 +6214,26 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，通过后就在这里一步步建好画像和首轮内容池。",
+      stateShape.degraded
+        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
-    setHint("先完成初始化，把画像和候选池攒起来。");
+    if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
+      // Keep the one-click config repair entry alongside the init journey —
+      // the checklist explains the blocker, this button opens the fix.
+      elements.emptyAction.textContent = "去设置修复 →";
+      elements.emptyAction.hidden = false;
+    }
+    setHint(
+      stateShape.degraded
+        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
+        : "先完成初始化，把画像和候选池攒起来。",
+      stateShape.degraded ? "error" : "info",
+    );
     renderInitPanelIdle();
+    // If a run is already live (started elsewhere / page reopened mid-init),
+    // take over with the progress view + poll instead of a dead idle panel.
+    void maybeAttachRunningInitProgress();
     return;
   }
 
@@ -5443,11 +6429,13 @@ async function refreshProfileSummaryAfterInteraction({
 
 async function initializeRecommendations() {
   const online = await checkBackendStatus();
-  state.online = online;
-  setStatus(online);
+  if (online) {
+    backendConnectionCoordinator.markHttpReachable();
+  } else {
+    backendConnectionCoordinator.markOffline();
+  }
 
   if (!online) {
-    offlineBackendPoller.start();
     state.runtimeStatus = null;
     state.runtimeConfig = null;
     state.recommendations = [];
@@ -5460,7 +6448,6 @@ async function initializeRecommendations() {
     renderProfileSummary(normalizeProfileSummary({ initialized: false }));
     return;
   }
-  offlineBackendPoller.stop();
 
   const [runtimeResult, recommendationResult, delightResult, configResult] =
     await Promise.allSettled([
@@ -5471,6 +6458,10 @@ async function initializeRecommendations() {
     ]);
 
   state.runtimeStatus = runtimeResult.status === "fulfilled" ? runtimeResult.value : null;
+  // The banner is gated on the runtime snapshot (initialized + not degraded);
+  // the boot-time check usually races ahead of this fetch, so re-evaluate now
+  // that the snapshot is in.
+  void maybeShowEmbeddingBanner();
   if (configResult.status === "fulfilled") {
     applyRuntimeConfig(configResult.value);
   }
@@ -5547,15 +6538,22 @@ async function handleManualRefresh() {
     normalizeRuntimeStatus(state.runtimeStatus).pool_available_count > 0;
   setRefreshButtonState(true, "正在给你换一批…");
   try {
-    const result = await reshuffleRecommendations();
+    const excludedBvids = state.recommendations.map((item) => item?.bvid).filter(Boolean);
+    const result = await reshuffleRecommendations(excludedBvids);
     if (!Array.isArray(result.items)) {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;
     }
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items,
+    );
     resetRecommendationAutoLoadIntent();
-    state.recommendations = result.items;
+    state.recommendations = replacement.items;
     state.loadingMore = false;
-    state.hasMoreRecommendations = result.items.length >= 10;
+    state.hasMoreRecommendations = replacement.preserved
+      ? false
+      : result.items.length >= 10;
     state.runtimeStatus = await fetchRuntimeStatus().catch(() => state.runtimeStatus);
     renderPoolStatus(state.runtimeStatus);
     renderRecommendationState(
@@ -5568,6 +6566,7 @@ async function handleManualRefresh() {
     const hint = getManualRefreshResultHint({
       itemCount: result.items.length,
       hadAdvertisedInventory,
+      preservedCurrent: replacement.preserved,
     });
     setHint(hint.message, hint.tone);
     await loadActivityFeed();
@@ -5772,6 +6771,7 @@ function bindSettings() {
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
+  const backendSchemeInput = document.getElementById("cfgBackendScheme");
   const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
   const bannerOffline = document.getElementById("cfgBannerOffline");
@@ -5790,6 +6790,13 @@ function bindSettings() {
       hint: document.getElementById("cfgAuthHint"),
     },
     { getBaseUrl: getBackendBaseUrl },
+  );
+
+  const extLogin = initExtLogin(
+    { deviceKey: document.getElementById("cfgExtDeviceKey"),
+      btn: document.getElementById("cfgExtLoginBtn"),
+      status: document.getElementById("cfgExtLoginStatus") },
+    { getBaseUrl: getBackendBaseUrl, onPaired: connectRuntimeStream }
   );
 
   const autostartControl = initAutostartControl(
@@ -5831,6 +6838,9 @@ function bindSettings() {
   async function populateBackendEndpoint() {
     try {
       const endpoint = await getBackendEndpointConfig();
+      if (backendSchemeInput instanceof HTMLSelectElement) {
+        backendSchemeInput.value = endpoint.scheme || "http";
+      }
       if (backendHostInput instanceof HTMLInputElement) {
         backendHostInput.value = endpoint.host || "";
       }
@@ -5859,7 +6869,8 @@ function bindSettings() {
   const BACKEND_UPDATE_REASON_TEXT = {
     dirty_worktree: "代码目录有未提交改动，更新被阻止",
     unsupported_install_mode: "当前安装方式不支持自动更新",
-    untrusted_remote: "git 远端不在允许列表，更新被阻止",
+    docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+    untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
     branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
     merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
     github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -5900,6 +6911,16 @@ function bindSettings() {
     const installMode = String(backend.install_mode || "");
     const isGitInstall = installMode === "git";
     const isFrozenInstall = installMode === "frozen";
+    const isDockerInstall = installMode === "docker";
+    const autoApplyUnsupported = ["frozen", "docker", "unsupported"].includes(installMode);
+    const autoUpdateToggle = document.getElementById("cfgAutoUpdate");
+    if (autoUpdateToggle instanceof HTMLInputElement) {
+      autoUpdateToggle.disabled = autoApplyUnsupported;
+    }
+    const autoUpdateInterval = document.getElementById("cfgAutoUpdateInterval");
+    if (autoUpdateInterval instanceof HTMLInputElement) {
+      autoUpdateInterval.disabled = autoApplyUnsupported;
+    }
     const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
     const applyBtn = document.getElementById("backendUpdateApply");
     if (applyBtn instanceof HTMLButtonElement) {
@@ -5921,6 +6942,24 @@ function bindSettings() {
         showDownload && backend.latest_tag
           ? `https://github.com/whiteguo233/OpenBiliClaw/releases/tag/${encodeURIComponent(String(backend.latest_tag))}`
           : "https://github.com/whiteguo233/OpenBiliClaw/releases";
+    }
+    // Non-git installs never get the apply button; tell the user how their
+    // install actually upgrades instead of leaving the card action-less.
+    const modeHint = document.getElementById("backendUpdateModeHint");
+    if (modeHint instanceof HTMLElement) {
+      let hint = "";
+      if (isDockerInstall) {
+        hint =
+          backend.state === "update_available"
+            ? "Docker 安装：发现新版镜像，在部署目录执行 docker compose pull && docker compose up -d 完成升级。"
+            : "Docker 安装：升级通过拉取新镜像完成（docker compose pull && docker compose up -d）。";
+      } else if (isFrozenInstall) {
+        hint = "桌面安装包：发现新版时点击上方链接下载新安装包完成升级。";
+      } else if (installMode && !isGitInstall) {
+        hint = "当前安装方式不支持自动更新；建议使用 git / AI 安装以获得就地升级能力。";
+      }
+      modeHint.textContent = hint;
+      modeHint.hidden = !hint;
     }
   }
 
@@ -5951,9 +6990,31 @@ function bindSettings() {
     }
   }
 
+  // 主/备选 Provider 同名保护（与桌面 Web 对齐）：同名 fallback 永远不会触发
+  // （registry 静默丢弃），后端保存也会以 blocking issue 拒绝。禁用备选下拉里
+  // 与默认 Provider 同名的选项；旧配置已处于同名状态时只显示警告、不静默改数据。
+  function syncLlmFallbackSameState() {
+    const fallbackSelect = document.getElementById("cfgLlmFallbackProvider");
+    const warning = document.getElementById("cfgLlmFallbackSameWarning");
+    if (!(fallbackSelect instanceof HTMLSelectElement)) return;
+    const mainValue = providerSelect.value;
+    for (const option of fallbackSelect.options) {
+      option.disabled = Boolean(option.value) && option.value === mainValue;
+    }
+    if (warning) {
+      warning.hidden = !fallbackSelect.value || fallbackSelect.value !== mainValue;
+    }
+  }
+
   providerSelect.addEventListener("change", () => {
     showProviderFields(providerSelect.value);
+    syncLlmFallbackSameState();
   });
+
+  const fallbackProviderSelect = document.getElementById("cfgLlmFallbackProvider");
+  if (fallbackProviderSelect instanceof HTMLSelectElement) {
+    fallbackProviderSelect.addEventListener("change", syncLlmFallbackSameState);
+  }
 
   // ── Embedding section: dynamic visibility + placeholder ──
   // Mirrors the backend resolution order in
@@ -5964,6 +7025,7 @@ function bindSettings() {
     gemini: "gemini-embedding-001",
     ollama: "bge-m3",
     openai_compatible: "bge-large-en-v1.5",
+    dashscope: "qwen3-vl-embedding",
   };
   const EMBEDDING_BASE_URL_HINT = {
     "": "留空使用默认",
@@ -5971,6 +7033,7 @@ function bindSettings() {
     gemini: "(Gemini SDK 不需要 base_url)",
     ollama: "http://localhost:11434/v1",
     openai_compatible: "https://api.together.xyz/v1 / http://localhost:8000/v1",
+    dashscope: "留空 = https://dashscope.aliyuncs.com（国际站 dashscope-intl.aliyuncs.com）",
   };
 
   function applyEmbeddingProviderUI() {
@@ -6054,7 +7117,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `后端处于降级模式，保存修复后需要 restart daemon。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");
@@ -6198,24 +7261,81 @@ function bindSettings() {
     return selected.length > 0 ? selected : ["search"];
   }
 
+  const BANGUMI_SOURCE_MODE_FIELDS = [
+    ["search", "cfgBangumiModeSearch"],
+    ["ranked", "cfgBangumiModeRanked"],
+    ["latest", "cfgBangumiModeLatest"],
+  ];
+  const BANGUMI_SUBJECT_TYPE_FIELDS = [
+    ["anime", "cfgBangumiTypeAnime"],
+    ["book", "cfgBangumiTypeBook"],
+    ["game", "cfgBangumiTypeGame"],
+    ["music", "cfgBangumiTypeMusic"],
+    ["real", "cfgBangumiTypeReal"],
+  ];
+
+  function setCheckedValues(fields, rawValues) {
+    const fallback = fields.map(([value]) => value);
+    const selected = new Set(
+      (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    );
+    for (const [value, id] of fields) {
+      const el = document.getElementById(id);
+      if (el) el.checked = selected.has(value);
+    }
+  }
+
+  function collectCheckedValues(fields, fallback) {
+    const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
+    return selected.length > 0 ? selected : fallback;
+  }
+
   // Unified per-source login / cookie status from GET /api/sources/status,
-  // rendered as a uniform colored-dot line inside every source card. Only X is
-  // live-validated (state ok); the rest report local cookie/token readiness.
-  const SOURCE_STATUS_DOT = {
-    ok: "#2ecc71",
-    ready: "#2ecc71",
-    no_auth: "#9aa0a6",
-    missing: "#e0a800",
-    missing_cookie: "#e0a800",
-    login_required: "#e0a800",
-    rate_limited: "#e0a800",
-    partial: "#e0a800",
-    stale: "#e0a800",
-    error: "#e74c3c",
-    expired_cookie: "#e74c3c",
-    blocked: "#e74c3c",
+  // rendered as a uniform colored-dot line inside every source card.
+  //
+  // The verdict, its colour and the strength of the evidence behind it all come
+  // from shared/source-status.js, which the desktop page and the setup wizard
+  // load too. This panel used to keep its own pair of tables, and they had
+  // drifted: `no_auth` and `unverified` were the same grey here while the
+  // desktop page told them apart, and an unrecognised state rendered as an
+  // empty string instead of "状态未知" (spec D6). Having only one row per source
+  // to write into, this surface takes `access.line`, which folds the evidence
+  // in parenthetically — 「已验证（◆ 联网验证 · 3 分钟前）」 — where the desktop
+  // page gives it a badge of its own. Loaded as
+  // a classic script by popup.html, so it is a global rather than an import —
+  // MV3's CSP forbids pulling it from the backend over HTTP.
+  const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+  const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
+  const BANGUMI_SAVE_ERROR_MESSAGES = {
+    invalid_bangumi_access_token:
+      "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+    bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+
+  // The overseas-egress advisory is authored by the backend
+  // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+  // verbatim. This function must never learn a platform name nor read
+  // [network].mode: adding a platform must stay a one-line backend change.
+  // Only the `enabled` gate lives here — a disabled source makes no requests,
+  // so warning about its egress would be noise.
+  function applySourceNetworkHint(row, hint, enabled) {
+    const text = enabled ? String(hint || "") : "";
+    // The status row is a <p>; the hint is a sibling, never a nested <p>.
+    let node = row.nextElementSibling;
+    if (!node || !node.classList.contains("source-network-hint")) node = null;
+    if (!text) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("p");
+      node.className = "settings-hint source-network-hint";
+      row.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = text;
+  }
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -6231,15 +7351,16 @@ function bindSettings() {
       const dot = row.querySelector(".src-dot");
       const detail = row.querySelector(".src-detail");
       const item = data && data[key];
-      if (!item) {
-        if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
-        if (dot) dot.style.color = "#9aa0a6";
-        row.style.opacity = "1";
-        continue;
-      }
-      if (detail) detail.textContent = (item.enabled ? "" : "(未启用) ") + (item.detail || "");
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
-      row.style.opacity = item.enabled ? "1" : "0.6";
+      const access = SourceStatus.describeAccess(item);
+      // Offline wording comes from the shared module too, so a backend the user
+      // cannot reach reads the same here as on the desktop page. The rejected-
+      // token override now lives in describeAccess() rather than being spelled
+      // out again here — this panel and the desktop page each having their own
+      // copy of that rule is how the two status tables drifted (spec D6).
+      if (detail) detail.textContent = access.present ? access.line : access.detail;
+      if (dot) dot.style.color = access.color;
+      applySourceNetworkHint(row, access.present ? item.network_hint : "", access.enabled);
+      row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
     }
   }
 
@@ -6253,14 +7374,716 @@ function bindSettings() {
     void renderSourcesStatus();
   }, 30000);
 
+  const LLM_PROVIDER_LABELS = {
+    openai: "OpenAI",
+    claude: "Claude",
+    gemini: "Gemini",
+    deepseek: "DeepSeek",
+    openrouter: "OpenRouter",
+    ollama: "Ollama",
+    openai_compatible: "OpenAI-compatible",
+  };
+  const LLM_PROVIDER_DEFAULTS = {
+    openai: { model: "gpt-5-nano", base_url: "" },
+    claude: { model: "claude-sonnet-4-6", base_url: "" },
+    gemini: { model: "gemini-2.5-flash", base_url: "" },
+    deepseek: { model: "deepseek-v4-flash", base_url: "https://api.deepseek.com" },
+    openrouter: { model: "openai/gpt-5-nano", base_url: "https://openrouter.ai/api/v1" },
+    ollama: { model: "qwen2.5:7b", base_url: "http://127.0.0.1:11434/v1" },
+    openai_compatible: { model: "", base_url: "" },
+  };
+  const LLM_MODEL_DISCOVERY_PROVIDERS = new Set([
+    "openai",
+    "deepseek",
+    "openrouter",
+    "ollama",
+    "openai_compatible",
+  ]);
+  const LLM_MODULE_LABELS = {
+    soul: "画像理解",
+    discovery: "内容发现",
+    recommendation: "推荐表达",
+    evaluation: "内容评估",
+  };
+  const LLM_INSTANCE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  let llmDialogReturnFocus = null;
+
+  function clonePlain(value) {
+    return JSON.parse(JSON.stringify(value ?? null));
+  }
+
+  function normalizeLlmDraft(llm) {
+    const instances = {};
+    const rawInstances = llm?.instances && typeof llm.instances === "object"
+      ? llm.instances
+      : {};
+    for (const [rawId, rawInstance] of Object.entries(rawInstances)) {
+      const instanceId = String(rawId || "").trim().toLowerCase();
+      if (!instanceId || !rawInstance || typeof rawInstance !== "object") continue;
+      instances[instanceId] = {
+        name: String(rawInstance.name || instanceId),
+        provider_type: String(rawInstance.provider_type || ""),
+        enabled: rawInstance.enabled !== false,
+        api_key: String(rawInstance.api_key || ""),
+        model: String(rawInstance.model || ""),
+        base_url: String(rawInstance.base_url || ""),
+        auth_mode: String(rawInstance.auth_mode || ""),
+        api_flavor: String(rawInstance.api_flavor || ""),
+        http_referer: String(rawInstance.http_referer || ""),
+        x_title: String(rawInstance.x_title || ""),
+        reasoning_effort: String(rawInstance.reasoning_effort || ""),
+        num_ctx: parseInt(rawInstance.num_ctx, 10) || 0,
+      };
+    }
+    const defaultChain = Array.from(new Set(
+      (Array.isArray(llm?.default_chain) ? llm.default_chain : [])
+        .map((item) => String(item || "").trim().toLowerCase())
+        .filter(Boolean),
+    ));
+    const routes = {};
+    for (const moduleName of Object.keys(LLM_MODULE_LABELS)) {
+      const rawRoute = llm?.routes?.[moduleName] || llm?.[moduleName] || {};
+      routes[moduleName] = {
+        inherit: rawRoute.inherit !== false,
+        chain: Array.from(new Set(
+          (Array.isArray(rawRoute.chain) ? rawRoute.chain : [])
+            .map((item) => String(item || "").trim().toLowerCase())
+            .filter(Boolean),
+        )),
+      };
+    }
+    return { instances, default_chain: defaultChain, routes };
+  }
+
+  function llmInstanceReferences(instanceId) {
+    if (!state.llmDraft) return [];
+    const references = [];
+    if (state.llmDraft.default_chain.includes(instanceId)) references.push("默认链");
+    for (const [moduleName, label] of Object.entries(LLM_MODULE_LABELS)) {
+      const route = state.llmDraft.routes[moduleName];
+      if (route && route.inherit === false && route.chain.includes(instanceId)) {
+        references.push(label);
+      }
+    }
+    return references;
+  }
+
+  function llmEndpointSummary(instance) {
+    const raw = String(instance?.base_url || "").trim();
+    if (!raw) return "官方默认地址";
+    try {
+      const url = new URL(raw);
+      return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch {
+      return raw;
+    }
+  }
+
+  function createLlmBadge(text, tone = "") {
+    const badge = document.createElement("span");
+    badge.className = "settings-llm-badge";
+    if (tone) badge.dataset.tone = tone;
+    badge.textContent = text;
+    return badge;
+  }
+
+  function createLlmChainAction(action, label, disabled = false) {
+    const paths = {
+      up: '<path d="m6 15 6-6 6 6"></path>',
+      down: '<path d="m6 9 6 6 6-6"></path>',
+      remove: '<path d="M6 6l12 12M18 6 6 18"></path>',
+    };
+    const button = document.createElement("button");
+    button.className = "settings-llm-icon-btn";
+    button.type = "button";
+    button.dataset.llmChainAction = action;
+    button.setAttribute("aria-label", label);
+    button.disabled = disabled;
+    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[action]}</svg>`;
+    return button;
+  }
+
+  function renderLlmInstances() {
+    const container = document.getElementById("cfgLlmInstanceList");
+    if (!(container instanceof HTMLElement) || !state.llmDraft) return;
+    container.replaceChildren();
+    const entries = Object.entries(state.llmDraft.instances);
+    if (!entries.length) {
+      const empty = document.createElement("p");
+      empty.className = "settings-llm-empty";
+      empty.textContent = "尚未配置 LLM 实例。新建第一个已启用实例后，它会自动加入默认调用链。";
+      container.append(empty);
+      return;
+    }
+    for (const [instanceId, instance] of entries) {
+      const references = llmInstanceReferences(instanceId);
+      const probe = state.llmProbeResults.get(instanceId);
+      const card = document.createElement("article");
+      card.className = "settings-llm-instance-card";
+      card.dataset.enabled = instance.enabled !== false ? "true" : "false";
+      card.dataset.llmInstanceId = instanceId;
+
+      const head = document.createElement("div");
+      head.className = "settings-llm-instance-head";
+      const title = document.createElement("div");
+      title.className = "settings-llm-instance-title";
+      const name = document.createElement("strong");
+      name.textContent = instance.name || instanceId;
+      const id = document.createElement("code");
+      id.textContent = instanceId;
+      title.append(name, id);
+      head.append(
+        title,
+        createLlmBadge(instance.enabled !== false ? "已启用" : "已停用", instance.enabled !== false ? "success" : ""),
+      );
+
+      const badges = document.createElement("div");
+      badges.className = "settings-llm-badges";
+      badges.append(createLlmBadge(LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type || "未知类型"));
+      for (const reference of references) badges.append(createLlmBadge(reference));
+
+      const meta = document.createElement("p");
+      meta.className = "settings-llm-instance-meta";
+      const model = document.createElement("span");
+      model.textContent = `模型：${instance.model || "未填写"}`;
+      const endpoint = document.createElement("span");
+      endpoint.textContent = `地址：${llmEndpointSummary(instance)}`;
+      meta.append(model, endpoint);
+
+      const probeStatus = document.createElement("p");
+      probeStatus.className = "settings-llm-instance-probe";
+      probeStatus.setAttribute("aria-live", "polite");
+      if (probe?.pending) {
+        probeStatus.dataset.tone = "pending";
+        probeStatus.textContent = "正在测试真实连通性…";
+      } else if (probe) {
+        probeStatus.dataset.tone = probe.ok ? "success" : "error";
+        probeStatus.textContent = formatConfigProbeResult(probe);
+      } else {
+        probeStatus.textContent = "尚未测试";
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "settings-llm-instance-actions";
+      for (const [action, label] of [["probe", "测试"], ["edit", "编辑"], ["delete", "删除"]]) {
+        const button = document.createElement("button");
+        button.className = "settings-secondary-btn";
+        button.type = "button";
+        button.dataset.llmInstanceAction = action;
+        button.dataset.instanceId = instanceId;
+        button.textContent = label;
+        if (action === "probe") {
+          button.disabled = Boolean(probe?.pending) || instance.enabled === false;
+          if (instance.enabled === false) button.title = "请先启用实例再测试";
+        }
+        actions.append(button);
+      }
+      actions.querySelectorAll("[data-llm-instance-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const action = button.dataset.llmInstanceAction;
+          if (action === "probe") void runLlmInstanceProbe(instanceId);
+          if (action === "edit") openLlmInstanceDialog(instanceId);
+          if (action === "delete") deleteLlmInstance(instanceId);
+        });
+      });
+      card.append(head, badges, meta, probeStatus, actions);
+      container.append(card);
+    }
+  }
+
+  function renderLlmDefaultChain() {
+    const list = document.getElementById("cfgLlmDefaultChain");
+    const picker = document.getElementById("cfgLlmDefaultChainPicker");
+    const addButton = document.getElementById("cfgAddLlmDefaultChainItem");
+    if (!(list instanceof HTMLElement) || !(picker instanceof HTMLSelectElement) || !state.llmDraft) return;
+    list.replaceChildren();
+    const chain = state.llmDraft.default_chain;
+    if (!chain.length) {
+      const empty = document.createElement("li");
+      empty.className = "settings-llm-empty";
+      empty.textContent = "默认调用链为空。请创建或从下方加入一个已启用实例。";
+      list.append(empty);
+    }
+    chain.forEach((instanceId, index) => {
+      const instance = state.llmDraft.instances[instanceId];
+      const item = document.createElement("li");
+      item.className = "settings-llm-chain-item";
+      item.dataset.instanceId = instanceId;
+      const position = document.createElement("span");
+      position.className = "settings-llm-chain-position";
+      position.setAttribute("aria-label", `优先级 ${index + 1}`);
+      position.textContent = String(index + 1);
+      const copy = document.createElement("span");
+      copy.className = "settings-llm-chain-copy";
+      const title = document.createElement("strong");
+      title.textContent = instance?.name || instanceId;
+      const detail = document.createElement("small");
+      detail.textContent = instance
+        ? `${LLM_PROVIDER_LABELS[instance.provider_type] || instance.provider_type} · ${instance.model || "未填写模型"}`
+        : "实例不存在";
+      copy.append(title, detail);
+      const actions = document.createElement("span");
+      actions.className = "settings-llm-chain-actions";
+      const up = createLlmChainAction("up", `上移 ${title.textContent}`, index === 0);
+      const down = createLlmChainAction("down", `下移 ${title.textContent}`, index === chain.length - 1);
+      const remove = createLlmChainAction("remove", `从默认链移除 ${title.textContent}`, chain.length <= 1);
+      for (const button of [up, down, remove]) {
+        button.addEventListener("click", () => {
+          const next = [...state.llmDraft.default_chain];
+          const currentIndex = next.indexOf(instanceId);
+          if (currentIndex < 0) return;
+          const action = button.dataset.llmChainAction;
+          if (action === "up" && currentIndex > 0) {
+            [next[currentIndex - 1], next[currentIndex]] = [next[currentIndex], next[currentIndex - 1]];
+          }
+          if (action === "down" && currentIndex < next.length - 1) {
+            [next[currentIndex + 1], next[currentIndex]] = [next[currentIndex], next[currentIndex + 1]];
+          }
+          if (action === "remove" && next.length > 1) next.splice(currentIndex, 1);
+          state.llmDraft.default_chain = next;
+          setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
+          renderLlmRoutingSummary();
+        });
+      }
+      actions.append(up, down, remove);
+      item.append(position, copy, actions);
+      list.append(item);
+    });
+
+    picker.replaceChildren();
+    const candidates = Object.entries(state.llmDraft.instances)
+      .filter(([instanceId, instance]) => instance.enabled !== false && !chain.includes(instanceId));
+    if (!candidates.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "没有可添加的实例";
+      picker.append(option);
+    } else {
+      for (const [instanceId, instance] of candidates) {
+        const option = document.createElement("option");
+        option.value = instanceId;
+        option.textContent = `${instance.name || instanceId} · ${instance.model || "未填写模型"}`;
+        picker.append(option);
+      }
+    }
+    picker.disabled = candidates.length === 0;
+    if (addButton instanceof HTMLButtonElement) addButton.disabled = candidates.length === 0;
+  }
+
+  function renderLlmModuleSummary() {
+    const container = document.getElementById("cfgLlmModuleSummary");
+    if (!(container instanceof HTMLElement) || !state.llmDraft) return;
+    container.replaceChildren();
+    for (const [moduleName, label] of Object.entries(LLM_MODULE_LABELS)) {
+      const route = state.llmDraft.routes[moduleName];
+      const row = document.createElement("div");
+      row.className = "settings-llm-module-row";
+      const name = document.createElement("strong");
+      name.textContent = label;
+      const detail = document.createElement("span");
+      if (route?.inherit !== false) {
+        detail.textContent = "继承默认调用链";
+      } else {
+        const chainNames = route.chain
+          .map((instanceId) => state.llmDraft.instances[instanceId]?.name || instanceId)
+          .filter(Boolean);
+        detail.textContent = chainNames.join(" → ") || "自定义链尚未配置";
+      }
+      row.append(name, detail);
+      container.append(row);
+    }
+  }
+
+  function renderLlmRoutingSummary(llm = null) {
+    const root = document.getElementById("cfgLlmRoutingSummary");
+    if (!(root instanceof HTMLElement)) return;
+    if (llm && typeof llm === "object") state.llmDraft = normalizeLlmDraft(llm);
+    if (!state.llmDraft) state.llmDraft = normalizeLlmDraft({});
+    renderLlmInstances();
+    renderLlmDefaultChain();
+    renderLlmModuleSummary();
+  }
+
+  function addLlmDefaultChainItem() {
+    if (!state.llmDraft) return;
+    const picker = document.getElementById("cfgLlmDefaultChainPicker");
+    const instanceId = picker instanceof HTMLSelectElement ? picker.value : "";
+    if (!instanceId || state.llmDraft.default_chain.includes(instanceId)) return;
+    state.llmDraft.default_chain.push(instanceId);
+    setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
+    renderLlmRoutingSummary();
+  }
+
+  function renderLlmDatalist(id, values, currentValue = "") {
+    const list = document.getElementById(id);
+    if (!(list instanceof HTMLDataListElement)) return;
+    const normalized = [...new Set(
+      [...(Array.isArray(values) ? values : []), currentValue]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    )];
+    list.replaceChildren(...normalized.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    }));
+  }
+
+  function setLlmModelDiscoveryStatus(tone, text) {
+    const status = document.getElementById("cfgLlmInstanceModelDiscoveryStatus");
+    if (!(status instanceof HTMLElement)) return;
+    status.dataset.tone = tone || "neutral";
+    status.textContent = text;
+  }
+
+  function resetLlmModelDiscovery() {
+    renderLlmDatalist("cfgLlmInstanceModelOptions", []);
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType);
+    const button = document.getElementById("cfgRefreshLlmInstanceModels");
+    if (button instanceof HTMLButtonElement) {
+      button.hidden = !supported;
+      button.disabled = false;
+      button.textContent = "获取模型";
+    }
+    setLlmModelDiscoveryStatus(
+      "neutral",
+      supported
+        ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+        : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。",
+    );
+  }
+
+  function buildLlmModelDiscoveryRequest() {
+    if (!state.llmDraft) return null;
+    const existingId = state.llmEditingInstanceId;
+    const instanceId = String(
+      existingId || getVal("cfgLlmInstanceId") || "model-discovery-draft"
+    ).trim().toLowerCase();
+    const current = state.llmDraft.instances[existingId] || {};
+    const providerType = getVal("cfgLlmInstanceProviderType").trim();
+    const typedKey = getVal("cfgLlmInstanceApiKey");
+    const apiKey = checked("cfgLlmInstanceClearApiKey")
+      ? ""
+      : typedKey || current.api_key || "";
+    const instance = {
+      ...current,
+      name: getVal("cfgLlmInstanceName").trim() || current.name || instanceId,
+      provider_type: providerType,
+      enabled: true,
+      api_key: apiKey,
+      model: getVal("cfgLlmInstanceModel").trim(),
+      base_url: getVal("cfgLlmInstanceBaseUrl").trim(),
+      auth_mode: providerType === "openai"
+        ? getVal("cfgLlmInstanceAuthMode") || "api_key"
+        : "",
+      api_flavor: ["openai", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceApiFlavor")
+        : "",
+      http_referer: providerType === "openrouter"
+        ? getVal("cfgLlmInstanceReferer").trim()
+        : "",
+      x_title: providerType === "openrouter"
+        ? getVal("cfgLlmInstanceTitle").trim()
+        : "",
+      reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceReasoning").trim()
+        : "",
+      num_ctx: providerType === "ollama"
+        ? Math.max(0, getInt("cfgLlmInstanceNumCtx", 0))
+        : 0,
+    };
+    return {
+      instanceId,
+      config: {
+        llm: {
+          routing_version: 2,
+          instances: {
+            ...clonePlain(state.llmDraft.instances),
+            [instanceId]: instance,
+          },
+          default_chain: [...state.llmDraft.default_chain],
+          routes: clonePlain(state.llmDraft.routes),
+        },
+      },
+    };
+  }
+
+  async function discoverLlmInstanceModels() {
+    const request = buildLlmModelDiscoveryRequest();
+    const button = document.getElementById("cfgRefreshLlmInstanceModels");
+    if (!request || !(button instanceof HTMLButtonElement) || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "获取中…";
+    setLlmModelDiscoveryStatus("pending", "正在向当前端点请求 /models…");
+    try {
+      const result = await discoverConfigModels(request.config, request.instanceId);
+      if (Array.isArray(result?.reasoning_efforts) && result.reasoning_efforts.length) {
+        renderLlmDatalist(
+          "cfgLlmInstanceReasoningOptions",
+          result.reasoning_efforts,
+          getVal("cfgLlmInstanceReasoning"),
+        );
+      }
+      if (!result?.ok) {
+        throw new Error(result?.error || "端点没有返回模型列表");
+      }
+      const models = Array.isArray(result.models) ? result.models : [];
+      renderLlmDatalist(
+        "cfgLlmInstanceModelOptions",
+        models,
+        getVal("cfgLlmInstanceModel"),
+      );
+      setLlmModelDiscoveryStatus(
+        "success",
+        models.length
+          ? `已获取 ${models.length} 个模型；可从下拉选择，也可继续手填。`
+          : "接口返回了空列表；保留当前手填值。",
+      );
+    } catch (error) {
+      setLlmModelDiscoveryStatus(
+        "error",
+        `获取失败：${error?.message || "未知错误"}；当前输入未改动，仍可手填。`,
+      );
+    } finally {
+      button.disabled = false;
+      button.textContent = "获取模型";
+    }
+  }
+
+  function syncLlmInstanceConditionalFields() {
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement)) return;
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    dialog.querySelectorAll("[data-llm-instance-field]").forEach((field) => {
+      const kind = field.dataset.llmInstanceField;
+      const visible =
+        (kind === "openai-auth" && providerType === "openai")
+        || (kind === "openai-protocol" && ["openai", "openai_compatible"].includes(providerType))
+        || (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType))
+        || (kind === "ollama" && providerType === "ollama")
+        || (kind === "openrouter" && providerType === "openrouter");
+      field.hidden = !visible;
+    });
+    resetLlmModelDiscovery();
+  }
+
+  function applyLlmProviderDefaults() {
+    const providerType = getVal("cfgLlmInstanceProviderType");
+    const defaults = LLM_PROVIDER_DEFAULTS[providerType] || {};
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    const previousType = String(dialog?.dataset.providerType || "");
+    const previousDefaults = LLM_PROVIDER_DEFAULTS[previousType] || {};
+    const isNew = !state.llmEditingInstanceId;
+    const model = getVal("cfgLlmInstanceModel");
+    const baseUrl = getVal("cfgLlmInstanceBaseUrl");
+    if (!model || (isNew && model === (previousDefaults.model || ""))) {
+      setVal("cfgLlmInstanceModel", defaults.model || "");
+    }
+    if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
+      setVal("cfgLlmInstanceBaseUrl", defaults.base_url || "");
+    }
+    const previousBaseId = previousType.replace(/_/g, "-");
+    const currentId = getVal("cfgLlmInstanceId");
+    if (!currentId || (isNew && currentId === previousBaseId)) {
+      let candidate = providerType.replace(/_/g, "-");
+      let suffix = 2;
+      while (state.llmDraft?.instances[candidate]) {
+        candidate = `${providerType.replace(/_/g, "-")}-${suffix++}`;
+      }
+      setVal("cfgLlmInstanceId", candidate);
+    }
+    const previousLabel = LLM_PROVIDER_LABELS[previousType] || previousType;
+    const currentName = getVal("cfgLlmInstanceName");
+    if (!currentName || (isNew && currentName === previousLabel)) {
+      setVal("cfgLlmInstanceName", LLM_PROVIDER_LABELS[providerType] || providerType);
+    }
+    if (dialog instanceof HTMLElement) dialog.dataset.providerType = providerType;
+    syncLlmInstanceConditionalFields();
+  }
+
+  function openLlmInstanceDialog(instanceId = "") {
+    if (!state.llmDraft) return;
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement)) return;
+    const instance = instanceId ? state.llmDraft.instances[instanceId] : null;
+    state.llmEditingInstanceId = instanceId;
+    llmDialogReturnFocus = document.activeElement;
+    dialog.dataset.providerType = instance?.provider_type || "";
+    const title = document.getElementById("cfgLlmInstanceDialogTitle");
+    if (title) title.textContent = instance ? "编辑 LLM 实例" : "新建 LLM 实例";
+    setVal("cfgLlmInstanceName", instance?.name || "");
+    setVal("cfgLlmInstanceId", instanceId);
+    const idInput = document.getElementById("cfgLlmInstanceId");
+    if (idInput instanceof HTMLInputElement) idInput.disabled = Boolean(instance);
+    setVal("cfgLlmInstanceProviderType", instance?.provider_type || "openai");
+    setVal("cfgLlmInstanceEnabled", instance?.enabled === false ? "off" : "on");
+    setVal("cfgLlmInstanceModel", instance?.model || "");
+    setVal("cfgLlmInstanceBaseUrl", instance?.base_url || "");
+    setVal("cfgLlmInstanceApiKey", "");
+    const keyInput = document.getElementById("cfgLlmInstanceApiKey");
+    if (keyInput instanceof HTMLInputElement) {
+      keyInput.disabled = false;
+      keyInput.placeholder = instance?.api_key ? "已配置；留空保留原密钥" : "输入 API Key";
+    }
+    const clearKey = document.getElementById("cfgLlmInstanceClearApiKey");
+    if (clearKey instanceof HTMLInputElement) clearKey.checked = false;
+    const clearKeyField = document.getElementById("cfgLlmInstanceClearApiKeyField");
+    if (clearKeyField instanceof HTMLElement) clearKeyField.hidden = !instance?.api_key;
+    setVal("cfgLlmInstanceAuthMode", instance?.auth_mode || "api_key");
+    setVal("cfgLlmInstanceApiFlavor", instance?.api_flavor || "");
+    setVal("cfgLlmInstanceReasoning", instance?.reasoning_effort || "");
+    setVal("cfgLlmInstanceNumCtx", instance?.num_ctx || 0);
+    setVal("cfgLlmInstanceReferer", instance?.http_referer || "");
+    setVal("cfgLlmInstanceTitle", instance?.x_title || "");
+    const error = document.getElementById("cfgLlmInstanceFormError");
+    if (error) error.textContent = "";
+    renderLlmDatalist(
+      "cfgLlmInstanceReasoningOptions",
+      ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+      instance?.reasoning_effort || "",
+    );
+    if (instance) syncLlmInstanceConditionalFields();
+    else applyLlmProviderDefaults();
+    dialog.hidden = false;
+    overlay.classList.add("has-instance-dialog");
+    window.setTimeout(() => document.getElementById("cfgLlmInstanceName")?.focus(), 0);
+  }
+
+  function closeLlmInstanceDialog() {
+    const dialog = document.getElementById("cfgLlmInstanceDialog");
+    if (!(dialog instanceof HTMLElement) || dialog.hidden) return;
+    dialog.hidden = true;
+    overlay.classList.remove("has-instance-dialog");
+    state.llmEditingInstanceId = "";
+    if (llmDialogReturnFocus?.focus) llmDialogReturnFocus.focus();
+    llmDialogReturnFocus = null;
+  }
+
+  function saveLlmInstanceDraft() {
+    if (!state.llmDraft) return;
+    const existingId = state.llmEditingInstanceId;
+    const instanceId = String(existingId || getVal("cfgLlmInstanceId")).trim().toLowerCase();
+    const name = getVal("cfgLlmInstanceName").trim();
+    const providerType = getVal("cfgLlmInstanceProviderType").trim();
+    const enabled = getVal("cfgLlmInstanceEnabled") !== "off";
+    const model = getVal("cfgLlmInstanceModel").trim();
+    const baseUrl = getVal("cfgLlmInstanceBaseUrl").trim();
+    const error = document.getElementById("cfgLlmInstanceFormError");
+    const fail = (message, focusId = "") => {
+      if (error) error.textContent = message;
+      if (focusId) document.getElementById(focusId)?.focus();
+    };
+    if (!LLM_INSTANCE_ID_PATTERN.test(instanceId)) {
+      fail("实例 ID 只能使用小写字母、数字、下划线和连字符，且最长 64 个字符。", "cfgLlmInstanceId");
+      return;
+    }
+    if (!existingId && state.llmDraft.instances[instanceId]) {
+      fail("这个实例 ID 已经存在。", "cfgLlmInstanceId");
+      return;
+    }
+    if (!name) {
+      fail("请填写实例名称。", "cfgLlmInstanceName");
+      return;
+    }
+    if (enabled && !model) {
+      fail("启用的实例必须明确填写模型。", "cfgLlmInstanceModel");
+      return;
+    }
+    if (enabled && providerType === "openai_compatible" && !baseUrl) {
+      fail("OpenAI-compatible 实例必须填写 Base URL。", "cfgLlmInstanceBaseUrl");
+      return;
+    }
+    const current = state.llmDraft.instances[existingId] || {};
+    const typedKey = getVal("cfgLlmInstanceApiKey");
+    const authMode = providerType === "openai"
+      ? getVal("cfgLlmInstanceAuthMode") || "api_key"
+      : "";
+    const effectiveKey = checked("cfgLlmInstanceClearApiKey")
+      ? ""
+      : typedKey || current.api_key || "";
+    const keyOptional = ["ollama", "gemini"].includes(providerType)
+      || (providerType === "openai" && authMode === "codex_oauth");
+    if (enabled && !keyOptional && !effectiveKey) {
+      fail("启用的远端实例需要 API Key。", "cfgLlmInstanceApiKey");
+      return;
+    }
+    const references = existingId ? llmInstanceReferences(existingId) : [];
+    if (!enabled && references.length) {
+      fail(`请先从这些调用链移除实例：${references.join("、")}。`);
+      return;
+    }
+    state.llmDraft.instances[instanceId] = {
+      name,
+      provider_type: providerType,
+      enabled,
+      api_key: effectiveKey,
+      model,
+      base_url: baseUrl,
+      auth_mode: authMode,
+      api_flavor: ["openai", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceApiFlavor")
+        : "",
+      http_referer: providerType === "openrouter" ? getVal("cfgLlmInstanceReferer").trim() : "",
+      x_title: providerType === "openrouter" ? getVal("cfgLlmInstanceTitle").trim() : "",
+      reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+        ? getVal("cfgLlmInstanceReasoning")
+        : "",
+      num_ctx: providerType === "ollama" ? Math.max(0, getInt("cfgLlmInstanceNumCtx", 0)) : 0,
+    };
+    if (enabled && !state.llmDraft.default_chain.length) {
+      state.llmDraft.default_chain.push(instanceId);
+    }
+    state.llmProbeResults.delete(instanceId);
+    closeLlmInstanceDialog();
+    renderLlmRoutingSummary();
+    showToast("实例草稿已更新；点击底部“保存配置”后生效。", "success");
+  }
+
+  function deleteLlmInstance(instanceId) {
+    if (!state.llmDraft?.instances[instanceId]) return;
+    const references = llmInstanceReferences(instanceId);
+    if (references.length) {
+      showToast(`无法删除：仍被 ${references.join("、")} 引用。`, "error");
+      return;
+    }
+    const name = state.llmDraft.instances[instanceId].name || instanceId;
+    if (!window.confirm(`删除 LLM 实例「${name}」？`)) return;
+    delete state.llmDraft.instances[instanceId];
+    state.llmProbeResults.delete(instanceId);
+    renderLlmRoutingSummary();
+    showToast("实例已从草稿删除；保存配置后生效。", "success");
+  }
+
+  async function runLlmInstanceProbe(instanceId) {
+    if (!state.llmDraft?.instances[instanceId]) return;
+    state.llmProbeResults.set(instanceId, { pending: true });
+    renderLlmInstances();
+    try {
+      const result = await probeConfigService("llm_instance", collectForm(), instanceId);
+      state.llmProbeResults.set(instanceId, result);
+    } catch (err) {
+      state.llmProbeResults.set(instanceId, {
+        ok: false,
+        error: err?.details?.message || err?.message || "实例探测失败",
+      });
+    }
+    renderLlmInstances();
+  }
+
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
-    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 4);
+    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 300);
+    state.llmProbeResults.clear();
+    renderLlmRoutingSummary(cfg.llm || {});
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
+    syncLlmFallbackSameState();
 
     setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
     setVal("cfgOpenaiKey", cfg.llm?.openai?.api_key);
@@ -6303,6 +8126,8 @@ function bindSettings() {
     setVal("cfgEmbeddingBaseUrl", cfg.llm?.embedding?.base_url);
     setVal("cfgEmbeddingModel", cfg.llm?.embedding?.model);
     setVal("cfgEmbeddingSimilarity", cfg.llm?.embedding?.similarity_threshold);
+    const embMultimodal = document.getElementById("cfgEmbeddingMultimodalEnabled");
+    if (embMultimodal) embMultimodal.checked = cfg.llm?.embedding?.multimodal_enabled === true;
     applyEmbeddingProviderUI();
 
     // Bilibili
@@ -6370,6 +8195,36 @@ function bindSettings() {
     setVal("cfgRedditDailyRelatedBudget", cfg.sources?.reddit?.daily_related_budget);
     setVal("cfgRedditRequestInterval", cfg.sources?.reddit?.request_interval_seconds);
     setVal("cfgRedditMinInterval", cfg.sources?.reddit?.min_interval_minutes);
+    const bangumiEnabled = document.getElementById("cfgBangumiEnabled");
+    if (bangumiEnabled) bangumiEnabled.checked = cfg.sources?.bangumi?.enabled === true;
+    setVal("cfgBangumiUsername", cfg.sources?.bangumi?.username);
+    {
+      // Token is a secret and never returned by GET; access_token_set only
+      // signals whether one is stored. Keep the field empty and reflect the
+      // stored state in the placeholder so an untouched save never clobbers it.
+      const bangumiToken = document.getElementById("cfgBangumiAccessToken");
+      if (bangumiToken) {
+        bangumiToken.value = "";
+        bangumiToken.placeholder = cfg.sources?.bangumi?.access_token_set
+          ? "已配置（留空保持不变；填写新令牌以替换）"
+          : "填写以自动识别当前用户并读取私密收藏";
+      }
+      // Clear-token is a per-save action; never leave it pre-checked after a
+      // reload, and disable it when nothing is stored to clear.
+      const bangumiClearToken = document.getElementById("cfgBangumiClearToken");
+      if (bangumiClearToken) {
+        bangumiClearToken.checked = false;
+        bangumiClearToken.disabled = cfg.sources?.bangumi?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, cfg.sources?.bangumi?.source_modes);
+    setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, cfg.sources?.bangumi?.subject_types);
+    setVal("cfgBangumiDailySearchBudget", cfg.sources?.bangumi?.daily_search_budget);
+    setVal("cfgBangumiDailyRankedBudget", cfg.sources?.bangumi?.daily_ranked_budget);
+    setVal("cfgBangumiDailyLatestBudget", cfg.sources?.bangumi?.daily_latest_budget);
+    setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
+    setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
+    setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
     void renderSourcesStatus();
 
     // General
@@ -6377,6 +8232,15 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    // Mirrors the [network].mode backend default (system since v0.3.175);
+    // only reached if /api/config omits the field.
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "system");
+    setVal("cfgNetworkProxy", cfg.network?.proxy || "");
+    const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+    if (savedAutoSync instanceof HTMLInputElement) {
+      savedAutoSync.checked = cfg.saved_sync?.auto_sync_enabled === true;
+      savedAutoSync.dataset.confirmed = savedAutoSync.checked ? "true" : "false";
+    }
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -6394,6 +8258,8 @@ function bindSettings() {
     setVal("cfgTrendingRefreshHours", cfg.scheduler?.trending_refresh_hours);
     setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
+    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
+    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
@@ -6414,6 +8280,7 @@ function bindSettings() {
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
+    setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -6440,54 +8307,28 @@ function bindSettings() {
 
   function collectForm() {
     const logPath = splitLogPath(getVal("cfgLogPath"), state.runtimeConfig?.logging);
-    const llmFallbackProvider = getVal("cfgLlmFallbackProvider");
     const embeddingFallbackProvider = getVal("cfgEmbeddingFallbackProvider");
+    const llmDraft = state.llmDraft || normalizeLlmDraft(state.runtimeConfig?.llm || {});
     return {
       language: getVal("cfgLanguage"),
       data_dir: getVal("cfgDataDir"),
       llm: {
-        default_provider: providerSelect.value,
-        concurrency: getInt("cfgLlmConcurrency", 3),
-        timeout: getInt("cfgLlmTimeout", 300),
-        fallback_enabled: Boolean(llmFallbackProvider),
-        fallback_provider: llmFallbackProvider,
-        openai: {
-          auth_mode: getVal("cfgOpenaiAuthMode") || "api_key",
-          api_key: getVal("cfgOpenaiKey"),
-          model: getVal("cfgOpenaiModel"),
-          base_url: getVal("cfgOpenaiBaseUrl"),
-        },
-        claude: {
-          api_key: getVal("cfgClaudeKey"),
-          model: getVal("cfgClaudeModel"),
-        },
-        gemini: {
-          api_key: getVal("cfgGeminiKey"),
-          model: getVal("cfgGeminiModel"),
-        },
-        deepseek: {
-          api_key: getVal("cfgDeepseekKey"),
-          model: getVal("cfgDeepseekModel"),
-          base_url: getVal("cfgDeepseekBaseUrl"),
-          reasoning_effort: getVal("cfgDeepseekReasoning"),
-        },
-        ollama: {
-          model: getVal("cfgOllamaModel"),
-          base_url: getVal("cfgOllamaBaseUrl"),
-        },
-        openrouter: {
-          api_key: getVal("cfgOpenrouterKey"),
-          model: getVal("cfgOpenrouterModel"),
-          base_url: getVal("cfgOpenrouterBaseUrl"),
-          http_referer: getVal("cfgOpenrouterReferer"),
-          x_title: getVal("cfgOpenrouterTitle"),
-        },
-        openai_compatible: {
-          api_key: getVal("cfgOpenaiCompatibleKey"),
-          model: getVal("cfgOpenaiCompatibleModel"),
-          base_url: getVal("cfgOpenaiCompatibleBaseUrl"),
-        },
+        routing_version: 2,
+        instances: clonePlain(llmDraft.instances),
+        default_chain: [...llmDraft.default_chain],
+        routes: Object.fromEntries(
+          Object.entries(llmDraft.routes).map(([moduleName, route]) => [
+            moduleName,
+            {
+              inherit: route.inherit !== false,
+              chain: route.inherit !== false ? [] : [...route.chain],
+            },
+          ]),
+        ),
+        concurrency: getInt("cfgLlmConcurrencyV2", 4),
+        timeout: getInt("cfgLlmTimeoutV2", 300),
         embedding: {
+          ...(state.runtimeConfig?.llm?.embedding || {}),
           provider: getVal("cfgEmbeddingProvider"),
           api_key: getVal("cfgEmbeddingApiKey"),
           base_url: getVal("cfgEmbeddingBaseUrl"),
@@ -6495,22 +8336,7 @@ function bindSettings() {
           similarity_threshold: getFloat("cfgEmbeddingSimilarity", 0.82),
           fallback_enabled: Boolean(embeddingFallbackProvider),
           fallback_provider: embeddingFallbackProvider,
-        },
-        soul: {
-          provider: getVal("cfgModuleSoulProvider"),
-          model: getVal("cfgModuleSoulModel"),
-        },
-        discovery: {
-          provider: getVal("cfgModuleDiscoveryProvider"),
-          model: getVal("cfgModuleDiscoveryModel"),
-        },
-        recommendation: {
-          provider: getVal("cfgModuleRecommendationProvider"),
-          model: getVal("cfgModuleRecommendationModel"),
-        },
-        evaluation: {
-          provider: getVal("cfgModuleEvaluationProvider"),
-          model: getVal("cfgModuleEvaluationModel"),
+          multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
         },
       },
       bilibili: {
@@ -6582,6 +8408,7 @@ function bindSettings() {
         reddit: {
           enabled: checked("cfgRedditEnabled"),
           backend: getVal("cfgRedditBackend") || "rdt",
+          ...(getVal("cfgRedditCookie") ? { cookie: getVal("cfgRedditCookie") } : {}),
           source_modes: collectRedditSourceModes(),
           daily_search_budget: getInt("cfgRedditDailySearchBudget", 300),
           daily_hot_budget: getInt("cfgRedditDailyHotBudget", 300),
@@ -6590,9 +8417,33 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
           min_interval_minutes: getInt("cfgRedditMinInterval", 60),
         },
+        bangumi: {
+          enabled: checked("cfgBangumiEnabled"),
+          username: getVal("cfgBangumiUsername"),
+          // Precedence: an explicit "clear token" checkbox sends access_token:""
+          // (backend clears the stored token + rejection marker). Otherwise send
+          // the token only when the user typed one; an empty field means "leave
+          // the stored token unchanged", so omit the key rather than clobbering
+          // the saved token with "".
+          ...(checked("cfgBangumiClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgBangumiAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgBangumiAccessToken") }
+              : {}),
+          subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+          source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgBangumiDailySearchBudget", 300),
+          daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
+          daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
+          request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
+        keyword_generation_mode: getVal("cfgKeywordGenerationMode"),
+        candidate_eval_concurrency: getInt("cfgCandidateEvalConcurrency", 3),
         multimodal_evaluation_enabled: checked("cfgMultimodalEvaluationEnabled"),
         multimodal_batch_size: getInt("cfgMultimodalBatchSize", 8),
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
@@ -6621,6 +8472,7 @@ function bindSettings() {
           twitter: getInt("cfgPoolShareTwitter", 1),
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
+          bangumi: getInt("cfgPoolShareBangumi", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -6632,8 +8484,15 @@ function bindSettings() {
         auto_update_enabled: checked("cfgAutoUpdate"),
         auto_update_check_interval_hours: getInt("cfgAutoUpdateInterval", 6),
       },
+      saved_sync: {
+        auto_sync_enabled: checked("cfgSavedAutoSync"),
+      },
       storage: {
         db_path: getVal("cfgStorageDbPath"),
+      },
+      network: {
+        mode: getVal("cfgNetworkProxyMode"),
+        proxy: getVal("cfgNetworkProxy"),
       },
       logging: {
         level: getVal("cfgLogLevel"),
@@ -6649,24 +8508,80 @@ function bindSettings() {
     };
   }
 
-  function renderProbeResult(statusEl, result) {
+  // One DOM convention for every "click, wait, read a verdict" strip in this
+  // panel: tone in the dataset, verdict in the text. The LLM/embedding probes
+  // and the per-source 测试连接 buttons share it instead of each keeping a
+  // private copy — two independent copies of one rendering rule is exactly the
+  // drift that left this codebase with two divergent source status maps.
+  function setProbeStatus(statusEl, tone, text) {
     if (!statusEl) return;
+    statusEl.dataset.tone = tone;
+    statusEl.textContent = text;
+  }
+
+  function formatConfigProbeResult(result) {
     const ok = Boolean(result?.ok);
+    const instance = result?.instance_id ? ` ${result.instance_id}` : "";
     const provider = result?.provider ? ` ${result.provider}` : "";
     const model = result?.model ? ` / ${result.model}` : "";
     const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
       ? ` (${Math.round(Number(result.latency_ms))}ms)`
       : "";
     const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-    statusEl.dataset.tone = ok ? "success" : "error";
-    statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+    return `${ok ? "可用" : "不可用"}${instance}${provider}${model}${latency}: ${detail}`;
+  }
+
+  function renderProbeResult(statusEl, result) {
+    if (!statusEl) return;
+    setProbeStatus(statusEl, result?.ok ? "success" : "error", formatConfigProbeResult(result));
   }
 
   function renderProbePending(statusEl, label) {
-    if (!statusEl) return;
-    statusEl.dataset.tone = "pending";
-    statusEl.textContent = `${label} 探测中...`;
+    setProbeStatus(statusEl, "pending", `${label} 探测中...`);
   }
+
+  // Three outcomes, three tones. The third one is the whole point: a dead proxy,
+  // a closed browser, a throttled platform or YouTube (which needs no login at
+  // all) all mean "could not tell", and showing that in red would send a user
+  // off to delete a credential that works. The backend picks the outcome — this
+  // map is a rendering detail, not a second opinion derived from
+  // `auth.verification` (invariant I4).
+  function renderVerifyResult(statusEl, result) {
+    const view = SourceStatus.describeVerifyResult(result);
+    setProbeStatus(statusEl, view.tone, view.text);
+  }
+
+  const sourceVerifyInFlight = new Set();
+
+  async function runSourceVerify(button) {
+    const slug = button?.closest("[data-source-card]")?.dataset?.sourceCard || "";
+    if (!slug || sourceVerifyInFlight.has(slug)) return;
+    const statusEl = button.parentElement?.querySelector(".source-verify-status");
+    sourceVerifyInFlight.add(slug);
+    button.disabled = true;
+    renderProbePending(statusEl, "连接");
+    let cooldown = 0;
+    try {
+      const result = await verifySource(slug);
+      renderVerifyResult(statusEl, result);
+      cooldown = Number(result?.retry_after_seconds) || 0;
+      // Only a verification that actually moved the credential or the verdict
+      // makes the status line above it stale; a refreshed timestamp does not.
+      if (result?.changed) void renderSourcesStatus();
+    } catch (err) {
+      const view = SourceStatus.describeVerifyError(err);
+      setProbeStatus(statusEl, view.tone, view.text);
+    } finally {
+      sourceVerifyInFlight.delete(slug);
+      SourceStatus.startVerifyCooldown(button, cooldown);
+    }
+  }
+
+  document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.(".source-verify-btn");
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+    void runSourceVerify(button);
+  });
 
   async function runLlmConfigProbe(button, statusEl) {
     if (!button) return;
@@ -6710,11 +8625,163 @@ function bindSettings() {
     });
   }
 
+  const addLlmInstanceBtn = document.getElementById("cfgAddLlmInstance");
+  if (addLlmInstanceBtn instanceof HTMLButtonElement) {
+    addLlmInstanceBtn.addEventListener("click", () => openLlmInstanceDialog());
+  }
+  const addLlmDefaultChainBtn = document.getElementById("cfgAddLlmDefaultChainItem");
+  if (addLlmDefaultChainBtn instanceof HTMLButtonElement) {
+    addLlmDefaultChainBtn.addEventListener("click", addLlmDefaultChainItem);
+  }
+  const llmInstanceProviderType = document.getElementById("cfgLlmInstanceProviderType");
+  if (llmInstanceProviderType instanceof HTMLSelectElement) {
+    llmInstanceProviderType.addEventListener("change", applyLlmProviderDefaults);
+  }
+  const refreshLlmInstanceModelsBtn = document.getElementById("cfgRefreshLlmInstanceModels");
+  if (refreshLlmInstanceModelsBtn instanceof HTMLButtonElement) {
+    refreshLlmInstanceModelsBtn.addEventListener("click", () => {
+      void discoverLlmInstanceModels();
+    });
+  }
+  for (const [id, eventName] of [
+    ["cfgLlmInstanceBaseUrl", "input"],
+    ["cfgLlmInstanceApiKey", "input"],
+    ["cfgLlmInstanceAuthMode", "change"],
+  ]) {
+    document.getElementById(id)?.addEventListener(eventName, resetLlmModelDiscovery);
+  }
+  const saveLlmInstanceBtn = document.getElementById("cfgSaveLlmInstance");
+  if (saveLlmInstanceBtn instanceof HTMLButtonElement) {
+    saveLlmInstanceBtn.addEventListener("click", saveLlmInstanceDraft);
+  }
+  const llmInstanceDialog = document.getElementById("cfgLlmInstanceDialog");
+  const closeLlmDialogBtn = document.getElementById("cfgCloseLlmInstanceDialog");
+  const cancelLlmDialogBtn = document.getElementById("cfgCancelLlmInstance");
+  closeLlmDialogBtn?.addEventListener("click", closeLlmInstanceDialog);
+  cancelLlmDialogBtn?.addEventListener("click", closeLlmInstanceDialog);
+  llmInstanceDialog?.querySelector("[data-close-llm-instance-dialog]")
+    ?.addEventListener("click", closeLlmInstanceDialog);
+  llmInstanceDialog?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeLlmInstanceDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(llmInstanceDialog.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex="0"]',
+    )).filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  const clearLlmInstanceKey = document.getElementById("cfgLlmInstanceClearApiKey");
+  if (clearLlmInstanceKey instanceof HTMLInputElement) {
+    clearLlmInstanceKey.addEventListener("change", () => {
+      const keyInput = document.getElementById("cfgLlmInstanceApiKey");
+      if (!(keyInput instanceof HTMLInputElement)) return;
+      if (clearLlmInstanceKey.checked) keyInput.value = "";
+      keyInput.disabled = clearLlmInstanceKey.checked;
+    });
+  }
+
+  const openDesktopModelsBtn = document.getElementById("cfgOpenDesktopModels");
+  if (openDesktopModelsBtn instanceof HTMLButtonElement) {
+    openDesktopModelsBtn.addEventListener("click", async () => {
+      openDesktopModelsBtn.disabled = true;
+      try {
+        const origin = await getBackendOrigin();
+        openMobileWebUrl(`${origin}/web?settings=models`);
+      } finally {
+        openDesktopModelsBtn.disabled = false;
+      }
+    });
+  }
+
+  const probeLlmChainBtn = document.getElementById("cfgProbeLlmChain");
+  const probeLlmChainStatus = document.getElementById("cfgProbeLlmChainStatus");
+  if (probeLlmChainBtn instanceof HTMLButtonElement) {
+    probeLlmChainBtn.addEventListener("click", async () => {
+      probeLlmChainBtn.disabled = true;
+      renderProbePending(probeLlmChainStatus, "默认调用链");
+      try {
+        const result = await probeConfigService("llm_chain", collectForm());
+        renderProbeResult(probeLlmChainStatus, result);
+      } catch (err) {
+        renderProbeResult(probeLlmChainStatus, {
+          ok: false,
+          error: err?.message || "默认调用链探测失败",
+        });
+      } finally {
+        probeLlmChainBtn.disabled = false;
+      }
+    });
+  }
+
+  async function runLlmFallbackConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "备选 Provider");
+    try {
+      const result = await probeConfigService("llm_fallback", collectForm());
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "备选 Provider 探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeLlmFallbackBtn = document.getElementById("cfgProbeLlmFallback");
+  const probeLlmFallbackStatus = document.getElementById("cfgProbeLlmFallbackStatus");
+  if (probeLlmFallbackBtn instanceof HTMLButtonElement) {
+    probeLlmFallbackBtn.addEventListener("click", () => {
+      void runLlmFallbackConfigProbe(probeLlmFallbackBtn, probeLlmFallbackStatus);
+    });
+  }
+
   const probeEmbeddingBtn = document.getElementById("cfgProbeEmbedding");
   const probeEmbeddingStatus = document.getElementById("cfgProbeEmbeddingStatus");
   if (probeEmbeddingBtn instanceof HTMLButtonElement) {
     probeEmbeddingBtn.addEventListener("click", () => {
       void runEmbeddingConfigProbe(probeEmbeddingBtn, probeEmbeddingStatus);
+    });
+  }
+
+  async function runNetworkProxyConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "代理");
+    try {
+      const proxy = getVal("cfgNetworkProxy");
+      const mode = getVal("cfgNetworkProxyMode");
+      const result = await probeConfigService("network_proxy", { network: { mode, proxy } });
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "代理探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy");
+  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus");
+  if (probeNetworkProxyBtn instanceof HTMLButtonElement) {
+    probeNetworkProxyBtn.addEventListener("click", () => {
+      void runNetworkProxyConfigProbe(probeNetworkProxyBtn, probeNetworkProxyStatus);
     });
   }
 
@@ -6756,7 +8823,29 @@ function bindSettings() {
     });
   }
 
+  const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+  const savedAutoSyncStatus = document.getElementById("cfgSavedAutoSyncStatus");
+  if (savedAutoSync instanceof HTMLInputElement) {
+    savedAutoSync.addEventListener("change", () => {
+      if (!savedAutoSync.checked || savedAutoSync.dataset.confirmed === "true") return;
+      const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+      if (!window.confirm(warning)) {
+        savedAutoSync.checked = false;
+        savedAutoSync.dataset.confirmed = "false";
+        if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已取消，自动同步仍为关闭。";
+        return;
+      }
+      savedAutoSync.dataset.confirmed = "true";
+      if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
+    });
+  }
+
+  // The degraded empty state's "去设置修复" button routes through the gear so
+  // the overlay opens with the same banners / degraded save mode as always.
+  document.getElementById("emptyAction")?.addEventListener("click", () => gearBtn.click());
+
   gearBtn.addEventListener("click", async () => {
+    closeLlmInstanceDialog();
     overlay.hidden = false;
     toast.hidden = true;
     issuesContainer.innerHTML = "";
@@ -6796,6 +8885,7 @@ function bindSettings() {
   });
 
   backBtn.addEventListener("click", () => {
+    closeLlmInstanceDialog();
     overlay.hidden = true;
   });
 
@@ -6814,6 +8904,7 @@ function bindSettings() {
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
+            bangumi: checked("cfgBangumiEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -6823,6 +8914,7 @@ function bindSettings() {
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
+            bangumi: getInt("cfgPoolShareBangumi", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -6833,6 +8925,7 @@ function bindSettings() {
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");
@@ -6852,6 +8945,8 @@ function bindSettings() {
       // updateConfig() PUT targets the new origin.
       let endpointChanged = false;
       let newEndpointLabel = null;
+      const schemeRaw = backendSchemeInput instanceof HTMLSelectElement
+        ? backendSchemeInput.value : "http";
       const hostRaw = backendHostInput instanceof HTMLInputElement
         ? backendHostInput.value.trim() : "";
       const portRaw = backendPortInput instanceof HTMLInputElement
@@ -6866,18 +8961,17 @@ function bindSettings() {
       }
       {
         const previous = await getBackendEndpointConfig();
-        const next = await updateBackendEndpoint(hostRaw, portRaw || "8420");
-        newEndpointLabel = `${next.host}:${next.port}`;
-        endpointChanged = next.host !== previous.host || next.port !== previous.port;
+        const next = await updateBackendEndpoint(schemeRaw, hostRaw, portRaw || "8420");
+        newEndpointLabel = `${next.scheme}://${next.host}:${next.port}`;
+        endpointChanged = next.scheme !== previous.scheme
+          || next.host !== previous.host || next.port !== previous.port;
       }
 
       const data = collectForm();
       try {
         const result = await updateConfig(data);
         if (result.config) {
-          applyRuntimeConfig(result.config);
-          renderIssues(result.config.issues);
-          renderDegradedBanner(result.config);
+          populateForm(result.config);
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
@@ -6906,19 +9000,31 @@ function bindSettings() {
         // Rebind the runtime stream against the new origin and refresh
         // the online indicator. If the backend isn't yet running on the
         // new port these will retry on the fixed liveness cadence and the popup
-        // status will flip to offline — exactly the signal the user
-        // needs to remember to start the daemon with --port.
+        // status will stay reconnecting or flip to offline — exactly the signal
+        // the user needs to remember to start the daemon with --port.
+        await clearPopupSession();
         connectRuntimeStream();
-        state.online = await checkBackendStatus();
-        setStatus(state.online);
-        if (state.online) {
-          offlineBackendPoller.stop();
+        const online = await checkBackendStatus();
+        if (online) {
+          backendConnectionCoordinator.markHttpReachable();
         } else {
-          offlineBackendPoller.start();
+          backendConnectionCoordinator.markOffline();
         }
       }
     } catch (err) {
-      if (!renderStructuredConfigError(err)) {
+      if (err?.message === "https_required") {
+        showToast("公网后端必须使用 HTTPS。", "error");
+      } else if (err?.message === "backend_permission_denied") {
+        showToast("未授予该后端地址的访问权限，地址未保存。", "error");
+      } else if (err?.message === "invalid_backend_scheme") {
+        showToast("后端协议无效。", "error");
+      } else if (BANGUMI_SAVE_ERROR_MESSAGES[err?.details?.error]) {
+        // Config PUT rejects a bad/expired Bangumi token live via /v0/me.
+        showToast(
+          err.details.message || BANGUMI_SAVE_ERROR_MESSAGES[err.details.error],
+          "error",
+        );
+      } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {
@@ -6933,8 +9039,40 @@ function bindSettings() {
 // is still disabled.
 const EMBEDDING_BANNER_DISMISS_KEY = "embeddingBannerDismissed";
 
+// Repair polling: a bge-m3 pull is ~568MB, so allow up to 20 minutes. The
+// pull continues server-side even if the panel closes; the banner's
+// auto-refresh clears it once embedding recovers.
+const EMBEDDING_REPAIR_POLL_MS = 1_500;
+const EMBEDDING_REPAIR_POLL_LIMIT = Math.ceil((20 * 60 * 1_000) / EMBEDDING_REPAIR_POLL_MS);
+
+function formatRepairProgress(repair) {
+  if (repair && repair.total > 0) {
+    const pct = Math.min(99, Math.round((repair.completed / repair.total) * 100));
+    return `拉取中 ${pct}%`;
+  }
+  return "拉取中…";
+}
+
+// Wait for the server-side pull to finish, mirroring progress onto the
+// button. Returns the final repair state (or null if the backend vanished).
+async function waitForEmbeddingRepair(enableBtn) {
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    const repair = await fetchEmbeddingRepairStatus();
+    if (!repair) return null;
+    if (repair.done) return repair;
+    if (enableBtn) enableBtn.textContent = formatRepairProgress(repair);
+  }
+  return { done: false, ok: false, error: "拉取超时" };
+}
+
 async function enableLocalOllamaEmbedding(enableBtn) {
-  const original = enableBtn ? enableBtn.textContent : "";
+  const failBtn = (label) => {
+    if (enableBtn) {
+      enableBtn.disabled = false;
+      enableBtn.textContent = label;
+    }
+  };
   if (enableBtn) {
     enableBtn.disabled = true;
     enableBtn.textContent = "启用中…";
@@ -6945,7 +9083,10 @@ async function enableLocalOllamaEmbedding(enableBtn) {
         embedding: {
           provider: "ollama",
           model: "bge-m3",
-          base_url: "http://localhost:11434/v1",
+          // Don't hardcode base_url: Docker deployments use
+          // http://ollama:11434/v1 (sidecar), local deployments use
+          // the default http://localhost:11434/v1.  Omitting it
+          // preserves whatever the backend already has configured.
         },
       },
     });
@@ -6953,26 +9094,70 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     // /api/health probes it live, so embedding_ready only flips true once
     // Ollama actually serves a vector. Don't claim success on a config
     // write alone.
-    const health = await fetchHealth();
+    let health = await fetchHealth();
     const banner = document.getElementById("embeddingBanner");
     if (health && health.embedding_ready) {
       if (banner) banner.hidden = true;
       setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
-    } else {
-      if (enableBtn) {
-        enableBtn.disabled = false;
-        enableBtn.textContent = "重试";
+      return;
+    }
+    // Not ready → let the backend classify the cause and, when the fix is
+    // "pull the model", do it server-side with real progress (v0.3.155+).
+    const kicked = await startEmbeddingRepair();
+    if (kicked.status === 409 && kicked.error === "not_running") {
+      failBtn("重试");
+      setHint(kicked.detail || "Ollama 没有在运行，请先启动 Ollama（或运行 `ollama serve`）。", "error");
+      return;
+    }
+    if (kicked.status === 409 && kicked.error === "unsupported_provider") {
+      failBtn("重试");
+      setHint(kicked.detail || "一键修复只支持本地 Ollama embedding。", "error");
+      return;
+    }
+    if (kicked.status === 409 && kicked.error !== "already_running" && kicked.detail) {
+      failBtn("重试");
+      setHint(kicked.detail, "error");
+      return;
+    }
+    if (kicked.status === 403) {
+      failBtn("重试");
+      setHint("只能在本机操作 embedding 修复；请在装有后端的电脑上打开扩展。", "error");
+      return;
+    }
+    if (
+      kicked.status === 202 ||
+      kicked.already_ok ||
+      (kicked.status === 409 && kicked.error === "already_running")
+    ) {
+      if (!kicked.already_ok) {
+        setHint("正在拉取 bge-m3（约 568MB）。关闭面板下载也会继续。");
+        const repair = await waitForEmbeddingRepair(enableBtn);
+        if (repair && repair.done && !repair.ok) {
+          failBtn("重试");
+          setHint(`bge-m3 拉取失败：${repair.error || "未知错误"}`, "error");
+          return;
+        }
       }
-      setHint(
-        "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
-        "error",
-      );
+      // Health TTL is short (3s client / server-side cache expired on
+      // success), so one more read reflects the repaired state.
+      health = await fetchHealth();
+      if (health && health.embedding_ready) {
+        if (banner) banner.hidden = true;
+        setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
+        return;
+      }
+      failBtn("重试");
+      setHint("模型已就绪但探测还没通过，稍等几秒后重试。", "error");
+      return;
     }
+    // Older backend without /api/embedding/repair (404) or unreachable (0).
+    failBtn("重试");
+    setHint(
+      "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
+      "error",
+    );
   } catch {
-    if (enableBtn) {
-      enableBtn.disabled = false;
-      enableBtn.textContent = "重试";
-    }
+    failBtn("重试");
     setHint("启用失败，请检查后端连接后重试。", "error");
   }
 }
@@ -6982,7 +9167,7 @@ async function maybeShowEmbeddingBanner() {
   if (!banner) return;
   if (sessionStorage.getItem(EMBEDDING_BANNER_DISMISS_KEY) === "1") return;
   const health = await fetchHealth();
-  if (!shouldShowEmbeddingBanner(health)) {
+  if (!shouldShowEmbeddingBanner(health, state.runtimeStatus)) {
     banner.hidden = true;
     return;
   }

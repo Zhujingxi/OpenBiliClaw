@@ -339,6 +339,174 @@ def test_detect_missing_secrets_flags_openai_compatible_connection_fields(
     ]
 
 
+def test_detect_missing_secrets_flags_ollama_without_chat_model(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                "[llm]",
+                'default_provider = "ollama"',
+                "",
+                "[llm.ollama]",
+                'base_url = "http://localhost:11434/v1"',
+                'model = ""',
+                "",
+                "[bilibili]",
+                'cookie = "SESSDATA=test"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    status = bootstrap.detect_missing_secrets(tmp_path)
+
+    assert status["missing"] == ["llm.ollama.model"]
+
+
+def test_v2_template_provider_writes_target_one_instance_and_default_chain(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "config.toml").write_text(
+        (project_root / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    bootstrap.apply_provider_override(tmp_path, "openai_compatible")
+    bootstrap.apply_llm_api_key(tmp_path, "openai_compatible", "sk-relay")
+    bootstrap.apply_llm_base_url(
+        tmp_path,
+        "openai_compatible",
+        "https://relay.example/v1",
+    )
+    bootstrap.apply_llm_model(tmp_path, "openai_compatible", "relay-model")
+
+    data = bootstrap.read_simple_toml(tmp_path / "config.toml")
+    status = bootstrap.detect_missing_secrets(tmp_path)
+    llm = data["llm"]
+    instance = llm["instances"]["openai-compatible"]
+
+    assert llm["routing_version"] == 2
+    assert llm["default_chain"][0] == "openai-compatible"
+    assert instance["provider_type"] == "openai_compatible"
+    assert instance["enabled"] is True
+    assert instance["api_key"] == "sk-relay"
+    assert instance["base_url"] == "https://relay.example/v1"
+    assert instance["model"] == "relay-model"
+    assert status["provider"] == "openai_compatible"
+    assert status["instance_id"] == "openai-compatible"
+    assert status["missing"] == ["bilibili.cookie"]
+
+
+def test_v2_bootstrap_module_override_creates_complete_derived_instance(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "config.toml").write_text(
+        (project_root / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    bootstrap.apply_llm_api_key(tmp_path, "deepseek", "sk-deepseek")
+
+    summary = bootstrap.apply_module_overrides(
+        tmp_path,
+        ["soul=deepseek:deepseek-quality"],
+    )
+
+    data = bootstrap.read_simple_toml(tmp_path / "config.toml")
+    route = data["llm"]["routes"]["soul"]
+    instance_id = route["chain"][0]
+    instance = data["llm"]["instances"][instance_id]
+    assert summary["modules"] == ["llm.soul=deepseek:deepseek-quality"]
+    assert route == {"inherit": False, "chain": [instance_id]}
+    assert instance["provider_type"] == "deepseek"
+    assert instance["api_key"] == "sk-deepseek"
+    assert instance["model"] == "deepseek-quality"
+    assert instance["enabled"] is True
+
+
+def test_v2_bootstrap_module_override_reuses_matching_derived_instance(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "config.toml").write_text(
+        (project_root / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    bootstrap.apply_llm_api_key(tmp_path, "deepseek", "sk-deepseek")
+
+    bootstrap.apply_module_overrides(tmp_path, ["soul=deepseek:deepseek-quality"])
+    first = bootstrap.read_simple_toml(tmp_path / "config.toml")
+    first_instance_id = first["llm"]["routes"]["soul"]["chain"][0]
+    bootstrap.apply_module_overrides(tmp_path, ["soul=deepseek:deepseek-quality"])
+    second = bootstrap.read_simple_toml(tmp_path / "config.toml")
+
+    assert second["llm"]["routes"]["soul"]["chain"] == [first_instance_id]
+    assert [
+        instance_id
+        for instance_id, instance in second["llm"]["instances"].items()
+        if instance.get("provider_type") == "deepseek"
+        and instance.get("model") == "deepseek-quality"
+    ] == [first_instance_id]
+
+
+def test_v2_reuse_copies_all_instances_and_tolerates_bad_num_ctx(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    (target / "config.toml").write_text(
+        (project_root / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (source / "config.toml").write_text(
+        """
+[llm]
+routing_version = 2
+default_chain = ["relay-a", "relay-b"]
+
+[llm.instances.relay-a]
+name = "Relay A"
+provider_type = "openai_compatible"
+enabled = true
+api_key = "sk-a"
+model = "model-a"
+base_url = "https://a.example/v1"
+num_ctx = "invalid"
+
+[llm.instances.relay-b]
+name = "Relay B"
+provider_type = "openai_compatible"
+enabled = true
+api_key = "sk-b"
+model = "model-b"
+base_url = "https://b.example/v1"
+
+[llm.routes.soul]
+inherit = false
+chain = ["relay-b", "relay-a"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    summary = bootstrap.reuse_config_secrets(target, source)
+    data = bootstrap.read_simple_toml(target / "config.toml")
+
+    assert data["llm"]["default_chain"] == ["relay-a", "relay-b"]
+    assert data["llm"]["instances"]["relay-a"]["api_key"] == "sk-a"
+    assert data["llm"]["instances"]["relay-a"]["num_ctx"] == 0
+    assert data["llm"]["instances"]["relay-b"]["api_key"] == "sk-b"
+    assert data["llm"]["routes"]["soul"] == {
+        "inherit": False,
+        "chain": ["relay-b", "relay-a"],
+    }
+    assert "llm.instances.relay-a" in summary["reused"]
+    assert "llm.instances.relay-b" in summary["reused"]
+
+
 def test_reuse_config_secrets_copies_openai_compatible_connection(
     tmp_path: Path,
 ) -> None:
@@ -626,7 +794,9 @@ def test_collect_human_llm_openai_compat_numeric_preset_uses_vendor_defaults() -
 
 
 def test_collect_human_llm_ollama_needs_no_api_key() -> None:
-    plain_inputs = iter(["7", "qwen2.5:7b"])
+    # ollama is off the interactive menu but still accepted by name for
+    # backward-compat / non-interactive installs.
+    plain_inputs = iter(["ollama", "qwen2.5:7b"])
     secret_prompts: list[str] = []
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda _prompt: next(plain_inputs),
@@ -704,7 +874,7 @@ def test_collect_human_install_wizard_manual_cookie() -> None:
     prompts: list[tuple[str, str]] = []
     plain_inputs = iter(
         [
-            "7",
+            "ollama",
             "qwen2.5:7b",
             "3",
             "120",
@@ -1380,3 +1550,97 @@ def test_parser_rejects_conflicting_youtube_flags(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--project-dir", str(tmp_path), "--yes-youtube", "--no-youtube"])
+
+
+# ── Reused-cookie live validation (init-progress spec Phase 3) ──────────────
+
+
+def _final_status(missing: list[str] | None = None) -> dict:
+    return {
+        "provider": "deepseek",
+        "missing": list(missing or []),
+        "has_cookie_inline": True,
+        "has_cookie_file": True,
+    }
+
+
+def _reuse_summary(reused: list[str]) -> dict:
+    return {"reused": reused, "skipped": [], "source": "/old/install"}
+
+
+def _init_status(bilibili_check: str) -> dict:
+    return {"prerequisites": {"bilibili_check": bilibili_check}}
+
+
+def test_reused_cookie_stale_downgrades_to_needs_secrets() -> None:
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie", "data/bilibili_cookie.json"]),
+        init_status=_init_status("failed"),
+    )
+    assert validated["reused_cookie_stale"] is True
+    assert bootstrap.STALE_COOKIE_MISSING_ENTRY in validated["missing"]
+    assert (
+        bootstrap.STALE_COOKIE_MISSING_ENTRY
+        == "bilibili.cookie (stale — reused cookie failed live validation)"
+    )
+    label = bootstrap.backend_healthy_label(validated)
+    assert label == "needs_secrets"
+    assert label != "complete"
+
+
+def test_reused_cookie_valid_keeps_complete() -> None:
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("ok"),
+    )
+    assert "reused_cookie_stale" not in validated
+    assert validated["missing"] == []
+    assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_reused_cookie_unverifiable_probe_does_not_downgrade() -> None:
+    # Backend unreachable / malformed payload / still "checking" → the
+    # install.sh disclaimer branch stays; never claim staleness we didn't see.
+    for payload in (None, {}, {"prerequisites": {}}, _init_status("checking")):
+        validated = bootstrap.apply_reused_cookie_validation(
+            _final_status(),
+            reuse_summary=_reuse_summary(["data/bilibili_cookie.json"]),
+            init_status=payload,
+        )
+        assert "reused_cookie_stale" not in validated
+        assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_cookie_not_reused_skips_live_validation_fold() -> None:
+    # This run reused only LLM keys — a failed bilibili probe must not be
+    # attributed to a "reused stale cookie" (it was never reused).
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["llm.deepseek.api_key"]),
+        init_status=_init_status("failed"),
+    )
+    assert "reused_cookie_stale" not in validated
+    assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_backend_healthy_label_still_reports_plain_missing_secrets() -> None:
+    assert (
+        bootstrap.backend_healthy_label(_final_status(["bilibili.cookie"]))
+        == "running_with_missing_secrets"
+    )
+
+
+def test_stale_entry_is_not_duplicated_on_refold() -> None:
+    once = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("failed"),
+    )
+    twice = bootstrap.apply_reused_cookie_validation(
+        once,
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("failed"),
+    )
+    assert twice["missing"].count(bootstrap.STALE_COOKIE_MISSING_ENTRY) == 1

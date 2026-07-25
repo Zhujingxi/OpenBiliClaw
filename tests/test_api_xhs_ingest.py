@@ -129,7 +129,7 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     fake_config = SimpleNamespace(
         data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
         sources=SimpleNamespace(
             browser_cdp_url="",
             browser_headed=False,
@@ -167,7 +167,7 @@ def xhs_task_client(
 
     fake_config = SimpleNamespace(
         data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
         sources=SimpleNamespace(
             browser_cdp_url="",
             browser_headed=False,
@@ -247,6 +247,26 @@ class TestXhsObservedUrls:
         assert body["accepted"] == 1  # only the valid xhs URL
         assert body["enqueued"] == 0
 
+    def test_urls_branch_accepts_discovery_item_variant(self, app_client: TestClient) -> None:
+        """The bare-``urls`` branch previously only accepted ``/explore/`` and
+        silently dropped the equally valid ``/discovery/item/`` note URL shape
+        (the ``notes`` branch already accepted it). Align them so a
+        discovery/item bare link is ingested, not discarded."""
+        note = "0123456789abcdef01234567"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": [
+                    f"https://www.xiaohongshu.com/discovery/item/{note}?xsec_token=Z",
+                    "https://example.com/bad",
+                ],
+                "page_type": "explore",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] == 1  # the discovery/item URL, not the junk one
+
     def test_stores_observations_in_db(self, app_client: TestClient, tmp_path: Path) -> None:
         from openbiliclaw.storage.database import Database
 
@@ -297,6 +317,8 @@ class TestXhsObservedUrls:
                         "like_count": 100,
                         "collect_count": 90,
                         "comment_count": 80,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
                 "page_type": "search",
@@ -309,7 +331,8 @@ class TestXhsObservedUrls:
 
         row = db.conn.execute(
             "SELECT source_strategy, source_platform, content_id, content_url, title, up_name, "
-            "view_count, like_count, collect_count, comment_count "
+            "view_count, like_count, collect_count, comment_count, published_at, "
+            "published_label "
             "FROM discovery_candidates WHERE content_id=?",
             ("note-xyz-001",),
         ).fetchone()
@@ -320,6 +343,8 @@ class TestXhsObservedUrls:
         assert row["like_count"] == 100
         assert row["collect_count"] == 90
         assert row["comment_count"] == 80
+        assert row["published_at"] == "2026-07-08T06:30:00Z"
+        assert row["published_label"] == "3小时前"
 
     def test_notes_ingest_drains_through_pipeline_into_content_cache(
         self,
@@ -796,7 +821,9 @@ class TestXhsObservedUrls:
 
         fake_config = SimpleNamespace(
             data_path=tmp_path,
-            bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+            bilibili=SimpleNamespace(
+                cookie="", proxy="", browser_executable="", browser_headed=False
+            ),
             sources=SimpleNamespace(
                 browser_cdp_url="",
                 browser_headed=False,
@@ -1007,6 +1034,7 @@ class TestXhsTaskResults:
         assert [note["note_id"] for note in partial_result["notes"]] == ["saved-partial"]
         assert len(memory.events) == 1
         assert memory.events[0]["event_type"] == "favorite"
+        assert len(memory.profile_signals) == 1
 
         final = app_client.post(
             "/api/sources/xhs/task-result",
@@ -1020,6 +1048,8 @@ class TestXhsTaskResults:
                         "title": "partial saved",
                         "url": saved_url,
                         "note_id": "saved-partial",
+                        "published_at": 1783492200000,
+                        "published_label": "3小时前",
                     },
                     {
                         "scope": "liked",
@@ -1036,6 +1066,7 @@ class TestXhsTaskResults:
         assert final.status_code == 200
         assert len(memory.events) == 2
         assert memory.events[1]["event_type"] == "like"
+        assert len(memory.profile_signals) == 2
         row = db.conn.execute(
             "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
             (task["id"],),
@@ -1048,7 +1079,16 @@ class TestXhsTaskResults:
             "saved-partial",
             "liked-final",
         ]
+        assert result["notes"][0]["published_at"] == 1783492200000
+        assert result["notes"][0]["published_label"] == "3小时前"
         assert result["scope_counts"] == {"saved": 1, "liked": 1, "xhs_history": 0}
+        candidate = db.conn.execute(
+            "SELECT published_at, published_label FROM discovery_candidates WHERE content_id=?",
+            ("saved-partial",),
+        ).fetchone()
+        assert candidate is not None
+        assert candidate["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_empty_result_preserves_scope_counts(
         self,
@@ -1148,6 +1188,8 @@ class TestXhsTaskResults:
                         "like_count": 101,
                         "collect_count": 91,
                         "comment_count": 81,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
             },
@@ -1176,7 +1218,7 @@ class TestXhsTaskResults:
 
         candidate_row = db.conn.execute(
             "SELECT title, source_strategy, source_platform, like_count, collect_count, "
-            "comment_count FROM discovery_candidates "
+            "comment_count, published_at, published_label FROM discovery_candidates "
             "WHERE content_id=?",
             ("note-task-001",),
         ).fetchone()
@@ -1187,6 +1229,8 @@ class TestXhsTaskResults:
         assert candidate_row["like_count"] == 101
         assert candidate_row["collect_count"] == 91
         assert candidate_row["comment_count"] == 81
+        assert candidate_row["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate_row["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_skips_notes_already_seen_in_previous_task(
         self,
@@ -1374,3 +1418,127 @@ class TestXhsTokens:
         )
         assert resp.status_code == 200
         assert resp.json()["upgraded"] == 0
+
+
+class TestExtensionHarvestedCovers:
+    """Cover bytes harvested by the extension ride the notes payload.
+
+    xhscdn's TLS-fingerprint hotlink protection (2026-07) 403s every
+    server-side fetch, so ingest is the only moment the backend can obtain
+    these covers — shipped as base64 alongside the note metadata."""
+
+    def test_notes_with_cover_data_populate_image_cache(
+        self,
+        app_client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import base64
+
+        from openbiliclaw.runtime.image_cache import is_cover_cached
+
+        cache_dir = tmp_path / "image-cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr("openbiliclaw.runtime.image_cache._CACHE_DIR", cache_dir)
+
+        cover_url = "https://sns-webpic-qc.xhscdn.com/202607191557/deadbeef/1000gabc"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/note-cover-001"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/note-cover-001",
+                        "title": "封面测试",
+                        "author": "作者",
+                        "cover_url": cover_url,
+                        "cover_data": base64.b64encode(b"webp-bytes").decode(),
+                        "cover_content_type": "image/webp",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["enqueued"] == 1
+        assert is_cover_cached(cover_url) is True
+        # Token rotation maps to the same cache entry — a later serve with a
+        # newer (or long-dead) token still hits this copy.
+        rotated = "https://sns-webpic-qc.xhscdn.com/999912312359/ffffffff/1000gabc"
+        assert is_cover_cached(rotated) is True
+
+    def test_bad_cover_data_never_blocks_note_ingest(
+        self,
+        app_client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openbiliclaw.runtime.image_cache import is_cover_cached
+
+        cache_dir = tmp_path / "image-cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr("openbiliclaw.runtime.image_cache._CACHE_DIR", cache_dir)
+
+        cover_url = "https://sns-webpic-qc.xhscdn.com/202607191557/deadbeef/1000gbad"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/note-cover-002"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/note-cover-002",
+                        "title": "坏封面",
+                        "author": "作者",
+                        "cover_url": cover_url,
+                        "cover_data": "!!!not-base64!!!",
+                        "cover_content_type": "image/webp",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["enqueued"] == 1
+        assert is_cover_cached(cover_url) is False
+
+    def test_placeholder_cover_url_normalized_to_empty(
+        self,
+        app_client: TestClient,
+        tmp_path: Path,
+    ) -> None:
+        """data:/blob: lazy-load placeholders must never be stored as cover_url —
+        the image proxy rejects non-http(s) URLs, so a stored placeholder is a
+        cover that can never render (the 2026-07 「没头图」 failure mode)."""
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "test.db")
+        db.initialize()
+
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/note-ph-001"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/note-ph-001",
+                        "title": "占位符封面",
+                        "author": "作者",
+                        "cover_url": "data:image/png;base64,iVBORw0KGgo",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["enqueued"] == 1
+
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "test.db")
+        row = conn.execute(
+            "SELECT cover_url FROM discovery_candidates WHERE content_id=?",
+            ("note-ph-001",),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == ""

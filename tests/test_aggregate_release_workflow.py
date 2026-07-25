@@ -54,12 +54,14 @@ def test_aggregate_release_helper_only_lists_signed_firefox_xpi_when_asset_exist
         'firefox_xpi_asset_name="openbiliclaw-extension-v${extension_version}-firefox.xpi"'
     )
     assert expected_xpi_name_assignment in script
-    assert "asset_name_seen \"$firefox_xpi_asset_name\"" in script
-    assert "No signed Firefox extension XPI is available yet." in script
-    assert (
-        "firefox_signed_asset_line=\"\\`openbiliclaw-extension-v${extension_version}-firefox.xpi\\`\""
-        not in script
+    assert 'asset_name_seen "$firefox_xpi_asset_name"' in script
+    # Fallback wording must state the XPI is absent (v0.3.153 readable copy).
+    assert "no signed XPI in this release" in script
+    unconditional_xpi_assignment = (
+        'firefox_signed_asset_line="use '
+        '\\`openbiliclaw-extension-v${extension_version}-firefox.xpi\\`"'
     )
+    assert unconditional_xpi_assignment not in script
 
 
 def test_aggregate_release_helper_does_not_backfill_previous_channel_assets(
@@ -154,6 +156,13 @@ def test_aggregate_release_helper_does_not_backfill_previous_channel_assets(
         encoding="utf-8",
     )
     fake_gh.chmod(0o755)
+
+    # Keep this contract test hermetic. The aggregate helper also probes GHCR
+    # with curl; letting that hit the real network makes the subprocess race
+    # its 20-second timeout under a busy full-suite run.
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    fake_curl.chmod(0o755)
 
     env = os.environ.copy()
     env.update(

@@ -51,3 +51,50 @@ async def test_feedback_batch_scheduler_runs_again_when_dirty_during_processing(
     await scheduler.drain()
 
     assert soul.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_feedback_batch_scheduler_logs_info_on_no_provider(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMFallbackError
+
+    class NoProviderSoulEngine(FakeSoulEngine):
+        async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            self.calls += 1
+            raise LLMFallbackError("No provider was available to process the request.")
+
+    soul = NoProviderSoulEngine()
+    scheduler = FeedbackBatchScheduler(soul, debounce_seconds=0)
+
+    caplog.set_level(logging.INFO)
+    scheduler.schedule()
+    await scheduler.drain()
+
+    assert soul.calls == 1
+    assert "no chat LLM provider configured yet" in caplog.text
+    assert "post-feedback batch processing failed" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_feedback_batch_scheduler_logs_warning_on_rate_limit(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMRateLimitError
+
+    class RateLimitedSoulEngine(FakeSoulEngine):
+        async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            self.calls += 1
+            raise LLMRateLimitError("429 rate limit exceeded")
+
+    soul = RateLimitedSoulEngine()
+    scheduler = FeedbackBatchScheduler(soul, debounce_seconds=0)
+
+    caplog.set_level(logging.INFO)
+    scheduler.schedule()
+    await scheduler.drain()
+
+    assert soul.calls == 1
+    assert "rate-limited/cooling down" in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)

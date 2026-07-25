@@ -99,6 +99,7 @@ test("extractBootstrapNotesFromState maps saved liked and history groups", () =>
   const saved = {
     id: "saved-id",
     display_title: "saved",
+    create_time: 1783492200000,
     xsec_token: "saved-token",
     user: { nickname: "saved-author" },
     cover: { url: "https://example.com/saved.jpg" },
@@ -125,6 +126,7 @@ test("extractBootstrapNotesFromState maps saved liked and history groups", () =>
   assert.equal(notes.find((n) => n.title === "history")?.scope, "xhs_history");
   assert.equal(notes.find((n) => n.title === "saved")?.note_id, "saved-id");
   assert.equal(notes.find((n) => n.title === "saved")?.xsec_token, "saved-token");
+  assert.equal(notes.find((n) => n.title === "saved")?.published_at, 1783492200000);
 });
 
 test("extractBootstrapNotesFromState reads Xiaohongshu profile noteCard state shape", () => {
@@ -140,6 +142,7 @@ test("extractBootstrapNotesFromState reads Xiaohongshu profile noteCard state sh
                 xsecToken: "saved-xsec",
                 noteCard: {
                   displayTitle: "收藏标题",
+                  time: 1783492200000,
                   cover: { urlDefault: "https://example.com/saved-cover.jpg" },
                   user: { nickName: "收藏作者" },
                 },
@@ -171,6 +174,7 @@ test("extractBootstrapNotesFromState reads Xiaohongshu profile noteCard state sh
       author: note.author,
       cover_url: note.cover_url,
       xsec_token: note.xsec_token,
+      published_at: note.published_at,
     })),
     [
       {
@@ -180,6 +184,7 @@ test("extractBootstrapNotesFromState reads Xiaohongshu profile noteCard state sh
         author: "收藏作者",
         cover_url: "https://example.com/saved-cover.jpg",
         xsec_token: "saved-xsec",
+        published_at: 1783492200000,
       },
       {
         scope: "liked",
@@ -188,9 +193,11 @@ test("extractBootstrapNotesFromState reads Xiaohongshu profile noteCard state sh
         author: "赞过作者",
         cover_url: "https://example.com/liked-cover.jpg",
         xsec_token: "liked-xsec",
+        published_at: undefined,
       },
     ],
   );
+  assert.equal("published_at" in notes[1]!, false);
 });
 
 test("countBootstrapStateNotesByScope returns per-scope diagnostic counts", () => {

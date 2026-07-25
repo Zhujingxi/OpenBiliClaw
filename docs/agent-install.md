@@ -52,12 +52,13 @@ Either command:
 
 1. Clones the OpenBiliClaw repo (default `~/OpenBiliClaw` on Unix, `%USERPROFILE%\OpenBiliClaw` on Windows; override with the `INSTALL_DIR` env var)
    - Desktop installers use this same directory for `config.toml` / `data/` / `logs/`. If the desktop package created the directory first, the one-line installer clones source files into it without touching existing user data.
-2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses** its LLM API keys and Bilibili cookie so the user never has to retype them
-3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks LLM provider first, then provider credentials/model, embedding, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source
+2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses the full LLM instance registry, ordered chains, API keys, and Bilibili cookie** so same-type relay endpoints are not collapsed and the user never has to retype them
+3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks LLM provider first, then provider credentials/model, embedding, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source. Bangumi remains default-off here; after startup it can be enabled in `/setup/` or settings without login, and an optional public username controls whether public collections seed init.
 4. Installs Python dependencies for local mode, or builds / starts Docker Compose when `MODE=docker`; X/Twitter discovery's `twitter-cli` and Reddit discovery's `rdt-cli` packages are part of the default dependency set, so AI one-line installs do not need an extra flag for either one
 5. Starts the backend and runs a health check against `/api/health`. One-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
-6. Verifies the configured LLM provider and embedding service with real lightweight calls before init; if either fails, it blocks init with `status=service_check_failed`
+6. Verifies the configured global LLM instance chain and embedding service with real lightweight calls before init; any healthy chat instance satisfies the chain check, while embedding remains an independent check. If either service is unavailable, bootstrap blocks init with `status=service_check_failed`.
+   - The chat probe explicitly disables DeepSeek thinking. Every Ollama chat instance requires an explicit `model`; a Base URL or embedding-only `bge-m3` config never implies `llama3`.
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
 
 ```
@@ -68,7 +69,7 @@ Status:      complete | running_with_missing_secrets | needs_secrets | needs_dec
 Checkout:    <absolute path to the repo>
 Reused from: <path>                 (only present when reuse happened)
 Health URL:  http://127.0.0.1:8420/api/health
-Missing:     (none)  |  llm.<provider>.api_key, bilibili.cookie, ...
+Missing:     (none)  |  llm.instances.<instance-id>.api_key, bilibili.cookie, ...
 
 Next action (required — credentials are missing):
   1. Ask the user for: <exactly the missing items>
@@ -81,7 +82,7 @@ Next action (required — credentials are missing):
  — or —
 
 Next action (AI service check failed):
-  1. Fix the failing LLM provider or embedding service shown in the status block.
+  1. Fix the failing LLM instance chain or embedding service shown in the status block.
   2. Re-run the printed bootstrap command without --skip-init.
      The bootstrap repeats the checks and only then runs init.
 
@@ -89,7 +90,7 @@ Next action (AI service check failed):
 
 Next action (init has been run automatically):
   - Verify the backend is healthy: curl -sS <Health URL>
-  - Open Mobile Web: click the phone icon in the extension header and scan the QR code; if the backend address is loopback, the extension reads `/api/health.lan_ip` and shows the LAN URL automatically
+  - Open Mobile Web: click the phone icon in the extension header and scan the QR code; if the backend address is loopback, the extension calls `GET /api/qr-info` and reads the `lan_ip` response field to show the LAN URL automatically
   - See recommendations:    cd <dir> && uv run openbiliclaw recommend
   - View the soul profile:  cd <dir> && uv run openbiliclaw profile
   - Re-run init manually if needed: cd <dir> && uv run openbiliclaw init
@@ -104,9 +105,9 @@ states: continue the printed bootstrap command after asking the user,
 or wait for the browser extension to sync the Bilibili cookie, until
 bootstrap emits `init_complete` or a concrete blocker.
 `service_check_failed` means credentials and init choices were present,
-but the default LLM provider or embedding service failed its pre-init
+but the global LLM instance chain or embedding service failed its pre-init
 probe. Do not run `openbiliclaw init` manually around this; fix the
-provider/API key/base_url/model/Ollama issue and re-run bootstrap so the
+instance/API key/base_url/model/Ollama issue and re-run bootstrap so the
 same gate can pass.
 
 If the block says `Status: needs_decisions`, credentials are present
@@ -128,6 +129,7 @@ the user knows what fed their soul profile. Render approximately:
 >   - 📕 小红书:收藏 P 条 / 点赞 Q 条 / 浏览记录 R 条 → **入库 Y 条事件**
 >   - 🎵 抖音:发布 A 条 / 收藏 B 条 / 点赞 C 条 / 关注 D 人 → **入库 E 条事件**
 >   - 🌐 YouTube:观看历史 H 条 / 订阅 S 个 / 点赞 L 条 → **入库 T 条事件**
+>   - 📚 Bangumi:想看/想读/想玩 W 条 / 看过/读过/玩过 D 条 / 在看/在读/在玩 G 条 → **入库 U 条事件**（仅在本轮选择并填写公开用户名时）
 >   - 📊 画像建模总事件:Z 条
 >   - 🔍 首轮发现内容池:D 条
 > 现在可以打开扩展 popup 看推荐了。」
@@ -202,6 +204,26 @@ question silently.** Specifically for `bilibili.cookie`:
   history-fetch path swallows the auth failure and just returns 0
   items — leading to a hollow soul profile and the "为什么我的画像
   里没东西" support ticket.
+
+**Live validation (v0.3.162+)**: once the backend passes its health
+check, bootstrap consumes the backend's own live cookie probe
+(`GET /api/init-status` → `prerequisites.bilibili_check`) for any run
+that reused a cookie:
+
+- Probe says **failed** → the status block reports
+  `bilibili.cookie (stale — reused cookie failed live validation)`
+  under `Missing:`, the final `Status:` is downgraded from `complete`
+  to `needs_secrets`, and auto-init is **not** run (it could only fail
+  with `empty_history`). `install.sh` / `install.ps1` print an explicit
+  "cookie 已失效，请重新登录后由扩展同步" block instead of the generic
+  disclaimer. When you see this state, go straight to the re-login
+  options below (default A) — the cookie is confirmed dead, do not
+  offer "先用旧的" (option B).
+- Probe says **ok** → the reused cookie is confirmed live; you may
+  soften the confirmation below, but still surface the reuse.
+- Probe unreachable / indeterminate (backend not healthy, `checking`)
+  → no downgrade; the generic "NOT validated" disclaimer applies and
+  the full contract below is mandatory.
 
 **Concrete contract for reused cookies**:
 
@@ -310,7 +332,7 @@ user chooses an OpenAI-compatible gateway / preset path.
 > - 用户说"Azure OpenAI / 公司 Azure 部署" → 子菜单 #7 (azure)
 > - 用户说"自己跑的 vLLM / LMStudio / Ollama OpenAI 兼容 shim" → 子菜单 #8 (self-hosted)
 >
-> 子菜单选完后,**human one-line installer 会写到 `[llm.openai_compatible]`**（provider=`openai_compatible`,base_url 必填,和 OpenAI 官方配置解耦）。AI-agent 非交互 `--llm-preset` 兼容路径本阶段仍写 `[llm.openai]` 段(provider 字段是 `openai`,底层走 OpenAI Chat Completions 协议),避免破坏既有 agent prompt。子菜单还会**显示服务介绍 + Key 申请链接**,并**预提醒 embedding 怎么办**(Kimi / MiniMax / Yi / 自建 没 embedding endpoint → Phase 3 自动 fallback Ollama bge-m3;Qwen / GLM / Azure / 中转站 有 embedding → Phase 3 高级选项可指向同一 base_url)。
+> 子菜单选完后，fresh install 会创建或复用一个 `provider_type="openai_compatible"` 的 `[llm.instances.<id>]`（`base_url` 必填），并把它提升到 `default_chain` 首位；已有其他官方或中转实例与后续 fallback 顺序都会保留。AI-agent 非交互 `--llm-preset` 走同一实例写入逻辑；已有 legacy config 仍原格式就地更新，直到新版设置页保存时再迁移。子菜单还会**显示服务介绍 + Key 申请链接**，并**预提醒 embedding 怎么办**（Kimi / MiniMax / Yi / 自建通常没有 embedding endpoint，Phase 3 默认推荐独立 Ollama bge-m3；Qwen / GLM / Azure / 中转站可在 Phase 3 高级选项里显式复用同一地址）。
 
 **AI agent 一键非交互式安装(`--llm-preset`)** —— 不走交互菜单,直接传 preset 名给 `agent_bootstrap.py`,Base URL + 默认模型自动从 preset 表里拿。**最常见的中转站场景排第一**:
 
@@ -380,12 +402,13 @@ When the user *does* mention a gateway, ask **all three**:
 Run with `--provider openai --llm-base-url <URL> --llm-api-key <KEY> --llm-model <MODEL>`.
 
 > ⚠️ **Switching back from gateway to OpenAI 官方** (v0.3.20+): if
-> a previous run wrote a `base_url` into `[llm.openai]` and the user
+> the OpenAI instance selected by bootstrap has a stale gateway `base_url` and the user
 > later runs `--provider openai` *without* `--llm-base-url`, the
 > bootstrap automatically clears the stale base URL so the SDK falls
 > back to `https://api.openai.com/v1`. You'll see a `base_url_reset`
-> event in the JSON stream. Earlier versions silently kept routing
-> to the old gateway.
+> event in the JSON stream. Other instance IDs and the remaining
+> `default_chain` order are untouched. Legacy `[llm.openai]` receives the
+> same reset when the existing file has not migrated to v2 yet.
 
 ### Step 2 — Configure the chosen LLM
 
@@ -427,9 +450,12 @@ user is:
 >   不需要你做任何事，全程会打印进度。
 >   首次推理会比较慢（CPU 跑模型），不是装坏了。」
 
-Then run with `--provider ollama --llm-model llama3` (or
+Then run with `--provider ollama --llm-model qwen2.5:7b` (or
 `qwen2.5:3b` for a smaller model on weaker hardware), plus the Step 3
 embedding flags. No `--llm-api-key` or `--llm-base-url` needed.
+`--llm-model` is mandatory for Ollama chat: the bootstrap reports
+`llm.instances.<instance-id>.model` as missing instead of guessing or pulling `llama3`
+(legacy files still report `llm.ollama.model`).
 
 If the auto-install fails (no `brew` on Mac, no `winget` on Windows,
 no `sudo` on Linux), the bootstrap emits an `ollama_install_failed`
@@ -439,8 +465,9 @@ command — config already on disk, only the Ollama phase will rerun.
 
 Inside Docker mode the bootstrap **does not** auto-install Ollama for
 the chat LLM. If the user chooses chat provider `ollama`, tell them to
-run host-side Ollama and set `[llm.ollama] base_url` to
+run host-side Ollama and set that Ollama instance's `base_url` to
 `http://host.docker.internal:11434/v1` so the container can reach it.
+Set the same instance's `model` to the exact host-side chat model as well.
 This is separate from embedding: the default Docker embedding path uses
 the compose sidecar at `http://ollama:11434/v1` and does not require a
 host Ollama install.
@@ -488,15 +515,15 @@ Tell the user:
 **Special case — Gemini Key reuse**: if the user picks option 2 *and*
 already configured Gemini as their primary LLM, you may reuse the same
 key value, but still pass it as `--embedding-api-key <KEY>`. Embedding
-credentials are stored in `[llm.embedding]`, not borrowed from
-`[llm.gemini]`.
+credentials are stored in `[llm.embedding]`. When embedding fallback is
+explicitly enabled, runtime retains a compatibility path that can borrow the
+first enabled Gemini chat instance if this field is empty, but installer
+output should remain explicit and reproducible.
 
-**Safety net (no-op for the agent)**: even when the user picks option 3
-or skips entirely, the registry's runtime fallback chain
-(`build_embedding_service` in `src/openbiliclaw/llm/registry.py`) still
-catches the case where the configured provider has no embeddings
-endpoint and falls through ollama → gemini → openai. The chain is the
-last line of defence, not the primary UX.
+**No implicit embedding walk**: option 3 really disables embedding. Runtime
+only tries `[llm.embedding].fallback_provider` when that field is explicitly
+configured; it never walks Ollama → Gemini → OpenAI or follows the chat
+`default_chain`. This keeps vector model / dimension changes deliberate.
 
 ### Step 4 — B 站 Cookie
 
@@ -663,7 +690,7 @@ user already gave for the primary LLM is reused. The free tier
 ```bash
 python3 scripts/agent_bootstrap.py \
   --provider ollama \
-  --llm-model llama3 \
+  --llm-model qwen2.5:7b \
   --embedding-provider ollama \
   --embedding-model bge-m3 \
   --no-xhs \
@@ -713,7 +740,7 @@ the runtime fallback would still work but adds a startup warning.
 > decisions are explicit (`--embedding-*` plus source flags:
 > `--yes-xhs` / `--no-xhs`, `--yes-douyin` / `--no-douyin`,
 > and `--yes-youtube` / `--no-youtube`),
-> `agent_bootstrap.py` will first verify the configured LLM provider and
+> `agent_bootstrap.py` will first verify the configured global LLM instance chain and
 > embedding service. Only if both checks pass will it automatically run
 > `openbiliclaw init`: it pulls the user's Bilibili history, generates
 > the soul profile, and runs the first content discovery pass. Without
@@ -722,7 +749,7 @@ the runtime fallback would still work but adds a startup warning.
 >
 > If bootstrap emits `status=service_check_failed`, init has deliberately
 > **not** run. Surface the failing service and error to the user, help
-> them fix the provider/API key/base_url/model/Ollama issue, then re-run
+> them fix the instance/API key/base_url/model/Ollama issue, then re-run
 > the same bootstrap command without `--skip-init`.
 
 After running, **always**:
@@ -845,14 +872,11 @@ errors, or a no-API-key setup. Steps:
 Do NOT run these steps for the user automatically — Ollama install is a
 system-level package the user must consent to.
 
-> **Backend version note**: in v0.3.0–v0.3.2 the wizard wrote the
-> embedding config but the LLM registry never registered Ollama
-> unless `[llm.ollama]` was also populated, so embedding silently
-> kept hitting the user's primary cloud provider. Fixed in **v0.3.3**:
-> the registry auto-registers Ollama whenever `[llm.embedding]` asks
-> for it. If a user reports "I configured ollama but embedding still
-> hits Gemini/OpenAI", check their backend version and tell them to
-> upgrade to v0.3.3+ and restart.
+> **Backend version note**: v0.3.32+ builds embedding from its own
+> `[llm.embedding]` provider and does not route it through the chat
+> registry. This separation is intentional: local `bge-m3` can serve
+> embeddings without registering Ollama for chat or causing any
+> `llama3` probe. Older v0.3.0–v0.3.2 installs should be upgraded.
 
 ## Hard rules
 

@@ -423,6 +423,22 @@ def test_should_use_tray_false_on_unsupported_platform(monkeypatch) -> None:
     assert entry._should_use_tray() is False
 
 
+def test_tray_icon_uses_canonical_web_brand_asset() -> None:
+    from PIL import Image, ImageChops
+
+    from openbiliclaw import __file__ as package_init
+
+    icon_path = Path(package_init).resolve().parent / "web" / "icon-192.png"
+    with Image.open(icon_path) as source:
+        expected = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+
+    actual = entry._tray_icon_image()
+
+    assert actual.mode == "RGBA"
+    assert actual.size == (64, 64)
+    assert ImageChops.difference(actual, expected).getbbox() is None
+
+
 def test_redirect_output_to_logfile_noop_when_not_frozen(tmp_path: Path) -> None:
     # Dev (not frozen) keeps its real stdout/stderr — the redirect is a no-op and
     # must not create a log file.
@@ -434,6 +450,92 @@ def test_close_splash_noop_without_pyi_splash() -> None:
     # Dev / non-splash builds have no ``pyi_splash`` module — closing the splash
     # must be a silent no-op, never raise.
     entry._close_splash()  # must not raise
+
+
+def test_ensure_embedding_model_async_reports_global_pull_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.runtime import embedding_progress
+
+    cfg = Config()
+    cfg.llm.embedding.provider = "ollama"
+    cfg.llm.embedding.model = "bge-m3"
+    cfg.llm.embedding.base_url = "http://localhost:11434/v1"
+    pulled: list[tuple[str, str]] = []
+
+    class _InlineThread:
+        def __init__(self, *, target, name=None, daemon=None) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+        pulled.append((base_url, model))
+        if on_progress is not None:
+            on_progress("downloading", 240 * 1024 * 1024, 568 * 1024 * 1024)
+        return (True, "")
+
+    monkeypatch.setattr(entry.threading, "Thread", _InlineThread)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    monkeypatch.setattr("openbiliclaw.cli._ollama_has_model", lambda *_args: False)
+    monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+
+    entry._ensure_embedding_model_async()
+
+    snap = embedding_progress.snapshot()
+    assert pulled == [("http://localhost:11434/v1", "bge-m3")]
+    assert snap["running"] is False
+    assert snap["done"] is True
+    assert snap["ok"] is True
+    assert snap["model"] == "bge-m3"
+    assert snap["completed"] == 240 * 1024 * 1024
+    assert snap["total"] == 568 * 1024 * 1024
+
+
+def test_main_source_selftest_does_not_migrate_ignored_project_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source-checkout"
+    project_root = tmp_path / "selftest-profile"
+    source_data = source_root / "data"
+    source_data.mkdir(parents=True)
+    config_bytes = b"[api]\nport = 18420\n"
+    data_bytes = b"source-only ignored data"
+    (source_root / "config.toml").write_bytes(config_bytes)
+    (source_data / "marker.bin").write_bytes(data_bytes)
+
+    monkeypatch.setenv("OPENBILICLAW_SELFTEST", "1")
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    monkeypatch.setattr(entry.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        entry,
+        "__file__",
+        str(source_root / "packaging" / "entry.py"),
+    )
+    monkeypatch.setattr(entry, "_redirect_output_to_logfile", lambda _root: None)
+    monkeypatch.setattr(entry, "_notify_starting", lambda: None)
+    monkeypatch.setattr(entry, "_copy_legacy_packaged_user_data", lambda *_args: None)
+    monkeypatch.setattr(entry, "_inject_bundled_ollama_on_path", lambda _resources: False)
+    monkeypatch.setattr(entry, "_seed_default_config", lambda *_args: False)
+    monkeypatch.setattr(
+        entry,
+        "_repair_unloadable_config",
+        lambda *_args: entry._ConfigRepairResult(False, False),
+    )
+    monkeypatch.setattr(entry, "_close_splash", lambda: None)
+
+    import openbiliclaw.api.app as api_app
+
+    monkeypatch.setattr(api_app, "create_app", lambda: SimpleNamespace())
+
+    entry.main()
+
+    assert (source_root / "config.toml").read_bytes() == config_bytes
+    assert (source_data / "marker.bin").read_bytes() == data_bytes
+    assert not (project_root / "config.toml").exists()
+    assert not (project_root / "data" / "marker.bin").exists()
 
 
 def test_main_uses_configured_api_host_when_env_host_unset(
@@ -510,6 +612,21 @@ def test_main_opens_setup_after_repairing_unloadable_config(
     monkeypatch.setattr(entry, "_should_use_tray", lambda: False)
     opened: list[str] = []
     monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url) or True)
+    # The landing page now opens from a health-gated background thread; run it
+    # inline with the probes stubbed so the assertion below stays synchronous.
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: True)
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: None)
+
+    class _InlineThread:
+        def __init__(self, *, target, args=(), kwargs=None, name=None, daemon=None) -> None:
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(entry.threading, "Thread", _InlineThread)
 
     import uvicorn
 
@@ -556,7 +673,12 @@ def test_main_disables_uvicorn_access_log_in_tray_mode(
     monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
     monkeypatch.setattr(entry, "_redirect_output_to_logfile", lambda _root: None)
     monkeypatch.setattr(entry, "_notify_starting", lambda: None)
-    monkeypatch.setattr(entry, "_migrate_legacy_install_dir_data", lambda *_args: None)
+    migration_calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        entry,
+        "_migrate_legacy_install_dir_data",
+        lambda *args: migration_calls.append(args),
+    )
     monkeypatch.setattr(entry, "_inject_bundled_ollama_on_path", lambda _resources: False)
     monkeypatch.setattr(entry, "_packaged_ollama_preflight", lambda: None)
     monkeypatch.setattr(entry, "_ensure_embedding_model_async", lambda: None)
@@ -596,6 +718,7 @@ def test_main_disables_uvicorn_access_log_in_tray_mode(
 
     assert seen["tray"] is True
     assert seen["access_log"] is False
+    assert len(migration_calls) == 1
 
 
 def test_notify_starting_noop_when_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -787,6 +910,93 @@ def test_view_runtime_logs_macos_falls_back_when_terminal_fails(
 
     # Non-zero return code → fall back to opening the file in the default app.
     assert opened == [log]
+
+
+# --------------------------------------------------------------------------- #
+# Landing-page decision + health-gated browser open
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("seeded", "repaired", "initialized", "expected"),
+    [
+        (True, False, None, "/setup/"),
+        (False, True, None, "/setup/"),
+        (True, False, True, "/setup/"),
+        # Configured relaunch that never completed init → wizard, not /web.
+        (False, False, False, "/setup/"),
+        (False, False, True, "/web/"),
+        # Unknown init state (probe failed) keeps the /web fallback.
+        (False, False, None, "/web/"),
+    ],
+)
+def test_decide_landing_path(
+    seeded: bool, repaired: bool, initialized: bool | None, expected: str
+) -> None:
+    assert entry._decide_landing_path(seeded, repaired, initialized) == expected
+
+
+def test_fetch_backend_initialized_parses_bool_and_swallows_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.close()
+
+    # The helpers go through _LOOPBACK_OPENER (proxy-env-immune), so stub the
+    # opener's open method rather than urllib.request.urlopen.
+    def _open_ok(url: str, timeout: float = 0):
+        assert url.endswith("/api/init-status")
+        return _Response(b'{"initialized": false, "running": false}')
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_ok)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is False
+
+    def _open_boom(url: str, timeout: float = 0):
+        raise OSError("refused")
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_boom)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is None
+
+    def _open_garbage(url: str, timeout: float = 0):
+        return _Response(b'{"initialized": "yes"}')
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_garbage)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is None
+
+
+def test_open_landing_page_waits_for_health_then_routes_uninitialized_to_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: True)
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: False)
+    opened: list[str] = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url))
+
+    entry._open_landing_page_when_ready("http://127.0.0.1:8420", seeded=False, repaired=False)
+
+    assert opened == ["http://127.0.0.1:8420/setup/"]
+
+
+def test_open_landing_page_still_opens_web_on_health_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: False)
+    probed: list[str] = []
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: probed.append(base))
+    opened: list[str] = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url))
+
+    entry._open_landing_page_when_ready("http://127.0.0.1:8420", seeded=False, repaired=False)
+
+    # Timeout → best-effort open of /web without an init-status probe.
+    assert opened == ["http://127.0.0.1:8420/web/"]
+    assert probed == []
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience

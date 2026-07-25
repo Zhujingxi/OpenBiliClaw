@@ -6,10 +6,13 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import shutil
 import tomllib
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -17,15 +20,68 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
+
+# A per-day task-count cap in this range almost always means the user mistook
+# ``daily_*_budget`` for an on/off toggle (typed ``1`` to "enable" a source,
+# which actually throttles it to one task per day). ``0`` = unlimited.
+_SUSPICIOUS_BUDGET_LOW = 1
+_SUSPICIOUS_BUDGET_HIGH = 4
+# Guards the once-per-process warning so repeated config reloads don't spam.
+_warned_budget_keys: set[str] = set()
+
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
 _SUPPORTED_AUTH_METHODS = {"cookie", "qrcode", "none"}
 _SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
+_SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
+# Keep in sync with llm/registry.py `_EMBEDDING_CAPABLE_PROVIDERS` (config
+# cannot import the registry — cycle). An unknown name silently disables the
+# embedding service, so saves are validated as blocking (field 2026-07-05:
+# browser page-translation rewrote '奥拉玛' into config via value-less
+# <option> elements).
+_SUPPORTED_EMBEDDING_PROVIDERS = {
+    "",
+    "ollama",
+    "openai",
+    "gemini",
+    "openai_compatible",
+    # Alibaba DashScope native multimodal embedding (qwen3-vl). Must stay in
+    # sync with the registry's dedicated embedding providers — otherwise the
+    # backend can build it but config-save validation rejects it (drift caught
+    # by the multimodal cover-embedding E2E, 2026-07-14).
+    "dashscope",
+}
+# Keep in sync with llm/registry.py `build_llm_registry` provider_specs
+# (config cannot import the registry — cycle). Used to validate
+# `[llm].fallback_provider`: an unknown name is silently dropped by the
+# chat fallback chain (`base.py:_fallback_order`), so saves are validated
+# as blocking.
+_SUPPORTED_CHAT_PROVIDERS = {
+    "openai",
+    "claude",
+    "gemini",
+    "deepseek",
+    "ollama",
+    "openrouter",
+    "openai_compatible",
+}
+_LLM_INSTANCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_LLM_PROVIDER_DISPLAY_NAMES = {
+    "openai": "OpenAI",
+    "claude": "Claude",
+    "gemini": "Gemini",
+    "deepseek": "DeepSeek",
+    "ollama": "Ollama",
+    "openrouter": "OpenRouter",
+    "openai_compatible": "OpenAI-compatible",
+}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
+_DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
 _DEFAULT_TRENDING_REFRESH_HOURS = 3
@@ -35,6 +91,8 @@ _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
 _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
 _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
+_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 1
+_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 6
 # Unified keyword planner (Discover backpressure refactor P1, spec §6).
 # All defaults are the owner-approved starting baseline; see
 # docs/plans/2026-06-14-discover-backpressure-refactor-design.md §6 and
@@ -49,12 +107,32 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+# Phase-2 config collapse: these constants are the ``medium`` breadth tier
+# (the pre-collapse per-knob defaults, item-identical — a table-driven test
+# guards the equality so upgrading is zero behavior drift).
+_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE = 32
+_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE = 6
+_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE = 12
+_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE = 2
+_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET = 4
+_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE = 1
+_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY = 5
+_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT = 3
+_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM = 12
+_DEFAULT_INSPIRATION_BREADTH = "high"
+_DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
+    "local_cache",
+    "platform_sources",
+    "exa",
+    "you",
+)
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
+_DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
 _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
 _DEFAULT_MULTIMODAL_IMAGE_TIMEOUT_SECONDS = 6
-DEFAULT_LLM_CONCURRENCY = 3
+DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
 _DEFAULT_LLM_TIMEOUT = 300
@@ -67,6 +145,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "twitter": 1,
     "zhihu": 1,
     "reddit": 1,
+    "bangumi": 1,
 }
 _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
@@ -99,6 +178,29 @@ class ConfigIssue:
     severity: str = "warning"
 
 
+@dataclass(frozen=True)
+class LegacyConfigExportIssue:
+    """One semantic loss required when projecting v2 LLM routing to v1."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class LegacyConfigExportReport:
+    """Compatibility details for an explicit legacy-config export."""
+
+    source_was_native: bool
+    primary_instance_id: str = ""
+    fallback_instance_id: str = ""
+    issues: tuple[LegacyConfigExportIssue, ...] = ()
+
+    @property
+    def lossy(self) -> bool:
+        """Return whether the old schema cannot express the full v2 intent."""
+        return bool(self.issues)
+
+
 @dataclass
 class ConfigDiagnostics:
     """Supplementary information collected during config loading."""
@@ -109,6 +211,110 @@ class ConfigDiagnostics:
     issues: list[ConfigIssue] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class InspirationBreadthParams:
+    """Effective keyword-inspiration knobs derived from ``inspiration_breadth``.
+
+    Phase-2 config collapse (13 → 4): the ten per-knob ``inspiration_*`` config
+    fields were removed; consumers read this derived view instead. CLI one-shot
+    overrides (``--limit`` / ``--interest-limit``) are applied on a copy of this
+    object and injected via planner construction — never through config fields.
+    """
+
+    aspect_window_size: int
+    interest_sample_size: int
+    max_probe_searches_per_stage: int
+    platforms_per_probe: int
+    riskcontrolled_probe_budget: int
+    search_pages_per_probe: int
+    search_results_per_query: int
+    max_seeds_per_aspect: int
+    max_keywords_per_platform: int
+
+
+_INSPIRATION_BREADTH_TIERS: dict[str, InspirationBreadthParams] = {
+    "low": InspirationBreadthParams(
+        aspect_window_size=16,
+        interest_sample_size=3,
+        max_probe_searches_per_stage=6,
+        platforms_per_probe=1,
+        riskcontrolled_probe_budget=2,
+        search_pages_per_probe=1,
+        search_results_per_query=3,
+        max_seeds_per_aspect=2,
+        max_keywords_per_platform=8,
+    ),
+    "medium": InspirationBreadthParams(
+        aspect_window_size=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+        interest_sample_size=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+        max_probe_searches_per_stage=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
+        platforms_per_probe=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+        riskcontrolled_probe_budget=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
+        search_pages_per_probe=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+        search_results_per_query=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
+        max_seeds_per_aspect=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+        max_keywords_per_platform=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
+    ),
+    "high": InspirationBreadthParams(
+        aspect_window_size=48,
+        interest_sample_size=8,
+        max_probe_searches_per_stage=20,
+        platforms_per_probe=3,
+        riskcontrolled_probe_budget=8,
+        search_pages_per_probe=2,
+        search_results_per_query=8,
+        max_seeds_per_aspect=5,
+        max_keywords_per_platform=16,
+    ),
+}
+
+# The ten collapsed ``[discovery]`` keys (hard-removed, no compat shim). A
+# raw-config scan surfaces a removal notice through the diagnostics channel.
+_REMOVED_INSPIRATION_DISCOVERY_KEYS: tuple[str, ...] = (
+    "inspiration_aspect_window_size",
+    "inspiration_interest_sample_size",
+    "inspiration_max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe",
+    "inspiration_search_results_per_query",
+    "inspiration_max_seeds_per_aspect",
+    "inspiration_max_expansions_per_seed",
+    "inspiration_max_keywords_per_platform",
+)
+
+
+def derive_inspiration_breadth_params(breadth: object) -> InspirationBreadthParams:
+    """Return the effective inspiration knobs for a breadth tier.
+
+    Raises :class:`ConfigError` for anything but ``low`` / ``medium`` / ``high``.
+    """
+
+    tier = str(breadth or "").strip().lower()
+    params = _INSPIRATION_BREADTH_TIERS.get(tier)
+    if params is None:
+        raise ConfigError(
+            f"discovery.inspiration_breadth 必须是 low / medium / high，收到 {breadth!r}。"
+        )
+    return params
+
+
+def _removed_discovery_key_issues(raw: dict[str, Any]) -> list[ConfigIssue]:
+    discovery_raw = raw.get("discovery")
+    if not isinstance(discovery_raw, dict):
+        return []
+    return [
+        ConfigIssue(
+            field=f"discovery.{key}",
+            message=(
+                f"`{key}` 已移除，值被忽略，请改用 `inspiration_breadth`（low / medium / high）。"
+            ),
+        )
+        for key in _REMOVED_INSPIRATION_DISCOVERY_KEYS
+        if key in discovery_raw
+    ]
+
+
 @dataclass
 class LLMProviderConfig:
     """Configuration for a single LLM provider."""
@@ -117,17 +323,22 @@ class LLMProviderConfig:
     model: str = ""
     base_url: str = ""
     auth_mode: str = ""
+    # OpenAI-protocol endpoint selector: "" / "chat_completions" →
+    # /v1/chat/completions (default); "responses" → /v1/responses. Some
+    # third-party gateways expose GPT models only via the Responses API
+    # (issue #72). Honored by [llm.openai] and [llm.openai_compatible];
+    # ignored by all other providers.
+    api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
-    # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
-    # reasoning. v0.3.31 default = "max" — combined with v0.3.29's prompt-cache
-    # refactor (system 100% static, DeepSeek auto-cache 90% off) the
-    # reasoning-token cost becomes affordable, and the LLM produces noticeably
-    # better tags (franchise_key consistent across batch, score_threshold=0.70
-    # still gives healthy pool throughput). Set to "" if the per-day spend
-    # creeps too high and you want to trade off label quality for budget.
-    # Ignored by providers that don't accept ``thinking`` / ``reasoning_effort``.
-    reasoning_effort: str = "max"
+    # Balanced provider-native reasoning default.  LLMService overrides channel
+    # extraction/scoring/copy callers to ""; adapters disable thinking or use
+    # the cheapest supported approximation. Generic OpenAI-compatible routes
+    # honor an explicitly configured non-empty value as an advisory
+    # pass-through; configurations that predate that behavior are loaded with
+    # an empty value so upgrades do not start sending a new request field.
+    # Ollama ignores this field.
+    reasoning_effort: str = "medium"
     # Ollama-only: context window (tokens). 0 = use Ollama's server default
     # (usually 4096) via the OpenAI-compat ``/v1`` shim. When >0, chat routes
     # through Ollama's native ``/api/chat`` so ``options.num_ctx`` actually
@@ -135,6 +346,20 @@ class LLMProviderConfig:
     # prompts and breaking structured-JSON output. Ignored by all other
     # providers. See OllamaProvider._complete_native.
     num_ctx: int = 0
+
+
+@dataclass
+class LLMInstanceConfig(LLMProviderConfig):
+    """One independently callable chat endpoint.
+
+    The mapping key in ``LLMConfig.instances`` is the stable routing identity.
+    ``provider_type`` selects the wire adapter while ``name`` is presentation
+    only, so multiple instances may share one provider type without colliding.
+    """
+
+    name: str = ""
+    provider_type: str = ""
+    enabled: bool = True
 
 
 @dataclass
@@ -164,10 +389,16 @@ class EmbeddingConfig:
 
 @dataclass
 class ModuleLLMConfig:
-    """Per-module LLM override. Empty strings = use global defaults."""
+    """Per-module LLM route.
+
+    ``inherit`` / ``chain`` are the v2 instance-routing contract. ``provider``
+    / ``model`` remain for reading and serving legacy configurations.
+    """
 
     provider: str = ""
     model: str = ""
+    inherit: bool = True
+    chain: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -177,8 +408,17 @@ class LLMConfig:
     default_provider: str = "deepseek"
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     timeout: int = _DEFAULT_LLM_TIMEOUT
-    fallback_enabled: bool = False
+    # Non-empty = chat fallback on. There is no separate enable flag: the
+    # legacy ``fallback_enabled`` bool was never consulted by the fallback
+    # chain and has been removed (stale keys in old config.toml are ignored).
     fallback_provider: str = ""
+    # v2 routing is opt-in on load and becomes authoritative after the new
+    # settings UI saves ``instances`` / ``default_chain``. Keeping an explicit
+    # marker distinguishes a deliberately empty v2 draft from a legacy config
+    # whose fixed provider tables should be projected into instances.
+    instance_routing: bool = False
+    instances: dict[str, LLMInstanceConfig] = field(default_factory=dict)
+    default_chain: list[str] = field(default_factory=list)
     openai: LLMProviderConfig = field(default_factory=LLMProviderConfig)
     claude: LLMProviderConfig = field(default_factory=LLMProviderConfig)
     gemini: LLMProviderConfig = field(default_factory=LLMProviderConfig)
@@ -196,6 +436,393 @@ class LLMConfig:
     evaluation: ModuleLLMConfig = field(default_factory=ModuleLLMConfig)
 
 
+_LLM_PROVIDER_CONFIG_FIELDS = tuple(field_.name for field_ in fields(LLMProviderConfig))
+_LLM_INSTANCE_CONFIG_FIELDS = tuple(field_.name for field_ in fields(LLMInstanceConfig))
+_LLM_MODULE_BUCKETS = ("soul", "discovery", "recommendation", "evaluation")
+
+
+def _copy_provider_to_instance(
+    provider_type: str,
+    provider: LLMProviderConfig,
+    *,
+    name: str | None = None,
+    model: str | None = None,
+) -> LLMInstanceConfig:
+    values = {
+        field_name: getattr(provider, field_name) for field_name in _LLM_PROVIDER_CONFIG_FIELDS
+    }
+    if model is not None:
+        values["model"] = model
+    return LLMInstanceConfig(
+        **values,
+        name=name or _LLM_PROVIDER_DISPLAY_NAMES.get(provider_type, provider_type),
+        provider_type=provider_type,
+        enabled=True,
+    )
+
+
+def _legacy_provider_is_visible(
+    llm: LLMConfig,
+    provider_type: str,
+    provider: LLMProviderConfig,
+) -> bool:
+    """Return whether a fixed legacy provider is a real endpoint candidate.
+
+    Historical example configs wrote a default model into every fixed
+    provider block. Treating those template-only blocks as enabled v2
+    instances makes an otherwise valid legacy config impossible to save:
+    every unused remote template then fails API-key validation. Project only
+    providers that legacy routing actually references or that carry usable
+    credentials. Ollama is the credential-free exception.
+    """
+    referenced = {
+        str(llm.default_provider or "").strip().lower(),
+        str(llm.fallback_provider or "").strip().lower(),
+    }
+    for bucket in _LLM_MODULE_BUCKETS:
+        route = getattr(llm, bucket)
+        referenced.add(str(route.provider or "").strip().lower())
+    if provider_type in referenced:
+        return True
+    if str(provider.api_key or "").strip():
+        return True
+    if provider_type == "openai" and str(provider.auth_mode or "").strip().lower() == "codex_oauth":
+        return True
+    if provider_type == "gemini" and bool(
+        os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+    ):
+        return True
+    return provider_type == "ollama" and bool(
+        str(provider.model or "").strip() or str(provider.base_url or "").strip()
+    )
+
+
+def effective_llm_instances(llm: LLMConfig) -> dict[str, LLMInstanceConfig]:
+    """Return authoritative v2 instances or a lossless legacy projection.
+
+    This helper never mutates ``llm``. Merely loading an old config therefore
+    does not rewrite it; the desktop settings page receives the projection and
+    explicitly opts into v2 when it submits the new shape.
+    """
+    if llm.instance_routing:
+        return dict(llm.instances)
+
+    projected: dict[str, LLMInstanceConfig] = {}
+    for provider_type in sorted(_SUPPORTED_CHAT_PROVIDERS):
+        provider = getattr(llm, provider_type)
+        if _legacy_provider_is_visible(llm, provider_type, provider):
+            projected[provider_type] = _copy_provider_to_instance(provider_type, provider)
+
+    default_provider = str(llm.default_provider or "").strip().lower()
+    if default_provider in _SUPPORTED_CHAT_PROVIDERS and default_provider not in projected:
+        projected[default_provider] = _copy_provider_to_instance(
+            default_provider,
+            getattr(llm, default_provider),
+        )
+
+    # A legacy module may pin a different model on the same provider. In v2 an
+    # instance is a complete endpoint (including model), so preserve that intent
+    # as a derived endpoint instead of smuggling a per-call model override into
+    # the new chain.
+    for bucket in _LLM_MODULE_BUCKETS:
+        route = getattr(llm, bucket)
+        provider_type = str(route.provider or default_provider).strip().lower()
+        model = str(route.model or "").strip()
+        if not model or provider_type not in _SUPPORTED_CHAT_PROVIDERS:
+            continue
+        base = getattr(llm, provider_type)
+        existing = projected.get(provider_type)
+        if existing is not None and existing.model.strip() == model:
+            continue
+        instance_id = f"legacy-{bucket}"
+        projected[instance_id] = _copy_provider_to_instance(
+            provider_type,
+            base,
+            name=f"{bucket} · {_LLM_PROVIDER_DISPLAY_NAMES.get(provider_type, provider_type)}",
+            model=model,
+        )
+    return projected
+
+
+def effective_llm_default_chain(llm: LLMConfig) -> list[str]:
+    """Return the ordered global instance chain for native or legacy config."""
+    if llm.instance_routing:
+        return [str(item).strip().lower() for item in llm.default_chain if str(item).strip()]
+    chain: list[str] = []
+    for candidate in (llm.default_provider, llm.fallback_provider):
+        instance_id = str(candidate or "").strip().lower()
+        if instance_id and instance_id not in chain:
+            chain.append(instance_id)
+    return chain
+
+
+def effective_llm_routes(llm: LLMConfig) -> dict[str, ModuleLLMConfig]:
+    """Return module routes expressed with v2 instance chains."""
+    if llm.instance_routing:
+        return {bucket: getattr(llm, bucket) for bucket in _LLM_MODULE_BUCKETS}
+
+    routes: dict[str, ModuleLLMConfig] = {}
+    default_provider = str(llm.default_provider or "").strip().lower()
+    projected = effective_llm_instances(llm)
+    for bucket in _LLM_MODULE_BUCKETS:
+        legacy = getattr(llm, bucket)
+        provider_type = str(legacy.provider or default_provider).strip().lower()
+        model = str(legacy.model or "").strip()
+        if not legacy.provider.strip() and not model:
+            routes[bucket] = ModuleLLMConfig(inherit=True)
+            continue
+        instance_id = provider_type
+        derived_id = f"legacy-{bucket}"
+        if model and derived_id in projected:
+            instance_id = derived_id
+        routes[bucket] = ModuleLLMConfig(
+            provider=legacy.provider,
+            model=legacy.model,
+            inherit=False,
+            chain=[instance_id] if instance_id else [],
+        )
+    return routes
+
+
+def _copy_instance_to_provider(instance: LLMInstanceConfig) -> LLMProviderConfig:
+    """Drop v2 identity fields while preserving the legacy endpoint fields."""
+    return LLMProviderConfig(
+        **{
+            field_name: deepcopy(getattr(instance, field_name))
+            for field_name in _LLM_PROVIDER_CONFIG_FIELDS
+        }
+    )
+
+
+def _legacy_endpoint_signature(instance: LLMInstanceConfig) -> tuple[object, ...]:
+    """Return fields a legacy per-module model override cannot change."""
+    return tuple(
+        getattr(instance, field_name)
+        for field_name in _LLM_PROVIDER_CONFIG_FIELDS
+        if field_name != "model"
+    )
+
+
+def project_config_to_legacy(config: Config) -> tuple[Config, LegacyConfigExportReport]:
+    """Project native instance routing into the last fixed-provider schema.
+
+    Legacy chat routing can express one endpoint per provider type, one global
+    fallback of a *different* provider type, and one provider/model override per
+    module. The projection is deterministic and reports every semantic collapse
+    instead of silently claiming a lossless downgrade.
+    """
+    projected = deepcopy(config)
+    llm = config.llm
+    if not llm.instance_routing:
+        return projected, LegacyConfigExportReport(
+            source_was_native=False,
+            primary_instance_id=str(llm.default_provider or "").strip().lower(),
+            fallback_instance_id=str(llm.fallback_provider or "").strip().lower(),
+        )
+
+    issues: list[LegacyConfigExportIssue] = []
+    enabled: dict[str, tuple[str, LLMInstanceConfig]] = {}
+    disabled_ids: list[str] = []
+    unsupported_ids: list[str] = []
+    for raw_instance_id, instance in llm.instances.items():
+        instance_id = str(raw_instance_id).strip().lower()
+        provider_type = str(instance.provider_type or "").strip().lower()
+        if not instance.enabled:
+            disabled_ids.append(instance_id)
+            continue
+        if provider_type not in _SUPPORTED_CHAT_PROVIDERS:
+            unsupported_ids.append(instance_id)
+            continue
+        enabled[instance_id] = (str(raw_instance_id), instance)
+
+    if disabled_ids:
+        issues.append(
+            LegacyConfigExportIssue(
+                code="disabled_instances_omitted",
+                message=f"旧格式没有停用实例草稿，已省略：{', '.join(disabled_ids)}。",
+            )
+        )
+    if unsupported_ids:
+        issues.append(
+            LegacyConfigExportIssue(
+                code="unsupported_instances_omitted",
+                message=f"旧格式无法保存这些未知 Provider 实例：{', '.join(unsupported_ids)}。",
+            )
+        )
+
+    ordered_ids: list[str] = []
+    for candidate in [
+        *llm.default_chain,
+        *llm.instances.keys(),
+    ]:
+        instance_id = str(candidate).strip().lower()
+        if instance_id and instance_id not in ordered_ids:
+            ordered_ids.append(instance_id)
+
+    representatives: dict[str, tuple[str, LLMInstanceConfig]] = {}
+    same_type_ids: dict[str, list[str]] = {}
+    for instance_id in ordered_ids:
+        entry = enabled.get(instance_id)
+        if entry is None:
+            continue
+        _, instance = entry
+        provider_type = str(instance.provider_type or "").strip().lower()
+        same_type_ids.setdefault(provider_type, []).append(instance_id)
+        representatives.setdefault(provider_type, (instance_id, instance))
+
+    for provider_type, instance_ids in same_type_ids.items():
+        if len(instance_ids) < 2:
+            continue
+        selected_id, _ = representatives[provider_type]
+        omitted = [instance_id for instance_id in instance_ids if instance_id != selected_id]
+        issues.append(
+            LegacyConfigExportIssue(
+                code="provider_instances_collapsed",
+                message=(
+                    f"旧格式每种 Provider 只能保留一个端点；`{provider_type}` 保留 "
+                    f"`{selected_id}`，折叠：{', '.join(omitted)}。"
+                ),
+            )
+        )
+
+    valid_default_ids: list[str] = []
+    invalid_default_ids: list[str] = []
+    for candidate in llm.default_chain:
+        instance_id = str(candidate).strip().lower()
+        if instance_id in enabled:
+            valid_default_ids.append(instance_id)
+        elif instance_id:
+            invalid_default_ids.append(instance_id)
+    if invalid_default_ids:
+        issues.append(
+            LegacyConfigExportIssue(
+                code="invalid_default_entries_omitted",
+                message=(
+                    "全局调用链中不存在、停用或不支持的实例已省略："
+                    f"{', '.join(invalid_default_ids)}。"
+                ),
+            )
+        )
+    if not valid_default_ids:
+        raise ValueError("无法导出旧格式：全局 LLM 调用链中没有可用实例。")
+
+    primary_id = valid_default_ids[0]
+    primary_instance = enabled[primary_id][1]
+    primary_type = str(primary_instance.provider_type or "").strip().lower()
+    fallback_id = ""
+    for instance_id in valid_default_ids[1:]:
+        instance = enabled[instance_id][1]
+        if str(instance.provider_type or "").strip().lower() != primary_type:
+            fallback_id = instance_id
+            break
+
+    representable_default_ids = {primary_id}
+    if fallback_id:
+        representable_default_ids.add(fallback_id)
+    omitted_default_ids = [
+        instance_id
+        for instance_id in valid_default_ids
+        if instance_id not in representable_default_ids
+    ]
+    if omitted_default_ids:
+        issues.append(
+            LegacyConfigExportIssue(
+                code="default_chain_truncated",
+                message=(
+                    "旧格式的全局链最多只有“主 Provider + 一个不同类型备选”；"
+                    f"已从全局链省略：{', '.join(omitted_default_ids)}。"
+                ),
+            )
+        )
+
+    projected_llm = projected.llm
+    projected_llm.instance_routing = False
+    projected_llm.instances = {}
+    projected_llm.default_chain = []
+    projected_llm.default_provider = primary_type
+    projected_llm.fallback_provider = (
+        str(enabled[fallback_id][1].provider_type or "").strip().lower() if fallback_id else ""
+    )
+    for provider_type in _SUPPORTED_CHAT_PROVIDERS:
+        setattr(projected_llm, provider_type, LLMProviderConfig())
+    for provider_type, (_, instance) in representatives.items():
+        setattr(projected_llm, provider_type, _copy_instance_to_provider(instance))
+
+    for bucket in _LLM_MODULE_BUCKETS:
+        route = getattr(llm, bucket)
+        if route.inherit:
+            setattr(projected_llm, bucket, ModuleLLMConfig())
+            continue
+
+        route_ids = [
+            str(candidate).strip().lower() for candidate in route.chain if str(candidate).strip()
+        ]
+        valid_route_ids = [instance_id for instance_id in route_ids if instance_id in enabled]
+        invalid_route_ids = [instance_id for instance_id in route_ids if instance_id not in enabled]
+        if invalid_route_ids:
+            issues.append(
+                LegacyConfigExportIssue(
+                    code="invalid_module_entries_omitted",
+                    message=(
+                        f"`{bucket}` 模块链中不存在、停用或不支持的实例已省略："
+                        f"{', '.join(invalid_route_ids)}。"
+                    ),
+                )
+            )
+        if not valid_route_ids:
+            setattr(projected_llm, bucket, ModuleLLMConfig())
+            issues.append(
+                LegacyConfigExportIssue(
+                    code="module_route_dropped",
+                    message=f"`{bucket}` 模块没有可导出的实例，旧格式将改为继承全局链。",
+                )
+            )
+            continue
+
+        selected_route_id = valid_route_ids[0]
+        selected_route_instance = enabled[selected_route_id][1]
+        selected_route_type = str(selected_route_instance.provider_type or "").strip().lower()
+        setattr(
+            projected_llm,
+            bucket,
+            ModuleLLMConfig(
+                provider=selected_route_type,
+                model=str(selected_route_instance.model or ""),
+            ),
+        )
+        if len(valid_route_ids) > 1:
+            issues.append(
+                LegacyConfigExportIssue(
+                    code="module_chain_truncated",
+                    message=(
+                        f"旧格式的 `{bucket}` 模块没有独立 fallback；保留 "
+                        f"`{selected_route_id}`，省略：{', '.join(valid_route_ids[1:])}。"
+                    ),
+                )
+            )
+        representative_id, representative = representatives[selected_route_type]
+        if _legacy_endpoint_signature(selected_route_instance) != _legacy_endpoint_signature(
+            representative
+        ):
+            issues.append(
+                LegacyConfigExportIssue(
+                    code="module_endpoint_rebound",
+                    message=(
+                        f"`{bucket}` 原本使用 `{selected_route_id}`，但旧格式只能复用 "
+                        f"`{selected_route_type}` 的 `{representative_id}` 端点；"
+                        "模块模型名会保留，Base URL / Token / 协议参数将随代表端点。"
+                    ),
+                )
+            )
+
+    return projected, LegacyConfigExportReport(
+        source_was_native=True,
+        primary_instance_id=primary_id,
+        fallback_instance_id=fallback_id,
+        issues=tuple(issues),
+    )
+
+
 def _gemini_api_key_from_env() -> str:
     """Return Gemini API key from official environment variables."""
     google_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
@@ -209,8 +836,50 @@ class BilibiliConfig:
 
     auth_method: str = "cookie"
     cookie: str = ""
+    # Explicit proxy for Bilibili requests only. Empty (default) means
+    # direct connection: the client ignores env/system proxies because
+    # they routinely trip B站 risk control (valid cookie shows as "not
+    # logged in"). Set only if your network cannot reach B站 directly.
+    proxy: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
+
+
+@dataclass
+class NetworkConfig:
+    """Outbound proxy for OVERSEAS clients only.
+
+    Applies to the LLM SDKs (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/
+    openai_compatible chat+embedding), YouTube (yt-dlp), Bangumi (api.bgm.tv
+    is Cloudflare-fronted and resolves overseas), the GitHub updater, and
+    Codex OAuth token refresh. Bangumi's cover CDN (lain.bgm.tv) is overseas
+    too but rides the image cache's own ``trust_env`` path rather than this
+    setting. CN-direct clients (bilibili / douyin /
+    ollama / CN-CDN image cache) never consume it — that isolation is pinned
+    by tests/test_network_proxy_isolation.py. This is deliberately distinct
+    from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
+
+    ``mode`` is one of ``system`` (default; inherit HTTP(S)_PROXY / OS
+    settings), ``direct`` (ignore env/system proxies), or ``custom`` (use
+    ``proxy`` explicitly). Accepted proxy schemes: http / https / socks5 /
+    socks5h.
+
+    The default is ``system`` because every consumer listed above is an
+    overseas-only service. Under ``direct`` a mainland-China user's first
+    run dies on an opaque timeout — before they could plausibly find this
+    setting — even though their machine already has a working proxy. With
+    no proxy configured, ``system`` behaves exactly like a direct
+    connection, so users outside that situation lose nothing.
+
+    Only the "never configured" case moves. An explicit ``mode`` on disk is
+    always honored verbatim, including ``mode = "direct"``; the explicit /
+    defaulted split is decided by key presence in ``_build_network_config``.
+
+    See docs/plans/2026-07-11-network-proxy-config-spec.md.
+    """
+
+    mode: str = "system"
+    proxy: str = ""
 
 
 @dataclass
@@ -262,7 +931,7 @@ class SchedulerConfig:
     # tag. Opt-in only — set ``true`` in config.toml after the release
     # pipeline is reliable.
     auto_update_enabled: bool = False
-    auto_update_check_interval_hours: int = 6
+    auto_update_check_interval_hours: int = _DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS
     auto_update_allow_prerelease: bool = False
     auto_update_allowed_remotes: list[str] = field(
         default_factory=lambda: list(_DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES)
@@ -307,9 +976,25 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
+    # Optional search-inspired query brainstorming stage. Default off: when
+    # enabled, the keyword planner may use an injected search provider to mine
+    # adjacent concepts and insert metadata-bearing keywords.
+    inspiration_search_enabled: bool = False
+    inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
+    # Optional experiment mode: when true and inspiration search is available,
+    # due platforms skip the legacy merged keyword planner and are filled only
+    # through the search-inspired flow.
+    inspiration_replace_merged_keywords: bool = False
+    # Breadth tier (low / medium / high) replacing the ten per-knob fields —
+    # effective values come from ``derive_inspiration_breadth_params``.
+    inspiration_breadth: str = _DEFAULT_INSPIRATION_BREADTH
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
+    # Desired candidate-evaluation workers. The approved inventory-safe
+    # 3×30 design caps this at three (90 raw candidates in flight); runtime
+    # also reserves one global LLM slot, so the effective count may be lower.
+    candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
@@ -449,6 +1134,27 @@ class RedditSourceConfig:
 
 
 @dataclass
+class BangumiSourceConfig:
+    """Bangumi official anonymous API discovery configuration."""
+
+    enabled: bool = False
+    username: str = ""
+    # Optional Bangumi personal access token (https://next.bgm.tv/demo/access-token).
+    # When set, discovery/init resolve the account via /v0/me and read private
+    # collections with a Bearer header. Empty means the historical anonymous
+    # public-username path. Never log the value — only presence/length.
+    access_token: str = ""
+    subject_types: tuple[str, ...] = ("anime", "book", "game")
+    source_modes: tuple[str, ...] = ("search", "ranked", "latest")
+    daily_search_budget: int = 300
+    daily_ranked_budget: int = 100
+    daily_latest_budget: int = 100
+    request_interval_seconds: int = 1
+    min_interval_minutes: int = 60
+    bootstrap_limit: int = 300
+
+
+@dataclass
 class BilibiliSourceConfig:
     """Bilibili discovery source switch."""
 
@@ -479,6 +1185,7 @@ class SourcesConfig:
     twitter: TwitterSourceConfig = field(default_factory=TwitterSourceConfig)
     zhihu: ZhihuSourceConfig = field(default_factory=ZhihuSourceConfig)
     reddit: RedditSourceConfig = field(default_factory=RedditSourceConfig)
+    bangumi: BangumiSourceConfig = field(default_factory=BangumiSourceConfig)
 
 
 @dataclass
@@ -486,6 +1193,13 @@ class StorageConfig:
     """Storage configuration."""
 
     db_path: str = "data/openbiliclaw.db"
+
+
+@dataclass
+class SavedSyncConfig:
+    """External platform save synchronization."""
+
+    auto_sync_enabled: bool = False
 
 
 @dataclass
@@ -568,6 +1282,9 @@ class ApiAuthConfig:
     trust_loopback: bool = True
     trusted_proxies: list[str] = field(default_factory=list)
     allowed_bearer_origins: list[str] = field(default_factory=list)
+    extension_access_enabled: bool = False
+    extension_access_keys: list[str] = field(default_factory=list)
+    extension_token_ttl_hours: int = _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
 
 
 @dataclass
@@ -594,12 +1311,16 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
+    # Overseas-outbound proxy (LLM SDKs / YouTube / Bangumi / updater).
+    # CN-direct clients never use it — see NetworkConfig docstring.
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     # Top-level `[discovery]` carries the unified keyword planner / backpressure
     # knobs (P1). Distinct from `[llm.discovery]` (per-module provider override).
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
+    saved_sync: SavedSyncConfig = field(default_factory=SavedSyncConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
@@ -706,11 +1427,136 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
+    """Warn once per process for per-source budgets that look like misused toggles.
+
+    ``daily_*_budget`` is a per-UTC-day task-count cap, not an on/off switch; ``0``
+    means unlimited. A value of 1–4 almost always means the user typed ``1`` to
+    "enable" a source and unknowingly throttled it to a single task per day.
+    """
+    source_configs: list[tuple[str, Any]] = [
+        ("xiaohongshu", sources.xiaohongshu),
+        ("douyin", sources.douyin),
+        ("youtube", sources.youtube),
+        ("twitter", sources.twitter),
+        ("zhihu", sources.zhihu),
+        ("reddit", sources.reddit),
+        ("bangumi", sources.bangumi),
+    ]
+    for source_name, source_config in source_configs:
+        for source_field in fields(source_config):
+            name = source_field.name
+            if not (name.startswith("daily_") and name.endswith("_budget")):
+                continue
+            value = getattr(source_config, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+            if not (_SUSPICIOUS_BUDGET_LOW <= value <= _SUSPICIOUS_BUDGET_HIGH):
+                continue
+            key = f"sources.{source_name}.{name}"
+            if key in _warned_budget_keys:
+                continue
+            _warned_budget_keys.add(key)
+            logger.warning(
+                "config: %s=%d — 这是每日任务次数上限,不是开关;想不限次数请设为 0",
+                key,
+                value,
+            )
+
+
+# Whitelist for [network].proxy. httpx[socks] (pyproject) covers socks5/socks5h;
+# http/https cover CONNECT proxies. Anything else (ftp, socks4, bare host) is a
+# user error we reject at save time rather than silently ignore (pitfall rule 7).
+_OUTBOUND_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+_OUTBOUND_PROXY_MODES = frozenset({"direct", "system", "custom"})
+
+
+def normalize_outbound_proxy_mode(value: str) -> str:
+    """Normalize an overseas routing mode, or raise a user-facing error."""
+    mode = value.strip().lower()
+    if mode not in _OUTBOUND_PROXY_MODES:
+        raise ValueError("网络代理模式仅支持 direct / system / custom")
+    return mode
+
+
+def normalize_outbound_proxy(value: str) -> str:
+    """Normalize an overseas-outbound proxy URL, or raise ``ValueError``.
+
+    Returns ``""`` for empty/whitespace input (proxy disabled). Otherwise
+    strips surrounding whitespace, lowercases the scheme, and validates that
+    the scheme is whitelisted and a host is present. The raise message is a
+    user-facing Chinese reason surfaced directly in the settings UI.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    scheme = parsed.scheme.lower()
+    if scheme not in _OUTBOUND_PROXY_SCHEMES:
+        raise ValueError(
+            f"代理协议不支持:{parsed.scheme or '(缺少协议)'};仅支持 http / https / socks5 / socks5h"
+        )
+    if not parsed.hostname:
+        raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
+    # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
+    return f"{scheme}{text[len(parsed.scheme) :]}"
+
+
+def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
+    """Assemble ``NetworkConfig`` from the raw ``[network]`` table.
+
+    The ``mode`` **key's presence** — not its resolved value — separates a
+    deliberate choice from an unset one. Absent means the user never
+    configured overseas routing, so it takes the ``system`` default (see
+    :class:`NetworkConfig`); present is honored verbatim, so an explicit
+    ``mode = "direct"`` keeps ignoring env/system proxies. ``mode`` reaches
+    here from ``config.toml`` and from ``OPENBILICLAW_NETWORK_MODE``, which
+    ``_apply_env_overrides`` injects into this same table — an env var is
+    an explicit choice too, and lands on the present branch for free.
+
+    Invalid on-disk values are logged at WARNING and dropped to the empty
+    default rather than crashing load (pitfall rule 4 clamp-to-default); the
+    save-time API guard is what rejects invalid *writes* with a 400. Both
+    invalid-value clamps below deliberately land on ``direct`` rather than
+    on the ``system`` field default: the user did write *something* there,
+    and refusing to silently start routing their traffic through an
+    inherited env proxy is the conservative reading of a broken value.
+    """
+    network_raw = raw.get("network", {})
+    if not isinstance(network_raw, dict):
+        network_raw = {}
+    proxy_raw = str(network_raw.get("proxy", "") or "")
+    try:
+        proxy = normalize_outbound_proxy(proxy_raw)
+    except ValueError as exc:
+        logger.warning("config: [network].proxy 非法已忽略(%s):%s", proxy_raw, exc)
+        proxy = ""
+    mode_present = "mode" in network_raw
+    mode_raw = str(network_raw.get("mode", "") or "")
+    if not mode_present:
+        # Backward-compatible migration: legacy non-empty [network].proxy was
+        # explicitly configured by the user and therefore remains custom.
+        # Everything else is genuinely unconfigured and takes the default.
+        mode = "custom" if proxy else "system"
+    else:
+        try:
+            mode = normalize_outbound_proxy_mode(mode_raw)
+        except ValueError as exc:
+            logger.warning("config: [network].mode 非法已回退 direct(%s):%s", mode_raw, exc)
+            mode = "direct"
+    if mode == "custom" and not proxy:
+        logger.warning("config: [network].mode=custom 但 proxy 为空,已回退 direct")
+        mode = "direct"
+    return NetworkConfig(mode=mode, proxy=proxy)
+
+
 def _build_config(raw: dict[str, Any]) -> Config:
     """Build a Config dataclass from raw dict."""
     general = raw.get("general", {})
     api_raw = raw.get("api", {}) if isinstance(raw.get("api"), dict) else {}
     llm_raw = raw.get("llm", {})
+    if not isinstance(llm_raw, dict):
+        raise ConfigError("`[llm]` 必须是 TOML table，不能是字符串或其它标量。")
     bili_raw = raw.get("bilibili", {})
     sources_raw = raw.get("sources", {})
     sched_raw = dict(raw.get("scheduler", {}))
@@ -720,23 +1566,147 @@ def _build_config(raw: dict[str, Any]) -> Config:
     autostart_raw = raw.get("autostart", {})
     if not isinstance(autostart_raw, dict):
         autostart_raw = {}
+    saved_sync_raw = raw.get("saved_sync", {})
+    if not isinstance(saved_sync_raw, dict):
+        saved_sync_raw = {}
     store_raw = raw.get("storage", {})
     logging_raw = raw.get("logging", {})
 
     embedding_raw = llm_raw.get("embedding", {})
+    if not isinstance(embedding_raw, dict):
+        embedding_raw = {}
+    instances_raw = llm_raw.get("instances", {})
+    if not isinstance(instances_raw, dict):
+        instances_raw = {}
+    try:
+        routing_version = int(llm_raw.get("routing_version", 0) or 0)
+    except (TypeError, ValueError):
+        routing_version = 0
+        logger.warning("config: [llm].routing_version 非法，已按旧版配置读取")
+    instance_routing = bool(
+        routing_version >= 2
+        or "instances" in llm_raw
+        or "default_chain" in llm_raw
+        or "routes" in llm_raw
+    )
+    instances: dict[str, LLMInstanceConfig] = {}
+    for raw_instance_id, raw_instance in instances_raw.items():
+        if not isinstance(raw_instance, dict):
+            continue
+        instance_id = str(raw_instance_id).strip()
+        values = {
+            key: value for key, value in raw_instance.items() if key in _LLM_INSTANCE_CONFIG_FIELDS
+        }
+        for string_field in (
+            "name",
+            "provider_type",
+            "api_key",
+            "model",
+            "base_url",
+            "auth_mode",
+            "api_flavor",
+            "http_referer",
+            "x_title",
+            "reasoning_effort",
+        ):
+            if string_field in values:
+                values[string_field] = str(values[string_field] or "")
+        for normalized_field in ("provider_type", "auth_mode", "api_flavor"):
+            if normalized_field in values:
+                values[normalized_field] = str(values[normalized_field]).strip().lower()
+        if "enabled" in values and not isinstance(values["enabled"], bool):
+            logger.warning(
+                "config: [llm.instances.%s].enabled 必须是布尔值，已安全停用该实例",
+                instance_id,
+            )
+            values["enabled"] = False
+        if "num_ctx" in values:
+            try:
+                values["num_ctx"] = max(0, int(values["num_ctx"] or 0))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "config: [llm.instances.%s].num_ctx 非法，已回退为 0",
+                    instance_id,
+                )
+                values["num_ctx"] = 0
+        values.setdefault("name", instance_id)
+        values.setdefault(
+            "provider_type",
+            instance_id if instance_id in _SUPPORTED_CHAT_PROVIDERS else "",
+        )
+        if (
+            "reasoning_effort" not in values
+            and str(values["provider_type"]).strip().lower() == "openai_compatible"
+        ):
+            # Before model discovery / editable effort landed, compatible
+            # routes ignored this field entirely. Preserve that wire behavior
+            # for existing v2 files unless the user explicitly opts in.
+            values["reasoning_effort"] = ""
+        instances[instance_id] = LLMInstanceConfig(**values)
+
+    default_chain_raw = llm_raw.get("default_chain", [])
+    default_chain = (
+        [str(item).strip() for item in default_chain_raw if str(item).strip()]
+        if isinstance(default_chain_raw, list)
+        else []
+    )
+    routes_raw = llm_raw.get("routes", {})
+    if not isinstance(routes_raw, dict):
+        routes_raw = {}
+
+    def _module_config(bucket: str) -> ModuleLLMConfig:
+        if instance_routing:
+            raw_route = routes_raw.get(bucket, {})
+            if not isinstance(raw_route, dict):
+                raw_route = {}
+            chain_raw = raw_route.get("chain", [])
+            chain = (
+                [str(item).strip() for item in chain_raw if str(item).strip()]
+                if isinstance(chain_raw, list)
+                else []
+            )
+            return ModuleLLMConfig(
+                inherit=bool(raw_route.get("inherit", True)),
+                chain=chain,
+            )
+        raw_route = llm_raw.get(bucket, {})
+        if not isinstance(raw_route, dict):
+            raw_route = {}
+        return ModuleLLMConfig(
+            **{key: value for key, value in raw_route.items() if key in ("provider", "model")}
+        )
+
+    def _provider_config(provider_name: str) -> LLMProviderConfig:
+        raw_provider = llm_raw.get(provider_name, {})
+        if not isinstance(raw_provider, dict):
+            raw_provider = {}
+        values = dict(raw_provider)
+        if provider_name == "openai_compatible" and (
+            not instance_routing or "reasoning_effort" not in values
+        ):
+            # Backward compatibility: every legacy-schema compatible route
+            # ignored this field, including config files that an older
+            # ``save_config`` had materialized as ``"medium"``. Do not start
+            # sending a new wire parameter merely because that package was
+            # upgraded. Native v2 instances can opt in explicitly.
+            values["reasoning_effort"] = ""
+        return LLMProviderConfig(**values)
+
     llm = LLMConfig(
         default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
-        fallback_enabled=bool(llm_raw.get("fallback_enabled", False)),
         fallback_provider=llm_raw.get("fallback_provider", ""),
-        openai=LLMProviderConfig(**llm_raw.get("openai", {})),
-        claude=LLMProviderConfig(**llm_raw.get("claude", {})),
-        gemini=LLMProviderConfig(**llm_raw.get("gemini", {})),
-        deepseek=LLMProviderConfig(**llm_raw.get("deepseek", {})),
-        ollama=LLMProviderConfig(**llm_raw.get("ollama", {})),
-        openrouter=LLMProviderConfig(**llm_raw.get("openrouter", {})),
-        openai_compatible=LLMProviderConfig(**llm_raw.get("openai_compatible", {})),
+        instance_routing=instance_routing,
+        instances=instances,
+        default_chain=default_chain,
+        openai=_provider_config("openai"),
+        claude=_provider_config("claude"),
+        gemini=_provider_config("gemini"),
+        deepseek=_provider_config("deepseek"),
+        ollama=_provider_config("ollama"),
+        openrouter=_provider_config("openrouter"),
+        openai_compatible=_provider_config("openai_compatible"),
         embedding=EmbeddingConfig(
             **{
                 k: v
@@ -755,28 +1725,49 @@ def _build_config(raw: dict[str, Any]) -> Config:
                 )
             }
         ),
-        soul=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("soul", {}).items() if k in ("provider", "model")}
-        ),
-        discovery=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("discovery", {}).items() if k in ("provider", "model")}
-        ),
-        recommendation=ModuleLLMConfig(
-            **{
-                k: v
-                for k, v in llm_raw.get("recommendation", {}).items()
-                if k in ("provider", "model")
-            }
-        ),
-        evaluation=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("evaluation", {}).items() if k in ("provider", "model")}
-        ),
+        soul=_module_config("soul"),
+        discovery=_module_config("discovery"),
+        recommendation=_module_config("recommendation"),
+        evaluation=_module_config("evaluation"),
     )
+    if instance_routing:
+        ordered_instance_ids = [
+            *default_chain,
+            *[instance_id for instance_id in instances if instance_id not in default_chain],
+        ]
+        projected_types: set[str] = set()
+        for instance_id in ordered_instance_ids:
+            instance = instances.get(instance_id)
+            if instance is None:
+                continue
+            provider_type = str(instance.provider_type or "").strip().lower()
+            if provider_type not in _SUPPORTED_CHAT_PROVIDERS or provider_type in projected_types:
+                continue
+            projected_types.add(provider_type)
+            setattr(
+                llm,
+                provider_type,
+                LLMProviderConfig(
+                    **{
+                        field_name: getattr(instance, field_name)
+                        for field_name in _LLM_PROVIDER_CONFIG_FIELDS
+                    }
+                ),
+            )
+        first = instances.get(default_chain[0]) if default_chain else None
+        second = instances.get(default_chain[1]) if len(default_chain) > 1 else None
+        if first is not None:
+            llm.default_provider = str(first.provider_type or "").strip().lower()
+        if second is not None:
+            llm.fallback_provider = str(second.provider_type or "").strip().lower()
+        else:
+            llm.fallback_provider = ""
 
     browser_raw = bili_raw.pop("browser", {})
     bilibili = BilibiliConfig(
         auth_method=bili_raw.get("auth_method", "cookie"),
         cookie=bili_raw.get("cookie", ""),
+        proxy=bili_raw.get("proxy", ""),
         browser_executable=browser_raw.get("executable", ""),
         browser_headed=browser_raw.get("headed", False),
     )
@@ -789,6 +1780,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     twitter_raw = sources_raw.get("twitter", {})
     zhihu_raw = sources_raw.get("zhihu", {})
     reddit_raw = sources_raw.get("reddit", {})
+    bangumi_raw = sources_raw.get("bangumi", {})
     sources = SourcesConfig(
         browser_cdp_url=sources_browser_raw.get("cdp_url", ""),
         browser_headed=sources_browser_raw.get("headed", False),
@@ -864,7 +1856,35 @@ def _build_config(raw: dict[str, Any]) -> Config:
             request_interval_seconds=int(reddit_raw.get("request_interval_seconds", 3)),
             min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
         ),
+        bangumi=BangumiSourceConfig(
+            enabled=bool(bangumi_raw.get("enabled", False)),
+            username=str(bangumi_raw.get("username", "") or "").strip(),
+            access_token=str(bangumi_raw.get("access_token", "") or "").strip(),
+            subject_types=tuple(
+                value
+                for value in _coerce_str_list(
+                    bangumi_raw.get("subject_types", ["anime", "book", "game"])
+                )
+                if value in {"book", "anime", "music", "game", "real"}
+            )
+            or ("anime", "book", "game"),
+            source_modes=tuple(
+                value
+                for value in _coerce_str_list(
+                    bangumi_raw.get("source_modes", ["search", "ranked", "latest"])
+                )
+                if value in {"search", "ranked", "latest"}
+            )
+            or ("search",),
+            daily_search_budget=max(0, int(bangumi_raw.get("daily_search_budget", 300))),
+            daily_ranked_budget=max(0, int(bangumi_raw.get("daily_ranked_budget", 100))),
+            daily_latest_budget=max(0, int(bangumi_raw.get("daily_latest_budget", 100))),
+            request_interval_seconds=max(0, int(bangumi_raw.get("request_interval_seconds", 1))),
+            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 60))),
+            bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
+        ),
     )
+    _warn_suspicious_budgets(sources)
 
     soul_raw = raw.get("soul", {}) if isinstance(raw.get("soul"), dict) else {}
     soul_preference_raw = (
@@ -890,10 +1910,25 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         llm=llm,
         bilibili=bilibili,
+        network=_build_network_config(raw),
         sources=sources,
         scheduler=SchedulerConfig(
             **{
                 **sched_raw,
+                # Environment overrides arrive as strings. Leaving these raw
+                # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
+                # CLI while still being the string ``""``; the typed config
+                # API then rejected that same value. Normalize every scheduler
+                # boolean at the boundary so all consumers see a real bool.
+                "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
+                "pause_on_extension_disconnect": _coerce_bool(
+                    sched_raw.get("pause_on_extension_disconnect"),
+                    default=False,
+                ),
+                "profile_consolidation_enabled": _coerce_bool(
+                    sched_raw.get("profile_consolidation_enabled"),
+                    default=True,
+                ),
                 "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
                     sched_raw.get("extension_disconnect_grace_seconds")
                 ),
@@ -961,6 +1996,14 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     sched_raw.get("profile_consolidation_archive_enabled"),
                     default=True,
                 ),
+                "auto_update_enabled": _coerce_bool(
+                    sched_raw.get("auto_update_enabled"),
+                    default=False,
+                ),
+                "auto_update_allow_prerelease": _coerce_bool(
+                    sched_raw.get("auto_update_allow_prerelease"),
+                    default=False,
+                ),
                 "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
                     sched_raw.get("avoidance_speculation_interval_minutes"),
                     default=10,
@@ -986,6 +2029,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     default=5,
                     min_value=1,
                 ),
+                "auto_update_check_interval_hours": _normalize_scheduler_int(
+                    sched_raw.get("auto_update_check_interval_hours"),
+                    default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                    min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                ),
                 "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
                     sched_raw.get("auto_update_allowed_remotes")
                 ),
@@ -995,6 +2043,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
         autostart=AutostartConfig(
             enabled=_coerce_bool(autostart_raw.get("enabled"), default=False),
             manage_ollama=_coerce_bool(autostart_raw.get("manage_ollama"), default=True),
+        ),
+        saved_sync=SavedSyncConfig(
+            auto_sync_enabled=_coerce_bool(saved_sync_raw.get("auto_sync_enabled"), default=False),
         ),
         storage=StorageConfig(**store_raw),
         logging=LoggingConfig(**logging_raw),
@@ -1061,9 +2112,29 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             default=_DEFAULT_PLAN_TTL_HOURS,
             min_value=1,
         ),
+        inspiration_search_enabled=_coerce_bool(
+            discovery_raw.get("inspiration_search_enabled"),
+            default=False,
+        ),
+        inspiration_search_backends=_normalize_inspiration_search_backends(
+            discovery_raw.get("inspiration_search_backends")
+        ),
+        inspiration_replace_merged_keywords=_coerce_bool(
+            discovery_raw.get("inspiration_replace_merged_keywords"),
+            default=False,
+        ),
+        inspiration_breadth=_normalize_inspiration_breadth(
+            discovery_raw.get("inspiration_breadth")
+        ),
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
+        ),
+        candidate_eval_concurrency=_normalize_scheduler_int(
+            discovery_raw.get("candidate_eval_concurrency"),
+            default=_DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            min_value=1,
+            max_value=3,
         ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
@@ -1148,6 +2219,19 @@ def _coerce_ttl_hours(value: object) -> int:
     return 0
 
 
+def _coerce_extension_token_ttl_hours(value: object) -> int:
+    """Normalize extension token TTL to the supported 1..168 hour range."""
+    if isinstance(value, bool):
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    try:
+        ttl = int(value) if isinstance(value, int | str) else -1
+    except ValueError:
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    if 1 <= ttl <= 168:
+        return ttl
+    return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+
+
 def config_local_auth_keys() -> set[str]:
     """``[api.auth]`` keys pinned in ``config.local.toml`` (the override layer that
     ``load_config`` merges OVER ``config.toml``, local winning).
@@ -1198,6 +2282,38 @@ def _coerce_str_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
+    """Normalize inspiration search backend names for the mcporter provider chain."""
+
+    raw_values = (
+        list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
+    )
+    aliases = {
+        "exa": "exa",
+        "local": "local_cache",
+        "cache": "local_cache",
+        "local_cache": "local_cache",
+        "local-cache": "local_cache",
+        "platform-source": "platform_sources",
+        "platform_sources": "platform_sources",
+        "platform": "platform_sources",
+        "you": "you",
+        "you.com": "you",
+        "youcom": "you",
+        "you-search": "you",
+        "you_search": "you",
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        backend = aliases.get(raw.strip().lower())
+        if backend is None or backend in seen:
+            continue
+        normalized.append(backend)
+        seen.add(backend)
+    return tuple(normalized or _DEFAULT_INSPIRATION_SEARCH_BACKENDS)
 
 
 # Single source of truth: every env var ``_build_api_auth`` honors for
@@ -1268,6 +2384,11 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         ),
         trusted_proxies=_coerce_str_list(auth_raw.get("trusted_proxies", [])),
         allowed_bearer_origins=_coerce_str_list(auth_raw.get("allowed_bearer_origins", [])),
+        extension_access_enabled=_coerce_bool(auth_raw.get("extension_access_enabled", False)),
+        extension_access_keys=_coerce_str_list(auth_raw.get("extension_access_keys", [])),
+        extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
+            auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
+        ),
     )
 
 
@@ -1437,6 +2558,15 @@ def _normalize_scheduler_int(
     return normalized
 
 
+def _normalize_inspiration_breadth(value: object) -> str:
+    """Validate the breadth tier; unset → default, invalid → ConfigError."""
+    if value is None:
+        return _DEFAULT_INSPIRATION_BREADTH
+    tier = str(value).strip().lower()
+    derive_inspiration_breadth_params(tier)  # raises ConfigError when invalid
+    return tier
+
+
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
     """Normalize auto-update remote allowlist into non-empty string URLs."""
     if not isinstance(value, list):
@@ -1445,9 +2575,237 @@ def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
     return remotes or list(_DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES)
 
 
+def _validate_auto_update_check_interval(value: object) -> int:
+    """Reject unsafe save-time updater intervals instead of silently coercing them."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("auto_update_check_interval_hours 必须是整数")
+    if value < _MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS:
+        raise ValueError("auto_update_check_interval_hours 必须至少为 1 小时")
+    return value
+
+
+def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
+    """Validate v2 instance identities, endpoint configs, and route references."""
+    issues: list[ConfigIssue] = []
+    instances = llm.instances
+
+    if not instances:
+        issues.append(
+            ConfigIssue(
+                field="llm.instances",
+                message="至少需要新建一个 LLM 实例。",
+                severity="blocking",
+            )
+        )
+
+    for instance_id, instance in instances.items():
+        field_prefix = f"llm.instances.{instance_id}"
+        if _LLM_INSTANCE_ID_RE.fullmatch(instance_id) is None:
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.id",
+                    message=(
+                        "实例 ID 只能使用小写字母、数字、`_`、`-`，"
+                        "必须以字母或数字开头，最长 64 个字符。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        provider_type = str(instance.provider_type or "").strip().lower()
+        if provider_type not in _SUPPORTED_CHAT_PROVIDERS:
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.provider_type",
+                    message=(
+                        f"不支持的 provider 类型: `{instance.provider_type}`。仅支持: "
+                        f"{', '.join(sorted(_SUPPORTED_CHAT_PROVIDERS))}。"
+                    ),
+                    severity="blocking",
+                )
+            )
+            continue
+        if not str(instance.name or "").strip():
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.name",
+                    message="实例名称不能为空。",
+                    severity="blocking",
+                )
+            )
+        if instance.num_ctx < 0:
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.num_ctx",
+                    message="`num_ctx` 不能小于 0。",
+                    severity="blocking",
+                )
+            )
+
+        auth_mode = str(instance.auth_mode or "").strip().lower()
+        if provider_type == "openai" and auth_mode not in _SUPPORTED_OPENAI_AUTH_MODES:
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.auth_mode",
+                    message='OpenAI `auth_mode` 仅支持: "", "api_key", "codex_oauth"。',
+                    severity="blocking",
+                )
+            )
+        flavor = str(instance.api_flavor or "").strip().lower()
+        if (
+            provider_type in {"openai", "openai_compatible"}
+            and flavor not in _SUPPORTED_OPENAI_API_FLAVORS
+        ):
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.api_flavor",
+                    message='`api_flavor` 仅支持: "", "chat_completions", "responses"。',
+                    severity="blocking",
+                )
+            )
+        if provider_type == "openai" and auth_mode == "codex_oauth":
+            if not _is_openai_official_base_url(instance.base_url):
+                issues.append(
+                    ConfigIssue(
+                        field=f"{field_prefix}.base_url",
+                        message=(
+                            "Codex OAuth 只允许留空 base_url 或使用 OpenAI 官方 API 域名，"
+                            "避免把 ChatGPT token 发送给第三方。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            try:
+                from openbiliclaw.llm.codex_auth import codex_credentials_exist
+
+                has_codex_credentials = codex_credentials_exist()
+            except Exception:
+                has_codex_credentials = False
+            if not has_codex_credentials:
+                issues.append(
+                    ConfigIssue(
+                        field=f"{field_prefix}.auth_mode",
+                        message="未找到 Codex OAuth 凭据，请先运行 `openbiliclaw login codex`。",
+                    )
+                )
+
+        if not instance.enabled:
+            continue
+        if not str(instance.model or "").strip():
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.model",
+                    message="启用的 LLM 实例必须明确填写模型。",
+                    severity="blocking",
+                )
+            )
+        uses_codex_oauth = provider_type == "openai" and auth_mode == "codex_oauth"
+        has_env_key = provider_type == "gemini" and bool(_gemini_api_key_from_env())
+        if (
+            provider_type in _REMOTE_PROVIDER_FIELDS
+            and not str(instance.api_key or "").strip()
+            and not uses_codex_oauth
+            and not has_env_key
+        ):
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.api_key",
+                    message=f"启用的 `{provider_type}` 实例缺少 API Key。",
+                    severity="blocking",
+                )
+            )
+        if provider_type == "openai_compatible" and not str(instance.base_url or "").strip():
+            issues.append(
+                ConfigIssue(
+                    field=f"{field_prefix}.base_url",
+                    message="OpenAI-compatible 实例必须填写 Base URL。",
+                    severity="blocking",
+                )
+            )
+
+    def _validate_chain(field_name: str, chain: list[str], *, allow_empty: bool) -> None:
+        normalized = [str(item).strip().lower() for item in chain if str(item).strip()]
+        if not normalized and not allow_empty:
+            issues.append(
+                ConfigIssue(
+                    field=field_name,
+                    message="调用链至少需要一个实例。",
+                    severity="blocking",
+                )
+            )
+            return
+        if len(normalized) != len(set(normalized)):
+            issues.append(
+                ConfigIssue(
+                    field=field_name,
+                    message="同一调用链不能重复引用同一个实例。",
+                    severity="blocking",
+                )
+            )
+        for instance_id in normalized:
+            instance = instances.get(instance_id)
+            if instance is None:
+                issues.append(
+                    ConfigIssue(
+                        field=field_name,
+                        message=f"调用链引用了不存在的实例 `{instance_id}`。",
+                        severity="blocking",
+                    )
+                )
+            elif not instance.enabled:
+                issues.append(
+                    ConfigIssue(
+                        field=field_name,
+                        message=f"调用链引用了已停用的实例 `{instance_id}`。",
+                        severity="blocking",
+                    )
+                )
+
+    _validate_chain("llm.default_chain", llm.default_chain, allow_empty=False)
+    for bucket in _LLM_MODULE_BUCKETS:
+        route = getattr(llm, bucket)
+        field_name = f"llm.routes.{bucket}.chain"
+        if route.inherit:
+            if route.chain:
+                issues.append(
+                    ConfigIssue(
+                        field=field_name,
+                        message="模块当前继承全局调用链；保存时会忽略它自己的 chain。",
+                    )
+                )
+            continue
+        _validate_chain(field_name, route.chain, allow_empty=False)
+    return issues
+
+
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
+
+    try:
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        validate_bangumi_username(config.sources.bangumi.username)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.bangumi.username",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+
+    try:
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_access_token
+
+        validate_bangumi_access_token(config.sources.bangumi.access_token)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.bangumi.access_token",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
 
     if config.api.auth.enabled and not config.api.auth.password_hash.strip():
         issues.append(
@@ -1470,6 +2828,138 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    # Before the default-provider early return: embedding validation must run
+    # even when default_provider itself is broken.
+    for emb_field, emb_value in (
+        ("provider", config.llm.embedding.provider),
+        ("fallback_provider", config.llm.embedding.fallback_provider),
+    ):
+        normalized = str(emb_value or "").strip().lower()
+        if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
+            supported = '"", "ollama", "openai", "gemini", "openai_compatible", "dashscope"'
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.embedding.{emb_field}",
+                    message=(
+                        f"不支持的 embedding {emb_field}: `{emb_value}`。仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
+
+    if config.llm.instance_routing:
+        issues.extend(_collect_llm_instance_routing_issues(config.llm))
+        if not (
+            _MIN_POOL_TARGET_COUNT <= config.scheduler.pool_target_count <= _MAX_POOL_TARGET_COUNT
+        ):
+            issues.append(
+                ConfigIssue(
+                    field="scheduler.pool_target_count",
+                    message=(
+                        "`scheduler.pool_target_count` 必须在 "
+                        f"{_MIN_POOL_TARGET_COUNT}..{_MAX_POOL_TARGET_COUNT} 之间。"
+                    ),
+                )
+            )
+        return issues
+
+    # `[llm].fallback_provider` dead-state validation. The chat fallback
+    # chain (llm/base.py `_fallback_order`) deliberately drops an unusable
+    # fallback WITHOUT any runtime signal — surfacing the dead state here
+    # at save/load time is the only user-visible diagnosis. Runs before the
+    # default-provider early return so a broken default provider does not
+    # hide fallback problems.
+    fallback_name = str(config.llm.fallback_provider or "").strip().lower()
+    if fallback_name:
+        default_name = str(config.llm.default_provider or "").strip().lower()
+        if fallback_name not in _SUPPORTED_CHAT_PROVIDERS:
+            supported = ", ".join(sorted(_SUPPORTED_CHAT_PROVIDERS))
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        f"不支持的备选 provider: `{config.llm.fallback_provider}`。"
+                        f"仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        elif fallback_name == default_name:
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        "备选与主 Provider 相同时永远不会生效；"
+                        "请换一个不同类型的 Provider 或留空关闭 fallback。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        else:
+            # Mirrors the default-provider credential logic below: gemini
+            # may take its key from GOOGLE_API_KEY / GEMINI_API_KEY, and
+            # openai may authenticate via Codex OAuth instead of api_key.
+            fallback_cfg = getattr(config.llm, fallback_name, None)
+            fallback_required_field = _REMOTE_PROVIDER_FIELDS.get(fallback_name)
+            fallback_has_env_key = fallback_name == "gemini" and bool(_gemini_api_key_from_env())
+            fallback_uses_codex_oauth = (
+                fallback_name == "openai"
+                and config.llm.openai.auth_mode.strip().lower() == "codex_oauth"
+            )
+            if (
+                fallback_required_field
+                and fallback_cfg is not None
+                and not fallback_cfg.api_key.strip()
+                and not fallback_has_env_key
+                and not fallback_uses_codex_oauth
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            f"备选 provider `{fallback_name}` 缺少 `api_key`，不会被注册，"
+                            f"fallback 永远不会生效；请填写 `{fallback_required_field}` "
+                            "或留空关闭 fallback。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            if (
+                fallback_name == "openai_compatible"
+                and not config.llm.openai_compatible.base_url.strip()
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `openai_compatible` 必须填 `base_url` "
+                            "(例如 Groq: https://api.groq.com/openai/v1)，"
+                            "否则不会被注册，fallback 永远不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
+            # `_ollama_is_chat_capable` (config cannot import the registry —
+            # cycle). A base URL cannot identify an installed chat model, so
+            # fallback Ollama always requires an explicit model.
+            if fallback_name == "ollama" and not config.llm.ollama.model.strip():
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
+                            "（例如 `qwen2.5:7b`）；仅填写 `base_url` 无法确定聊天模型，"
+                            "fallback 不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+
     provider_name = config.llm.default_provider
     provider_configs: dict[str, LLMProviderConfig] = {
         "openai": config.llm.openai,
@@ -1490,6 +2980,20 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
         return issues
+
+    for flavor_provider in ("openai", "openai_compatible"):
+        flavor = provider_configs[flavor_provider].api_flavor.strip().lower()
+        if flavor not in _SUPPORTED_OPENAI_API_FLAVORS:
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.{flavor_provider}.api_flavor",
+                    message=(
+                        f"`llm.{flavor_provider}.api_flavor` 仅支持: "
+                        '"", "chat_completions", "responses"。'
+                    ),
+                    severity="blocking",
+                )
+            )
 
     openai_auth_mode = config.llm.openai.auth_mode.strip().lower()
     if openai_auth_mode not in _SUPPORTED_OPENAI_AUTH_MODES:
@@ -1567,6 +3071,18 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    if provider_name == "ollama" and not config.llm.ollama.model.strip():
+        issues.append(
+            ConfigIssue(
+                field="llm.ollama.model",
+                message=(
+                    "默认 provider `ollama` 必须明确填写聊天 `model` "
+                    "（例如 `qwen2.5:7b`）；系统不会再隐式使用 `llama3`。"
+                ),
+                severity="blocking",
+            )
+        )
+
     if not (_MIN_POOL_TARGET_COUNT <= config.scheduler.pool_target_count <= _MAX_POOL_TARGET_COUNT):
         issues.append(
             ConfigIssue(
@@ -1632,6 +3148,9 @@ def load_config_with_diagnostics(
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
+    # Removed-key notices are collected from the RAW [discovery] table before
+    # _build_discovery ever runs — the values are ignored, never fail-fast.
+    diagnostics.issues.extend(_removed_discovery_key_issues(raw))
     config = _build_config(raw)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
@@ -1676,6 +3195,9 @@ _LOCAL_AUTH_KEY_TO_FIELD = {
     "trust_loopback": "trust_loopback",
     "trusted_proxies": "trusted_proxies",
     "allowed_bearer_origins": "allowed_bearer_origins",
+    "extension_access_enabled": "extension_access_enabled",
+    "extension_access_keys": "extension_access_keys",
+    "extension_token_ttl_hours": "extension_token_ttl_hours",
 }
 
 
@@ -1727,6 +3249,70 @@ def _read_on_disk_autostart(path: Path) -> dict[str, Any]:
         return {}
     autostart = data.get("autostart")
     return autostart if isinstance(autostart, dict) else {}
+
+
+def _uses_native_llm_routing(raw: object) -> bool:
+    """Return whether parsed TOML contains the v2 LLM routing schema."""
+    if not isinstance(raw, dict):
+        return False
+    llm = raw.get("llm")
+    if not isinstance(llm, dict):
+        return False
+    try:
+        routing_version = int(llm.get("routing_version", 0) or 0)
+    except (TypeError, ValueError):
+        routing_version = 0
+    return bool(
+        routing_version >= 2 or "instances" in llm or "default_chain" in llm or "routes" in llm
+    )
+
+
+def llm_migration_backup_path(config_path: str | Path) -> Path:
+    """Return the permanent one-time backup path for a v1-to-v2 migration."""
+    path = Path(config_path)
+    return path.with_name(f"{path.name}.pre-llm-routing.bak")
+
+
+def _create_llm_migration_backup(path: Path) -> Path | None:
+    """Save the exact pre-v2 file once; never overwrite an earlier backup."""
+    try:
+        source = path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+    try:
+        parsed = tomllib.loads(source.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # Preserve a malformed pre-migration file too. save_config historically
+        # overwrote it; the new safety layer must not make recovery worse.
+        parsed = {}
+    if _uses_native_llm_routing(parsed):
+        return None
+
+    backup = llm_migration_backup_path(path)
+    source_mode = path.stat().st_mode & 0o777
+    try:
+        descriptor = os.open(
+            backup,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            source_mode,
+        )
+    except FileExistsError:
+        return None
+
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(source)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # os.open applies umask, which can only make creation stricter. Restore
+        # the exact source mode after all bytes are durable; the backup is never
+        # more permissive than the source, even for the instant it is created.
+        backup.chmod(source_mode)
+    except Exception:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
 
 
 def _api_auth_lines(
@@ -1825,6 +3411,21 @@ def _api_auth_lines(
         f"allowed_bearer_origins = {_toml_str_list(auth.allowed_bearer_origins)}",
         lambda v: _toml_str_list(_coerce_str_list(v)),
     )
+    emit(
+        "extension_access_enabled",
+        f"extension_access_enabled = {_toml_bool(auth.extension_access_enabled)}",
+        lambda v: _toml_bool(_coerce_bool(v)),
+    )
+    emit(
+        "extension_access_keys",
+        f"extension_access_keys = {_toml_str_list(auth.extension_access_keys)}",
+        lambda v: _toml_str_list(_coerce_str_list(v)),
+    )
+    emit(
+        "extension_token_ttl_hours",
+        f"extension_token_ttl_hours = {auth.extension_token_ttl_hours}",
+        lambda v: str(_coerce_extension_token_ttl_hours(v)),
+    )
     return lines
 
 
@@ -1858,7 +3459,21 @@ def save_config(
     *,
     autostart_authoritative: bool = False,
 ) -> Path:
-    """Persist a Config dataclass to TOML."""
+    """Persist a Config dataclass to TOML.
+
+    The first write that replaces an existing legacy LLM schema with native
+    instance routing keeps an exact adjacent ``.pre-llm-routing.bak`` copy.
+    """
+    from openbiliclaw.sources.bangumi_client import (
+        validate_bangumi_access_token,
+        validate_bangumi_username,
+    )
+
+    _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
+    config.sources.bangumi.username = validate_bangumi_username(config.sources.bangumi.username)
+    config.sources.bangumi.access_token = validate_bangumi_access_token(
+        config.sources.bangumi.access_token
+    )
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -1872,16 +3487,16 @@ def save_config(
     # (production / default path). For a save to any other explicit file it was
     # never merged, so its overrides must not gate this render (review r11).
     consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
-    path.write_text(
-        _render_config_toml(
-            config,
-            on_disk_auth=on_disk_auth,
-            on_disk_autostart=on_disk_autostart,
-            autostart_authoritative=autostart_authoritative,
-            consult_local=consult_local,
-        ),
-        encoding="utf-8",
+    rendered = _render_config_toml(
+        config,
+        on_disk_auth=on_disk_auth,
+        on_disk_autostart=on_disk_autostart,
+        autostart_authoritative=autostart_authoritative,
+        consult_local=consult_local,
     )
+    if config.llm.instance_routing and path.exists():
+        _create_llm_migration_backup(path)
+    path.write_text(rendered, encoding="utf-8")
     return path
 
 
@@ -1905,21 +3520,38 @@ def _render_config_toml(
         "",
         *_api_auth_lines(config, on_disk_auth, consult_local=consult_local),
         "",
-        "[llm]",
-        f"default_provider = {_toml_string(config.llm.default_provider)}",
-        f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
-        f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
-        f"fallback_enabled = {_toml_bool(config.llm.fallback_enabled)}",
-        f"fallback_provider = {_toml_string(config.llm.fallback_provider)}",
-        "",
     ]
-    lines.extend(_render_provider_section("openai", config.llm.openai))
-    lines.extend(_render_provider_section("claude", config.llm.claude))
-    lines.extend(_render_provider_section("gemini", config.llm.gemini))
-    lines.extend(_render_provider_section("deepseek", config.llm.deepseek))
-    lines.extend(_render_provider_section("ollama", config.llm.ollama))
-    lines.extend(_render_provider_section("openrouter", config.llm.openrouter))
-    lines.extend(_render_provider_section("openai_compatible", config.llm.openai_compatible))
+    if config.llm.instance_routing:
+        lines.extend(
+            [
+                "[llm]",
+                "routing_version = 2",
+                f"default_chain = {_toml_str_list(config.llm.default_chain)}",
+                f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
+                f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
+                "",
+            ]
+        )
+        for instance_id, instance in config.llm.instances.items():
+            lines.extend(_render_llm_instance_section(instance_id, instance))
+    else:
+        lines.extend(
+            [
+                "[llm]",
+                f"default_provider = {_toml_string(config.llm.default_provider)}",
+                f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
+                f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
+                f"fallback_provider = {_toml_string(config.llm.fallback_provider)}",
+                "",
+            ]
+        )
+        lines.extend(_render_provider_section("openai", config.llm.openai))
+        lines.extend(_render_provider_section("claude", config.llm.claude))
+        lines.extend(_render_provider_section("gemini", config.llm.gemini))
+        lines.extend(_render_provider_section("deepseek", config.llm.deepseek))
+        lines.extend(_render_provider_section("ollama", config.llm.ollama))
+        lines.extend(_render_provider_section("openrouter", config.llm.openrouter))
+        lines.extend(_render_provider_section("openai_compatible", config.llm.openai_compatible))
     lines.extend(
         [
             "[llm.embedding]",
@@ -1933,34 +3565,62 @@ def _render_config_toml(
             f"fallback_provider = {_toml_string(config.llm.embedding.fallback_provider)}",
             f"multimodal_enabled = {_toml_bool(config.llm.embedding.multimodal_enabled)}",
             "",
-            "# Per-module LLM overrides (empty = use global default)",
-            "[llm.soul]",
-            f"provider = {_toml_string(config.llm.soul.provider)}",
-            f"model = {_toml_string(config.llm.soul.model)}",
-            "",
-            "[llm.discovery]",
-            f"provider = {_toml_string(config.llm.discovery.provider)}",
-            f"model = {_toml_string(config.llm.discovery.model)}",
-            "",
-            "[llm.recommendation]",
-            f"provider = {_toml_string(config.llm.recommendation.provider)}",
-            f"model = {_toml_string(config.llm.recommendation.model)}",
-            "",
-            "[llm.evaluation]",
-            f"provider = {_toml_string(config.llm.evaluation.provider)}",
-            f"model = {_toml_string(config.llm.evaluation.model)}",
-            "",
         ]
     )
+    if config.llm.instance_routing:
+        lines.append("# Per-module routes (inherit=true uses llm.default_chain)")
+        for bucket in _LLM_MODULE_BUCKETS:
+            route = getattr(config.llm, bucket)
+            lines.extend(
+                [
+                    f"[llm.routes.{bucket}]",
+                    f"inherit = {_toml_bool(route.inherit)}",
+                    f"chain = {_toml_str_list([] if route.inherit else route.chain)}",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "# Per-module LLM overrides (empty = use global default)",
+                "[llm.soul]",
+                f"provider = {_toml_string(config.llm.soul.provider)}",
+                f"model = {_toml_string(config.llm.soul.model)}",
+                "",
+                "[llm.discovery]",
+                f"provider = {_toml_string(config.llm.discovery.provider)}",
+                f"model = {_toml_string(config.llm.discovery.model)}",
+                "",
+                "[llm.recommendation]",
+                f"provider = {_toml_string(config.llm.recommendation.provider)}",
+                f"model = {_toml_string(config.llm.recommendation.model)}",
+                "",
+                "[llm.evaluation]",
+                f"provider = {_toml_string(config.llm.evaluation.provider)}",
+                f"model = {_toml_string(config.llm.evaluation.model)}",
+                "",
+            ]
+        )
     lines.extend(
         [
             "[bilibili]",
             f"auth_method = {_toml_string(config.bilibili.auth_method)}",
             f"cookie = {_toml_string(config.bilibili.cookie)}",
+            f"proxy = {_toml_string(config.bilibili.proxy)}",
             "",
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
+            "",
+            "[network]",
+            "# Overseas routing mode: system (default; inherit HTTP(S)_PROXY /",
+            "# OS proxy), direct (ignore env proxy), custom (use proxy below).",
+            "# Applies to LLM SDKs, YouTube, Bangumi,",
+            "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
+            "# 始终直连,不受此项影响。",
+            "# 支持 http:// | https:// | socks5:// | socks5h://",
+            f"mode = {_toml_string(config.network.mode)}",
+            f"proxy = {_toml_string(config.network.proxy)}",
             "",
             "[sources.browser]",
             f"cdp_url = {_toml_string(config.sources.browser_cdp_url)}",
@@ -2024,6 +3684,19 @@ def _render_config_toml(
             f"request_interval_seconds = {config.sources.reddit.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.reddit.min_interval_minutes}",
             "",
+            "[sources.bangumi]",
+            f"enabled = {_toml_bool(config.sources.bangumi.enabled)}",
+            f"username = {_toml_string(config.sources.bangumi.username)}",
+            f"access_token = {_toml_string(config.sources.bangumi.access_token)}",
+            f"subject_types = {_toml_str_list(list(config.sources.bangumi.subject_types))}",
+            f"source_modes = {_toml_str_list(list(config.sources.bangumi.source_modes))}",
+            f"daily_search_budget = {config.sources.bangumi.daily_search_budget}",
+            f"daily_ranked_budget = {config.sources.bangumi.daily_ranked_budget}",
+            f"daily_latest_budget = {config.sources.bangumi.daily_latest_budget}",
+            f"request_interval_seconds = {config.sources.bangumi.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.bangumi.min_interval_minutes}",
+            f"bootstrap_limit = {config.sources.bangumi.bootstrap_limit}",
+            "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
             "pause_on_extension_disconnect = "
@@ -2077,6 +3750,7 @@ def _render_config_toml(
             f"twitter = {int(config.scheduler.pool_source_shares.get('twitter', 1))}",
             f"zhihu = {int(config.scheduler.pool_source_shares.get('zhihu', 1))}",
             f"reddit = {int(config.scheduler.pool_source_shares.get('reddit', 1))}",
+            f"bangumi = {int(config.scheduler.pool_source_shares.get('bangumi', 1))}",
             "",
             "[discovery]",
             "unified_keyword_planner_enabled = "
@@ -2091,6 +3765,14 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            f"candidate_eval_concurrency = {config.discovery.candidate_eval_concurrency}",
+            "inspiration_search_enabled = "
+            f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
+            "inspiration_search_backends = "
+            f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
+            "inspiration_replace_merged_keywords = "
+            f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
+            f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",
@@ -2104,6 +3786,9 @@ def _render_config_toml(
                 on_disk_autostart,
                 autostart_authoritative=autostart_authoritative,
             ),
+            "",
+            "[saved_sync]",
+            f"auto_sync_enabled = {_toml_bool(config.saved_sync.auto_sync_enabled)}",
             "",
             "[storage]",
             f"db_path = {_toml_string(config.storage.db_path)}",
@@ -2132,16 +3817,41 @@ def _render_config_toml(
     return "\n".join(lines)
 
 
+def _render_llm_instance_section(
+    instance_id: str,
+    instance: LLMInstanceConfig,
+) -> list[str]:
+    """Render one v2 provider instance with a quoted dynamic table key."""
+    return [
+        f"[llm.instances.{_toml_string(instance_id)}]",
+        f"name = {_toml_string(instance.name)}",
+        f"provider_type = {_toml_string(instance.provider_type)}",
+        f"enabled = {_toml_bool(instance.enabled)}",
+        f"api_key = {_toml_string(instance.api_key)}",
+        f"model = {_toml_string(instance.model)}",
+        f"base_url = {_toml_string(instance.base_url)}",
+        f"auth_mode = {_toml_string(instance.auth_mode)}",
+        f"api_flavor = {_toml_string(instance.api_flavor)}",
+        f"http_referer = {_toml_string(instance.http_referer)}",
+        f"x_title = {_toml_string(instance.x_title)}",
+        f"reasoning_effort = {_toml_string(instance.reasoning_effort)}",
+        f"num_ctx = {max(0, int(instance.num_ctx))}",
+        "",
+    ]
+
+
 def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str]:
     """Render one provider subsection."""
     lines = [f"[llm.{name}]"]
     lines.append(f"api_key = {_toml_string(provider.api_key)}")
     lines.append(f"model = {_toml_string(provider.model)}")
-    if name in {"openai", "deepseek", "ollama", "openrouter", "openai_compatible"}:
+    if name in {"openai", "claude", "deepseek", "ollama", "openrouter", "openai_compatible"}:
         lines.append(f"base_url = {_toml_string(provider.base_url)}")
     if name == "openai":
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
-    if name == "deepseek":
+    if name in {"openai", "openai_compatible"}:
+        lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
+    if name in {"openai", "claude", "gemini", "deepseek", "openrouter"}:
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":
         lines.append(f"http_referer = {_toml_string(provider.http_referer)}")

@@ -37,7 +37,17 @@
 
 const POST_MESSAGE_SOURCE = "obc-x-tap";
 
-export type XEventType = "like" | "favorite" | "share" | "comment" | "view" | "follow";
+export type XEventType =
+  | "like"
+  | "favorite"
+  | "share"
+  | "comment"
+  | "view"
+  | "follow"
+  | "retraction";
+
+/** The positive action a retraction withdraws. */
+export type RetractedAction = "like" | "favorite" | "share";
 
 /** A request as the tap observes it: URL + raw request/response bodies. */
 export interface CapturedXRequest {
@@ -53,6 +63,14 @@ export interface XEngagement {
   tweet_id?: string;
   /** Present for follow only (REST friendships/create carries user_id). */
   user_id?: string;
+  /** Present for retraction only — the withdrawn positive action. */
+  retracted_action?: RetractedAction;
+  /**
+   * Present for a comment (reply CreateTweet) only, and only when the
+   * mutation actually succeeded (no GraphQL errors) — the raw reply body.
+   * The content script sanitizes it before recording (never trust MAIN world).
+   */
+  text?: string;
 }
 
 // GraphQL operation name → event type. Engagement + opens only; discovery
@@ -64,6 +82,19 @@ const GRAPHQL_OP_EVENTS: Record<string, XEventType> = {
   CreateRetweet: "share",
   CreateTweet: "comment", // only counts as a comment when a reply target is present
   TweetDetail: "view",
+  // Un-actions map to a single "retraction" type; the withdrawn action is
+  // resolved from GRAPHQL_RETRACTION_ACTIONS below. DeleteTweet is
+  // deliberately absent — deleting your own tweet is not a preference signal.
+  UnfavoriteTweet: "retraction",
+  DeleteBookmark: "retraction",
+  DeleteRetweet: "retraction",
+};
+
+// Retraction op → the positive action being withdrawn.
+const GRAPHQL_RETRACTION_ACTIONS: Record<string, RetractedAction> = {
+  UnfavoriteTweet: "like",
+  DeleteBookmark: "favorite",
+  DeleteRetweet: "share",
 };
 
 /**
@@ -135,9 +166,26 @@ function findFirstString(node: unknown, keys: readonly string[]): string {
 }
 
 const TWEET_ID_KEYS = ["tweet_id", "tweetId"] as const;
+// DeleteRetweet carries the target under `source_tweet_id`, not `tweet_id`.
+const RETRACTION_ID_KEYS = ["tweet_id", "tweetId", "source_tweet_id"] as const;
 const REPLY_KEYS = ["reply"] as const;
 const IN_REPLY_TO_KEYS = ["in_reply_to_tweet_id", "in_reply_to_status_id"] as const;
 const USER_ID_KEYS = ["user_id", "userId", "id_str"] as const;
+const TWEET_TEXT_KEYS = ["tweet_text"] as const;
+
+/**
+ * True when a GraphQL response carries a non-empty top-level `errors` array —
+ * i.e. the mutation failed at the business layer despite an HTTP 2xx. Used to
+ * gate reply-body attachment (invariant 7b: network success = business
+ * success). Best effort: an unparseable body is treated as no errors so the
+ * existing comment event (tweet_id) is unaffected.
+ */
+function hasGraphqlErrors(responseBody: string): boolean {
+  const parsed = safeJsonParse(responseBody);
+  if (!parsed || typeof parsed !== "object") return false;
+  const errors = (parsed as { errors?: unknown }).errors;
+  return Array.isArray(errors) && errors.length > 0;
+}
 
 /** Pull a form-encoded field (e.g. follow's `user_id`). */
 function findFormField(body: string, name: string): string {
@@ -185,6 +233,20 @@ export function parseXMutation(captured: CapturedXRequest): XEngagement | null {
 
   const reqJson = safeJsonParse(requestBody);
 
+  // Un-actions (unlike / unbookmark / unretweet): the target id lives in the
+  // request variables (unretweet uses `source_tweet_id`). Attach the
+  // withdrawn action so the consumer can build the retraction event.
+  if (type === "retraction") {
+    const op = graphqlOperationName(url);
+    const retractedAction = GRAPHQL_RETRACTION_ACTIONS[op];
+    if (!retractedAction) return null;
+    const tweetId =
+      findFirstString(reqJson, RETRACTION_ID_KEYS) ||
+      findFirstString(variablesFromUrl(url), RETRACTION_ID_KEYS);
+    if (!tweetId) return null;
+    return { type, tweet_id: tweetId, retracted_action: retractedAction };
+  }
+
   // CreateTweet is only an engagement event when it's a reply to another
   // tweet (variables.reply.in_reply_to_tweet_id). A brand-new top-level
   // tweet is the user authoring content, not engaging — drop it.
@@ -193,7 +255,15 @@ export function parseXMutation(captured: CapturedXRequest): XEngagement | null {
     if (reply === null) return null;
     const inReplyTo = findFirstString(reply, IN_REPLY_TO_KEYS);
     if (!inReplyTo) return null;
-    return { type, tweet_id: inReplyTo };
+    const engagement: XEngagement = { type, tweet_id: inReplyTo };
+    // Attach the reply body only when the mutation succeeded (invariant 7b).
+    // The comment event's existing emission timing is unchanged — a failed
+    // reply still fires the comment event, just without the body text.
+    const text = findFirstString(reqJson, TWEET_TEXT_KEYS);
+    if (text && !hasGraphqlErrors(responseBody)) {
+      engagement.text = text;
+    }
+    return engagement;
   }
 
   // TweetDetail is a GET — the focalTweetId lives in the URL's `variables`.

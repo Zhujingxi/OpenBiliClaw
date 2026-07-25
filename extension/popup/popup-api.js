@@ -1,7 +1,12 @@
 import { normalizeRecommendation, normalizeSavedItem } from "./popup-helpers.js";
 import { getBackendBaseUrl } from "./popup-backend-config.js";
+import {
+  ensurePopupSession,
+  popupAuthenticatedFetch,
+} from "./popup-device-auth.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
+export const CONFIG_GET_TIMEOUT_MS = 12_000;
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
 const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
 const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
@@ -55,21 +60,42 @@ function withTimeout(signal, timeoutMs) {
   };
 }
 
+function awaitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 export async function requestJson(path, options = {}) {
-  const backendUrl = await getBackendBaseUrl();
   const { timeoutMs, signal, ...fetchOptions } = options;
   const timeout = withTimeout(signal, timeoutMs);
-  const requestOptions = { ...fetchOptions };
-  if (timeout.signal) {
-    requestOptions.signal = timeout.signal;
-  }
   try {
-    const response = await fetch(`${backendUrl}${path}`, requestOptions);
+    const fetchImpl = globalThis.fetch.bind(globalThis);
+    const backendUrl = await awaitWithAbort(getBackendBaseUrl(), timeout.signal);
+    const sessionToken = await awaitWithAbort(ensurePopupSession({
+      fetchImpl,
+      signal: timeout.signal,
+    }), timeout.signal);
+    const requestOptions = { ...fetchOptions };
+    if (timeout.signal) requestOptions.signal = timeout.signal;
+    const response = await awaitWithAbort(popupAuthenticatedFetch(
+      `${backendUrl}${path}`,
+      requestOptions,
+      fetchImpl,
+      { sessionToken, signal: timeout.signal },
+    ), timeout.signal);
     if (!response.ok) {
       let details = null;
       try {
-        details = await response.json();
-      } catch {
+        details = await awaitWithAbort(response.json(), timeout.signal);
+      } catch (error) {
+        if (timeout.signal?.aborted) throw error;
         details = null;
       }
       const error = new Error(`${path} request failed: ${response.status}`);
@@ -77,7 +103,7 @@ export async function requestJson(path, options = {}) {
       error.details = details;
       throw error;
     }
-    return response.json();
+    return await awaitWithAbort(response.json(), timeout.signal);
   } finally {
     timeout.cleanup();
   }
@@ -215,6 +241,43 @@ export function __resetPopupHealthCacheForTests() {
   healthProbeInFlight = null;
 }
 
+// One-click embedding repair (v0.3.155+): POST asks the backend to
+// (re-)pull the configured Ollama embedding model; GET reports progress.
+// Returns {status, ...payload} — callers branch on status/error instead of
+// throwing, because each 409 flavor gets its own user-facing hint. A 404
+// status means an older backend without the route.
+export async function startEmbeddingRepair() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "POST",
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    return { status: response.status, ...payload };
+  } catch {
+    return { status: 0 };
+  }
+}
+
+// Progress of the in-flight (or last finished) repair; null when unreachable.
+export async function fetchEmbeddingRepairStatus() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "GET",
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchRecommendations() {
   const payload = await requestJson("/recommendations", { method: "GET" });
   return Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [];
@@ -224,8 +287,14 @@ export async function refreshRecommendations() {
   return requestJson("/recommendations/refresh", { method: "POST" });
 }
 
-export async function reshuffleRecommendations() {
-  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+export async function reshuffleRecommendations(excludedBvids = []) {
+  const payload = await requestJson("/recommendations/reshuffle", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ excluded_bvids: excludedBvids }),
+  });
   return {
     ...payload,
     items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
@@ -251,7 +320,7 @@ export async function fetchRuntimeStatus() {
 }
 
 export async function fetchInitStatus() {
-  return requestJson("/init-status", { method: "GET" });
+  return requestJson("/init-status", { method: "GET", timeoutMs: 45000 });
 }
 
 export async function fetchXSourceStatus() {
@@ -262,22 +331,55 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
-export async function startInit({ force = false, sources } = {}) {
+// The counterpart to fetchSourcesStatus: that one is polled and never goes out,
+// this one is an explicit user action and is the only place a platform gets
+// probed. Generous timeout because it really can reach the network — a B站 nav
+// probe or a 5s wait for this very extension to answer a heartbeat request.
+export async function verifySource(slug) {
+  return requestJson(`/sources/${encodeURIComponent(slug)}/verify`, {
+    method: "POST",
+    timeoutMs: 30_000,
+  });
+}
+
+export async function startInit({
+  force = false,
+  sources,
+  bangumiUsername = null,
+  bangumiToken = null,
+} = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
     payload.sources = sources;
   }
+  // Send explicit Bangumi options only when the caller has one to send.
+  // `null`/`undefined` means "leave the configured value untouched" (the backend
+  // treats an omitted field as keep-existing); an empty string is a deliberate
+  // clear the user asked for. A token, when present, auto-resolves the account.
+  if (Array.isArray(sources) && sources.includes("bangumi")) {
+    const bangumi = {};
+    if (bangumiUsername != null) {
+      bangumi.username = String(bangumiUsername).trim();
+    }
+    if (bangumiToken != null) {
+      bangumi.access_token = String(bangumiToken).trim();
+    }
+    if (Object.keys(bangumi).length > 0) {
+      payload.source_options = { bangumi };
+    }
+  }
   return requestJson("/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: 60000,
   });
 }
 
 export async function cancelInit() {
-  return requestJson("/init/cancel", { method: "POST" });
+  return requestJson("/init/cancel", { method: "POST", timeoutMs: 15000 });
 }
 
 export async function fetchUpdateStatus() {
@@ -386,6 +488,14 @@ export async function submitFeedback(payload) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function sendBehaviorEvents(events) {
+  return requestJson("/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events }),
   });
 }
 
@@ -539,8 +649,8 @@ export async function respondToDelight(bvid, responseType, title = "", message =
   }
 }
 
-export async function fetchConfig() {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET" });
+export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
+  const config = await requestJson("/config", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }
@@ -558,21 +668,39 @@ export async function fetchSourceShareSuggestion(overrides = null) {
   return requestJson("/config/source-share-suggestion", { method: "GET" });
 }
 
-export async function probeConfigService(kind, config) {
+export async function probeConfigService(kind, config, instanceId = "") {
   return requestJson("/config/probe-service", {
     method: "POST",
     timeoutMs: 35_000,
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ kind, config }),
+    body: JSON.stringify({
+      kind,
+      config,
+      ...(instanceId ? { instance_id: instanceId } : {}),
+    }),
   });
 }
 
-export async function updateConfig(data) {
+export async function discoverConfigModels(config, instanceId) {
+  return requestJson("/config/discover-models", {
+    method: "POST",
+    timeoutMs: 25_000,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      instance_id: String(instanceId || ""),
+      config,
+    }),
+  });
+}
+
+export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
-    timeoutMs: CONFIG_PUT_TIMEOUT_MS,
+    timeoutMs,
     headers: {
       "Content-Type": "application/json",
     },
@@ -599,6 +727,86 @@ export async function updateRuntimeToggle(name, value) {
 // fetches. A bounded timeout turns "hangs forever, button stuck disabled"
 // into a visible, retryable failure.
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
+const SAVED_READ_TIMEOUT_MS = 10_000;
+
+function savedListPath(listKind) {
+  if (listKind !== "favorite" && listKind !== "watch_later") {
+    throw new TypeError(`Unknown saved list: ${listKind}`);
+  }
+  return `/saved/${listKind}`;
+}
+
+/** Keep platform routing on the backend; clients only normalize identity fields. */
+export function normalizeSavedItemInput(item = {}) {
+  const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
+  const legacyId = String(item.bvid || "").trim();
+  const contentId = String(
+    item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  ).trim();
+  return {
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || item.url || "").trim(),
+    content_type: String(
+      item.content_type || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+    ).trim(),
+    title: String(item.title || "").trim(),
+    author_name: String(item.author_name || item.up_name || item.author || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+    note: String(item.note || "").trim(),
+  };
+}
+
+export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(savedListPath(listKind), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(normalizeSavedItemInput(item)),
+    timeoutMs,
+  });
+}
+
+export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_key: String(itemKey || "").trim() }),
+    timeoutMs,
+  });
+}
+
+export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const payload = await requestJson(
+    `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    { timeoutMs },
+  );
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
+}
+
+export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
+  return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
+}
+
+export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+    }),
+    timeoutMs,
+  });
+}
+
+export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
+    timeoutMs,
+  });
+}
 
 export async function addToWatchLater(bvid) {
   return requestJson("/watch-later", {

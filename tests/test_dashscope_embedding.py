@@ -18,9 +18,7 @@ from openbiliclaw.llm.registry import (
 
 def test_is_multimodal_embedding_model_markers() -> None:
     assert DashScopeEmbeddingProvider.is_multimodal_embedding_model("qwen3-vl-embedding")
-    assert DashScopeEmbeddingProvider.is_multimodal_embedding_model(
-        "tongyi-embedding-vision-plus"
-    )
+    assert DashScopeEmbeddingProvider.is_multimodal_embedding_model("tongyi-embedding-vision-plus")
     assert DashScopeEmbeddingProvider.is_multimodal_embedding_model("multimodal-embedding-v1")
     assert not DashScopeEmbeddingProvider.is_multimodal_embedding_model("text-embedding-v3")
     assert not DashScopeEmbeddingProvider.is_multimodal_embedding_model("")
@@ -75,9 +73,7 @@ async def test_embed_text_parses_vector() -> None:
     call_kwargs = mock_client.post.await_args
     assert call_kwargs is not None
     url = call_kwargs.args[0]
-    assert url.endswith(
-        "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
-    )
+    assert url.endswith("/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding")
     body = call_kwargs.kwargs["json"]
     assert body["model"] == "qwen3-vl-embedding"
     assert body["input"]["contents"] == [{"text": "游戏攻略封面风格"}]
@@ -204,9 +200,7 @@ def test_build_embedding_service_dashscope_missing_key() -> None:
 
 
 def test_dashscope_honors_output_dimensionality() -> None:
-    assert _embedding_provider_honors_output_dimensionality(
-        "dashscope", "qwen3-vl-embedding"
-    )
+    assert _embedding_provider_honors_output_dimensionality("dashscope", "qwen3-vl-embedding")
     assert not _embedding_provider_honors_output_dimensionality(
         "dashscope", "tongyi-embedding-vision-plus"
     )
@@ -218,3 +212,54 @@ def test_base_url_strips_compatible_mode_suffix() -> None:
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     assert provider._base_url == "https://dashscope.aliyuncs.com"
+
+
+@pytest.mark.asyncio
+async def test_embed_routes_per_endpoint_domestic_direct() -> None:
+    """Pitfall rule 1 + v0.3.167: the DashScope client routes per endpoint via
+    network.httpx_kwargs_for_endpoint. dashscope.aliyuncs.com is domestic, so it
+    stays direct (trust_env=False, no proxy) even when [network].mode is custom
+    for reaching overseas models — the CN embedding call never tunnels the ladder.
+    A genuinely non-domestic base_url still follows the global mode.
+    """
+    from openbiliclaw import network
+
+    payload = {"output": {"embeddings": [{"index": 0, "type": "text", "embedding": [0.1]}]}}
+
+    def _make_factory() -> MagicMock:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post = AsyncMock(return_value=_mock_response(payload))
+        return MagicMock(return_value=mock_client)
+
+    async def _capture(provider: DashScopeEmbeddingProvider) -> MagicMock:
+        factory = _make_factory()
+        with patch("openbiliclaw.llm.dashscope_provider.httpx.AsyncClient", factory):
+            await provider.embed("hi")
+        return factory
+
+    domestic = DashScopeEmbeddingProvider(api_key="sk-test", model="qwen3-vl-embedding")
+    offshore = DashScopeEmbeddingProvider(
+        api_key="sk-test", model="qwen3-vl-embedding", base_url="https://relay.example.com"
+    )
+
+    network.reset_outbound_proxy_for_tests()
+    try:
+        # Domestic endpoint, direct mode → direct, no proxy.
+        f = await _capture(domestic)
+        assert f.call_args.kwargs.get("trust_env") is False
+        assert "proxy" not in f.call_args.kwargs
+
+        # Domestic endpoint, CUSTOM mode → STILL direct (domestic carve-out).
+        network.set_outbound_proxy("http://127.0.0.1:7890")
+        f = await _capture(domestic)
+        assert f.call_args.kwargs.get("trust_env") is False
+        assert "proxy" not in f.call_args.kwargs
+
+        # Non-domestic base_url, custom mode → follows global mode (proxy applied).
+        f = await _capture(offshore)
+        assert f.call_args.kwargs.get("proxy") == "http://127.0.0.1:7890"
+        assert f.call_args.kwargs.get("trust_env") is False
+    finally:
+        network.reset_outbound_proxy_for_tests()

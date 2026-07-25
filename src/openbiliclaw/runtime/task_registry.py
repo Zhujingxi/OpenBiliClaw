@@ -10,7 +10,9 @@ runtime for SQLite writes and LLM tokens for many seconds after rebuild.
 
 ``BackgroundTaskRegistry`` is the single chokepoint every detached task
 should flow through. ``cancel_all`` is awaited at the very top of
-``rebuild_from_config`` so the new runtime starts from a clean slate.
+``rebuild_from_config``. Cancellation has a strict grace deadline; a broken
+third-party coroutine that suppresses cancellation remains owned/tracked for a
+later cleanup attempt instead of hanging hot reload or becoming an orphan.
 
 Backward compatibility note: every caller that previously used
 ``asyncio.create_task`` directly continues to work unmodified — the
@@ -23,6 +25,7 @@ a registry.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -37,9 +40,10 @@ class BackgroundTaskRegistry:
 
     Every detached task that the runtime spawns (precompute, prewarm,
     per-event trigger, refresh-loop ticks) should pass through
-    ``track`` instead of bare ``asyncio.create_task``. On
-    ``cancel_all``, the registry cancels every still-running task and
-    waits for them to settle.
+    ``track`` instead of bare ``asyncio.create_task``. On ``cancel_all``, the
+    registry cancels every still-running task and waits only for the configured
+    grace period. Non-cooperative tasks remain tracked so callers never mistake
+    them for safely stopped work.
     """
 
     def __init__(self) -> None:
@@ -66,25 +70,37 @@ class BackgroundTaskRegistry:
         (gui-init spec §5c). Returns the number of tasks actually cancelled.
         """
         tasks = [t for t, name in self._tasks.items() if name not in exclude]
+        current_loop = asyncio.get_running_loop()
+        waitable: list[asyncio.Task[Any]] = []
+        done: set[asyncio.Task[Any]] = {task for task in tasks if task.done()}
+        foreign_pending: set[asyncio.Task[Any]] = set()
         for task in tasks:
+            if task.done():
+                continue
+            if task.get_loop() is not current_loop:
+                foreign_pending.add(task)
+                continue
             task.cancel()
-        if tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=grace_seconds,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "%d background task(s) did not exit within %.1fs of cancel",
-                    sum(1 for t in tasks if not t.done()),
-                    grace_seconds,
-                )
-        # Self-untrack callbacks may not have fired for cancelled tasks
-        # (especially when the grace timeout hit). Drop the cancelled ones
-        # explicitly; excluded tasks stay tracked so they remain cancellable.
+            waitable.append(task)
+        pending: set[asyncio.Task[Any]] = set()
+        if waitable:
+            settled, pending = await asyncio.wait(waitable, timeout=max(0.0, grace_seconds))
+            done.update(settled)
+        for task in done:
+            with contextlib.suppress(BaseException):
+                task.result()
+        if pending or foreign_pending:
+            logger.warning(
+                "%d background task(s) did not exit within %.1fs of cancel",
+                len(pending) + len(foreign_pending),
+                grace_seconds,
+            )
+        # Completed tasks can be dropped immediately. A coroutine that ignored
+        # cancellation stays registered so a later shutdown/reload can retry;
+        # forgetting it would create an unowned task that can compete forever.
         for task in tasks:
-            self._tasks.pop(task, None)
+            if task.done():
+                self._tasks.pop(task, None)
         return len(tasks)
 
     async def cancel(self, name: str, *, grace_seconds: float = 1.5) -> int:
@@ -94,18 +110,30 @@ class BackgroundTaskRegistry:
         without touching the rest (gui-init spec §5f).
         """
         tasks = [t for t, n in self._tasks.items() if n == name]
+        current_loop = asyncio.get_running_loop()
+        waitable: list[asyncio.Task[Any]] = []
+        done: set[asyncio.Task[Any]] = {task for task in tasks if task.done()}
+        foreign_pending: set[asyncio.Task[Any]] = set()
         for task in tasks:
+            if task.done():
+                continue
+            if task.get_loop() is not current_loop:
+                foreign_pending.add(task)
+                continue
             task.cancel()
-        if tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=grace_seconds,
-                )
-            except TimeoutError:
-                logger.warning("task %r did not exit within %.1fs of cancel", name, grace_seconds)
+            waitable.append(task)
+        pending: set[asyncio.Task[Any]] = set()
+        if waitable:
+            settled, pending = await asyncio.wait(waitable, timeout=max(0.0, grace_seconds))
+            done.update(settled)
+        for task in done:
+            with contextlib.suppress(BaseException):
+                task.result()
+        if pending or foreign_pending:
+            logger.warning("task %r did not exit within %.1fs of cancel", name, grace_seconds)
         for task in tasks:
-            self._tasks.pop(task, None)
+            if task.done():
+                self._tasks.pop(task, None)
         return len(tasks)
 
     def stats(self) -> dict[str, int]:

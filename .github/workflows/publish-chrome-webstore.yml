@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      replace_pending:
+        description: "Cancel an existing in-review submission and replace it with this package"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -63,6 +68,7 @@ jobs:
           CHROME_WEBSTORE_EXTENSION_ID: ${{ secrets.CHROME_WEBSTORE_EXTENSION_ID }}
           SHOULD_PUBLISH: ${{ inputs.publish }}
           SHOULD_STAGE: ${{ inputs.staged }}
+          SHOULD_REPLACE_PENDING: ${{ inputs.replace_pending }}
           ARCHIVE_PATH: ${{ steps.archive.outputs.archive }}
         run: |
           args=(--zip "$ARCHIVE_PATH")
@@ -73,5 +79,8 @@ jobs:
             fi
           elif [ "$SHOULD_STAGE" = "true" ]; then
             echo "staged=true ignored because publish=false"
+          fi
+          if [ "$SHOULD_REPLACE_PENDING" = "true" ]; then
+            args+=(--replace-pending)
           fi
           node extension/scripts/chrome-webstore-upload.mjs "${args[@]}"

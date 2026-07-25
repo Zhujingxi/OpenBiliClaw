@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
-from openbiliclaw.runtime.refresh import ContinuousRefreshController
+from openbiliclaw.runtime.refresh import (
+    ContinuousRefreshController,
+    InitialPoolUnavailableError,
+)
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -128,6 +134,70 @@ async def test_run_init_backfill_releases_lock_on_cancel() -> None:
     assert ctrl._refresh_lock.locked() is False
 
 
+async def test_run_init_backfill_drains_copy_before_reporting_success() -> None:
+    class _CanonicalDB:
+        available = 0
+
+        def count_pool_candidates(self, **_kw: Any) -> int:
+            return self.available
+
+    class _Copy:
+        def __init__(self, db: _CanonicalDB) -> None:
+            self.db = db
+            self.calls: list[tuple[Any, int]] = []
+
+        async def drain_pending_expression_copy(self, *, profile: Any, limit: int) -> int:
+            self.calls.append((profile, limit))
+            self.db.available = 1
+            return 1
+
+    db = _CanonicalDB()
+    disc = _FakeDisc()
+    copy = _Copy(db)
+    ctrl = _ctrl(db, disc)
+    ctrl.recommendation_engine = copy
+    progress: list[tuple[int, int, str]] = []
+
+    async def _progress(done: int, total: int, note: str) -> None:
+        progress.append((done, total, note))
+
+    profile = object()
+    discovered = await ctrl.run_init_backfill(
+        profile,
+        target_pool_count=15,
+        progress_callback=_progress,
+    )
+
+    assert discovered == 2
+    assert copy.calls == [(profile, 15)]
+    assert db.available == 1
+    assert any(done == 2 and "生成首轮推荐文案" in note for done, _total, note in progress)
+    assert progress[-1] == (4, 4, "首轮内容池已就绪（1 条可直接浏览）")
+
+
+async def test_run_init_backfill_rejects_raw_only_result_and_releases_lock() -> None:
+    class _RawOnlyDB:
+        def count_pool_candidates(self, **_kw: Any) -> int:
+            return 0
+
+        def count_pool_readiness(self, **_kw: Any) -> dict[str, int]:
+            return {"available": 0, "pending": 2}
+
+    class _NoCopy:
+        async def drain_pending_expression_copy(self, *, profile: Any, limit: int) -> int:
+            return 0
+
+    ctrl = _ctrl(_RawOnlyDB(), _FakeDisc())
+    ctrl.recommendation_engine = _NoCopy()
+
+    with pytest.raises(InitialPoolUnavailableError) as excinfo:
+        await ctrl.run_init_backfill(object(), target_pool_count=15)
+
+    assert excinfo.value.discovered_count == 2
+    assert excinfo.value.pending_count == 2
+    assert ctrl._refresh_lock.locked() is False
+
+
 def test_llm_work_gate_blocks_while_init_active() -> None:
     """gui-init D1: the controller's background loops pause while a guided init
     is active (account_sync already gates on the same predicate)."""
@@ -145,3 +215,58 @@ def test_llm_work_gate_blocks_while_init_active() -> None:
 
     ctrl.init_active_check = _boom  # defensive: a raising check never crashes
     assert ctrl._llm_work_allowed() == baseline
+
+
+def test_empty_plan_diagnostics_throttled_by_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [datetime(2026, 7, 16, 12, 0, 0)]
+    ctrl = _ctrl(_FakeDB([0]), _FakeDisc())
+    readiness = Mock(return_value={"raw": 20, "pending": 5})
+    source_available = Mock(return_value={"bilibili": 10})
+    source_raw = Mock(return_value={"bilibili": 20})
+    monkeypatch.setattr(ctrl, "_now", lambda: now[0])
+    monkeypatch.setattr(ctrl, "_pool_readiness_counts", readiness)
+    monkeypatch.setattr(ctrl, "_count_pool_available_candidates_by_source", source_available)
+    monkeypatch.setattr(ctrl, "_count_pool_raw_material_by_source", source_raw)
+    monkeypatch.setattr(ctrl, "_source_target_counts", Mock(return_value={"bilibili": 30}))
+    monkeypatch.setattr(ctrl, "_raw_source_target_counts", Mock(return_value={"bilibili": 60}))
+    monkeypatch.setattr(ctrl, "_source_requested_count", Mock(return_value=20))
+    caplog.set_level(logging.DEBUG, logger="openbiliclaw.runtime.refresh")
+
+    for _ in range(100):
+        ctrl._log_empty_refresh_plan_diagnostics(pool_available=10)
+
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    suppressed_records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("refresh plan empty (suppressed diagnostics")
+    ]
+    assert len(full_records) == 1
+    assert len(suppressed_records) == 99
+    assert "99 since last full" in suppressed_records[-1].message
+    assert readiness.call_count == 1
+    assert source_available.call_count == 1
+    assert source_raw.call_count == 1
+
+    ctrl._log_empty_refresh_plan_diagnostics(pool_available=11)
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    assert len(full_records) == 2
+    assert "suppressed=99" in full_records[-1].message
+
+    now[0] += timedelta(seconds=301)
+    ctrl._log_empty_refresh_plan_diagnostics(pool_available=11)
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    assert len(full_records) == 3
+    assert "suppressed=0" in full_records[-1].message
+    assert readiness.call_count == 3
+    assert source_available.call_count == 3
+    assert source_raw.call_count == 3

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -135,6 +136,46 @@ async def test_fetch_latest_version_prefers_backend_tag_over_higher_legacy_tag()
     assert await service._fetch_latest_version() == "backend-v0.3.89"
 
 
+def test_prerelease_candidates_order_by_semver_identifiers() -> None:
+    """rc2 beats rc1 and a same-numbered stable beats any prerelease (audit N8)."""
+    selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc1", "backend-v0.4.0-rc2"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert selection.tag == "backend-v0.4.0-rc2"
+    # Feed order must not decide the winner.
+    reversed_selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc2", "backend-v0.4.0-rc1"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert reversed_selection.tag == "backend-v0.4.0-rc2"
+    stable = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc9", "backend-v0.4.0"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert stable.tag == "backend-v0.4.0"
+    # Numeric identifiers compare numerically: rc.10 > rc.9.
+    numeric = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc.9", "backend-v0.4.0-rc.10"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert numeric.tag == "backend-v0.4.0-rc.10"
+
+
+def test_prerelease_version_text_keeps_prerelease_identity() -> None:
+    """UI must not present backend-v0.4.0-rc1 as a stable v0.4.0 (audit N8)."""
+    selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc1"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert selection.version_text == "0.4.0-rc1"
+
+
 @pytest.mark.asyncio
 async def test_fetch_latest_version_ignores_prerelease_by_default() -> None:
     _FakeAsyncClient.pages = {
@@ -188,19 +229,21 @@ async def test_fetch_latest_version_returns_empty_and_warns_on_http_error(
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_version_retries_without_tls_verify_on_cert_error() -> None:
+async def test_fetch_latest_version_fails_closed_on_tls_verification_error() -> None:
+    # Deliberate spec invariant 3 rewrite: the updater must never retry with
+    # verify=False after a certificate failure.
     _FakeAsyncClient.error_by_verify = {
         True: httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
     }
     _FakeAsyncClient.pages = {1: [{"name": "backend-v0.3.92"}]}
 
     service = updater.AutoUpdateService()
+    backend = await service.check_now()
 
-    assert await service._fetch_latest_version() == "backend-v0.3.92"
-    assert [kwargs.get("verify", True) for kwargs in _FakeAsyncClient.init_kwargs] == [
-        True,
-        False,
-    ]
+    assert backend["state"] == "error"
+    assert backend["reason"] == "tls_verification_failed"
+    assert "SSL_CERT_FILE" in str(backend["last_error"])
+    assert [kwargs.get("verify", True) for kwargs in _FakeAsyncClient.init_kwargs] == [True]
 
 
 @pytest.mark.asyncio
@@ -308,6 +351,78 @@ async def test_manual_check_uses_atom_fallback_when_tags_api_quota_exhausted(
 
 
 @pytest.mark.asyncio
+async def test_atom_fallback_recovers_from_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _TransportThenAtomClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+            calls.append(url)
+            if url == updater._GITHUB_TAGS:
+                raise httpx.ConnectError("connection refused")
+            return _FakeResponse(
+                200,
+                None,
+                text="""
+                <feed xmlns="http://www.w3.org/2005/Atom">
+                  <entry>
+                    <link rel="alternate" href="https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.140"/>
+                  </entry>
+                </feed>
+                """,
+            )
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", _TransportThenAtomClient)
+    monkeypatch.setattr(openbiliclaw, "__version__", "0.3.139")
+
+    backend = await updater.AutoUpdateService().check_now()
+
+    assert backend["state"] == "update_available"
+    assert backend["latest_tag"] == "backend-v0.3.140"
+    assert calls == [updater._GITHUB_TAGS, updater._GITHUB_TAGS_ATOM]
+
+
+@pytest.mark.asyncio
+async def test_describe_empty_transport_exception_in_log_and_status(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _FakeAsyncClient.error = httpx.ReadTimeout("")
+    service = updater.AutoUpdateService()
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.updater"):
+        backend = await service.check_now()
+
+    assert backend["reason"] == "github_unreachable"
+    assert "ReadTimeout" in str(backend["last_error"])
+    assert "ReadTimeout" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_classify_malformed_tags_json_without_raising() -> None:
+    class _MalformedResponse(_FakeResponse):
+        def json(self) -> object:
+            raise ValueError("malformed json")
+
+    _FakeAsyncClient.responses = {1: _MalformedResponse(200, None)}
+
+    backend = await updater.AutoUpdateService().check_now()
+
+    assert backend["state"] == "error"
+    assert backend["reason"] == "invalid_github_response"
+    assert "malformed json" in str(backend["last_error"])
+
+
+@pytest.mark.asyncio
 async def test_manual_check_publishes_backend_update_available_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -392,6 +507,73 @@ def test_update_status_payloads_include_install_mode(
 )
 def test_dirty_paths_besides_uv_lock(porcelain: str, expected: list[str]) -> None:
     assert updater._dirty_paths_besides_uv_lock(porcelain) == expected
+
+
+@pytest.mark.parametrize(
+    ("porcelain", "expected_reason"),
+    [
+        ("A  src/new_file.py\n", "dirty_worktree"),
+        ("M  src/changed.py\n", "dirty_worktree"),
+        ("?? src/untracked.py\n", ""),
+        ("A  uv.lock\n", ""),
+    ],
+)
+@pytest.mark.asyncio
+async def test_staged_changes_are_dirty_but_untracked_files_remain_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    porcelain: str,
+    expected_reason: str,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, porcelain, "")
+        if command == ["git", "rev-parse", "--git-dir"]:
+            return subprocess.CompletedProcess(command, 0, ".git\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.140") == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected_reason"),
+    [
+        ("extension-v0.3.171", "invalid_target_tag"),
+        ("desktop-v0.3.171", "invalid_target_tag"),
+        ("not-a-release", "invalid_target_tag"),
+        ("backend-v0.3.171-rc1", "prerelease_not_allowed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_tag_channel_validation_precedes_git_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+    expected_reason: str,
+) -> None:
+    service = updater.AutoUpdateService(allow_prerelease=False)
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag=tag)
+
+    assert status_code == 409
+    assert payload["reason"] == expected_reason
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -525,6 +707,39 @@ async def test_request_apply_rejects_second_concurrent_apply(
     }
 
 
+@pytest.mark.asyncio
+async def test_request_apply_reports_already_applying_after_service_hot_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    first = updater.AutoUpdateService(enabled=False)
+    rebuilt = updater.AutoUpdateService(enabled=False)
+
+    async def _guard(_tag: str) -> str:
+        return ""
+
+    async def _apply(_tag: str) -> None:
+        started.set()
+        await release.wait()
+
+    for service in (first, rebuilt):
+        monkeypatch.setattr(service, "_check_apply_guards", _guard)
+        monkeypatch.setattr(service, "_apply_update_to_tag", _apply)
+
+    first_status, _ = await first.request_apply(tag="backend-v0.3.92")
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+    second_status, second_payload = await rebuilt.request_apply(tag="backend-v0.3.92")
+    release.set()
+    tasks = [task for task in (first._apply_task, rebuilt._apply_task) if task is not None]
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.5)
+
+    assert first_status == 202
+    assert second_status == 409
+    assert second_payload["reason"] == "already_applying"
+
+
 @pytest.mark.parametrize(
     "remote_url",
     [
@@ -640,6 +855,7 @@ async def test_successful_apply_fetches_merges_syncs_and_publishes_restart(
     (tmp_path / ".git").mkdir()
     (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
     calls: list[list[str]] = []
     events: list[dict[str, object]] = []
     restarted = False
@@ -673,7 +889,7 @@ async def test_successful_apply_fetches_merges_syncs_and_publishes_restart(
     assert payload["accepted"] is True
     assert ["git", "fetch", "--force", "--tags", "origin"] in calls
     assert ["git", "merge", "--ff-only", "backend-v0.3.92"] in calls
-    assert ["uv", "sync"] in calls
+    assert ["uv", "sync", "--no-install-project", "--inexact"] in calls
     assert restarted is True
     assert events == [{"type": "backend_restart_pending", "latest_tag": "backend-v0.3.92"}]
 
@@ -726,14 +942,104 @@ async def test_run_command_uses_async_subprocess_exec(
     ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "proxy", "expected"),
+    [
+        ("direct", None, ["git", "fetch", "origin"]),
+        ("system", None, ["git", "fetch", "origin"]),
+        (
+            "custom",
+            "http://127.0.0.1:7890",
+            ["git", "-c", "http.proxy=http://127.0.0.1:7890", "fetch", "origin"],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_mode_matrix_controls_git_command_only_for_custom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    mode: str,
+    proxy: str | None,
+    expected: list[str],
+) -> None:
+    from openbiliclaw import network
+
+    monkeypatch.setattr(network, "_outbound_mode", mode)
+    monkeypatch.setattr(network, "_outbound_proxy", proxy)
+    captured: list[list[str]] = []
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        captured.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._run_git(["fetch", "origin"], tmp_path)
+
+    assert captured == [expected]
+
+
+@pytest.mark.parametrize("command", [["uv", "sync"], ["/venv/bin/python", "-m", "pip", "install"]])
+@pytest.mark.parametrize(
+    ("mode", "proxy"),
+    [
+        ("direct", None),
+        ("system", None),
+        ("custom", "http://127.0.0.1:7890"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_mode_matrix_controls_dependency_environment_only_for_custom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    mode: str,
+    proxy: str | None,
+    command: list[str],
+) -> None:
+    from openbiliclaw import network
+
+    monkeypatch.setattr(network, "_outbound_mode", mode)
+    monkeypatch.setattr(network, "_outbound_proxy", proxy)
+    calls: list[dict[str, object]] = []
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+        def kill(self) -> None:
+            raise AssertionError("process should not be killed")
+
+    async def _create_subprocess_exec(*_args: str, **kwargs: object) -> _FakeProcess:
+        calls.append(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(updater.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    await updater.AutoUpdateService()._run_command(command, tmp_path, timeout=5)
+
+    assert len(calls) == 1
+    if mode == "custom":
+        env = calls[0].get("env")
+        assert isinstance(env, dict)
+        assert env["HTTP_PROXY"] == proxy
+        assert env["HTTPS_PROXY"] == proxy
+    else:
+        assert "env" not in calls[0]
+
+
 @pytest.mark.asyncio
 async def test_apply_dependency_failure_publishes_backend_update_failed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     (tmp_path / ".git").mkdir()
     (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
     events: list[dict[str, object]] = []
 
     async def _publish(event: dict[str, object]) -> None:
@@ -749,22 +1055,187 @@ async def test_apply_dependency_failure_publishes_backend_update_failed(
             )
         if command == ["git", "rev-parse", "--git-dir"]:
             return subprocess.CompletedProcess(command, 0, ".git\n", "")
-        if command == ["uv", "sync"]:
+        if command == ["uv", "sync", "--no-install-project", "--inexact"]:
             return subprocess.CompletedProcess(command, 1, "", "dependency failed")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     service = updater.AutoUpdateService(enabled=False, event_publisher=_publish)
     monkeypatch.setattr(service, "_run_command", _run_command)
 
-    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
-    if service._apply_task is not None:
-        await asyncio.wait_for(service._apply_task, timeout=0.5)
+    with caplog.at_level(logging.ERROR):
+        status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+        if service._apply_task is not None:
+            await asyncio.wait_for(service._apply_task, timeout=0.5)
 
     assert status_code == 202
     assert payload["accepted"] is True
     assert service.get_update_status()["state"] == "error"
     assert service.get_update_status()["reason"] == "dependency_sync_failed"
+    assert service.get_update_status()["last_error"] == (
+        "依赖同步失败(uv,退出码 1);请查看后端日志中的完整错误"
+    )
+    assert "dependency failed" in caplog.text
     assert events == [{"type": "backend_update_failed", "reason": "dependency_sync_failed"}]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_reason", "detail_fragment"),
+    [
+        (FileNotFoundError(2, "No such file or directory", "git"), "git_unavailable", "git"),
+        (
+            subprocess.TimeoutExpired(["git", "status"], 30),
+            "git_command_timeout",
+            "timed out",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_classify_git_guard_execution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    exc: Exception,
+    expected_reason: str,
+    detail_fragment: str,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        raise exc
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.140")
+
+    assert status_code == 409
+    assert payload["reason"] == expected_reason
+    assert detail_fragment in str(service.get_update_status()["last_error"])
+
+
+@pytest.mark.asyncio
+async def test_classify_uv_lock_checkout_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 1, "", "uv.lock checkout refused")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._apply_update_to_tag("backend-v0.3.140")
+
+    assert service.get_update_status()["reason"] == "worktree_prepare_failed"
+    assert "uv.lock checkout refused" in str(service.get_update_status()["last_error"])
+    assert calls == [["git", "checkout", "--", "uv.lock"]]
+
+
+@pytest.mark.asyncio
+async def test_classify_merge_index_lock_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "merge", "--ff-only", "backend-v0.3.140"]:
+            return subprocess.CompletedProcess(
+                command,
+                128,
+                "",
+                "fatal: Unable to create '.git/index.lock': File exists.",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._apply_update_to_tag("backend-v0.3.140")
+
+    assert service.get_update_status()["reason"] == "git_worktree_locked"
+    assert "index.lock" in str(service.get_update_status()["last_error"])
+
+
+def test_install_command_uses_uv_only_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
+
+    assert updater.AutoUpdateService._detect_install_command(tmp_path) == [
+        "uv",
+        "sync",
+        "--no-install-project",
+        "--inexact",
+    ]
+
+
+def test_install_command_falls_back_to_running_python_when_uv_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """\
+[project]
+name = "example"
+version = "1.0.0"
+dependencies = ["httpx>=0.27", "Pillow>=10; python_version >= '3.11'"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(updater.sys, "executable", "/venv/bin/python")
+
+    assert updater.AutoUpdateService._detect_install_command(tmp_path) == [
+        "/venv/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "httpx>=0.27",
+        "Pillow>=10; python_version >= '3.11'",
+    ]
+
+
+def test_restart_process_uses_module_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(updater.sys, "executable", r"C:\OpenBiliClaw\.venv\Scripts\python.exe")
+    monkeypatch.setattr(
+        updater.sys,
+        "argv",
+        [r"C:\OpenBiliClaw\.venv\Scripts\openbiliclaw.exe", "serve-api", "--port", "8420"],
+    )
+    monkeypatch.setattr(
+        updater.os,
+        "execv",
+        lambda executable, argv: calls.append((executable, list(argv))),
+    )
+
+    updater.AutoUpdateService._restart_process()
+
+    assert calls == [
+        (
+            r"C:\OpenBiliClaw\.venv\Scripts\python.exe",
+            [
+                r"C:\OpenBiliClaw\.venv\Scripts\python.exe",
+                "-m",
+                "openbiliclaw.cli",
+                "serve-api",
+                "--port",
+                "8420",
+            ],
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -1037,3 +1508,507 @@ def test_adopt_status_from_skips_transient_state_but_keeps_versions(
     assert status["state"] == "disabled"
     assert status["latest_tag"] == "backend-v0.3.118"
     assert status["last_check_at"] == "2026-06-11T04:43:30+00:00"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/whiteguo233/OpenBiliClaw.git", "github.com/whiteguo233/openbiliclaw"),
+        ("https://github.com/whiteguo233/OpenBiliClaw", "github.com/whiteguo233/openbiliclaw"),
+        ("https://github.com/whiteguo233/OpenBiliClaw/", "github.com/whiteguo233/openbiliclaw"),
+        ("git@github.com:whiteguo233/OpenBiliClaw.git", "github.com/whiteguo233/openbiliclaw"),
+        ("git@github.com:whiteguo233/OpenBiliClaw", "github.com/whiteguo233/openbiliclaw"),
+        (
+            "ssh://git@github.com/whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+        ("HTTPS://GitHub.com/WhiteGuo233/OpenBiliClaw.GIT", "github.com/whiteguo233/openbiliclaw"),
+        # Mirror wrappers must NOT collapse to the wrapped GitHub path — a
+        # mirror user allowlists the mirror URL verbatim in config instead,
+        # and the canonical form is stable so it still matches itself.
+        (
+            "https://gh-proxy.com/https://github.com/whiteguo233/OpenBiliClaw.git",
+            "gh-proxy.com/https://github.com/whiteguo233/openbiliclaw",
+        ),
+        ("/Users/someone/workspace/OpenBiliClaw", "/users/someone/workspace/openbiliclaw"),
+        ("", ""),
+    ],
+)
+def test_canonicalize_remote_url(url: str, expected: str) -> None:
+    assert updater._canonicalize_remote_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "ssh://git@ssh.github.com:443/whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+        (
+            "git@ssh.github.com:whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+    ],
+)
+def test_canonicalize_official_github_ssh_over_443_host(url: str, expected: str) -> None:
+    assert updater._canonicalize_remote_url(url) == expected
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_accepts_multiple_effective_official_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 2, "", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://github.com/whiteguo233/OpenBiliClaw.git\n"
+                "git@github.com:whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == ""
+    assert ["git", "ls-remote", "--get-url", "origin"] in calls
+    assert ["git", "remote", "get-url", "--all", "origin"] in calls
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_one_untrusted_url_among_multiple_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 2, "", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://github.com/whiteguo233/OpenBiliClaw.git\n"
+                "https://mirror.example/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_insteadof_rewritten_effective_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://mirror.example/https://github.com/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_mirror_wrapped_github_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    mirror = "https://gh-proxy.com/https://github.com/whiteguo233/OpenBiliClaw.git"
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "https://github.com/whiteguo233/OpenBiliClaw",  # .git-less manual clone
+        "git@github.com:whiteguo233/OpenBiliClaw",  # .git-less ssh clone
+        "ssh://git@github.com/whiteguo233/OpenBiliClaw.git",  # explicit ssh scheme
+    ],
+)
+@pytest.mark.asyncio
+async def test_request_apply_accepts_equivalent_remote_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    remote_url: str,
+) -> None:
+    """Clones made without the .git suffix (or via ssh://) must not be
+    rejected as untrusted — exact-string matching used to block them forever."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    restarted = False
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 0, f"{remote_url}\n", "")
+        if command == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command == ["git", "rev-parse", "--git-dir"]:
+            return subprocess.CompletedProcess(command, 0, ".git\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def _restart() -> None:
+        nonlocal restarted
+        restarted = True
+
+    service = updater.AutoUpdateService(enabled=False)
+    monkeypatch.setattr(service, "_run_command", _run_command)
+    monkeypatch.setattr(service, "_restart_process", _restart)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+    if service._apply_task is not None:
+        await asyncio.wait_for(service._apply_task, timeout=0.5)
+
+    assert status_code == 202
+    assert payload["accepted"] is True
+    assert restarted is True
+
+
+@pytest.mark.asyncio
+async def test_request_apply_untrusted_remote_logs_url_and_sets_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard path used to be fully silent — no log line, empty last_error."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/someone-else/OpenBiliClaw.git\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.updater"):
+        status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    # ``reason`` stays the stable machine code (frontends map it to i18n text),
+    # but ``last_error`` now carries the actual rejected remote URL + fix
+    # command so the status card is self-diagnosing instead of pointing users
+    # at the backend log.
+    assert payload["reason"] == "untrusted_remote"
+    last_error = service.get_update_status()["last_error"]
+    assert last_error != "untrusted_remote"
+    assert "someone-else/OpenBiliClaw" in last_error
+    assert "git remote set-url origin" in last_error
+    assert any("someone-else/OpenBiliClaw" in record.getMessage() for record in caplog.records), (
+        "the rejected remote URL must appear in the log"
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_apply_credentialed_remote_redacts_token_in_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """An embedded token is rejected, but must never leak into the UI detail."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://ghp_secretTOKEN@github.com/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "untrusted_remote"
+    last_error = service.get_update_status()["last_error"]
+    assert "ghp_secretTOKEN" not in last_error
+    assert "github.com/whiteguo233/OpenBiliClaw" in last_error
+
+
+@pytest.mark.asyncio
+async def test_request_apply_origin_exists_without_url_suggests_set_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Origin section present but url-less — the exact reported contradiction.
+
+    ``git config --get remote.origin.url`` returns empty while ``git remote add
+    origin`` answers "already exists", so the old "运行:git remote add origin"
+    hint was a dead end. The ``git remote get-url origin`` probe (exit 0, empty)
+    marks origin-exists-but-blank, so the fix must be ``set-url``, never ``add``.
+    """
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["state"] == "blocked"
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "remote set-url origin" in last_error
+    assert "remote add origin" not in last_error
+
+
+@pytest.mark.asyncio
+async def test_request_apply_no_origin_remote_suggests_remote_add(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Genuinely no origin — get-url errors "No such remote" → suggest add."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 2, "", "error: No such remote 'origin'")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "remote add origin" in last_error
+    assert "set-url" not in last_error
+
+
+@pytest.mark.asyncio
+async def test_request_apply_dubious_ownership_points_at_safe_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Windows dubious ownership: config read fails with a git *fatal*, not a
+    missing remote. Surface safe.directory, never the wrong "remote add" hint."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    fatal = (
+        f"fatal: detected dubious ownership in repository at '{tmp_path}'\n"
+        f"To add an exception for this directory, call:\n"
+        f"\tgit config --global --add safe.directory {tmp_path}"
+    )
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 128, "", fatal)
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 128, "", fatal)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "safe.directory" in last_error
+    assert "remote add origin" not in last_error
+
+
+@pytest.mark.parametrize(
+    ("root_text", "config_error", "probe_code", "probe_error", "command_prefix"),
+    [
+        (
+            "/Users/Jane Doe/OpenBiliClaw",
+            "dubious ownership",
+            128,
+            "dubious ownership",
+            "git config --global --add safe.directory",
+        ),
+        (
+            r"C:\Users\Jane Doe\OpenBiliClaw",
+            "dubious ownership",
+            128,
+            "dubious ownership",
+            "git config --global --add safe.directory",
+        ),
+        ("/Users/Jane Doe/OpenBiliClaw", "", 2, "No such remote 'origin'", "remote add"),
+        (
+            r"C:\Users\Jane Doe\OpenBiliClaw",
+            "",
+            2,
+            "No such remote 'origin'",
+            "remote add",
+        ),
+        ("/Users/Jane Doe/OpenBiliClaw", "", 0, "", "remote set-url"),
+        (r"C:\Users\Jane Doe\OpenBiliClaw", "", 0, "", "remote set-url"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_guidance_quotes_repository_paths_with_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+    root_text: str,
+    config_error: str,
+    probe_code: int,
+    probe_error: str,
+    command_prefix: str,
+) -> None:
+    root = Path(root_text)
+    service = updater.AutoUpdateService()
+    config_result = subprocess.CompletedProcess(
+        ["git", "config", "--get", "remote.origin.url"],
+        128 if config_error else 1,
+        "",
+        config_error,
+    )
+
+    async def _run_command(command, _root, *, timeout):
+        return subprocess.CompletedProcess(command, probe_code, "", probe_error)
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._refuse_unreadable_origin(root, config_result)
+
+    assert command_prefix in service._guard_detail
+    assert f'"{root}"' in service._guard_detail
+
+
+def test_detect_install_mode_docker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Container marker wins over a co-located git checkout: the image is the
+    code, so fast-forwarding a mounted checkout would not update the runtime."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    assert updater.detect_install_mode() == "docker"
+
+
+@pytest.mark.asyncio
+async def test_request_apply_refuses_docker_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    service = updater.AutoUpdateService(enabled=True)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["state"] == "unsupported"
+    assert payload["reason"] == "docker_install_mode"
+    assert service.get_update_status()["last_error"] == "docker_install_mode"
+
+
+@pytest.mark.asyncio
+async def test_docker_install_polls_check_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Docker installs poll for new images regardless of the auto-apply toggle
+    and never attempt an apply."""
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    service = updater.AutoUpdateService(enabled=False)
+    assert service._background_loop_enabled() is True
+
+    applied: list[str] = []
+
+    async def _check_now() -> dict[str, object]:
+        return {
+            "state": "update_available",
+            "current_version": "0.3.152",
+            "latest_tag": "backend-v0.3.153",
+        }
+
+    async def _request_apply(*, tag: str = ""):
+        applied.append(tag)
+        return 202, {}
+
+    monkeypatch.setattr(service, "check_now", _check_now)
+    monkeypatch.setattr(service, "request_apply", _request_apply)
+
+    result = await service.check_and_update_if_due()
+
+    assert result["checked"] is True
+    assert result["updated"] is False
+    assert result["reason"] == "docker_install_mode"
+    assert applied == []

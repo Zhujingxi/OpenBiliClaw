@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.saved_sync.identity import make_item_key
 
 PENDING_EVAL = "pending_eval"
 EVALUATING = "evaluating"
@@ -51,6 +52,8 @@ class DiscoveryCandidateWrite:
     up_name: str = ""
     up_mid: int = 0
     description: str = ""
+    published_at: str = ""
+    published_label: str = ""
     cover_url: str = ""
     duration: int = 0
     view_count: int = 0
@@ -63,6 +66,9 @@ class DiscoveryCandidateWrite:
     reply_count: int = 0
     retweet_count: int = 0
     bookmark_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
     tags: list[str] = field(default_factory=list)
     source_context: str = ""
     candidate_tier: str = "primary"
@@ -88,6 +94,8 @@ def _canonical_platform(raw_platform: object) -> str:
         return "twitter"
     if raw in {"zhihu", "知乎"}:
         return "zhihu"
+    if raw in {"bangumi", "bgm"}:
+        return "bangumi"
     return raw or "unknown"
 
 
@@ -122,7 +130,12 @@ def candidate_key_for(item: DiscoveredContent) -> str:
     platform = _canonical_platform(item.source_platform or ("bilibili" if item.bvid else ""))
     content_id = str(item.content_id or item.bvid or "").strip()
     if content_id:
-        return f"{platform}:{content_id}"
+        return make_item_key(platform, content_id, item.content_url)
+    if item.content_url:
+        try:
+            return make_item_key(platform, "", item.content_url)
+        except ValueError:
+            pass
     canonical_url = _canonical_url(item.content_url)
     if canonical_url:
         digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()[:24]
@@ -181,6 +194,8 @@ def discovered_content_to_candidate_write(
         up_name=item.up_name or item.author_name,
         up_mid=item.up_mid,
         description=item.description,
+        published_at=item.published_at,
+        published_label=item.published_label,
         cover_url=item.cover_url,
         duration=item.duration,
         view_count=item.view_count,
@@ -193,6 +208,9 @@ def discovered_content_to_candidate_write(
         reply_count=item.reply_count,
         retweet_count=item.retweet_count,
         bookmark_count=item.bookmark_count,
+        rating_score=item.rating_score,
+        rating_count=item.rating_count,
+        source_rank=item.source_rank,
         tags=list(item.tags),
         source_context=source_context,
         candidate_tier=item.candidate_tier,
@@ -253,12 +271,17 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
         reply_count=int(row.get("reply_count") or 0),
         retweet_count=int(row.get("retweet_count") or 0),
         bookmark_count=int(row.get("bookmark_count") or 0),
+        rating_score=float(row.get("rating_score") or 0.0),
+        rating_count=int(row.get("rating_count") or 0),
+        source_rank=int(row.get("source_rank") or 0),
         tags=_json_list(row.get("tags")),
         topic_key=str(row.get("topic_key") or ""),
         topic_group=str(row.get("topic_group") or ""),
         style_key=str(row.get("style_key") or ""),
         franchise_key=str(row.get("franchise_key") or ""),
         description=str(row.get("description") or ""),
+        published_at=str(row.get("published_at") or ""),
+        published_label=str(row.get("published_label") or ""),
         source_strategy=str(row.get("source_strategy") or ""),
         relevance_score=float(row.get("relevance_score") or 0.0),
         relevance_reason=str(row.get("relevance_reason") or ""),

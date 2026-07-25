@@ -18,6 +18,23 @@ test("twitterAdapter exposes the correct source identity", () => {
   assert.equal(twitterAdapter.sourcePlatform, "twitter");
 });
 
+test("twitterAdapter declares the GraphQL tap as authoritative for all five engagement actions", () => {
+  // On X the MAIN-world tap emits the real like/favorite/share/comment AND
+  // retraction; the DOM click path must suppress each so it never double-emits
+  // or records an "opened the menu" false action. Migrated from the old
+  // coarse `strongSignalSource: "tap"` flag to per-action granularity.
+  const actions = twitterAdapter.tapAuthoritativeActions;
+  assert.ok(actions instanceof Set);
+  for (const action of ["like", "favorite", "share", "comment", "retraction"]) {
+    assert.ok(actions?.has(action), action);
+  }
+  // The old coarse flag is gone.
+  assert.equal(
+    (twitterAdapter as { strongSignalSource?: unknown }).strongSignalSource,
+    undefined,
+  );
+});
+
 test("extractContentId pulls the tweet id from a status URL", () => {
   assert.equal(
     twitterAdapter.extractContentId("https://x.com/h/status/1790000000000000001"),

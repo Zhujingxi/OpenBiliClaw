@@ -74,6 +74,20 @@ def image_embedding_cache_key(image_bytes: bytes) -> str:
     return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
 
 
+def image_embedding_cache_key_for_url(cover_url: str) -> str:
+    """Stable L1/L2 key derived from a cover URL (not its bytes).
+
+    Lets the discovery warmer and the delight consumer agree on one key
+    without both re-downloading + re-compressing the cover just to hash the
+    bytes: the warmer stores under this key on pool admission, and the hot
+    delight path looks it up by URL alone. The URL is normalised (trimmed)
+    so the same cover resolves to the same key across call sites.
+    """
+    normalized = (cover_url or "").strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:40]
+    return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors (pure Python)."""
     dot = sum(x * y for x, y in zip(a, b, strict=False))
@@ -328,8 +342,8 @@ class EmbeddingService:
         # after the upstream issue is fixed. v0.3.31 had ~170 keys
         # poisoned this way before this guard existed — top user
         # interests like 游戏攻略 / 洛克王国 / 金铲铲之战 were affected
-        # and the cascade silently zero'd DelightScorer's
-        # likes_alignment for the most relevant content. Surface a
+        # and the cascade silently zero'd every embedding-derived
+        # similarity signal for the most relevant content. Surface a
         # WARN per occurrence so the failure mode is visible at the
         # service layer, not buried in provider-level logs.
         if not vector:

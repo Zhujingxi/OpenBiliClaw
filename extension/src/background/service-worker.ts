@@ -8,7 +8,20 @@
  * from the runtime-stream, not HTTP polling.
  */
 
-import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.js";
+import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
+import {
+  BUFFER_MAX_SIZE,
+  bufferReady,
+  drainParkedEvents,
+  enqueueEvent,
+  getBufferLength,
+  parkEvents,
+  persistBuffer,
+  prependBufferedEvents,
+  requeueEvents,
+  shouldFlushImmediately,
+  takeBufferedEvents,
+} from "./buffer.js";
 import {
   startXhsTaskPolling,
   handleXhsTaskAlarm,
@@ -50,6 +63,12 @@ import {
   pollRedditTaskNow,
 } from "./reddit-task-dispatcher.ts";
 import {
+  startXTaskPolling,
+  handleXTaskAlarm,
+  pollXTaskNow,
+} from "./x-task-dispatcher.ts";
+import { ensureNativeSaveTaskRecovery } from "./native-save-task-runner.ts";
+import {
   startBiliTaskPolling,
   handleBiliTaskAlarm,
   handleBiliTaskResult,
@@ -76,11 +95,17 @@ import { handleE2ERuntimeEvent } from "./e2e-runner.ts";
 // the import when test files load these dispatchers directly. esbuild
 // bundles either extension, so production builds are unaffected.
 import { apiUrl, onBackendEndpointChange, wsUrl } from "../shared/backend-endpoint.ts";
+import {
+  authenticatedFetch,
+  clearSession,
+  ensureSession,
+} from "../shared/auth.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
-let eventBuffer: BehaviorEvent[] = [];
+// The event buffer + its chrome.storage.local persistence live in ./buffer.ts
+// so they survive MV3 service-worker recycling. BUFFER_MAX_SIZE is imported
+// from there; flush cadence stays here.
 const BUFFER_FLUSH_INTERVAL = 30_000;
-const BUFFER_MAX_SIZE = 50;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
 const E2E_CAPTURE_SETTLE_MS = 1_000;
 // v0.3.22+: health probe before WS prevents extension-only installs
@@ -106,7 +131,7 @@ type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdat
 
 async function acknowledgeNotificationSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/notifications/sent"), {
+  await authenticatedFetch(await apiUrl("/notifications/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -114,7 +139,9 @@ async function acknowledgeNotificationSent(bvid: string): Promise<void> {
 }
 
 async function fetchPendingNotification(): Promise<PendingNotification | null> {
-  const response = await fetch(await apiUrl("/notifications/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/notifications/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending notifications failed: ${response.status}`);
   }
@@ -123,7 +150,9 @@ async function fetchPendingNotification(): Promise<PendingNotification | null> {
 }
 
 async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | null> {
-  const response = await fetch(await apiUrl("/cognition-updates/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/cognition-updates/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending cognition updates failed: ${response.status}`);
   }
@@ -133,7 +162,7 @@ async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | n
 
 async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
   if (!id) return;
-  await fetch(await apiUrl("/cognition-updates/seen"), {
+  await authenticatedFetch(await apiUrl("/cognition-updates/seen"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
@@ -146,7 +175,7 @@ async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
 
 async function acknowledgeDelightSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/delight/sent"), {
+  await authenticatedFetch(await apiUrl("/delight/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -212,6 +241,17 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
 
   const eventType = String(event.type ?? "");
 
+  // Guided init finished (started from any surface) → the uninitialized
+  // toolbar badge must clear without waiting for the next WS reconnect.
+  // refresh.pool_updated implies an initialized backend too.
+  if (
+    backendUninitialized &&
+    (eventType === "init_completed" || eventType === "refresh.pool_updated")
+  ) {
+    backendUninitialized = false;
+    renderActionBadge();
+  }
+
   // Task-kick events: the backend broadcasts these from
   // /api/sources/{xhs,dy}/kick when the CLI enqueues a bootstrap
   // task. Poking the dispatcher here cuts the worst-case
@@ -236,7 +276,11 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
     return;
   }
   if (eventType === "reddit_task_available") {
-    pollRedditTaskNow();
+    await pollRedditTaskNow();
+    return;
+  }
+  if (eventType === "x_task_available") {
+    await pollXTaskNow();
     return;
   }
   if (eventType === "bili_task_available") {
@@ -323,19 +367,47 @@ async function isBackendAlive(): Promise<boolean> {
   }
 }
 
-function setBackendBadge(reachable: boolean): void {
+let backendReachable: boolean | null = null;
+let backendUninitialized = false;
+
+function renderActionBadge(): void {
   // Subtle "!" badge so a fresh-install user (or anyone whose daemon
   // crashed) sees the toolbar icon flag the issue without opening the
-  // popup. The popup itself still shows the "openbiliclaw start" hint.
+  // popup. Gray = backend unreachable; orange = reachable but guided init
+  // never completed — previously that state cleared the badge and was
+  // visually identical to a healthy backend, so fresh installs got zero
+  // proactive signal to initialize.
   try {
-    if (reachable) {
-      void chrome.action.setBadgeText({ text: "" });
-    } else {
-      void chrome.action.setBadgeText({ text: "!" });
-      void chrome.action.setBadgeBackgroundColor({ color: "#9CA3AF" });
-    }
+    const view = computeActionBadge(backendReachable, backendUninitialized);
+    void chrome.action.setBadgeText({ text: view.text });
+    if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
+    void chrome.action.setTitle({ title: view.title });
   } catch {
     // chrome.action is missing in some contexts (e.g. tests) — best-effort.
+  }
+}
+
+function setBackendBadge(reachable: boolean): void {
+  backendReachable = reachable;
+  // A down backend's init state is unknown; drop the stale flag so the
+  // gray unreachable badge (and its hint) wins.
+  if (!reachable) backendUninitialized = false;
+  renderActionBadge();
+}
+
+async function refreshInitBadge(): Promise<void> {
+  // /api/runtime-status carries `initialized` without running any billable
+  // prereq probes (unlike an uninitialized /api/init-status read), so it is
+  // the right cheap source for the toolbar signal. Best-effort: on any
+  // failure keep the last known state.
+  try {
+    const response = await authenticatedFetch(await apiUrl("/runtime-status"), { method: "GET" });
+    if (!response.ok) return;
+    const payload = (await response.json()) as Record<string, unknown>;
+    backendUninitialized = payload.initialized === false;
+    renderActionBadge();
+  } catch {
+    // Keep the last rendered state.
   }
 }
 
@@ -351,7 +423,7 @@ async function connectRuntimeStream(): Promise<void> {
     }
 
     try {
-      const url = await wsUrl("/runtime-stream?client=background");
+      const url = await wsUrl("/runtime-stream?client=background", await ensureSession());
       runtimeSocket = new WebSocket(url);
     } catch {
       setBackendBadge(false);
@@ -361,6 +433,7 @@ async function connectRuntimeStream(): Promise<void> {
 
     runtimeSocket.onopen = () => {
       setBackendBadge(true);
+      void refreshInitBadge();
     };
 
     runtimeSocket.onmessage = (msg) => {
@@ -403,13 +476,14 @@ function scheduleWsReconnect(): void {
 // ---------------------------------------------------------------------------
 
 async function flushEvents(): Promise<void> {
-  if (eventBuffer.length === 0) return;
+  await bufferReady();
+  if (getBufferLength() === 0) return;
 
-  const events = [...eventBuffer];
-  eventBuffer = [];
+  const events = takeBufferedEvents();
+  await persistBuffer();
 
   try {
-    const response = await fetch(await apiUrl("/events"), {
+    const response = await authenticatedFetch(await apiUrl("/events"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),
@@ -417,13 +491,43 @@ async function flushEvents(): Promise<void> {
 
     if (!response.ok) {
       console.warn("[OpenBiliClaw] Backend returned", response.status);
-      eventBuffer.unshift(...events);
+      requeueEvents(events);
+      await persistBuffer();
       return;
+    }
+    let uninitialized = false;
+    try {
+      // Pre-init the backend consumes-and-drops events (200 + rejected:
+      // not_initialized). Instead of dropping browsing-behavior events
+      // (dwell/click/scroll) that init can never refetch, park them and drain
+      // once the backend reports initialized.
+      uninitialized = flushResponseReportsUninitialized(await response.json());
+    } catch {
+      // Non-JSON response — nothing to inspect.
+    }
+    if (uninitialized) {
+      if (!backendUninitialized) {
+        backendUninitialized = true;
+        renderActionBadge();
+      }
+      await parkEvents(events);
+      await persistBuffer();
+      console.debug("[OpenBiliClaw] Events parked: backend not initialized yet");
+    } else {
+      // Successful delivery: drain any previously-parked events into the front
+      // of the buffer (oldest-first) for the next cycle, then rewrite the
+      // mirror from the post-flush state.
+      const parked = await drainParkedEvents();
+      if (parked.length > 0) {
+        prependBufferedEvents(parked);
+      }
+      await persistBuffer();
     }
     await checkPendingNotification();
   } catch {
     console.warn("[OpenBiliClaw] Backend not available, buffering events");
-    eventBuffer.unshift(...events);
+    requeueEvents(events);
+    await persistBuffer();
   }
 }
 
@@ -443,21 +547,29 @@ function startPlatformTaskPolling(): void {
   startYtTaskPolling();
   startZhihuTaskPolling();
   startRedditTaskPolling();
+  startXTaskPolling();
   startBiliTaskPolling();
+}
+
+async function startServiceWorkerAfterRecovery(): Promise<void> {
+  // MV3 workers can stop between tab creation and cleanup. Session storage records
+  // only the runner-owned numeric tab ID, so recovery must finish before polling
+  // can create a new task tab and never scans or closes arbitrary Reddit/X tabs.
+  await ensureNativeSaveTaskRecovery();
+  await ensureSession();
+  await connectRuntimeStream();
+  startPlatformTaskPolling();
+  startCookieSync();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureFlushAlarm();
-  void connectRuntimeStream();
-  startPlatformTaskPolling();
-  startCookieSync();
+  void startServiceWorkerAfterRecovery();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFlushAlarm();
-  void connectRuntimeStream();
-  startPlatformTaskPolling();
-  startCookieSync();
+  void startServiceWorkerAfterRecovery();
 });
 
 chrome.action.onClicked.addListener((tab) => {
@@ -469,7 +581,7 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function postXhsObservedUrls(payload: Record<string, unknown>): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/xhs/observed-urls"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/observed-urls"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -484,7 +596,7 @@ async function postXhsTokens(
 ): Promise<void> {
   if (!payload?.pairs || payload.pairs.length === 0) return;
   try {
-    await fetch(await apiUrl("/sources/xhs/tokens"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/tokens"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -494,7 +606,24 @@ async function postXhsTokens(
   }
 }
 
+async function postBangumiIdentity(payload: { uid: number; username: string }): Promise<void> {
+  if (!payload || !(payload.uid > 0)) return;
+  try {
+    await authenticatedFetch(await apiUrl("/sources/bangumi/identity"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid: payload.uid, username: payload.username || "" }),
+    });
+  } catch {
+    // Best-effort — the next bgm.tv page view re-reports the identity.
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.action === "BGM_IDENTITY_OBSERVED") {
+    void postBangumiIdentity(message.data as { uid: number; username: string });
+    return;
+  }
   if (message.action === "XHS_URLS_OBSERVED") {
     void postXhsObservedUrls(message.data as Record<string, unknown>);
     return;
@@ -607,11 +736,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.action !== "BEHAVIOR_EVENT") return;
 
-  eventBuffer = enqueueBufferedEvent(eventBuffer, message.data as BehaviorEvent, BUFFER_MAX_SIZE);
-
-  if (eventBuffer.length >= BUFFER_MAX_SIZE || shouldFlushImmediately(message.data as BehaviorEvent)) {
-    void flushEvents();
-  }
+  const event = message.data as BehaviorEvent;
+  // enqueueEvent awaits the storage mirror before resolving, so a strong signal
+  // is on disk before the network flush starts — even if the SW dies mid-flush.
+  void (async () => {
+    const length = await enqueueEvent(event);
+    if (length >= BUFFER_MAX_SIZE || shouldFlushImmediately(event)) {
+      await flushEvents();
+    }
+  })();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -619,17 +752,21 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleDyTaskAlarm(alarm.name);
   handleYtTaskAlarm(alarm.name);
   handleZhihuTaskAlarm(alarm.name);
-  handleRedditTaskAlarm(alarm.name);
+  void handleRedditTaskAlarm(alarm.name);
+  void handleXTaskAlarm(alarm.name);
   handleBiliTaskAlarm(alarm.name);
   if (handleCookieSyncAlarm(alarm.name)) {
     return;
   }
   if (alarm.name === FLUSH_ALARM_NAME) {
-    if (eventBuffer.length > 0) {
-      void flushEvents();
-      return;
-    }
-    void checkPendingNotification();
+    void (async () => {
+      await bufferReady();
+      if (getBufferLength() > 0) {
+        await flushEvents();
+        return;
+      }
+      await checkPendingNotification();
+    })();
   }
 });
 
@@ -659,10 +796,11 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   void chrome.notifications.clear(notificationId);
 });
 
+// Kick off the restore gate at SW start so events persisted before a recycle
+// are back in the buffer for the next alarm flush, even without a fresh event.
+void bufferReady();
 ensureFlushAlarm();
-void connectRuntimeStream();
-startPlatformTaskPolling();
-startCookieSync();
+void startServiceWorkerAfterRecovery();
 
 // Popup writes a new backend port → chrome.storage.onChanged fires here.
 // Close the existing runtime-stream WS so the next connect attempt opens
@@ -680,7 +818,7 @@ onBackendEndpointChange(() => {
     clearTimeout(wsReconnectTimer);
     wsReconnectTimer = null;
   }
-  void connectRuntimeStream();
+  void clearSession().then(() => connectRuntimeStream());
 });
 
 console.log("[OpenBiliClaw] Service worker initialized");

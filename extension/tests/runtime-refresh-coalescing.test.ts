@@ -60,8 +60,14 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   // ("加载更多") cards. config_reloaded is the broad-reload path; init terminal
   // events go through refreshInitStatus so completion hydrates once after the
   // authoritative init status flips. Mirrors the popup + mobile recommend guards below.
+  // v0.3.156+: the trigger is a guarded block (hydration is skipped while the
+  // user is editing #settingsForm so the rehydrate can't stomp unsaved input),
+  // so match the block form rather than the old single-line call.
   const desktopHydrationTrigger =
-    desktopJs.match(/if \(\[[^\]]*\]\.includes\(event\.type\)\) scheduleBackendHydration\(\);/)?.[0] ?? "";
+    desktopJs.match(
+      /if \(\[[^\]]*\]\.includes\(event\.type\)\) \{[\s\S]*?scheduleBackendHydration\(\);[\s\S]*?\n      \}/,
+    )?.[0] ?? "";
+  assert.match(desktopHydrationTrigger, /settingsForm/, "hydration should skip while editing settings");
   assert.notEqual(desktopHydrationTrigger, "", "desktop should still hydrate on broad-reload events");
   assert.doesNotMatch(desktopHydrationTrigger, /refresh\.pool_updated/);
   assert.doesNotMatch(desktopHydrationTrigger, /recommendation\.reshuffled/);
@@ -72,13 +78,28 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   assert.notEqual(desktopInitTrigger, "", "desktop should route init events through init status refresh");
   assert.match(desktopInitTrigger, /refreshInitStatus/);
 
+  const desktopRuntimeHandler =
+    desktopJs.match(/function handleRuntimeEvent\(event\) \{[\s\S]*?\n    \}\n\n    function connectRuntimeStream/)?.[0] ?? "";
+  assert.notEqual(desktopRuntimeHandler, "", "desktop runtime handler should be inspectable");
+  assert.match(desktopRuntimeHandler, /state\.videos\.length === 0/);
+  assert.match(desktopRuntimeHandler, /desktopRecommendationLoadState === "failed"/);
+  assert.match(desktopRuntimeHandler, /desktopRecommendationLoadState === "failed-exhausted"/);
+  assert.match(desktopRuntimeHandler, /scheduleDesktopRecommendationRecovery\(\);/);
+  assert.match(desktopRuntimeHandler, /desktopRuntimeGeneration \+= 1;/);
+  assert.doesNotMatch(desktopRuntimeHandler, /state\.videos\s*=\s*normalizeRecommendationList/);
+
   const poolUpdatedBlock =
     mobileRecommendJs.match(/if \(type === "refresh\.pool_updated"\) \{[\s\S]*?\} else if/)?.[0] ?? "";
   assert.notEqual(poolUpdatedBlock, "", "mobile recommend stream handler should handle pool updates");
   assert.match(poolUpdatedBlock, /mergeRuntimeStatusEvent/);
+  assert.match(poolUpdatedBlock, /runtimeStatusGeneration \+= 1;/);
   assert.match(poolUpdatedBlock, /rerenderRuntimeDependentChrome\(\);/);
+  assert.match(poolUpdatedBlock, /state\.recommendations\.length === 0/);
+  assert.match(poolUpdatedBlock, /recommendationLoadState === "failed"/);
+  assert.match(poolUpdatedBlock, /recommendationLoadState === "failed-exhausted"/);
+  assert.match(poolUpdatedBlock, /scheduleRecommendationRecovery\(\);/);
   assert.doesNotMatch(poolUpdatedBlock, /scheduleRecommendationItemsRefresh/);
-  assert.doesNotMatch(poolUpdatedBlock, /fetchRecommendations|loadData/);
+  assert.doesNotMatch(poolUpdatedBlock, /fetchRecommendations|loadData|patchState\(\{ recommendations:/);
   assert.doesNotMatch(poolUpdatedBlock, /loadData\(/);
 
   assert.match(mobileProfileJs, /function scheduleProfileRefresh/);

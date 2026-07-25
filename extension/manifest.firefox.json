@@ -4,7 +4,7 @@
     "description": "跨平台内容发现 AI Agent — 行为采集、画像与智能推荐",
     "browser_specific_settings": {
         "gecko": {
-            "id": "openbiliclaw@whiteguo233.github.io",
+            "id": "openbiliclaw-firefox@whiteguo233.github.io",
             "data_collection_permissions": {
                 "required": [
                     "authenticationInfo",
@@ -39,8 +39,14 @@
         "*://*.redd.it/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
+        "*://*.bgm.tv/*",
+        "*://*.bangumi.tv/*",
         "http://127.0.0.1/*",
         "http://localhost/*"
+    ],
+    "optional_host_permissions": [
+        "http://*/*",
+        "https://*/*"
     ],
     "background": {
         "scripts": [
@@ -59,6 +65,16 @@
         },
         {
             "matches": [
+                "*://*.bilibili.com/*"
+            ],
+            "js": [
+                "main/bili-interact-tap.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [
@@ -72,7 +88,8 @@
             ],
             "js": [
                 "main/xhs-token-sniffer.js",
-                "main/xhs-state-bridge.js"
+                "main/xhs-state-bridge.js",
+                "main/xhs-action-tap.js"
             ],
             "run_at": "document_start",
             "world": "MAIN"
@@ -133,6 +150,27 @@
                 "main/x-graphql-tap.js"
             ],
             "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "content/bangumi.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
+            ],
+            "js": [
+                "main/bgm-identity-bridge.js"
+            ],
+            "run_at": "document_idle",
             "world": "MAIN"
         }
     ],

@@ -8,10 +8,12 @@ is never actually driven against x.com.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 
 import pytest
 
+from openbiliclaw import network
 from openbiliclaw.sources.x_client import (
     XAuthError,
     XBlockedError,
@@ -82,6 +84,58 @@ def test_missing_cookie_raises_before_any_call() -> None:
 def test_missing_cookie_blank_string() -> None:
     with pytest.raises(XMissingCookieError):
         XClient(cookie="")._auth_pair()
+
+
+def test_xclient_applies_project_proxy_to_twitter_cli_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from twitter_cli import client as twitter_client
+
+    seen: list[str | None] = []
+
+    class FakeTwitterClient:
+        def __init__(self, auth_token: str, ct0: str) -> None:
+            assert (auth_token, ct0) == ("a", "b")
+            assert twitter_client._cffi_session is None
+            seen.append(os.environ.get("TWITTER_PROXY"))
+
+    monkeypatch.setattr(twitter_client, "TwitterClient", FakeTwitterClient)
+    monkeypatch.setattr(twitter_client, "_cffi_session", object())
+    monkeypatch.setattr(XClient, "_build_transaction", lambda _self: None)
+    monkeypatch.delattr(twitter_client, "_openbiliclaw_proxy", raising=False)
+    monkeypatch.setenv("TWITTER_PROXY", "http://ambient:7890")
+    network.set_outbound_proxy("socks5://custom:1080", mode="custom")
+
+    XClient(cookie="auth_token=a; ct0=b")._client()
+
+    assert seen == ["socks5://custom:1080"]
+    assert os.environ["TWITTER_PROXY"] == "http://ambient:7890"
+    assert twitter_client._cffi_session is None
+    assert twitter_client._openbiliclaw_proxy == "socks5://custom:1080"
+    network.reset_outbound_proxy_for_tests()
+
+
+def test_xclient_direct_mode_clears_ambient_twitter_proxy_during_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from twitter_cli import client as twitter_client
+
+    seen: list[str | None] = []
+
+    class FakeTwitterClient:
+        def __init__(self, _auth_token: str, _ct0: str) -> None:
+            seen.append(os.environ.get("TWITTER_PROXY"))
+
+    monkeypatch.setattr(twitter_client, "TwitterClient", FakeTwitterClient)
+    monkeypatch.setattr(XClient, "_build_transaction", lambda _self: None)
+    monkeypatch.delattr(twitter_client, "_openbiliclaw_proxy", raising=False)
+    monkeypatch.setenv("TWITTER_PROXY", "http://ambient:7890")
+    network.set_outbound_proxy("", mode="direct")
+
+    XClient(cookie="auth_token=a; ct0=b")._client()
+
+    assert seen == [None]
+    assert os.environ["TWITTER_PROXY"] == "http://ambient:7890"
 
 
 async def test_xclient_search_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,3 +244,96 @@ async def test_authentication_error_maps_to_xauth(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(client, "_raw_search", _boom)
     with pytest.raises(XAuthError):
         await client.search("q", limit=5)
+
+
+# ── x-client-transaction-id seeding (issue: X SearchTimeline 404) ──────────
+# All offline: TwitterClient and the homepage fetch are stubbed.
+
+
+def test_client_seeds_transaction_onto_twitter_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_client`` injects the bootstrapped generator and skips the broken one."""
+    import twitter_cli.client as tcc
+
+    captured: dict[str, object] = {}
+
+    class _FakeTwitterClient:
+        def __init__(self, auth_token: str, ct0: str) -> None:
+            captured["auth"] = (auth_token, ct0)
+
+    monkeypatch.setattr(tcc, "TwitterClient", _FakeTwitterClient)
+    sentinel = object()
+    client = XClient(cookie="auth_token=a; ct0=b")
+    monkeypatch.setattr(client, "_build_transaction", lambda: sentinel)
+
+    built = client._client()
+    assert built._client_transaction is sentinel
+    assert built._ct_init_attempted is True
+    assert captured["auth"] == ("a", "b")
+
+
+def test_client_leaves_client_untouched_when_bootstrap_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed bootstrap (``None``) must not set the transaction attributes."""
+    import twitter_cli.client as tcc
+
+    class _FakeTwitterClient:
+        def __init__(self, auth_token: str, ct0: str) -> None:
+            pass
+
+    monkeypatch.setattr(tcc, "TwitterClient", _FakeTwitterClient)
+    client = XClient(cookie="auth_token=a; ct0=b")
+    monkeypatch.setattr(client, "_build_transaction", lambda: None)
+
+    built = client._client()
+    assert not hasattr(built, "_client_transaction")
+    assert not hasattr(built, "_ct_init_attempted")
+
+
+def test_transaction_built_once_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful transaction is reused for the client's lifetime."""
+    calls = {"n": 0}
+
+    def _build() -> object:
+        calls["n"] += 1
+        return object()
+
+    client = XClient(cookie="auth_token=a; ct0=b")
+    monkeypatch.setattr(client, "_build_transaction", _build)
+
+    first = client._ensure_transaction()
+    second = client._ensure_transaction()
+    assert first is second
+    assert calls["n"] == 1
+
+
+def test_failed_transaction_cached_as_none_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed build caches ``None`` so it is not re-attempted every call."""
+    calls = {"n": 0}
+
+    def _build() -> object | None:
+        calls["n"] += 1
+        return None
+
+    client = XClient(cookie="auth_token=a; ct0=b")
+    monkeypatch.setattr(client, "_build_transaction", _build)
+
+    assert client._ensure_transaction() is None
+    assert client._ensure_transaction() is None
+    assert calls["n"] == 1
+
+
+def test_build_transaction_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any failure during bootstrap returns ``None`` instead of raising."""
+    import twitter_cli.client as tcc
+
+    def _boom() -> object:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(tcc, "_get_cffi_session", _boom)
+    client = XClient(cookie="auth_token=a; ct0=b")
+    assert client._build_transaction() is None

@@ -30,6 +30,7 @@
    - 推荐列表（封面、标题、UP 主、推荐理由）
    - 来源标识（Bilibili / Xiaohongshu / Douyin / YouTube / Web）
    - 点击跳转原始内容链接（`content_url` 优先，B 站 `bvid` fallback）
+   - 移动端点击优先拉起目标平台 App（`js/app-launch.js`：B站 / 小红书 / 抖音 / YouTube / X / 知乎 URL scheme 深链，小红书携带 `xsec_token`）。回落策略保证 `/m/` 当前页永不被跳走：1.6s 内页面未被切走视为拉起失败，优先 `window.open` 新标签页打开网页；弹窗被拦（用户手势已过期，iOS Safari 必拦）则显示页内提示条「打开网页版」按钮由用户新手势打开。系统弹窗（iOS「在 App 中打开?」确认 / 打不开提示）挂起时 `blur` 暂停回落计时、关闭后 `focus` 续 0.9s 再回落，避免拉起成功却误跳当前页。桌面端及无法解析深链的地址（b23.tv / xhslink 短链、Reddit 等）保持新标签页打开网页
    - 点击直达上报（best-effort，不追踪观看时长）
    - "换一批" 按钮（reshuffle）
    - 接近列表底部自动 append 下一批，底部 "加载更多" 保留为手动兜底
@@ -54,7 +55,7 @@
    - 与插件共享 `session=popup&scope=chat` 的主聊天历史
    - 聊天回复完成后刷新画像摘要与活动流
    - 底部固定两行输入框，优先保留聊天上下文浏览空间
-   - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针卡片首次点击后会锁住同卡片其它动作，避免重复提交；空态提示保持 X 关闭入口可用）
+   - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针非聊天动作按归一化后的 `type + domain` 键记录独立的 in-flight 状态，关闭再打开 overlay 或其它重渲染仍从该状态恢复整卡禁用、`is-processing` 与 `aria-busy=true`，避免重复提交；只有服务端接受结算或返回终态 no-op 后才写入 terminal handled key 并移除卡片，传输/服务端失败则清除 pending、保留卡片并恢复全部动作供重试；空态提示保持 X 关闭入口可用）
 
 4. **通用**
    - 底部 Tab 导航栏（推荐/画像/对话）
@@ -89,6 +90,7 @@ src/openbiliclaw/web/
 │   ├── api.js          # 后端 API 封装（同插件 popup-api.js）
 │   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
 │   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
+│   ├── app-launch.js   # 移动端深链拉起目标平台 App + 网页回落
 │   ├── views/
 │   │   ├── recommend.js  # 推荐页渲染 & 交互
 │   │   ├── profile.js    # 画像页渲染 & 交互
@@ -172,7 +174,19 @@ if web_dir.is_dir():
 移动端会在 `view-models.js` 中做最小字段适配：
 - 推荐池状态读取 `/api/runtime-status` 的 `pool_available_count`、`last_replenished_count`、`recent_pool_topics`，再映射成推荐页三枚 chip 使用的 `pool_size`、`recent_replenish`、`current_topic`。
 - 推荐页头部用 `getMobileRecommendationHeaderState()` 生成插件语义一致的标题、首屏「换一批」、三枚池状态 chip 和活动辅助行；移动端把池状态压成横向轻量 pill，并把 `xhs-extension-*` / `dy-plugin-*` / `yt-*` 等内部来源名显示为用户可读短标签；列表接近底部时用 `IntersectionObserver` 自动调用 `append`，同时保留底部「加载更多」作为手动兜底。
-- 惊喜推荐沿用插件 compact banner 思路：左侧小缩略图、标签 / 标题 / 理由 / 来源围绕头图形成 featured card，推荐原因带轻量标记，翻页控件与「稍后看」关闭入口放在右上角，动作区仍保持「看看 / 喜欢 / 不感兴趣 / 聊一聊」；「聊一聊」会在当前卡片内展开 composer 和多轮气泡，不切换到对话 tab。
+- 惊喜推荐沿用插件 compact banner 思路：左侧小缩略图、标签 / 标题 / 理由 / 来源围绕头图形成 featured card，推荐原因带轻量标记，翻页控件与「稍后看」关闭入口放在右上角，动作区保持「看看 / 喜欢 / 稍后再看 / 收藏 / 不感兴趣 / 聊一聊」；「聊一聊」会在当前卡片内展开 composer 和多轮气泡，不切换到对话 tab。结果提示与动作区独立渲染：`state="liked"` 同时显示「好，这类多来点。」和完整动作组，like 使用 `aria-pressed="true"` 且只禁用重复 like，其余动作继续可用；like 请求失败则恢复未选中状态。
+
+Delight UI 投影矩阵：
+
+| `state` | `show_status` | `show_actions` | `like_pressed` | `like_disabled` |
+| --- | --- | --- | --- | --- |
+| `pending` | 有响应文案时显示 | 是 | 否 | 否 |
+| `liked` | 是 | 是 | 是 | 是 |
+| `viewed` | 是 | 否 | 否 | 是 |
+| `rejected` | 是 | 否 | 否 | 是 |
+| `chatted / chatting` | 有响应文案时显示 | 是 | 否 | 否 |
+
+本地点击成功、刷新后 `pending-batch` 返回 liked，以及 `delight.liked` 实时事件都复用这份投影；`handled` 仅作为 `viewed / rejected` 的兼容终态，不参与 liked 动作区可见性。
 - MBTI 维度兼容后端对象形态（如 `EI: { pole: "I", strength: 0.8 }`）和旧数组形态，统一映射为 `{ left, right, score }` 后再渲染。
 - MBTI 会保留后端 `confidence` 显示为“可信度”；内容口味将 `long/slow` 等 raw 枚举映射为“长视频 / 慢节奏”等中文标签；使用场景会显示 `session_type` 为“模式”。
 - 认知更新卡片会保留后端 `context_line` 与 `source_label`，即使前端已做过一次 normalize 后再次渲染，也不回退成泛化上下文。
@@ -190,6 +204,7 @@ if web_dir.is_dir():
 复用插件的 `runtime-stream` 协议，移动端关注的事件：
 - `refresh.pool_updated` → 更新池子状态 / header，不替换当前推荐列表
 - `delight.candidate` → 更新惊喜推荐
+- `delight.liked` → 将匹配 bvid 的候选投影为 liked，保留状态与其它动作
 - `profile_updated` → 刷新画像
 - `interest.probe` → 弹出探测通知
 - `activity.added` → 更新活动流
@@ -247,3 +262,5 @@ http://<电脑局域网IP>:8420/m/
 ```
 
 打开 `/m/` 后可在 iOS Safari 通过「分享 → 添加到主屏幕」保存为桌面图标；Android Chrome / Chromium 浏览器可通过菜单里的「安装应用」或「添加到主屏幕」保存。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；完整 PWA 安装提示对 HTTPS 更稳定。
+
+不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成）；后端地址仍是 loopback 时，桌面抽屉会调用轻量端点 `GET /api/qr-info` 并读取响应中的 `lan_ip` 字段，插件入口也使用同一轻量端点生成局域网地址。两个入口都在**每次打开时重新请求**该端点，端点自身也绕过 `/api/health` 的 30 秒 `lan_ip` TTL 实时探测：局域网地址会随换 Wi-Fi / 插拔网卡改变，任何一层缓存住都会让二维码继续编码手机已经打不开的旧地址。桌面侧仍保留首屏预取值，但只在这次请求失败时兜底使用，避免退化成 loopback 地址。

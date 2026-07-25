@@ -3,6 +3,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 const COMMENT_POST_PATTERN = /(?:reddit\.com\/r\/[^/]+\/comments\/|redd\.it\/)([A-Za-z0-9_]+)/;
 const SUBREDDIT_PATTERN = /reddit\.com\/r\/([^/?#]+)/;
@@ -180,9 +181,11 @@ export const redditAdapter: PlatformAdapter = {
   sourcePlatform: "reddit",
   detectPageType: detectRedditPageType,
   extractContentId: extractRedditContentId,
+  extractSearchQuery: (url) => queryParam(url, "q"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: null,
+  dwellPageTypes: ["post"],
   inferActionType: inferRedditActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return metadataFromRedditUrl(url);

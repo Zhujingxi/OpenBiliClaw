@@ -12,6 +12,9 @@ from openbiliclaw.llm.service import LLMServiceError
 from openbiliclaw.soul.preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
     MAX_CONCURRENT_PREFERENCE_CHUNKS,
+    PREFERENCE_CHUNK_MAX_TOKENS,
+    PREFERENCE_REASONING_FALLBACK_MAX_TOKENS,
+    PreferenceAnalysisError,
     PreferenceAnalyzer,
 )
 
@@ -70,6 +73,7 @@ class CacheFlagStructuredService:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         caller: str = "",
+        reasoning_effort: str | None = None,
         inject_core_memory: bool = True,
     ) -> LLMResponse:
         self.calls.append(
@@ -77,6 +81,8 @@ class CacheFlagStructuredService:
                 "system_instruction": system_instruction,
                 "user_input": user_input,
                 "inject_core_memory": inject_core_memory,
+                "max_tokens": max_tokens,
+                "reasoning_effort": reasoning_effort,
             }
         )
         return LLMResponse(
@@ -191,6 +197,11 @@ async def test_chunked_preference_analysis_disables_core_memory_injection() -> N
 
     assert len(service.calls) == 2
     assert [call["inject_core_memory"] for call in service.calls] == [False, False]
+    assert [call["max_tokens"] for call in service.calls] == [
+        PREFERENCE_CHUNK_MAX_TOKENS,
+        PREFERENCE_CHUNK_MAX_TOKENS,
+    ]
+    assert [call["reasoning_effort"] for call in service.calls] == ["", ""]
 
 
 @pytest.mark.asyncio
@@ -296,6 +307,29 @@ def test_compact_event_for_prompt_preserves_signal_strength() -> None:
     assert compact["metadata"] == {
         "signal_strength": 0.35,
         "source_platform": "bilibili",
+    }
+
+
+def test_compact_event_for_prompt_preserves_comment_text_and_kind() -> None:
+    analyzer = PreferenceAnalyzer(registry=ContextOverflowOnceStructuredService())
+
+    compact = analyzer._compact_event_for_prompt(
+        {
+            "event_type": "comment",
+            "title": "一个视频",
+            "metadata": {
+                "source_platform": "bilibili",
+                "comment_text": "写得真好",
+                "comment_kind": "danmaku",
+                "unused": "drop me",
+            },
+        }
+    )
+
+    assert compact["metadata"] == {
+        "source_platform": "bilibili",
+        "comment_text": "写得真好",
+        "comment_kind": "danmaku",
     }
 
 
@@ -953,6 +987,207 @@ async def test_chunked_analysis_batches_initial_chunk_fanout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunked_analysis_respects_configured_llm_concurrency() -> None:
+    service = ConcurrentChunkStructuredService()
+    service.concurrency = 2
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": f"事件 {idx}"} for idx in range(8)],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert service.max_active_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_recursive_recovery_does_not_expand_fanout() -> None:
+    class SplitUntilSingleService(FakeStructuredService):
+        concurrency = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_calls = 0
+            self.max_active_calls = 0
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                await asyncio.sleep(0.005)
+                if str(kwargs["user_input"]).count('"event_type"') > 1:
+                    return LLMResponse(content="not json", provider="openai")
+                return LLMResponse(content='{"interests": []}', provider="openai")
+            finally:
+                self.active_calls -= 1
+
+    service = SplitUntilSingleService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": f"事件 {idx}"} for idx in range(8)],
+        existing_preference={},
+        event_chunk_size=4,
+    )
+
+    assert service.max_active_calls == 2
+    assert len(service.calls) == 14
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_retries_transient_rate_limit(monkeypatch) -> None:
+    from openbiliclaw.soul import preference_analyzer as module
+
+    class RateLimitedOnceService(FakeStructuredService):
+        concurrency = 1
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise LLMServiceError("openai_compatible rate limit exceeded")
+            return LLMResponse(content='{"interests": []}', provider="openai")
+
+    monkeypatch.setattr(module, "PREFERENCE_RATE_LIMIT_RETRY_SECONDS", 0)
+    service = RateLimitedOnceService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": "事件"}],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert len(service.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_does_not_retry_exhausted_balance(monkeypatch) -> None:
+    from openbiliclaw.soul import preference_analyzer as module
+
+    class ExhaustedBalanceService(FakeStructuredService):
+        concurrency = 1
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            raise LLMServiceError("HTTP 402: insufficient balance")
+
+    monkeypatch.setattr(module, "PREFERENCE_RATE_LIMIT_RETRY_SECONDS", 0)
+    service = ExhaustedBalanceService()
+
+    with pytest.raises(PreferenceAnalysisError, match="insufficient balance"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=[{"event_type": "view", "title": "事件"}],
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    assert len(service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_retries_reasoning_only_length_once_with_larger_budget() -> None:
+    class ReasoningExhaustedOnceService(FakeStructuredService):
+        concurrency = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.max_token_calls: list[int] = []
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.max_token_calls.append(int(kwargs["max_tokens"]))
+            if len(self.calls) == 1:
+                raise LLMServiceError(
+                    "All providers failed. Last error: openai_compatible returned reasoning "
+                    "but no final content (finish_reason=length); disable thinking/reasoning "
+                    "or increase max_tokens"
+                )
+            return LLMResponse(content='{"interests": []}', provider="openai")
+
+    service = ReasoningExhaustedOnceService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": "事件"}],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert service.max_token_calls == [
+        PREFERENCE_CHUNK_MAX_TOKENS,
+        PREFERENCE_REASONING_FALLBACK_MAX_TOKENS,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_cancels_and_drains_sibling_after_hard_failure() -> None:
+    class FailAndBlockService(FakeStructuredService):
+        concurrency = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_calls = 0
+            self.both_started = asyncio.Event()
+            self.sibling_cancelled = False
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.active_calls += 1
+            if self.active_calls == 2:
+                self.both_started.set()
+            try:
+                if "失败事件" in str(kwargs["user_input"]):
+                    await self.both_started.wait()
+                    raise LLMServiceError("hard provider failure")
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.sibling_cancelled = True
+                    raise
+            finally:
+                self.active_calls -= 1
+
+    service = FailAndBlockService()
+
+    with pytest.raises(PreferenceAnalysisError, match="hard provider failure"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=[
+                {"event_type": "view", "title": "失败事件"},
+                {"event_type": "view", "title": "等待事件"},
+            ],
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    assert service.sibling_cancelled is True
+    assert service.active_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_logs_per_chunk_lifecycle(caplog) -> None:
+    """Each chunk logs an indexed start + done line so ``openbiliclaw.log``
+    pinpoints which chunk is in flight (a started-without-done line is the one
+    that stalled or was cancelled by the init timeout)."""
+    import logging
+
+    service = ConcurrentChunkStructuredService()
+    events = [
+        {"event_type": "view", "title": f"事件 {idx}", "metadata": {"source_platform": "bilibili"}}
+        for idx in range(3)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="openbiliclaw.soul.preference_analyzer"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=events,
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    for idx in range(1, 4):
+        assert any(f"preference chunk {idx}/3 started" in m for m in messages), idx
+        assert any(f"preference chunk {idx}/3 done" in m for m in messages), idx
+
+
+@pytest.mark.asyncio
 async def test_chunked_analysis_splits_by_prompt_budget_before_llm_call() -> None:
     from openbiliclaw.llm.prompts import build_preference_analysis_prompt
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
@@ -1288,3 +1523,238 @@ async def test_analyze_events_default_drops_quick_exit_but_keeps_explicit_dislik
     assert "低质混剪" in user_input, "explicit dislikes must remain dislike evidence"
     assert "没写 reason 的点踩" in user_input, "metadata-level explicit dislikes must be kept"
     assert "不要把负向事件提取为 interests" in str(system_instruction)
+
+
+def test_maybe_filter_events_keeps_bangumi_view_and_dislike() -> None:
+    """Bangumi collection events carry no ``inferred_satisfaction`` — a 'view'
+    (完成/搁置收藏 → 中性浏览) resolves to 'unknown' and must survive, while an
+    explicit dislike (低评分 → feedback/dislike) must survive as negative
+    evidence. The satisfaction filter runs for real here (no LLM involved);
+    earlier guided-init tests bypassed this layer with a soul double, so this
+    pins the real ``_maybe_filter_events`` path for Bangumi signals."""
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    analyzer = PreferenceAnalyzer(FakeStructuredService())  # filter on by default
+    events = [
+        # view → no inferred_satisfaction → treated as "unknown" → kept
+        {
+            "event_type": "view",
+            "title": "某番剧 EP1",
+            "metadata": {"source_platform": "bangumi"},
+        },
+        # feedback + feedback_type=dislike → explicit negative → kept
+        {
+            "event_type": "feedback",
+            "title": "不感兴趣的番",
+            "metadata": {"source_platform": "bangumi", "feedback_type": "dislike"},
+        },
+        # event_type=dislike → explicit negative → kept
+        {
+            "event_type": "dislike",
+            "title": "点踩的番",
+            "metadata": {"source_platform": "bangumi"},
+        },
+    ]
+
+    kept = analyzer._maybe_filter_events(events)
+
+    assert kept == events, "bangumi view + explicit dislikes must all pass the filter"
+
+
+def test_normalize_style_coerces_schema_defying_llm_output(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """LLM output that violates the style schema must be coerced, not persisted
+    verbatim, and the coercion must be logged so the user gets a diagnosable line."""
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    with caplog.at_level("WARNING", logger="openbiliclaw.soul.preference_analyzer"):
+        normalized = analyzer._normalize_preference(
+            {
+                "style": {
+                    "preferred_duration": "unknown",
+                    "preferred_pace": "unknown",
+                    "quality_sensitivity": 0,
+                    "humor_preference": 0,
+                    "depth_preference": "unknown",
+                },
+                "exploration_openness": "unknown",
+                "context": {"session_type": "未知"},
+            }
+        )
+
+    style = normalized["style"]
+    assert isinstance(style, dict)
+    # Illegal enums reset to "" so UIs fall back to their observing copy.
+    assert style["preferred_duration"] == ""
+    assert style["preferred_pace"] == ""
+    # Non-numeric taste field resets to the field default (0.5).
+    assert style["depth_preference"] == 0.5
+    # A literal numeric 0 is a legitimate extreme and must survive untouched.
+    assert style["quality_sensitivity"] == 0.0
+    assert style["humor_preference"] == 0.0
+    # Garbage openness falls back to the field default (0.5), NOT 0.0.
+    assert normalized["exploration_openness"] == 0.5
+    # Unknown-ish context placeholder cleared for UI fallback.
+    assert normalized["context"]["session_type"] == ""
+
+    warnings = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    for field in (
+        "preferred_duration",
+        "preferred_pace",
+        "depth_preference",
+        "exploration_openness",
+        "session_type",
+    ):
+        assert field in message
+    # Legal numeric-0 fields must NOT be listed as corrected.
+    assert "quality_sensitivity" not in message
+    assert "humor_preference" not in message
+
+
+def test_normalize_style_accepts_and_clamps_valid_numerics() -> None:
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    normalized = analyzer._normalize_preference(
+        {
+            "style": {
+                "preferred_duration": "LONG",
+                "preferred_pace": "moderate",
+                "quality_sensitivity": "0.7",
+                "humor_preference": 1.7,
+                "depth_preference": 0.0,
+            },
+            "exploration_openness": "0.9",
+        }
+    )
+    style = normalized["style"]
+    assert isinstance(style, dict)
+    # Case-insensitive enum accepted and normalized to canonical lowercase.
+    assert style["preferred_duration"] == "long"
+    assert style["preferred_pace"] == "moderate"
+    # Numeric string parsed.
+    assert style["quality_sensitivity"] == 0.7
+    # Out-of-range clamped to [0, 1].
+    assert style["humor_preference"] == 1.0
+    # Literal 0.0 accepted unchanged.
+    assert style["depth_preference"] == 0.0
+    assert normalized["exploration_openness"] == 0.9
+
+
+def test_normalize_style_clean_payload_logs_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    with caplog.at_level("WARNING", logger="openbiliclaw.soul.preference_analyzer"):
+        analyzer._normalize_preference(
+            {
+                "style": {
+                    "preferred_duration": "medium",
+                    "preferred_pace": "fast",
+                    "quality_sensitivity": 0.4,
+                    "humor_preference": 0.6,
+                    "depth_preference": 0.8,
+                },
+                "exploration_openness": 0.5,
+                "context": {"session_type": "深度钻研型"},
+            }
+        )
+    assert [rec for rec in caplog.records if rec.levelname == "WARNING"] == []
+
+
+# ── init-progress-visibility Phase 1: analyze_events progress_callback ────────
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_reports_progress_per_chunk() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
+    analyzer = PreferenceAnalyzer(service)
+    calls: list[tuple[int, int]] = []
+
+    async def _cb(done: int, total: int) -> None:
+        calls.append((done, total))
+
+    await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": f"t{i}"} for i in range(8)],
+        existing_preference={},
+        event_chunk_size=1,
+        progress_callback=_cb,
+    )
+
+    # Exactly one report per chunk, done strictly increasing 1..8 against total 8.
+    assert calls == [(i, 8) for i in range(1, 9)]
+
+
+@pytest.mark.asyncio
+async def test_single_path_reports_one_progress_tick() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
+    analyzer = PreferenceAnalyzer(service)
+    calls: list[tuple[int, int]] = []
+
+    async def _cb(done: int, total: int) -> None:
+        calls.append((done, total))
+
+    await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": "solo"}],
+        existing_preference={},
+        progress_callback=_cb,
+    )
+
+    # Un-chunked path fires a single (1, 1) completion tick (locked semantics).
+    assert calls == [(1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_error_does_not_break_analysis() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
+    analyzer = PreferenceAnalyzer(service)
+
+    async def _boom(done: int, total: int) -> None:
+        raise RuntimeError("observer down")
+
+    # Callback failure is swallowed (WARNING) — analysis still returns a result.
+    result = await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": f"t{i}"} for i in range(3)],
+        existing_preference={},
+        event_chunk_size=1,
+        progress_callback=_boom,
+    )
+    assert isinstance(result, dict)
+
+
+@pytest.mark.asyncio
+async def test_engine_analyze_events_forwards_progress_callback() -> None:
+    """SoulEngine.analyze_events threads the callback down to the analyzer."""
+    from unittest.mock import AsyncMock
+
+    from openbiliclaw.soul.engine import SoulEngine
+
+    engine = SoulEngine.__new__(SoulEngine)
+    engine._preference_analyzer = AsyncMock()  # type: ignore[attr-defined]
+    engine._preference_analyzer.analyze_events = AsyncMock(return_value={})
+    engine._init_cognition_context = {}  # type: ignore[attr-defined]
+
+    class _Layer:
+        data: dict[str, object] = {}
+
+        def save(self) -> None:
+            pass
+
+    class _Mem:
+        def get_layer(self, name: str) -> _Layer:
+            return _Layer()
+
+    engine._memory = _Mem()  # type: ignore[attr-defined]
+
+    async def _cb(done: int, total: int) -> None:
+        pass
+
+    await engine.analyze_events([{"event_type": "view", "title": "x"}], progress_callback=_cb)
+    kwargs = engine._preference_analyzer.analyze_events.await_args.kwargs
+    assert kwargs["progress_callback"] is _cb

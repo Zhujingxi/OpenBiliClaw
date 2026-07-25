@@ -29,11 +29,17 @@ import {
   extractBootstrapStateFromDocument,
   extractSelfInfoFromState,
 } from "./xhs/bootstrap.js";
+import { attachCoverData } from "./xhs/cover-harvest.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
+import { buildEventFromXhsAction, isXhsAction } from "./xhs/action-event.ts";
+import type { BehaviorEvent } from "../shared/types.js";
 
 startCollector(xiaohongshuAdapter);
 registerTaskExecutor();
 registerE2EExecutor("xiaohongshu");
+installNativeSaveExecutor("xiaohongshu", saveXiaohongshu, verifyXiaohongshu);
 
 // ── Token sniffer bridge (isolated world receiver) ──────────────────
 //
@@ -89,6 +95,29 @@ window.addEventListener("message", (event) => {
     }
   }
   scheduleTokenFlush();
+});
+
+// ── Action tap bridge (isolated world receiver) ─────────────────────
+//
+// The MAIN-world script at `dist/main/xhs-action-tap.js` wraps xhs's own
+// fetch/XHR and postMessages the user's own like / collect writes (and their
+// withdrawals) under `source: "obc-xhs-action"` — kept separate from the
+// token sniffer's `obc-xhs-sniffer` stream so the two never cross-talk. We
+// forward each as a like / favorite / retraction BEHAVIOR_EVENT.
+function sendBehaviorEvent(behaviorEvent: BehaviorEvent): void {
+  try {
+    chrome.runtime.sendMessage({ action: "BEHAVIOR_EVENT", data: behaviorEvent });
+  } catch {
+    // best effort — never break the page
+  }
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data as { source?: string; action?: unknown } | null;
+  if (!data || data.source !== "obc-xhs-action") return;
+  if (!isXhsAction(data.action)) return;
+  sendBehaviorEvent(buildEventFromXhsAction(data.action));
 });
 
 // When the tab is about to die (navigation, close, or background
@@ -200,7 +229,13 @@ function runPassiveCollection(): void {
     observed_at: Date.now(),
     ...(selfInfo ? { self_info: selfInfo } : {}),
   };
-  chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
+  // Harvest cover bytes before sending — xhscdn 403s every server-side
+  // fetch (TLS-fingerprint hotlink protection), so the page context is the
+  // only place covers can still be read. Fire-and-forget: attachCoverData
+  // never throws and a cover failure must not delay or drop the observation.
+  void attachCoverData(filteredNotes).finally(() => {
+    chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
+  });
 }
 
 let scrollTimer: number | null = null;

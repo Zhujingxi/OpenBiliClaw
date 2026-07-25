@@ -6,6 +6,7 @@ cross-layer updates, bidirectional corrections, and self-editing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,7 @@ _EVENT_TYPES = {
     "scroll",
     "hover",
     "snapshot",
+    "reshuffle",
     "feedback",
     "follow",
     "share",
@@ -277,6 +279,8 @@ class MemoryManager:
             "following_mids": [],
             "last_account_sync_at": "",
             "last_sync_error": "",
+            "last_sync_error_kind": "",
+            "last_sync_issues": [],
         }
         if not self._account_sync_state_path.exists():
             return default_state
@@ -298,6 +302,11 @@ class MemoryManager:
             "following_mids": self._as_str_list(loaded.get("following_mids", [])),
             "last_account_sync_at": str(loaded.get("last_account_sync_at", "")),
             "last_sync_error": str(loaded.get("last_sync_error", "")),
+            # Drives the UI's "re-login needed" branch. Missing from this
+            # whitelist since the field was introduced, so the desktop's
+            # auth_expired copy was unreachable and users saw raw English.
+            "last_sync_error_kind": str(loaded.get("last_sync_error_kind", "")),
+            "last_sync_issues": self._as_sync_issue_list(loaded.get("last_sync_issues", [])),
         }
 
     def save_account_sync_state(self, state: dict[str, object]) -> None:
@@ -317,6 +326,8 @@ class MemoryManager:
             "following_mids": self._as_str_list(state.get("following_mids", [])),
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             "last_sync_error": str(state.get("last_sync_error", "")),
+            "last_sync_error_kind": str(state.get("last_sync_error_kind", "")),
+            "last_sync_issues": self._as_sync_issue_list(state.get("last_sync_issues", [])),
         }
         with open(self._account_sync_state_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -749,6 +760,28 @@ class MemoryManager:
         return [item for item in raw_value if isinstance(item, dict)]
 
     @staticmethod
+    def _as_sync_issue_list(raw_value: object) -> list[dict[str, str]]:
+        """Normalize bounded account-sync diagnostics without stringifying junk."""
+        if not isinstance(raw_value, list):
+            return []
+        issues: list[dict[str, str]] = []
+        for raw in raw_value[:8]:
+            if not isinstance(raw, dict):
+                continue
+            stage = raw.get("stage")
+            kind = raw.get("kind")
+            if not isinstance(stage, str) or not isinstance(kind, str):
+                continue
+            stage = stage.strip()[:64]
+            kind = kind.strip()[:64]
+            if not stage or not kind:
+                continue
+            issue = {"stage": stage, "kind": kind}
+            if issue not in issues:
+                issues.append(issue)
+        return issues
+
+    @staticmethod
     def _to_float(raw_value: object) -> float:
         if isinstance(raw_value, bool):
             return float(raw_value)
@@ -819,11 +852,45 @@ class MemoryManager:
 
     # --- Cross-layer operations ---
 
-    async def propagate_event(self, event: dict[str, Any]) -> None:
-        """Propagate a new event upward through the memory layers.
+    def _reconcile_retracted_positive(
+        self, event_type: str, url: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Discount a late-arriving positive already undone by a stored retraction.
 
-        This is the main entry point for new behavioral data. The event
-        is stored in the Event layer and may trigger updates in higher layers.
+        Phase 0 face 2b: when a positive is persisted after its retraction is
+        already in the events table (account_sync backfilling an old like), mark
+        it retracted at insert time if its event time precedes the retraction.
+        A re-like (event time after the retraction) is left untouched. Any
+        failure is swallowed — reconciliation must never block persistence.
+        """
+        from openbiliclaw.sources.event_format import (
+            RETRACTABLE_ACTIONS,
+            apply_retraction_discount,
+            parse_event_timestamp,
+        )
+
+        action = event_type.strip().lower()
+        if action not in RETRACTABLE_ACTIONS or not url:
+            return metadata
+        event_time = parse_event_timestamp(metadata)
+        if event_time is None:
+            return metadata
+        try:
+            retraction_time = self._database.latest_retraction_time_for(url, action)
+        except Exception:
+            logger.warning("retraction reconciliation lookup failed", exc_info=True)
+            return metadata
+        if retraction_time is not None and event_time < retraction_time:
+            return apply_retraction_discount(metadata)
+        return metadata
+
+    async def propagate_event(self, event: dict[str, Any]) -> None:
+        """Record a behavioral event in the SQLite event layer.
+
+        This method only persists the event row and enriches missing event
+        metadata. Profile updates are explicit in the API/runtime layer, which
+        converts persisted events into signals for ``ProfileUpdatePipeline``
+        when the caller's contract requires it.
 
         Args:
             event: Behavioral event data.
@@ -840,6 +907,9 @@ class MemoryManager:
                 signal_strength = default_signal_strength_for_event(event_type, metadata)
                 if signal_strength is not None:
                     metadata["signal_strength"] = signal_strength
+            metadata = self._reconcile_retracted_positive(
+                event_type, str(event.get("url", "")), metadata
+            )
 
         self._database.insert_event(
             event_type,
@@ -853,10 +923,32 @@ class MemoryManager:
             context=event.get("context", ""),
             metadata=metadata,
         )
-        # TODO: Check if preference layer needs updating
-        # TODO: Check if this triggers awareness observations
-        # TODO: Check for significant events that bypass to soul layer
-        logger.debug("Event propagated: %s", event_type)
+        logger.debug("Event persisted: %s", event_type)
+
+    async def propagate_events(self, events: list[dict[str, Any]]) -> int:
+        """Persist an event batch without blocking the caller's event loop."""
+        normalized: list[dict[str, Any]] = []
+        for event in events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip()
+            if event_type not in _EVENT_TYPES:
+                raise ValueError(f"Unsupported event type: {event_type or 'unknown'}")
+            item = dict(event)
+            item["event_type"] = event_type
+            metadata_raw = item.get("metadata", {})
+            if isinstance(metadata_raw, dict):
+                metadata = dict(metadata_raw)
+                if "signal_strength" not in metadata:
+                    signal_strength = default_signal_strength_for_event(event_type, metadata)
+                    if signal_strength is not None:
+                        metadata["signal_strength"] = signal_strength
+                metadata = self._reconcile_retracted_positive(
+                    event_type, str(item.get("url", "")), metadata
+                )
+                item["metadata"] = metadata
+            normalized.append(item)
+        inserted = await asyncio.to_thread(self._database.insert_events_batch, normalized)
+        logger.debug("Event batch persisted: %s rows", inserted)
+        return inserted
 
     def query_events(
         self,

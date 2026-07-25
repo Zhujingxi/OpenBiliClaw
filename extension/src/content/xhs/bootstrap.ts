@@ -6,6 +6,14 @@
  * enabled when a bootstrap task explicitly sets max_scroll_rounds > 0.
  */
 
+import {
+  NOTE_ANCHOR_SELECTOR,
+  NOTE_AUTHOR_SELECTOR,
+  NOTE_CARD_CONTAINER_SELECTOR,
+  NOTE_COVER_SELECTOR,
+  NOTE_TITLE_SELECTOR,
+} from "./selectors.ts";
+
 export type XhsBootstrapScope = "saved" | "liked" | "xhs_history";
 
 export interface XhsBootstrapNote {
@@ -16,6 +24,8 @@ export interface XhsBootstrapNote {
   cover_url: string;
   note_id: string;
   xsec_token: string;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface ExtractBootstrapOptions {
@@ -97,7 +107,7 @@ const OWN_PROFILE_EXACT_SELECTORS = [
   "nav .user a[href*='/user/profile/']",
   "aside .user a[href*='/user/profile/']",
 ];
-const ANCHOR_SELECTOR = 'a[href*="/explore/"], a[href*="/discovery/item/"]';
+const ANCHOR_SELECTOR = NOTE_ANCHOR_SELECTOR;
 const SCROLL_CONTAINER_SELECTOR = [
   ".feeds-container",
   ".feeds-page",
@@ -299,6 +309,15 @@ function firstPathString(value: unknown, paths: string[][]): string {
     if (found) return found;
   }
   return "";
+}
+
+function firstPathPublicationTime(value: unknown, paths: string[][]): string | number | undefined {
+  for (const path of paths) {
+    const found = unwrapReactive(getPath(value, path));
+    if (typeof found === "number" && Number.isFinite(found)) return found;
+    if (typeof found === "string" && found.trim()) return found.trim();
+  }
+  return undefined;
 }
 
 function flattenNotes(value: unknown): unknown[] {
@@ -642,6 +661,14 @@ function normalizeStateNote(
     ["note_card", "cover", "url"],
     ["note_card", "cover", "urlDefault"],
   ]);
+  const publishedAt = firstPathPublicationTime(rawNote, [
+    ["create_time"],
+    ["createTime"],
+    ["publish_time"],
+    ["publishTime"],
+    ["noteCard", "time"],
+    ["note_card", "time"],
+  ]);
 
   if (!title && !url) return null;
 
@@ -653,6 +680,7 @@ function normalizeStateNote(
     cover_url: coverUrl,
     note_id: normalizedNoteId,
     xsec_token: xsecToken,
+    ...(publishedAt !== undefined ? { published_at: publishedAt } : {}),
   };
 }
 
@@ -798,18 +826,10 @@ export function extractBootstrapNotesFromDocument(
     if (!key || seen.has(key)) return;
     seen.add(key);
 
-    const card =
-      anchor.closest(".note-item, section, [class*='note'], [class*='card']") ??
-      anchor;
-    const titleEl = card.querySelector(
-      ".title, .note-title, [class*='title'] span, [class*='title']",
-    );
-    const authorEl = card.querySelector(
-      ".author-wrapper .name, .author .name, .user-name, [class*='author'] .name, .nickname",
-    );
-    const coverImg = card.querySelector(
-      "img.cover, .cover img, img[src*='xhscdn'], img[src*='sns-img'], img",
-    );
+    const card = anchor.closest(NOTE_CARD_CONTAINER_SELECTOR) ?? anchor;
+    const titleEl = card.querySelector(NOTE_TITLE_SELECTOR);
+    const authorEl = card.querySelector(NOTE_AUTHOR_SELECTOR);
+    const coverImg = card.querySelector(NOTE_COVER_SELECTOR);
     const parsed = new URL(url);
 
     notes.push({

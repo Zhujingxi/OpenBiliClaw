@@ -70,6 +70,24 @@ def test_inno_installer_sets_numeric_file_version_resource() -> None:
     assert "VersionInfoProductVersion={#MyAppVersion}" in script
 
 
+def test_inno_installer_always_restarts_freshly_installed_executable() -> None:
+    script = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.iss").read_text(
+        encoding="utf-8"
+    )
+    run_entry = next(
+        line
+        for line in script.splitlines()
+        if line.startswith('Filename: "{app}\\{#MyAppExeName}"')
+    )
+
+    assert 'WorkingDir: "{app}"' in run_entry
+    assert "Flags: nowait" in run_entry
+    assert "postinstall" not in run_entry
+    assert "skipifsilent" not in run_entry
+    assert "RestartApplications=no" in script
+    assert "StopRunningInstance;" in script
+
+
 def test_pyinstaller_spec_uses_windows_version_file_env() -> None:
     spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
         encoding="utf-8"
@@ -77,6 +95,17 @@ def test_pyinstaller_spec_uses_windows_version_file_env() -> None:
 
     assert "OPENBILICLAW_WINDOWS_VERSION_FILE" in spec
     assert "version=version_file" in spec
+
+
+def test_pyinstaller_spec_uses_platform_brand_icons() -> None:
+    root = Path(__file__).resolve().parent.parent
+    spec = (root / "packaging" / "openbiliclaw.spec").read_text(encoding="utf-8")
+
+    assert 'project_root / "packaging" / "icon.ico"' in spec
+    assert 'project_root / "packaging" / "icon.icns"' in spec
+    assert "icon=str(application_icon) if application_icon is not None else None" in spec
+    assert (root / "packaging" / "icon.ico").is_file()
+    assert (root / "packaging" / "icon.icns").is_file()
 
 
 def test_build_pyinstaller_install_command_falls_back_to_uv_when_pip_missing() -> None:
@@ -93,6 +122,12 @@ def test_build_reddit_dependency_install_command_uses_default_dependency_spec() 
     assert cmd[4].startswith("rdt-cli>=")
 
 
+def test_default_runtime_dependency_enables_httpx_socks_proxy_support() -> None:
+    requirement = build_module.project_dependency_spec("httpx")
+
+    assert requirement.startswith("httpx[socks]>=")
+
+
 def test_pyinstaller_spec_collects_reddit_dependency() -> None:
     spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
         encoding="utf-8"
@@ -102,6 +137,23 @@ def test_pyinstaller_spec_collects_reddit_dependency() -> None:
     assert "rdt_cli" in spec
     assert "browser_cookie3" in spec
     assert "_reddit_hiddenimports" in spec
+
+
+def test_pyinstaller_spec_collects_httpx_socks_dependency() -> None:
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"socksio"' in spec
+
+
+def test_pyinstaller_spec_collects_websocket_protocol_dependency() -> None:
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"websockets"' in spec
+    assert '"uvicorn.protocols.websockets.websockets_impl"' in spec
 
 
 def test_find_packaged_root_prefers_app_bundle_on_macos(tmp_path: Path) -> None:
@@ -148,6 +200,39 @@ def test_write_macos_first_launch_guide_explains_gatekeeper_paths(tmp_path: Path
     assert "已损坏" in text
     assert "xattr -dr com.apple.quarantine" in text
     assert "codesign --force" not in text
+    assert build_module.MACOS_INSTALLER_COMMAND_NAME in text
+    assert "退出旧版本、原子替换" in text
+    assert "atomically replaces" in text
+
+
+def test_macos_installer_command_performs_verified_version_handoff() -> None:
+    helper = Path(__file__).resolve().parent.parent / "packaging" / "install_macos.command"
+    text = helper.read_text(encoding="utf-8")
+
+    assert helper.stat().st_mode & 0o111
+    assert "OPENBILICLAW_INSTALL_BUNDLE_ID" in text
+    assert "OPENBILICLAW_INSTALL_APP_PROCESS_PATTERN" in text
+    assert "OPENBILICLAW_INSTALL_BUNDLED_RUNTIME_PATTERN" in text
+    assert "OPENBILICLAW_INSTALL_GRACEFUL_ATTEMPTS" in text
+    assert "OPENBILICLAW_INSTALL_LAUNCH_ATTEMPTS" in text
+    assert "com.openbiliclaw.desktop" in text
+    assert "/usr/bin/ditto --rsrc --extattr --acl" in text
+    assert "/usr/bin/codesign --verify --deep --strict" in text
+    assert "CFBundleShortVersionString" in text
+    assert "stop_old_instance" in text
+    assert "stop_bundled_runtime" in text
+    assert '/usr/bin/open -n "${TARGET_APP}"' in text
+    assert "target_app_pids" in text
+    assert "rollback_install" in text
+    assert "BACKUP_ACTIVE" in text
+    assert "INSTALL_COMPLETE" in text
+    assert "run_privileged /bin/chmod 0755" in text
+    assert "xattr -d" not in text
+    assert "xattr -dr" not in text
+
+    zsh = shutil.which("zsh")
+    if zsh is not None:
+        subprocess.run([zsh, "-n", str(helper)], check=True)
 
 
 def test_make_macos_dmg_stages_first_launch_guidance(tmp_path: Path, monkeypatch) -> None:
@@ -178,6 +263,9 @@ def test_make_macos_dmg_stages_first_launch_guidance(tmp_path: Path, monkeypatch
         assert text is True
         assert (stage / "OpenBiliClaw.app").is_dir()
         assert (stage / "Applications").is_symlink()
+        installer = stage / build_module.MACOS_INSTALLER_COMMAND_NAME
+        assert installer.is_file()
+        assert installer.stat().st_mode & 0o111
         assert (stage / build_module.MACOS_FIRST_LAUNCH_GUIDE_NAME).is_file()
         assert (stage / build_module.MACOS_FIRST_LAUNCH_IMAGE_NAME).is_file()
         assert (stage / ".background" / "openbiliclaw-dmg-guide.png").is_file()
@@ -348,17 +436,31 @@ def test_desktop_release_workflow_uses_official_macos_ollama_bundle() -> None:
     assert "brew install ollama" not in workflow
 
 
-def test_desktop_release_workflow_mentions_macos_first_launch_guide() -> None:
+def test_desktop_release_workflow_mentions_macos_installer_and_first_launch_guide() -> None:
     workflow = (
         Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release-desktop.yml"
     ).read_text(encoding="utf-8")
 
-    assert "DMG 内已放入首次打开说明" in workflow
+    assert "一键安装并启动助手与首次打开说明" in workflow
+    assert build_module.MACOS_INSTALLER_COMMAND_NAME in workflow
     assert "macOS 安全阻挡" in workflow
     assert "Control-click" in workflow
     assert "Privacy & Security" in workflow
     assert "xattr -dr com.apple.quarantine" in workflow
     assert "codesign --force" not in workflow
+
+
+@pytest.mark.parametrize(
+    "workflow_name",
+    ["release-desktop.yml", "build-installers.yml"],
+)
+def test_macos_packaging_workflows_run_installer_handoff_e2e(workflow_name: str) -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / workflow_name
+    ).read_text(encoding="utf-8")
+
+    assert 'pip install -e ".[packaging]" "pytest>=8"' in workflow
+    assert "python -m pytest -q tests/test_macos_installer_e2e.py" in workflow
 
 
 def test_manual_installer_workflow_uses_official_macos_ollama_bundle() -> None:

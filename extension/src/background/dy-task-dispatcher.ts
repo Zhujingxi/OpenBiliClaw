@@ -29,6 +29,10 @@ import type {
   DouyinSearchItem,
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
+import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
+import { runtimeAssetCandidates } from "../shared/asset-prefix.ts";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
 // the same field on globalThis. See dispatcher-mutex.ts for the
@@ -65,7 +69,7 @@ function releaseDispatcherMutex(label: string): void {
 function debugLog(event: string, data?: unknown): void {
   void (async () => {
     try {
-      await fetch(await apiUrl("/sources/_debug/log"), {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: "dy", event, data: data ?? null }),
@@ -105,7 +109,7 @@ const KNOWN_SCOPES: readonly DouyinScope[] = [
   "dy_follow",
 ] as const;
 
-export interface DyTask {
+export interface DyLegacyTask {
   id: string;
   type: "bootstrap_profile" | "search" | "hot" | "feed";
   scopes?: DouyinScope[];
@@ -118,6 +122,8 @@ export interface DyTask {
   max_items_per_hot?: number;
   max_items?: number;
 }
+
+export type DyTask = DyLegacyTask | NativeSaveTask;
 
 export interface DyHotTaskItem {
   word?: string;
@@ -193,6 +199,7 @@ let feedProgress: FeedProgress | null = null;
 // ---------------------------------------------------------------------------
 
 export function buildDyTaskUrl(task: DyTask): string | null {
+  if (task.type === "native_save") return task.content_url;
   if (task.type === "bootstrap_profile") {
     return "https://www.douyin.com/";
   }
@@ -216,6 +223,9 @@ export function buildDyDiscoveryPageUrl(
 }
 
 export function isValidDyTask(task: unknown): task is DyTask {
+  if (isNativeSaveTask(task)) {
+    return task.platform === "douyin" && task.platform_slug === "dy";
+  }
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
@@ -245,7 +255,7 @@ export function isValidDyTask(task: unknown): task is DyTask {
   return true;
 }
 
-export function computeDyTaskTimeoutMs(task: DyTask): number {
+export function computeDyTaskTimeoutMs(task: DyLegacyTask): number {
   if (task.type === "search") {
     const keywordCount =
       Array.isArray(task.keywords) && task.keywords.length > 0 ? task.keywords.length : 1;
@@ -284,7 +294,7 @@ export function computeDyTaskTimeoutMs(task: DyTask): number {
   );
 }
 
-export function buildDyExecuteMessageData(task: DyTask): Record<string, unknown> {
+export function buildDyExecuteMessageData(task: DyLegacyTask): Record<string, unknown> {
   const data: Record<string, unknown> = { task_id: task.id, type: task.type };
   if (task.scopes !== undefined) data.scopes = task.scopes;
   if (task.max_items_per_scope !== undefined) {
@@ -320,7 +330,7 @@ export function shouldFinalizeHotTask({
   return accumulatedCount >= maxItemsTotal || currentHotIndex + 1 >= hotItemCount;
 }
 
-export function shouldOpenDyTaskActive(task: DyTask): boolean {
+export function shouldOpenDyTaskActive(task: DyLegacyTask): boolean {
   return task.type === "bootstrap_profile";
 }
 
@@ -331,7 +341,7 @@ export function shouldOpenDyTaskActive(task: DyTask): boolean {
 
 async function fetchNextTask(): Promise<DyTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/dy/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/dy/next-task"));
     if (resp.status === 204) return null; // no pending task
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -343,7 +353,7 @@ async function fetchNextTask(): Promise<DyTask | null> {
 
 async function postTaskResult(result: DyTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/dy/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/dy/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),
@@ -353,6 +363,53 @@ async function postTaskResult(result: DyTaskResult): Promise<void> {
     // crashing the dispatcher. The next task poll will keep things moving.
   }
 }
+
+export interface DyNativeSaveResultTransport {
+  resolveUrl: (path: string) => Promise<string>;
+  fetch: (input: string, init: RequestInit) => Promise<unknown>;
+}
+
+const DY_NATIVE_SAVE_RESULT_TRANSPORT: DyNativeSaveResultTransport = {
+  resolveUrl: apiUrl,
+  fetch: authenticatedFetch,
+};
+
+export async function postDyNativeSaveResult(
+  result: NativeSaveResult,
+  transport: DyNativeSaveResultTransport = DY_NATIVE_SAVE_RESULT_TRANSPORT,
+): Promise<void> {
+  try {
+    await transport.fetch(await transport.resolveUrl("/sources/dy/task-result"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+    });
+  } catch {
+    // Backend transient unavailability should not crash the service worker.
+  }
+}
+
+export interface DyNativeSaveDispatchDependencies {
+  run: (
+    task: NativeSaveTask,
+    platformSlug: "dy",
+    postResult: (result: NativeSaveResult) => Promise<void>,
+  ) => Promise<void>;
+  postResult: (result: NativeSaveResult) => Promise<void>;
+}
+
+/** Behavior seam used by executeTask and tests to keep native-result closure explicit. */
+export async function dispatchDyNativeSaveTask(
+  task: NativeSaveTask,
+  dependencies: DyNativeSaveDispatchDependencies,
+): Promise<void> {
+  await dependencies.run(task, "dy", dependencies.postResult);
+}
+
+const DY_NATIVE_SAVE_DISPATCH_DEPENDENCIES: DyNativeSaveDispatchDependencies = {
+  run: runNativeSaveTask,
+  postResult: postDyNativeSaveResult,
+};
 
 function cleanupTask(): void {
   if (taskTimeoutId !== null) {
@@ -381,7 +438,7 @@ function emptyScopeCounts(): Record<DouyinScope, number> {
   return { dy_post: 0, dy_collect: 0, dy_like: 0, dy_follow: 0 };
 }
 
-function armTaskTimeout(task: DyTask): void {
+function armTaskTimeout(task: DyLegacyTask): void {
   const timeoutMs = computeDyTaskTimeoutMs(task);
   taskTimeoutId = setTimeout(async () => {
     await postTaskResult({
@@ -637,20 +694,32 @@ async function injectFetchTapInto(tabId: number): Promise<void> {
     _lastInjectStatus = "scripting_api_missing";
     return;
   }
-  try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: false },
-      files: ["dist/main/dy-fetch-tap.js"],
-      world: "MAIN",
-    });
-    _lastInjectStatus = `ok_results=${Array.isArray(result) ? result.length : "n/a"}`;
-  } catch (err) {
-    // Inject failed — could be scripting permission missing, file
-    // not in web_accessible_resources, captcha intermediate page,
-    // or chrome:// blocked. Capture the error so the content script
-    // can ship it back through scope debug.
-    _lastInjectStatus = `error: ${String(err).slice(0, 120)}`;
+  let lastError = "unknown injection error";
+  for (const file of runtimeAssetCandidates("main/dy-fetch-tap.js")) {
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: false },
+        files: [file],
+        world: "MAIN",
+      });
+      _lastInjectStatus =
+        `ok_file=${file};results=${Array.isArray(result) ? result.length : "n/a"}`;
+      return;
+    } catch (err) {
+      // Firefox structured-clones the completion value of a MAIN-world file
+      // injection and rejects a non-clonable result even though the script
+      // executed fine (only the result clone failed). Treat that as success.
+      if (String(err).includes("non-structured-clonable")) {
+        _lastInjectStatus = `ok_file=${file};uncloneable_result`;
+        return;
+      }
+      lastError = String(err);
+    }
   }
+  // Inject failed — could be a mismatched unpacked layout, scripting
+  // permission missing, captcha intermediate page, or chrome:// blocked.
+  // Capture the final error so the content script can ship it through debug.
+  _lastInjectStatus = `error: ${lastError.slice(0, 120)}`;
 }
 
 function normalizeHotTaskItems(items: DyHotTaskItem[] | undefined): DyHotTaskItem[] {
@@ -671,7 +740,20 @@ function normalizeHotTaskItems(items: DyHotTaskItem[] | undefined): DyHotTaskIte
   return result.sort((a, b) => Number(Boolean(b.seed_aweme_id)) - Number(Boolean(a.seed_aweme_id)));
 }
 
-export async function executeTask(task: DyTask): Promise<void> {
+export async function executeTask(
+  task: DyTask,
+  nativeDependencies: DyNativeSaveDispatchDependencies = DY_NATIVE_SAVE_DISPATCH_DEPENDENCIES,
+): Promise<void> {
+  if (task.type === "native_save") {
+    if (taskInFlight) return;
+    taskInFlight = true;
+    try {
+      await dispatchDyNativeSaveTask(task, nativeDependencies);
+    } finally {
+      taskInFlight = false;
+    }
+    return;
+  }
   debugLog("executeTask:start", { task_id: task.id, taskInFlight });
   if (taskInFlight) {
     debugLog("executeTask:already_in_flight");
@@ -1139,6 +1221,7 @@ export interface DyFeedResult {
 }
 
 async function pollNextTask(): Promise<void> {
+  await ensureNativeSaveTaskRecovery();
   if (taskInFlight) return;
   const task = await fetchNextTask();
   if (!task) return;

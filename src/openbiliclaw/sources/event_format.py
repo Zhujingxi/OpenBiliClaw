@@ -54,10 +54,192 @@ the LLM consumes ``context``.
 
 from __future__ import annotations
 
+import json
 import logging
+import unicodedata
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+# --- Comment / danmaku text capture (event-capture-completion Phase 2/3) -----
+#
+# Users' own comment / danmaku text is the strongest first-person interest
+# expression we capture. Both surfaces sanitize independently (invariant 5,
+# two-layer defense): the extension truncates + strips control chars before
+# send, and the server repeats it here as the authoritative final defense.
+#
+# Calibration: 200 chars keeps a full danmaku / short comment intact while
+# capping a pasted-essay reply so a single event can't blow the prompt budget.
+# Reopen on any provider/model swap (pitfall #3).
+COMMENT_TEXT_MAX_CHARS = 200
+
+# ``comment_kind`` whitelist (invariant 4). Out-of-range values are treated as
+# missing ("") + logged at WARNING, matching the retracted_action guard.
+VALID_COMMENT_KINDS = frozenset({"", "comment", "danmaku"})
+
+# Evidence strength for a danmaku. Calibration: below a written comment (0.75)
+# because bullet chatter is more casual / reactive, ties with follow (0.6).
+# Reopen on any provider/model swap (pitfall #3).
+DANMAKU_SIGNAL_STRENGTH = 0.6
+
+
+def _strip_unicode_category_c(text: str) -> str:
+    """Drop every Unicode category-C code point (control / format / surrogate /
+    private-use / unassigned) — zero-width joiners, bidi marks, NUL, newlines.
+    Ordinary whitespace (category Z) is preserved so interior spaces survive."""
+    return "".join(ch for ch in text if not unicodedata.category(ch).startswith("C"))
+
+
+def sanitize_comment_text(text: Any) -> str:
+    """Truncate to ``COMMENT_TEXT_MAX_CHARS`` and strip Unicode category-C.
+
+    The authoritative server-side half of the two-layer defense (invariant 5):
+    never trusts the extension's pre-sanitization. Non-string input → "".
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    cleaned = _strip_unicode_category_c(text).strip()
+    return cleaned[:COMMENT_TEXT_MAX_CHARS]
+
+
+def normalize_comment_kind(kind: Any) -> str:
+    """Return a whitelisted ``comment_kind`` ("" | "comment" | "danmaku").
+
+    Out-of-range / non-string values are treated as missing ("") and logged at
+    WARNING (invariant 4 — enum whitelist with coercion logging, pitfall #4).
+    """
+    if not isinstance(kind, str):
+        return ""
+    normalized = kind.strip().lower()
+    if normalized in VALID_COMMENT_KINDS:
+        return normalized
+    logger.warning("normalize_comment_kind: out-of-range comment_kind %r → ''", kind)
+    return ""
+
+
+# --- Retraction discounting (event-capture-completion Phase 0) --------------
+#
+# A retraction (an unlike / unbookmark / unfollow / undo-retweet) neutralizes a
+# prior positive event. The positive evidence is *discounted, never deleted*
+# (invariant 3): its metadata is marked ``retracted`` and its evidence strength
+# capped. Whitelisted actions map 1:1 to positive event_types.
+RETRACTABLE_ACTIONS = frozenset({"like", "favorite", "share", "follow"})
+
+# Post-retraction evidence strength. Calibration: mirrors the extension's
+# explicit retraction ``signal_strength`` (see the feedback/retraction branch in
+# ``default_signal_strength_for_event`` — both 0.2) so a retracted positive is
+# downgraded to the same weak-evidence floor as the retraction signal itself.
+# Reopen calibration on any provider/model swap (pitfall #3).
+RETRACTION_DISCOUNTED_STRENGTH = 0.2
+
+# Natural-language marker appended to a retracted event's rendered context so
+# every reread LLM consumption face (preference / awareness) sees the undo, not
+# just the structured ``retracted`` flag. Half-width parens match the existing
+# ``format_event_context`` extra style.
+RETRACTION_RENDER_MARKER = "(已撤销)"
+
+
+def apply_retraction_discount(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``metadata`` marked retracted with capped strength.
+
+    Idempotent: re-applying keeps ``signal_strength`` at the min (never
+    re-inflates). A missing / unparseable strength is set to the floor.
+    """
+    result = dict(metadata)
+    result["retracted"] = True
+    raw = result.get("signal_strength")
+    try:
+        current = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        current = None
+    result["signal_strength"] = (
+        RETRACTION_DISCOUNTED_STRENGTH
+        if current is None
+        else min(current, RETRACTION_DISCOUNTED_STRENGTH)
+    )
+    return result
+
+
+def _metadata_is_retracted(metadata: Any) -> bool:
+    """True when the event's metadata carries a truthy ``retracted`` flag.
+
+    Handles both dict metadata (in-memory events) and the raw JSON-string
+    metadata returned by ``Database.query_events`` for reread paths.
+    """
+    if isinstance(metadata, dict):
+        return bool(metadata.get("retracted"))
+    if isinstance(metadata, str) and metadata:
+        try:
+            parsed = json.loads(metadata)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(parsed, dict) and bool(parsed.get("retracted"))
+    return False
+
+
+def render_retraction_marked_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append ``(已撤销)`` to the context of retracted events for rendering.
+
+    Non-retracted events are returned as-is (identity), so rendering of an
+    event set without any retraction is byte-for-byte unchanged (invariant 2).
+    """
+    marked: list[dict[str, Any]] = []
+    for event in events:
+        if not _metadata_is_retracted(event.get("metadata")):
+            marked.append(event)
+            continue
+        context = str(event.get("context") or "")
+        if RETRACTION_RENDER_MARKER in context:
+            marked.append(event)
+            continue
+        copy = dict(event)
+        copy["context"] = (
+            context + RETRACTION_RENDER_MARKER if context else RETRACTION_RENDER_MARKER
+        )
+        marked.append(copy)
+    return marked
+
+
+def parse_event_timestamp(metadata: dict[str, Any] | None) -> datetime | None:
+    """Extract a timezone-aware UTC event time from ``metadata.timestamp``.
+
+    The extension folds ``item.timestamp`` (epoch milliseconds) into
+    ``metadata.timestamp`` at ingest; account_sync / server events may carry an
+    ISO string. Returns ``None`` when no usable timestamp is present so callers
+    can conservatively skip causality-dependent decisions (Phase 0 rule: time
+    unavailable → do not discount).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("timestamp")
+    if isinstance(raw, bool):  # bool is an int subclass — never a timestamp
+        return None
+    if isinstance(raw, int | float):
+        return _epoch_to_datetime(float(raw))
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        try:
+            return _epoch_to_datetime(float(text))
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _epoch_to_datetime(value: float) -> datetime:
+    """Convert an epoch value to UTC, treating large magnitudes as milliseconds."""
+    # Values above ~1e11 are milliseconds (year 5138 in seconds), so any real
+    # ms epoch (~1.7e12 today) divides cleanly while second epochs pass through.
+    seconds = value / 1000.0 if abs(value) >= 1e11 else value
+    return datetime.fromtimestamp(seconds, UTC)
+
 
 SatisfactionCategory = Literal["positive", "neutral", "negative", "unknown"]
 
@@ -74,6 +256,13 @@ _MEANINGFUL_DWELL_MIN_SECONDS = 15
 _MEANINGFUL_DWELL_MIN_RATIO = 0.3
 _QUICK_EXIT_MAX_SECONDS = 5
 
+# Content pages (xhs note / zhihu answer / reddit post / X status) carry no
+# video duration, so the ratio rule can't apply. A duration-less
+# `content_page_exit` dwell is scored on visible reading time alone: >= 30s is
+# engaged reading (positive); < 5s reuses the quick-exit negative; between is
+# neutral.
+_CONTENT_DWELL_POSITIVE_MIN_SECONDS = 30
+
 # Explicit engagement event types (no dwell needed to read intent).
 _EXPLICIT_POSITIVE_EVENT_TYPES = frozenset({"like", "coin", "favorite", "comment"})
 
@@ -87,7 +276,7 @@ _NEGATIVE_REACTIONS = frozenset({"thumbs_down"})
 
 # Events that record passive browse — useful for context but never a
 # direct signal of like / dislike.
-_PASSIVE_BROWSE_EVENT_TYPES = frozenset({"snapshot", "scroll", "hover", "search"})
+_PASSIVE_BROWSE_EVENT_TYPES = frozenset({"snapshot", "scroll", "hover", "search", "reshuffle"})
 
 
 def classify_event_satisfaction(event: dict[str, Any]) -> tuple[SatisfactionCategory, str]:
@@ -130,6 +319,12 @@ def classify_event_satisfaction(event: dict[str, Any]) -> tuple[SatisfactionCate
     if event_type == "feedback":
         feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
         reaction = str(metadata.get("reaction") or "").strip().lower()
+        # Retraction (an unlike / unbookmark) is a neutralization, never a
+        # negative preference — checked BEFORE any feedback-negative rule so an
+        # incidental negative reaction can't flip it (invariant: retraction is
+        # neutral).
+        if feedback_type == "retraction":
+            return ("neutral", "retraction")
         if feedback_type in _NEGATIVE_FEEDBACK_TYPES or reaction in _NEGATIVE_REACTIONS:
             return ("negative", "explicit_negative")
         if feedback_type in _POSITIVE_FEEDBACK_TYPES or reaction in _POSITIVE_REACTIONS:
@@ -158,6 +353,13 @@ def _classify_click_dwell(
 
     if watch_seconds < _QUICK_EXIT_MAX_SECONDS:
         return ("negative", "quick_exit")
+
+    # Content-page dwell has no video duration — score on reading time alone.
+    dwell_source = str(metadata.get("dwell_source") or "").strip()
+    if dwell_source == "content_page_exit":
+        if watch_seconds >= _CONTENT_DWELL_POSITIVE_MIN_SECONDS:
+            return ("positive", "engaged_reading")
+        return ("neutral", "shallow_view")
 
     duration = _read_dwell_field(event, metadata, "video_duration_seconds")
     if duration is None:
@@ -207,6 +409,7 @@ SOURCE_YOUTUBE = "youtube"
 SOURCE_TWITTER = "twitter"
 SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
+SOURCE_BANGUMI = "bangumi"
 
 # Human-readable platform labels used to render the context string.
 # Keys must match the source_platform values stored in event metadata.
@@ -219,6 +422,7 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_TWITTER: "X",
     SOURCE_ZHIHU: "知乎",
     SOURCE_REDDIT: "Reddit",
+    SOURCE_BANGUMI: "Bangumi",
 }
 
 # Action verbs per event_type. Designed so the rendered sentence reads
@@ -230,11 +434,13 @@ _EVENT_TYPE_LABELS: dict[str, str] = {
     "like": "点赞了",
     "follow": "关注了",
     "dislike": "标记不喜欢",
+    "dismiss": "忽略了",
     "click": "点开了",
     "dialogue": "聊到",
     "feedback": "反馈过",
     "comment": "评论过",
     "share": "分享了",
+    "reshuffle": "换了一批",
 }
 
 _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
@@ -247,10 +453,18 @@ _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
     "follow": 0.6,
     "view": 0.35,
     "click": 0.3,
-    "search": 0.25,
+    # Search is an explicit-intent signal (the user names a topic), weighted
+    # above passive view. It stays satisfaction-neutral (_PASSIVE_BROWSE_EVENT_TYPES)
+    # since a query says what they want, not whether they were satisfied.
+    "search": 0.5,
     "hover": 0.1,
     "scroll": 0.1,
     "snapshot": 0.1,
+    # One reshuffle describes a batch-level navigation choice, not ten
+    # item-level dislikes. Keep it at the same weak, satisfaction-neutral
+    # evidence strength as other passive browsing actions (2026-07-21 UX
+    # correction: removing the old bulk-dismiss toggle).
+    "reshuffle": 0.1,
     "dislike": 1.0,
 }
 
@@ -271,6 +485,11 @@ def default_signal_strength_for_event(
     if normalized_event_type == "feedback":
         feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
         reaction = str(metadata.get("reaction") or "").strip().lower()
+        # A retraction is weak evidence (0.2) — defended here for server-built
+        # or metadata-stripped events where the extension's explicit 0.2 is
+        # absent and the plain feedback default (0.5) would otherwise apply.
+        if feedback_type == "retraction":
+            return 0.2
         if feedback_type == "dislike" or reaction == "thumbs_down":
             return 1.0
         if feedback_type == "like" or reaction == "thumbs_up":
@@ -280,6 +499,14 @@ def default_signal_strength_for_event(
         if feedback_type == "dismiss":
             return 0.5
         return 0.5
+
+    # A danmaku is a lighter comment sub-kind (0.6 vs a written comment's 0.75);
+    # defended here for metadata-stripped / server-built events (mirrors the
+    # retraction branch above).
+    if normalized_event_type == "comment":
+        comment_kind = str(metadata.get("comment_kind") or "").strip().lower()
+        if comment_kind == "danmaku":
+            return DANMAKU_SIGNAL_STRENGTH
 
     return _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE.get(normalized_event_type)
 
@@ -395,6 +622,14 @@ def build_event(
     final_metadata.setdefault("source_platform", source_platform)
     if author and "author" not in final_metadata:
         final_metadata["author"] = author
+    # Comment / danmaku text is the final sanitization defense (invariant 5) and
+    # comment_kind the enum whitelist (invariant 4). Normalize BEFORE the
+    # signal_strength fallback so a danmaku's 0.6 is derived from the cleaned
+    # kind.
+    if "comment_kind" in final_metadata:
+        final_metadata["comment_kind"] = normalize_comment_kind(final_metadata["comment_kind"])
+    if "comment_text" in final_metadata:
+        final_metadata["comment_text"] = sanitize_comment_text(final_metadata["comment_text"])
     if "signal_strength" not in final_metadata:
         signal_strength = default_signal_strength_for_event(event_type, final_metadata)
         if signal_strength is not None:
@@ -410,6 +645,15 @@ def build_event(
             source_platform=source_platform,
             title=title,
             author=effective_author,
+        )
+
+    # Surface the user's own comment / danmaku text in the human-readable
+    # context so the preference LLM reads it directly (it's the strongest
+    # first-person interest signal). The excerpt is already sanitized above.
+    comment_excerpt = str(final_metadata.get("comment_text") or "")
+    if event_type == "comment" and comment_excerpt and "评论:『" not in context:
+        context = (
+            f"{context},评论:『{comment_excerpt}』" if context else f"评论:『{comment_excerpt}』"
         )
 
     event: dict[str, Any] = {

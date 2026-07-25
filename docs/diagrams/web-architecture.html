@@ -309,7 +309,7 @@
         </div>
         <div class="box static">
           <strong>根路径跳转</strong>
-          <span>`/` 302 到 `/web`；手机入口由插件二维码生成 `/m/` URL。</span>
+          <span>`/` 302 到 `/web`；`/setup` 承载首次配置；降级时四个静态入口及其资源仍可达。</span>
         </div>
       </div>
 
@@ -393,12 +393,12 @@
       <div class="step">
         <span class="step-num">3</span>
         <strong>首屏 REST hydration</strong>
-        <p>先取推荐列表；runtime status、activity、delight、profile 并行或异步补齐。</p>
+        <p>先用 provider-free `/api/ping` 判断是否降级；正常时再并行加载推荐、runtime、health/profile/activity/config，降级时只读配置并停止业务 hydration。</p>
       </div>
       <div class="step">
         <span class="step-num">4</span>
         <strong>连接 runtime-stream</strong>
-        <p>建立 WebSocket 后接收池子、探针、画像、活动和降级事件。</p>
+        <p>建立 WebSocket 后接收池子、探针、画像、活动和降级事件；桌面端遇 degraded 会进入模型设置恢复面。</p>
       </div>
       <div class="step">
         <span class="step-num">5</span>
@@ -447,7 +447,7 @@
           <div class="step">
             <span class="step-num">2</span>
             <strong>Durable chat</strong>
-            <p>提交 `/chat/turns` 后轮询 turn 状态；reload 后按 session / scope 恢复 pending 与历史。</p>
+            <p>提交 `/chat/turns` 后轮询 turn 状态；reload 后按 session / scope 恢复 pending 与历史。成功才追加 user+agent 历史和后台学习；失败/超时回滚临时历史，持久化 `failed` + 空 `reply` + 安全 `error`。</p>
           </div>
           <div class="step">
             <span class="step-num">3</span>
@@ -469,6 +469,10 @@
       <div class="box risk">
         <strong>推荐慢请求</strong>
         <span>移动端首屏有超时兜底，慢请求不会让页面一直停在 loading。</span>
+      </div>
+      <div class="box risk">
+        <strong>对话失败原子性</strong>
+        <span>Web / CLI / OpenClaw 只在真实回复后学习；失败时回滚临时历史，并在各边界显示不泄漏上游细节的安全错因。</span>
       </div>
       <div class="box risk">
         <strong>权限边界</strong>

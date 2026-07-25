@@ -24,7 +24,10 @@ Cleanup rules (unioned), see :func:`cleanup_image_cache`:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import logging
 import re
 import time
 from contextlib import suppress
@@ -32,6 +35,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -263,7 +268,25 @@ ALLOWED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
     "douyinvod.com",
     "ytimg.com",
     "ggpht.com",
+    "lain.bgm.tv",
 )
+# CN CDNs must be fetched DIRECT: env/system proxies (Clash & co.) route them
+# through exit IPs their risk control blocks or throttles — the same failure
+# mode that broke the Bilibili login probe (see bilibili/api.py
+# trust_env=False). Overseas CDNs (YouTube thumbnails) stay on trust_env so
+# users who NEED the proxy to reach them keep working.
+# lain.bgm.tv (Bangumi covers) is deliberately NOT here: it is Cloudflare-
+# fronted and resolves overseas, so a 2026-07-18 curl showed direct fetch
+# timing out while the env/system proxy returned 200 in ~0.5s — the ytimg
+# overseas pattern, not the CN-CDN risk-control pattern. It stays on trust_env.
+_DIRECT_FETCH_HOST_SUFFIXES: tuple[str, ...] = (
+    "hdslb.com",
+    "xhscdn.com",
+    "pstatp.com",
+    "douyinpic.com",
+    "douyinvod.com",
+)
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _FETCH_TIMEOUT_SECONDS = 10.0
 _MAX_REDIRECTS = 3
@@ -291,6 +314,14 @@ def is_allowed_image_host(hostname: str) -> bool:
     host = hostname.rstrip(".").lower()
     return any(
         host == suffix or host.endswith(f".{suffix}") for suffix in ALLOWED_IMAGE_HOST_SUFFIXES
+    )
+
+
+def _is_direct_fetch_host(hostname: str) -> bool:
+    """Whether this host is a CN CDN that must bypass env/system proxies."""
+    host = hostname.rstrip(".").lower()
+    return any(
+        host == suffix or host.endswith(f".{suffix}") for suffix in _DIRECT_FETCH_HOST_SUFFIXES
     )
 
 
@@ -377,31 +408,67 @@ async def _read_bounded(response: httpx.Response) -> bytes:
     return b"".join(chunks)
 
 
+# Per-host rate limiter for cover-fetch failure WARNINGs. This module was
+# fully silent for years, which made the 2026-07 「小红书都没头图」 report
+# undiagnosable from logs — the only signal was xhscdn's *absence* from the
+# slow-miss lines while other CN CDN hosts appeared. First failure per host
+# logs immediately; afterwards at most one WARNING per host per interval,
+# carrying the suppressed-failure count.
+_FAILURE_LOG_INTERVAL_SECONDS = 600.0
+_failure_log_state: dict[str, tuple[int, float]] = {}
+
+
+def _log_cover_fetch_failure(url: str, reason: str) -> None:
+    try:
+        host = str(httpx.URL(url).host or "") or "<unparseable>"
+    except Exception:  # noqa: BLE001 — logging must never raise
+        host = "<unparseable>"
+    count, last_log = _failure_log_state.get(host, (0, 0.0))
+    count += 1
+    now = time.monotonic()
+    if last_log == 0.0 or now - last_log >= _FAILURE_LOG_INTERVAL_SECONDS:
+        logger.warning(
+            "cover fetch failed for host %s: %s (%d failure(s) since last report)",
+            host,
+            reason,
+            count,
+        )
+        _failure_log_state[host] = (0, now)
+    else:
+        _failure_log_state[host] = (count, last_log)
+
+
 async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
     """Fetch a whitelisted cover image, returning ``(data, content_type)``.
 
     Enforces scheme/host whitelist, manual redirect revalidation (max 3 hops),
     ``image/*`` content type, and a 10MB ceiling (rejected before reading the
     body when ``Content-Length`` says so, and during the read otherwise). Raises
-    :class:`CoverFetchError` (400/403/413/502/504) on any failure.
+    :class:`CoverFetchError` (400/403/413/502/504) on any failure. Upstream /
+    network failures additionally emit a per-host rate-limited WARNING.
     """
     parsed = _parse_image_url(url)
     try:
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT_SECONDS,
             follow_redirects=False,
+            trust_env=not _is_direct_fetch_host(str(parsed.host or "")),
         ) as client:
             response = await _send_with_redirects(client, parsed)
             try:
                 if response.status_code < 200 or response.status_code >= 300:
-                    raise CoverFetchError(502, "Upstream request failed")
+                    detail = f"Upstream request failed (HTTP {response.status_code})"
+                    _log_cover_fetch_failure(url, detail)
+                    raise CoverFetchError(502, detail)
                 content_type = _validate_content_headers(response.headers)
                 data = await _read_bounded(response)
             finally:
                 await response.aclose()
     except httpx.TimeoutException as exc:
+        _log_cover_fetch_failure(url, f"timeout: {exc!r}")
         raise CoverFetchError(504, "Upstream request timed out") from exc
     except httpx.HTTPError as exc:
+        _log_cover_fetch_failure(url, f"network error: {exc!r}")
         raise CoverFetchError(502, "Upstream request failed") from exc
     return data, content_type
 
@@ -481,4 +548,53 @@ async def prefetch_cover(url: str) -> bool:
     except Exception:
         return False
     save_image_bytes(url, data, content_type)
+    return True
+
+
+# Upload ceiling for extension-harvested covers. XHS covers are ~30-80KB webp;
+# 1MB leaves headroom for large jpegs without letting a misbehaving client
+# write arbitrary blobs. Deliberately far below the 10MB proxy-fetch ceiling —
+# uploads are attacker-shaped input, fetches of whitelisted CDNs are not.
+MAX_EXTENSION_COVER_BYTES = 1 * 1024 * 1024
+
+
+def save_extension_cover(url: str, data_base64: str, content_type: str) -> bool:
+    """Persist a cover image the browser extension fetched in the page context.
+
+    Why this path exists: xhscdn cover URLs carry a short-lived rotating
+    ``{timestamp}/{token}`` prefix, so a server-side fetch is a race the
+    backend can lose — to token expiry, or to its own egress to the CDN
+    (the 2026-07 「没头图」 field report's backend never landed a single
+    xhscdn fetch while other CN CDNs worked). The extension fetches the
+    bytes at scrape time, in the page, when the URL is freshest, and ships
+    them with the note metadata — caching then cannot depend on this
+    machine's later fetch succeeding.
+
+    Returns True only when a new cache entry was written. Rejections (bad
+    host, bad content type, oversize, undecodable base64) return False and
+    log at DEBUG — this is best-effort enrichment, a bad cover must never
+    break note ingestion.
+    """
+    if not is_allowed_image_url(url):
+        logger.debug("extension cover rejected (host not allowed): %.100s", url)
+        return False
+    normalized_type = content_type.split(";")[0].strip().lower()
+    if not normalized_type.startswith("image/"):
+        logger.debug("extension cover rejected (content type %r): %.100s", content_type, url)
+        return False
+    if is_cover_cached(url):
+        return False
+    # ~4/3 base64 expansion; cheap pre-check before decoding.
+    if len(data_base64) > MAX_EXTENSION_COVER_BYTES * 4 // 3 + 8:
+        logger.debug("extension cover rejected (oversize payload): %.100s", url)
+        return False
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        logger.debug("extension cover rejected (invalid base64): %.100s", url)
+        return False
+    if not data or len(data) > MAX_EXTENSION_COVER_BYTES:
+        logger.debug("extension cover rejected (empty or oversize): %.100s", url)
+        return False
+    save_image_bytes(url, data, normalized_type)
     return True

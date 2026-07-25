@@ -86,9 +86,15 @@ async def test_runtime_context_routes_configured_module_overrides(
         user_input="keywords",
         caller="sources.xhs.keyword_gen",
     )
+    await ctx.llm_service.complete_structured_task(
+        system_instruction="Return JSON.",
+        user_input="inspiration",
+        caller="discovery.keyword_inspiration",
+    )
 
     assert [call["model"] for call in deepseek.calls] == [
         "deepseek-eval",
+        "deepseek-discovery",
         "deepseek-discovery",
     ]
     assert [call["model"] for call in openai.calls] == ["gpt-rec"]

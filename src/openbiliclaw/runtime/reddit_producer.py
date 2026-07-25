@@ -14,6 +14,7 @@ from typing import Any
 from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_REDDIT
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.reddit_tasks import (
     REDDIT_SOURCE_ORDER,
     REDDIT_SOURCE_STRATEGIES,
@@ -76,7 +77,13 @@ class RedditDiscoveryProducer:
         if _is_extension_backend(self.backend):
             return await self._produce_with_extension(limit=limit)
 
-        status = probe_reddit_command_backend(
+        # Command-backed probes may spawn ``rdt`` / ``opencli`` and wait for
+        # their network round-trip.  Running them on the API event loop makes
+        # every HTTP/WebSocket request pause for the command timeout (15s in a
+        # real post-init run).  Keep the whole synchronous adapter boundary in
+        # a worker thread, not only the eventual discovery command.
+        status = await asyncio.to_thread(
+            probe_reddit_command_backend,
             self.backend,
             which=self.which if self.which is not None else None,
             runner=self.runner,
@@ -158,10 +165,14 @@ class RedditDiscoveryProducer:
                         subreddit=command_input if source in {"hot", "subreddit"} else "",
                         limit=command_limit,
                     )
-                    rows = run_reddit_command(
+                    rows = await asyncio.to_thread(
+                        run_reddit_command,
                         args,
                         runner=self.runner,
-                        timeout=max(15.0, float(self.request_interval_seconds) * command_limit),
+                        timeout=max(
+                            15.0,
+                            float(self.request_interval_seconds) * command_limit,
+                        ),
                     )
                     for row in rows:
                         row.setdefault("source_strategy", strategy)
@@ -643,17 +654,9 @@ class RedditDiscoveryProducer:
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=min_interval)
 
     def _candidate_pool_full(self) -> bool:
-        pipeline = self.candidate_pipeline
-        if pipeline is None:
-            return False
-        checker = getattr(pipeline, "is_candidate_pool_full", None)
-        if not callable(checker):
-            return False
-        try:
-            return bool(checker())
-        except Exception:
-            logger.debug("reddit producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "reddit", logger=logger, label="reddit producer"
+        )
 
     def _skip(self, reason: str) -> dict[str, object]:
         self._last_skip_reason = reason

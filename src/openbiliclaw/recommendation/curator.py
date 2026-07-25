@@ -108,6 +108,23 @@ def candidate_amplification_keys(item: DiscoveredContent) -> set[str]:
     return {key for key in keys if key}
 
 
+def candidate_feedback_topics(item: DiscoveredContent) -> frozenset[str]:
+    """Return normalized fine/coarse topic aliases used by feedback scoring."""
+    values = (
+        normalize_amplification_key(str(getattr(item, "topic_key", "") or "")),
+        normalize_amplification_key(str(getattr(item, "topic_group", "") or "")),
+    )
+    return frozenset(value for value in values if value)
+
+
+def _feedback_row_topics(row: dict[str, object]) -> frozenset[str]:
+    values = (
+        normalize_amplification_key(str(row.get("topic_key", "") or "")),
+        normalize_amplification_key(str(row.get("topic_group", "") or "")),
+    )
+    return frozenset(value for value in values if value)
+
+
 # ---------------------------------------------------------------------------
 # PoolCurator
 # ---------------------------------------------------------------------------
@@ -145,6 +162,25 @@ class PoolCurator:
         signals = self._database.get_recent_recommendation_signals(
             limit=self._history_window,
         )
+        feedback_rows = self._database.get_feedback_signals(
+            limit=self._history_window,
+        )
+        return self.build_context_from_rows(
+            signals,
+            feedback_rows,
+            newly_confirmed_amplification_keys=newly_confirmed_amplification_keys,
+            rolling_window_hours=rolling_window_hours,
+        )
+
+    def build_context_from_rows(
+        self,
+        signals: list[dict[str, object]],
+        feedback_rows: list[dict[str, object]],
+        *,
+        newly_confirmed_amplification_keys: set[str] | frozenset[str] | None = None,
+        rolling_window_hours: int = 24,
+    ) -> ScoringContext:
+        """Build scoring context from a caller-owned consistent DB snapshot."""
         topic_keys = tuple(
             str(row.get("topic_key", "")).strip()
             for row in signals
@@ -161,9 +197,6 @@ class PoolCurator:
             if str(row.get("source", "")).strip()
         )
 
-        feedback_rows = self._database.get_feedback_signals(
-            limit=self._history_window,
-        )
         disliked_ups: set[int] = set()
         disliked_topics: set[str] = set()
         liked_topics: set[str] = set()
@@ -175,20 +208,17 @@ class PoolCurator:
         disliked_franchises: set[str] = set()
         for row in feedback_rows:
             ftype = str(row.get("feedback_type", "")).strip()
+            topics = _feedback_row_topics(row)
             if ftype == "dislike":
                 up_mid = row.get("up_mid")
                 if isinstance(up_mid, int) and up_mid > 0:
                     disliked_ups.add(up_mid)
-                topic = str(row.get("topic_key", "")).strip()
-                if topic:
-                    disliked_topics.add(topic)
+                disliked_topics.update(topics)
                 franchise = str(row.get("franchise_key", "")).strip()
                 if franchise:
                     disliked_franchises.add(franchise)
             elif ftype in ("like", "save"):
-                topic = str(row.get("topic_key", "")).strip()
-                if topic:
-                    liked_topics.add(topic)
+                liked_topics.update(topics)
 
         normalized_amplification_keys = frozenset(
             key
@@ -274,7 +304,19 @@ class PoolCurator:
 
     def needs_replenishment(self, *, threshold: int = _POOL_LOW_THRESHOLD) -> bool:
         """True when the pool is getting thin."""
-        return self._database.count_pool_candidates() < threshold
+        return self.needs_replenishment_for_count(
+            self._database.count_pool_candidates(),
+            threshold=threshold,
+        )
+
+    @staticmethod
+    def needs_replenishment_for_count(
+        available_count: int,
+        *,
+        threshold: int = _POOL_LOW_THRESHOLD,
+    ) -> bool:
+        """Pure inventory gate for callers that already own a pool snapshot."""
+        return max(0, int(available_count)) < max(0, int(threshold))
 
     def pool_count(self) -> int:
         """Current number of fresh pool candidates."""
@@ -359,13 +401,13 @@ class PoolCurator:
     def _serendipity_bonus(source_strategy: str) -> float:
         """Bonus for content that brings surprise/novelty.
 
-        explore gets full bonus (cross-domain discovery),
-        trending gets partial bonus (popular but potentially new topics).
+        ``explore`` is the sole discovery context allowed a scoring
+        privilege (cross-domain discovery). Every other strategy —
+        including ``trending`` — is source context only and must not
+        earn a rec-score bonus.
         """
         if source_strategy == "explore":
             return 1.0
-        if source_strategy == "trending":
-            return 0.5
         return 0.0
 
     @staticmethod
@@ -389,10 +431,10 @@ class PoolCurator:
         adj = 0.0
         if item.up_mid and item.up_mid in feedback.disliked_up_mids:
             adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-        topic = (item.topic_group or item.topic_key).strip()
-        if topic and topic in feedback.disliked_topic_keys:
+        candidate_topics = candidate_feedback_topics(item)
+        if candidate_topics & feedback.disliked_topic_keys:
             adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
-        if topic and topic in feedback.liked_topic_keys:
+        if candidate_topics & feedback.liked_topic_keys:
             adj += _FEEDBACK_LIKE_TOPIC_BONUS
         item_franchise = (getattr(item, "franchise_key", "") or "").strip()
         if item_franchise and item_franchise in feedback.disliked_franchises:
@@ -479,26 +521,41 @@ class PoolCurator:
             score = base + fresh - fatigue - monotony + bonus
 
             # Embedding-based feedback adjustment
-            if embedding_service is not None and topic_label:
-                topic_vec = await embedding_service.embed(topic_label)
+            candidate_topics = candidate_feedback_topics(item)
+            candidate_topic_vecs = []
+            if embedding_service is not None:
+                for candidate_topic in candidate_topics:
+                    vector = await embedding_service.embed(candidate_topic)
+                    if vector:
+                        candidate_topic_vecs.append(vector)
+
+            if embedding_service is not None:
                 adj = 0.0
                 if item.up_mid and item.up_mid in context.feedback.disliked_up_mids:
                     adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-                if topic_vec:
-                    for dv in _disliked_vecs.values():
-                        if (
-                            cosine_similarity(topic_vec, dv)
-                            >= embedding_service.similarity_threshold
-                        ):
-                            adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
-                            break
-                    for lv in _liked_vecs.values():
-                        if (
-                            cosine_similarity(topic_vec, lv)
-                            >= embedding_service.similarity_threshold
-                        ):
-                            adj += _FEEDBACK_LIKE_TOPIC_BONUS
-                            break
+                disliked_topic_match = bool(
+                    candidate_topics & context.feedback.disliked_topic_keys
+                ) or any(
+                    cosine_similarity(topic_vec, disliked_vec)
+                    >= embedding_service.similarity_threshold
+                    for topic_vec in candidate_topic_vecs
+                    for disliked_vec in _disliked_vecs.values()
+                )
+                if disliked_topic_match:
+                    adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
+                liked_topic_match = bool(
+                    candidate_topics & context.feedback.liked_topic_keys
+                ) or any(
+                    cosine_similarity(topic_vec, liked_vec)
+                    >= embedding_service.similarity_threshold
+                    for topic_vec in candidate_topic_vecs
+                    for liked_vec in _liked_vecs.values()
+                )
+                if liked_topic_match:
+                    adj += _FEEDBACK_LIKE_TOPIC_BONUS
+                item_franchise = (getattr(item, "franchise_key", "") or "").strip()
+                if item_franchise and item_franchise in context.feedback.disliked_franchises:
+                    adj -= _FEEDBACK_DISLIKE_FRANCHISE_PENALTY
                 score += adj
             else:
                 score += self._feedback_adjustment(item, context.feedback)

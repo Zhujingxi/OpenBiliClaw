@@ -96,7 +96,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计；正式事件类型为 `view/dialogue/pause/seek/search/favorite/like/coin/comment/click/scroll/hover/snapshot/feedback/follow/share`；入库前会为缺失 `metadata.signal_strength` 的事件补统一证据强度，已有平台自定义值不覆盖；v0.3.x 每行带 `inferred_satisfaction` + `satisfaction_reason`（写入时由 `classify_event_satisfaction` 决定），`query_events(satisfaction_modes=...)` 支持按 positive/negative/neutral/unknown 过滤，`unknown` 同时匹配 pre-migration 的 NULL 行；`query_events_since(after_event_id, event_types)` 提供按 `id ASC` 的游标增量读取，供反馈批学习这类严格 cursor 消费方避免 newest-first limit 跳过旧事件 |
+| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计；正式事件类型为 `view/dialogue/pause/seek/search/favorite/like/coin/comment/click/scroll/hover/snapshot/reshuffle/feedback/follow/share`；入库前会为缺失 `metadata.signal_strength` 的事件补统一证据强度，已有平台自定义值不覆盖。`reshuffle` 是强度 `0.1`、satisfaction-neutral 的单批导航事件，不等价于其中每条内容的 `dismiss`。v0.3.x 每行带 `inferred_satisfaction` + `satisfaction_reason`（写入时由 `classify_event_satisfaction` 决定），`query_events(satisfaction_modes=...)` 支持按 positive/negative/neutral/unknown 过滤，`unknown` 同时匹配 pre-migration 的 NULL 行；`query_events_since(after_event_id, event_types)` 提供按 `id ASC` 的游标增量读取，供反馈批学习这类严格 cursor 消费方避免 newest-first limit 跳过旧事件 |
 | 4.2 偏好层 | ✅ | LLM structured extraction + 合并 + 衰减 |
 | 4.3 灵魂层 | ✅ | 初始画像生成 + `profile` CLI 展示 |
 | 4.4 觉察层 + 洞察层 | ✅ | 觉察笔记、洞察假设、反馈更新 |
@@ -105,11 +105,13 @@
 | 对话学习状态 | ✅ | `dialogue` 事件 + `insight_candidates.json`，支撑聊天信号的受控学习 |
 | 持续刷新状态 | ✅ | `discovery_runtime.json` 记录候选池刷新、通知游标、最近处理事件位置、正向/负向 probe 冷却、probe distance 历史和短期探索 buffer |
 | 认知变化状态 | ✅ | `cognition_updates.json` 记录关键认知变化、通知状态和来源 |
-| 账户同步状态 | ✅ | `account_sync_state.json` 记录历史/收藏/关注同步游标、已见 ID 集合、签名和最近错误 |
+| 账户同步状态 | ✅ | `account_sync_state.json` 记录历史/收藏/关注同步游标、已见 ID 集合、签名、最近错误，以及最多 8 个去重后的 `{stage,kind}` 结构化同步问题 |
 | 多源 bootstrap 去重状态 | ✅ | `source_bootstrap_state.json` 记录 XHS / 抖音 / YouTube 已进入事件路径的 bootstrap identity key，避免跨任务重放旧画像信号 |
 | 用户画像覆盖层 | ✅ | `profile_overrides.json` 存用户对画像的手动编辑（文本/标量固定 + 列表/兴趣树增删）；`load/save_profile_overrides` 读写，`sync_profile_files` 渲染人类可读镜像前叠加覆盖层，确保编辑在画像重建后仍反映在 `soul_profile.md/.json` |
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
 | JSON 状态原子更新 | ✅ | `memory/json_state.py` 提供带进程内锁、跨进程文件锁和 `os.replace` 的 `update_json_state()`；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈 |
+
+> `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。storage 会在同一事务内把 `view` 的 canonical identity upsert 到 `seen_items`，这是推荐去重索引，不是画像推断。批量版本把整批初始化事件交给 storage 的单事务接口，并通过 `asyncio.to_thread` 避免 SQLite 阻塞 API loop。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
 
 ## 公开 API
 
@@ -127,11 +129,16 @@ memory.initialize()
 
 # 写入事件
 await memory.propagate_event({
-    "event_type": "view",           # view|dialogue|pause|seek|search|favorite|like|coin|comment|click|scroll|hover|snapshot|feedback|follow|share
+    "event_type": "view",           # view|dialogue|pause|seek|search|favorite|like|coin|comment|click|scroll|hover|snapshot|reshuffle|feedback|follow|share
     "url": "https://www.bilibili.com/video/BV1xx",
     "title": "视频标题",
     "metadata": {"bvid": "BV1xx"},  # 缺失 signal_strength 时会按事件类型补默认值
 })
+
+# 首轮初始化等批量路径：统一校验/补信号强度，一次事务提交；任一写入失败整批回滚
+await memory.propagate_events([event_a, event_b, event_c])
+# 注意：两个 propagate API 都只持久化事件。需要影响画像时，由调用方在落库后
+# 显式把事件转成 ProfileSignal 并送入 ProfileUpdatePipeline。
 
 # 查询事件
 events = memory.query_events(
@@ -151,6 +158,9 @@ stats = memory.get_event_stats()  # {"view": 42, "search": 7, ...}
 # API 入口 POST /api/events 会逐条写入。raw dislike 会规范成
 # feedback + metadata.feedback_type="dislike"；未知类型只进入响应的
 # rejected 明细，不再让整批 500。
+# X 的取消赞/取消收藏归一为 feedback + metadata.feedback_type="retraction"
+# （satisfaction 恒 neutral），但反馈批学习 process_feedback_batch_if_needed
+# 会把 retraction 行从阈值计数与 LLM 分析输入中剔除——撤销是"中和"不是负偏好。
 
 # 插件 side panel 的 durable chat turn 由 Database 管理：
 from openbiliclaw.storage.database import Database
@@ -245,7 +255,15 @@ account_sync_state = memory.load_account_sync_state()
 #   "following_mids": ["99"],
 #   "last_account_sync_at": "2026-03-14T12:05:00+00:00",
 #   "last_sync_error": "",
+#   "last_sync_error_kind": "",  # "auth_expired" 驱动三端的“需重新登录”呈现
+#   "last_sync_issues": [
+#       {"stage": "bilibili_favorites", "kind": "timeout"},
+#   ],
 # }
+#
+# 读写两侧都是显式 key 白名单：新增字段必须同时加进 load / save 和默认状态，
+# 否则会被静默丢弃。last_sync_issues 只接受字符串 stage/kind，最多保留 8 条并去重；
+# runtime 边界还会把未知 stage 收敛为 unknown，避免任意持久化内容进入展示。
 
 source_bootstrap_state = memory.load_source_bootstrap_state()
 # {
@@ -396,7 +414,7 @@ data/memory/
 | 文件 | 用途 | 主要消费者 |
 |------|------|-----------|
 | `feedback_state.json` | 记录反馈处理到了哪一条，避免重复分析 | SoulEngine |
-| `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合和签名 | AccountSyncService |
+| `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合、签名，以及有界的分阶段错误诊断 | AccountSyncService |
 | `source_bootstrap_state.json` | XHS / 抖音 / YouTube bootstrap 已传播 identity key，避免跨任务重复写入同一批画像信号 | FastAPI source task endpoints |
 | `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题、近期 probe domain / axis / distance 历史、显式 probe feedback 历史、短期探索 buffer | RefreshController / OpenClaw / FastAPI |
 | `avoidance_state.json` | 不喜欢领域探针的 active/cooldown 列表和生命周期状态 | AvoidanceSpeculator / FastAPI |
@@ -431,7 +449,7 @@ MemoryManager 被以下组件直接依赖：
 | **Source task endpoints** | `load_source_bootstrap_state()` | `save_source_bootstrap_state()`, `propagate_event()` |
 | **RefreshController** | `load_discovery_runtime_state()` | `save_discovery_runtime_state()` |
 | **AccountSyncService** | `load_account_sync_state()` | `save_account_sync_state()`, `propagate_event()` |
-| **CLI** | — | `propagate_event()` |
+| **CLI / guided init** | — | `propagate_event()`, `propagate_events()`（初始化批量事务） |
 
 职责边界：**SoulEngine** 是唯一负责五层之间编排和更新逻辑的组件，其他组件只通过 MemoryManager 的公开接口读写特定状态。
 
@@ -460,5 +478,5 @@ data_dir = "data"  # 记忆 JSON 文件存储在 data/memory/ 下
 11. **插件聊天回合独立持久化**：`chat_turns` 只保存 side panel durable turn 的请求、回复和状态，解决 Chrome side panel reload / discard 时 DOM 和 JS 内存丢失的问题；它不替代事件层学习，完成后的 dialogue/cognition 仍按后端流程受控进入画像链路
 12. **候选池运行状态分层**：`discovery_runtime.json` 只负责刷新与通知游标，不与 `feedback_state.json`、`insight_candidates.json` 或画像数据混存
 13. **认知变化单独留痕**：`cognition_updates.json` 保存系统最近形成的关键理解变化，既供插件通知使用，也让画像页能回显”最近记住了什么”
-14. **账户同步状态单独持久化**：`account_sync_state.json` 记录 history / favorites / following 的增量游标、已见 ID 集合和稳定签名，避免每轮全量重灌事件层，也避免收藏夹顺序变化或同秒历史游标导致重复画像分析
+14. **账户同步状态单独持久化**：`account_sync_state.json` 记录 history / favorites / following 的增量游标、已见 ID 集合、稳定签名与有界的 `{stage,kind}` 错误清单，既避免每轮全量重灌事件层和同秒历史游标导致重复画像分析，也让 runtime-status 无需解析原始异常文本即可定位失败环节
 15. **多源 bootstrap 去重状态独立持久化**：`source_bootstrap_state.json` 只保存 XHS / 抖音 / YouTube 已见 bootstrap identity key，不塞进画像 JSON；task-result 仍保留完整原始结果用于调试，但进入 memory / profile pipeline 前会过滤旧 key

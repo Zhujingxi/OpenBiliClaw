@@ -12,8 +12,13 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     install_ps1 = _read("scripts/install.ps1")
     config_example = _read("config.example.toml")
 
-    expected_default = "Choose your LLM provider (default: deepseek):"
+    expected_default = "Choose your LLM chat provider (default: deepseek):"
     expected_supported = (
+        "Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible"
+    )
+    # Local Ollama is embedding-only in onboarding (v0.3.177); the chat menu
+    # must not offer it, and both shell installers must say so identically.
+    retired_supported = (
         "Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
     )
 
@@ -21,6 +26,8 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     assert expected_default in install_ps1
     assert expected_supported in install_sh
     assert expected_supported in install_ps1
+    assert retired_supported not in install_sh
+    assert retired_supported not in install_ps1
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_sh
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_ps1
     config_lines = {
@@ -28,8 +35,9 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
         for line in config_example.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    assert 'default_provider = "deepseek"' in config_lines
-    assert 'default_provider = "openai"' not in config_lines
+    assert "routing_version = 2" in config_lines
+    assert 'default_chain = ["deepseek"]' in config_lines
+    assert 'default_chain = ["openai"]' not in config_lines
 
 
 def test_install_sh_uses_interactive_auto_init_contract() -> None:
@@ -117,7 +125,7 @@ def test_install_contract_blocks_init_when_ai_service_checks_fail() -> None:
     assert "AI service check failed before init" in install_sh
     assert "AI service check failed before init" in install_ps1
     assert "status=service_check_failed" in agent_doc
-    assert "default LLM provider or embedding service failed" in agent_doc
+    assert "global LLM instance chain or embedding service failed" in agent_doc
     assert "service_check_failed" in docker_doc
     assert "service_check_failed" in cli_doc
 
@@ -186,6 +194,27 @@ def test_backend_tag_workflow_only_updates_aggregate_release() -> None:
     assert "维护者通道仍保留 `extension-v*` / `desktop-v*` / `backend-v*`" in docs_index
     assert "后端源码更新仍只通过 `backend-v*` tag 标记" in extension_doc
     assert "桌面安装包仍由 `desktop-v*` workflow 构建" in extension_doc
+
+
+def test_ollama_bundled_dockerfile_retries_model_pull_before_verification() -> None:
+    dockerfile = _read("docker/ollama-bundled.Dockerfile")
+    run_block = dockerfile.split("RUN set -eux;", maxsplit=1)[1].split(
+        "COPY docker/seed-bge-m3.sh", maxsplit=1
+    )[0]
+
+    assert "start_ollama()" in run_block
+    assert 'ollama serve & pid="$!"' in run_block
+    assert 'model_blob="/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"' in run_block
+    assert 'until start_ollama && ollama pull bge-m3 && [ -f "$model_blob" ]; do' in run_block
+    assert "attempts=$((attempts + 1))" in run_block
+    assert "find /root/.ollama/models" in run_block
+
+    between_pull_and_verify = run_block[
+        run_block.index("ollama pull bge-m3") : run_block.index(
+            "cp -a /root/.ollama/models/blobs /opt/bge-m3-seed/blobs"
+        )
+    ]
+    assert 'kill "$pid"' not in between_pull_and_verify
 
 
 def test_installers_can_clone_code_into_existing_packaged_data_root() -> None:

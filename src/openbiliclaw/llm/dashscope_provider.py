@@ -61,9 +61,7 @@ class DashScopeEmbeddingProvider(LLMProvider):
             root = root[: -len("/compatible-mode")].rstrip("/")
         self._base_url = root or _DEFAULT_BASE_URL
         self._timeout = max(5.0, float(timeout))
-        self._embedding_output_dimensionality = max(
-            0, int(embedding_output_dimensionality or 0)
-        )
+        self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
 
     @property
     def name(self) -> str:
@@ -174,8 +172,20 @@ class DashScopeEmbeddingProvider(LLMProvider):
         if params:
             body["parameters"] = params
 
+        # Pitfall rule 1 / v0.3.166–167 outbound routing: route per endpoint via
+        # network.httpx_kwargs_for_endpoint(base_url). DashScope's
+        # dashscope.aliyuncs.com / dashscope.cn are on the domestic host list, so
+        # they force trust_env=False (direct) even when [network].mode is
+        # system/custom for reaching overseas models — a CN user's env proxy /
+        # overseas ladder never tunnels the domestic embedding call (the exact
+        # regression v0.3.167 fixed for chat gateways). A genuinely non-domestic
+        # base_url still follows the global mode. Imported per-call, like codex_auth.
+        from openbiliclaw.network import httpx_kwargs_for_endpoint
+
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, **httpx_kwargs_for_endpoint(self._base_url)
+            ) as client:
                 response = await client.post(
                     url,
                     headers={

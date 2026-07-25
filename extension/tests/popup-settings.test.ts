@@ -7,10 +7,25 @@ test("settings page exposes advanced config fields from backend schema", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const expectedIds = [
+    "cfgBackendScheme",
     "cfgBackendPort",
+    "cfgExtDeviceKey",
     "cfgDataDir",
-    "cfgLlmFallbackProvider",
+    "cfgLlmRoutingSummary",
+    "cfgAddLlmInstance",
+    "cfgLlmInstanceList",
+    "cfgLlmDefaultChain",
+    "cfgLlmDefaultChainPicker",
+    "cfgAddLlmDefaultChainItem",
+    "cfgLlmModuleSummary",
+    "cfgLlmInstanceDialog",
+    "cfgSaveLlmInstance",
+    "cfgLlmConcurrencyV2",
+    "cfgLlmTimeoutV2",
+    "cfgOpenDesktopModels",
+    "cfgProbeLlmChain",
     "cfgEmbeddingFallbackProvider",
+    "cfgEmbeddingMultimodalEnabled",
     "cfgOpenaiAuthMode",
     "cfgDeepseekReasoning",
     "cfgOpenrouterReferer",
@@ -48,6 +63,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgYoutubeMinInterval",
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -108,6 +124,8 @@ test("settings page exposes advanced config fields from backend schema", () => {
     assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
+  assert.doesNotMatch(popupHtml, /cfgExtLoginPassword|扩展登录密码/);
+  assert.doesNotMatch(popupJs, /obc_auth_password|obc_auth_token/);
   assert.doesNotMatch(popupHtml, /id="cfgDiscoveryCron"/);
   assert.doesNotMatch(popupJs, /discovery_cron:\s*getVal\("cfgDiscoveryCron"\)/);
   assert.match(
@@ -137,6 +155,7 @@ test("settings source tab separates every platform into its own block", () => {
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
     "browser",
     "pool",
   ]) {
@@ -221,7 +240,8 @@ test("settings backend update apply failures show backend reason and refresh sta
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   assert.match(popupJs, /dirty_worktree:\s*"代码目录有未提交改动，更新被阻止"/);
-  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止"/);
+  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）"/);
+  assert.match(popupJs, /docker_install_mode:\s*"Docker 安装通过拉取新镜像升级，无法就地自更新"/);
   assert.match(popupJs, /branch_not_fast_forwardable:\s*"本地代码与发布版本分叉，无法快进更新"/);
   assert.match(popupJs, /missing_target_tag:\s*"远端未找到目标版本标签"/);
 
@@ -236,6 +256,8 @@ test("settings backend update actions require explicit install branch", () => {
 
   assert.match(popupJs, /const isGitInstall = installMode === "git"/);
   assert.match(popupJs, /const isFrozenInstall = installMode === "frozen"/);
+  assert.match(popupJs, /const isDockerInstall = installMode === "docker"/);
+  assert.match(popupJs, /docker compose pull && docker compose up -d/);
   assert.match(
     popupJs,
     /const isDesktopInstallerUpdate = String\(backend\.latest_tag \|\| ""\)\.startsWith\("desktop-v"\)/,
@@ -246,6 +268,17 @@ test("settings backend update actions require explicit install branch", () => {
     /\(isFrozenInstall \|\| isDesktopInstallerUpdate\) && backend\.state === "update_available"/,
   );
   assert.doesNotMatch(popupJs, /!unsupportedInstall && backend\.state === "update_available"/);
+});
+
+test("settings disables backend auto-apply controls for every non-git install", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(
+    popupJs,
+    /const autoApplyUnsupported = \["frozen", "docker", "unsupported"\]\.includes\(installMode\)/,
+  );
+  assert.match(popupJs, /autoUpdateToggle\.disabled = autoApplyUnsupported/);
+  assert.match(popupJs, /autoUpdateInterval\.disabled = autoApplyUnsupported/);
 });
 
 test("settings page round-trips YouTube source budgets", () => {
@@ -317,6 +350,7 @@ test("settings page round-trips Reddit discovery config", () => {
   for (const id of [
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -342,11 +376,74 @@ test("settings page round-trips Reddit discovery config", () => {
   assert.match(popupJs, /if \(shares\.reddit !== undefined\) setVal\("cfgPoolShareReddit", shares\.reddit\)/);
 });
 
+test("settings page round-trips Bangumi discovery config", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of [
+    "cfgBangumiEnabled",
+    "cfgBangumiUsername",
+    "cfgBangumiModeSearch",
+    "cfgBangumiModeRanked",
+    "cfgBangumiModeLatest",
+    "cfgBangumiTypeAnime",
+    "cfgBangumiTypeBook",
+    "cfgBangumiTypeGame",
+    "cfgBangumiTypeMusic",
+    "cfgBangumiTypeReal",
+    "cfgBangumiDailySearchBudget",
+    "cfgBangumiDailyRankedBudget",
+    "cfgBangumiDailyLatestBudget",
+    "cfgBangumiRequestInterval",
+    "cfgBangumiMinInterval",
+    "cfgBangumiBootstrapLimit",
+    "cfgPoolShareBangumi",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(popupJs, /cfg\.sources\?\.bangumi\?\.source_modes/);
+  assert.match(popupJs, /cfg\.sources\?\.bangumi\?\.subject_types/);
+  assert.match(popupJs, /username: getVal\("cfgBangumiUsername"\)/);
+  assert.match(popupJs, /daily_search_budget: getInt\("cfgBangumiDailySearchBudget", 300\)/);
+  assert.match(popupJs, /bangumi: getInt\("cfgPoolShareBangumi", 1\)/);
+  assert.match(popupJs, /bangumi: checked\("cfgBangumiEnabled"\)/);
+  assert.match(popupJs, /if \(shares\.bangumi !== undefined\) setVal\("cfgPoolShareBangumi", shares\.bangumi\)/);
+});
+
+test("settings page exposes Bangumi clear-token control and rejected status", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // C: an explicit "clear token" checkbox that sends access_token:"".
+  assert.match(popupHtml, /id="cfgBangumiClearToken"/);
+  assert.match(popupJs, /checked\("cfgBangumiClearToken"\)/);
+  assert.match(popupJs, /access_token: ""/);
+  // A: a rejected personal token renders an actionable warning + red dot.
+  // The rule itself moved into the shared module, which the side panel, the
+  // desktop page and the setup wizard all load — this panel and the desktop
+  // page each keeping their own copy is exactly how the two status tables
+  // drifted apart (spec D6). Assert it where it now lives, and assert that this
+  // surface renders through the module rather than re-deriving a verdict.
+  const sharedJs = readFileSync(
+    resolve("..", "src", "openbiliclaw", "web", "shared", "source-status.js"),
+    "utf8",
+  );
+  assert.match(sharedJs, /token_state\) === "rejected"/);
+  assert.match(sharedJs, /令牌已失效/);
+  assert.match(popupJs, /SourceStatus\.describeAccess\(/);
+  // B: config-save maps the live-validation error codes to friendly text.
+  assert.match(popupJs, /invalid_bangumi_access_token/);
+  assert.match(popupJs, /bangumi_token_check_failed/);
+});
+
 test("settings page round-trips multimodal discovery evaluation controls", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   for (const id of [
+    "cfgCandidateEvalConcurrency",
     "cfgMultimodalEvaluationEnabled",
     "cfgMultimodalBatchSize",
     "cfgMultimodalImageMaxPx",
@@ -357,6 +454,15 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
 
+  assert.match(
+    popupHtml,
+    /id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3"/,
+  );
+
+  assert.match(
+    popupJs,
+    /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency\)/,
+  );
   assert.match(
     popupJs,
     /multimodalEvaluation\.checked = cfg\.discovery\?\.multimodal_evaluation_enabled === true/,
@@ -378,12 +484,40 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds\)/,
   );
   assert.match(popupJs, /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/);
+  assert.match(
+    popupJs,
+    /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
+  );
+  assert.match(popupJs, /setVal\("cfgLlmConcurrencyV2", cfg\.llm\?\.concurrency \?\? 4\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrencyV2", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
   assert.match(
     popupJs,
     /multimodal_image_timeout_seconds: getInt\("cfgMultimodalImageTimeout", 6\)/,
+  );
+});
+
+test("settings page round-trips embedding multimodal cover toggle + dashscope provider", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // DashScope must be selectable as an embedding provider (not TOML-only).
+  assert.match(
+    popupHtml,
+    /<select id="cfgEmbeddingProvider">[\s\S]*<option value="dashscope"/,
+    "dashscope should be an embedding provider option",
+  );
+  // The image-only cover embedding toggle must exist and be wired both ways.
+  assert.match(popupHtml, /id="cfgEmbeddingMultimodalEnabled" type="checkbox"/);
+  assert.match(
+    popupJs,
+    /embMultimodal\.checked = cfg\.llm\?\.embedding\?\.multimodal_enabled === true/,
+  );
+  assert.match(
+    popupJs,
+    /multimodal_enabled: checked\("cfgEmbeddingMultimodalEnabled"\)/,
   );
 });
 
@@ -395,6 +529,7 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(popupHtml, /<textarea id="cfgBiliCookie"/);
   assert.match(popupHtml, /<textarea id="cfgDouyinCookie"/);
   assert.match(popupHtml, /<textarea id="cfgTwitterCookie"/);
+  assert.match(popupHtml, /<textarea id="cfgRedditCookie"/);
 
   assert.match(popupJs, /setVal\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
   assert.match(popupJs, /setVal\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
@@ -413,11 +548,21 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
     popupJs,
     /\.\.\.\(getVal\("cfgTwitterCookie"\) \? \{ cookie: getVal\("cfgTwitterCookie"\) \} : \{\}\)/,
   );
+  // Reddit has no config-side cookie echo (GET /api/config carries no
+  // sources.reddit.cookie) — paste-only, routed to rdt-cli's store.
+  assert.match(
+    popupJs,
+    /\.\.\.\(getVal\("cfgRedditCookie"\) \? \{ cookie: getVal\("cfgRedditCookie"\) \} : \{\}\)/,
+  );
 });
 
-test("settings page round-trips OpenAI auth mode", () => {
+test("settings page keeps the legacy OpenAI editor read-only under instance routing", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const collectFormSource = popupJs.slice(
+    popupJs.indexOf("function collectForm()"),
+    popupJs.indexOf("function showToast(", popupJs.indexOf("function collectForm()")),
+  );
 
   assert.match(popupHtml, /id="cfgOpenaiAuthMode"/);
   assert.match(popupHtml, /<option value="api_key">API Key<\/option>/);
@@ -426,24 +571,54 @@ test("settings page round-trips OpenAI auth mode", () => {
     popupJs,
     /setVal\("cfgOpenaiAuthMode", cfg\.llm\?\.openai\?\.auth_mode \|\| "api_key"\)/,
   );
-  assert.match(popupJs, /auth_mode: getVal\("cfgOpenaiAuthMode"\) \|\| "api_key"/);
+  assert.doesNotMatch(collectFormSource, /cfgOpenaiAuthMode|auth_mode:/);
 });
 
-test("settings page round-trips explicit LLM and embedding fallback providers", () => {
+test("settings page edits native LLM instances and round-trips every route", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const collectFormSource = popupJs.slice(
+    popupJs.indexOf("function collectForm()"),
+    popupJs.indexOf("function showToast(", popupJs.indexOf("function collectForm()")),
+  );
 
-  assert.match(popupHtml, /id="cfgLlmFallbackProvider"/);
+  assert.match(popupHtml, /id="cfgLlmRoutingSummary"/);
+  assert.match(popupHtml, /id="cfgAddLlmInstance"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceList"/);
+  assert.match(popupHtml, /id="cfgLlmDefaultChain"/);
+  assert.match(popupHtml, /id="cfgLlmDefaultChainPicker"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceDialog"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceApiKey" type="password"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceModel" list="cfgLlmInstanceModelOptions"/);
+  assert.match(popupHtml, /id="cfgRefreshLlmInstanceModels"/);
+  assert.match(popupHtml, /id="cfgLlmInstanceReasoning" list="cfgLlmInstanceReasoningOptions"/);
+  assert.match(popupHtml, /id="cfgOpenDesktopModels"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChain"/);
   assert.match(popupHtml, /id="cfgEmbeddingFallbackProvider"/);
-  assert.doesNotMatch(popupHtml, /id="cfgLlmFallbackEnabled"/);
   assert.doesNotMatch(popupHtml, /id="cfgEmbeddingFallbackEnabled"/);
-  assert.match(popupJs, /setVal\("cfgLlmFallbackProvider", cfg\.llm\?\.fallback_provider\)/);
+  assert.match(popupJs, /function normalizeLlmDraft\(llm\)/);
+  assert.match(popupJs, /function renderLlmRoutingSummary\(llm = null\)/);
+  assert.match(popupJs, /Array\.isArray\(llm\?\.default_chain\)/);
+  assert.match(popupJs, /const rawRoute = llm\?\.routes\?\.\[moduleName\]/);
+  assert.match(popupJs, /function saveLlmInstanceDraft\(\)/);
+  assert.match(popupJs, /function discoverLlmInstanceModels\(\)/);
+  assert.match(popupJs, /discoverConfigModels\(request\.config, request\.instanceId\)/);
+  assert.match(popupJs, /当前输入未改动，仍可手填/);
+  assert.match(popupJs, /function deleteLlmInstance\(instanceId\)/);
+  assert.match(popupJs, /openMobileWebUrl\(`\$\{origin\}\/web\?settings=models`\)/);
+  assert.doesNotMatch(
+    collectFormSource,
+    /cfgLlmFallbackProvider|llmFallbackProvider|default_provider:|fallback_provider: llmFallbackProvider/,
+  );
+  assert.match(collectFormSource, /routing_version: 2/);
+  assert.match(collectFormSource, /instances: clonePlain\(llmDraft\.instances\)/);
+  assert.match(collectFormSource, /default_chain: \[\.\.\.llmDraft\.default_chain\]/);
+  assert.match(collectFormSource, /routes: Object\.fromEntries\(/);
+  assert.match(collectFormSource, /chain: route\.inherit !== false \? \[\] : \[\.\.\.route\.chain\]/);
   assert.match(
     popupJs,
     /setVal\("cfgEmbeddingFallbackProvider", cfg\.llm\?\.embedding\?\.fallback_provider\)/,
   );
-  assert.match(popupJs, /const llmFallbackProvider = getVal\("cfgLlmFallbackProvider"\)/);
-  assert.match(popupJs, /fallback_provider: llmFallbackProvider/);
   assert.match(
     popupJs,
     /const embeddingFallbackProvider = getVal\("cfgEmbeddingFallbackProvider"\)/,
@@ -454,17 +629,55 @@ test("settings page round-trips explicit LLM and embedding fallback providers", 
   );
 });
 
-test("settings page exposes and wires LLM and embedding probe buttons", () => {
+test("settings page exposes and wires routed LLM and embedding probe buttons", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.match(popupHtml, /id="cfgProbeLlm"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChain"/);
   assert.match(popupHtml, /id="cfgProbeEmbedding"/);
-  assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
+  assert.match(popupHtml, /id="cfgProbeLlmChainStatus"/);
   assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
-  assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
+  assert.match(popupJs, /probeConfigService\("llm_instance", collectForm\(\), instanceId\)/);
+  assert.match(popupJs, /probeConfigService\("llm_chain", collectForm\(\)\)/);
   assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
   assert.match(popupJs, /function renderProbeResult/);
+});
+
+test("settings general tab exposes and wires the network proxy field (aligned with desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Field + probe control + copy stating CN requests stay direct.
+  assert.match(popupHtml, /id="cfgNetworkProxyMode"/);
+  assert.match(popupHtml, /id="cfgNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxyStatus"/);
+  assert.match(popupHtml, /海外/);
+  assert.match(popupHtml, /国内请求始终直连/);
+
+  // Restore mode + proxy, collect both into payload.network, probe wired.
+  // The fallback literal must track the backend [network].mode default
+  // (system since v0.3.175), else an omitted field renders the wrong mode.
+  assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "system"\)/);
+  assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
+  assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
+  assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
+  assert.match(popupJs, /function runNetworkProxyConfigProbe/);
+});
+
+test("settings page renders editable instance cards, ordered default chain, and module summary", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /function renderLlmInstances\(\)/);
+  assert.match(popupJs, /button\.dataset\.llmInstanceAction = action/);
+  assert.match(popupJs, /function renderLlmDefaultChain\(\)/);
+  assert.match(popupJs, /createLlmChainAction\("up"/);
+  assert.match(popupJs, /createLlmChainAction\("down"/);
+  assert.match(popupJs, /createLlmChainAction\("remove"/);
+  assert.match(popupJs, /function renderLlmModuleSummary\(\)/);
+  assert.match(popupJs, /detail\.textContent = "继承默认调用链"/);
+  assert.match(popupJs, /chainNames\.join\(" → "\)/);
+  assert.match(popupJs, /if \(enabled && !state\.llmDraft\.default_chain\.length\)/);
 });
 
 test("settings page placeholders match config example defaults", () => {
@@ -560,4 +773,94 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
   assert.match(popupJs, /restart_required/);
   assert.match(popupJs, /保存并提示重启/);
+});
+
+test("settings page shows the budget-semantics hint for every per-source budget group", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+
+  // The hint must match the desktop web wording so users learn budget is a
+  // per-day cap, not an on/off toggle.
+  const baseNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。";
+  const redditNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。";
+
+  // Every source card that has a daily budget input must carry a note.
+  const budgetCards = ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  for (const card of budgetCards) {
+    const start = popupHtml.indexOf(`data-source-card="${card}"`);
+    assert.ok(start >= 0, `source card ${card} should exist`);
+    const rest = popupHtml.slice(start);
+    const end = rest.indexOf("settings-source-card", 1);
+    const cardHtml = end >= 0 ? rest.slice(0, end) : rest;
+    assert.match(
+      cardHtml,
+      /class="settings-hint" data-budget-note>预算 = 每日任务次数上限/,
+      `${card} card should carry the budget-semantics hint`,
+    );
+  }
+
+  // Reddit keeps its 300-default clarification.
+  assert.ok(popupHtml.includes(redditNote), "reddit note should mention the 300 default");
+  // The other five use the base wording.
+  const baseCount = popupHtml.split(baseNote).length - 1;
+  assert.ok(baseCount >= 5, `expected >=5 base budget notes, got ${baseCount}`);
+});
+
+test("settings page wires the keyword generation mode selector (matches desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Select + the three options — values/labels byte-identical to desktop web.
+  assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
+  assert.match(popupHtml, /<option value="legacy">经典<\/option>/);
+  assert.match(popupHtml, /<option value="hybrid">混合<\/option>/);
+  assert.match(popupHtml, /<option value="inspiration">灵感<\/option>/);
+  // Cost hint conveys 混合最贵.
+  assert.match(popupHtml, /混合最贵/);
+
+  // Load fills the select from the derived discovery field.
+  assert.match(
+    popupJs,
+    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "legacy"\)/,
+  );
+
+  // Save collects it into the discovery payload AFTER the snapshot spread, so a
+  // loaded value never clobbers the user's live selection (R2 spread-order).
+  const saveKey = 'keyword_generation_mode: getVal("cfgKeywordGenerationMode")';
+  assert.ok(popupJs.includes(saveKey), "save key should be present");
+  const spread = "...(state.runtimeConfig?.discovery || {})";
+  assert.ok(
+    popupJs.indexOf(spread) !== -1 && popupJs.indexOf(spread) < popupJs.indexOf(saveKey),
+    "keyword_generation_mode must be written after the discovery spread",
+  );
+});
+
+test("settings source status labels distinguish local readiness", () => {
+  // The labels moved into the shared module (src/openbiliclaw/web/shared/
+  // source-status.js) that the desktop page and the setup wizard also load.
+  // They used to be pinned here as popup.js source text, which is precisely how
+  // the two surfaces drifted apart unnoticed: this file could stay green while
+  // the desktop page's copy said something else (spec D6).
+  const shared = readFileSync(
+    resolve("..", "src/openbiliclaw/web/shared/source-status.js"),
+    "utf8",
+  );
+
+  assert.match(shared, /ready: { tone: "ready", label: "凭据已就绪" }/);
+  assert.match(shared, /unverified: { tone: "pending", label: "状态待验证" }/);
+  assert.match(shared, /login_required: { tone: "warning", label: "需要登录" }/);
+  assert.match(shared, /error: { tone: "danger", label: "检查失败" }/);
+});
+
+test("the side panel keeps no second copy of the source status table", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // A local re-declaration is the regression this whole refactor removes: the
+  // panel painted no_auth and unverified the same grey while the desktop page
+  // told them apart, and nothing failed.
+  assert.doesNotMatch(popupJs, /const SOURCE_STATUS_DOT\s*=/);
+  assert.doesNotMatch(popupJs, /const SOURCE_STATUS_LABEL\s*=/);
+  assert.doesNotMatch(popupJs, /const VERIFY_OUTCOME_TONE\s*=/);
+  assert.match(popupJs, /globalThis\.OpenBiliClawSourceStatus/);
 });

@@ -13,13 +13,15 @@ import shutil
 import socket
 import subprocess
 import time
+import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote, urlparse
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
@@ -30,6 +32,7 @@ from openbiliclaw.api.models import (
     AutostartConfigOut,
     AutostartStatusOut,
     BackendUpdateStatusOut,
+    BangumiSourceConfigOut,
     BehaviorEventBatchIn,
     BilibiliConfigOut,
     BilibiliCookieIn,
@@ -43,6 +46,8 @@ from openbiliclaw.api.models import (
     CognitionUpdateSeenResponse,
     CognitionUpdateSummary,
     ConfigIssueOut,
+    ConfigModelDiscoveryIn,
+    ConfigModelDiscoveryResponse,
     ConfigResponse,
     ConfigServiceProbeIn,
     ConfigServiceProbeResponse,
@@ -67,6 +72,8 @@ from openbiliclaw.api.models import (
     ExtensionE2ERunIn,
     ExtensionE2ERunOut,
     ExtensionE2ERunStatus,
+    ExtensionNativeSaveE2EAuthorizationIn,
+    ExtensionNativeSaveResultIn,
     FavoriteAddIn,
     FavoriteItem,
     FavoriteListResponse,
@@ -80,9 +87,11 @@ from openbiliclaw.api.models import (
     InsightFeedbackIn,
     InsightFeedbackResponse,
     LLMConfigOut,
+    LLMInstanceConfigOut,
     LLMProviderConfigOut,
     LoggingConfigOut,
     ModuleLLMConfigOut,
+    NetworkConfigOut,
     NotificationAckIn,
     NotificationAckResponse,
     PendingCognitionUpdateOut,
@@ -91,6 +100,7 @@ from openbiliclaw.api.models import (
     PendingDelightResponse,
     PendingNotificationOut,
     PendingNotificationResponse,
+    PlatformAvailabilityResponse,
     ProfileEditIn,
     ProfileSummaryResponse,
     RecommendationAppendIn,
@@ -99,13 +109,25 @@ from openbiliclaw.api.models import (
     RecommendationListResponse,
     RecommendationOut,
     RecommendationRefreshResponse,
+    RecommendationReshuffleIn,
     RecommendationReshuffleResponse,
     RedditCookieIn,
     RedditCookieResponse,
     RedditSourceConfigOut,
     RuntimeStatusResponse,
+    SavedItemIn,
+    SavedItemKeyIn,
+    SavedItemStateResponse,
+    SavedListItem,
+    SavedListResponse,
+    SavedSyncBatchResponse,
+    SavedSyncConfigOut,
+    SavedSyncItemResponse,
+    SavedSyncRequest,
     SchedulerConfigOut,
     SourceCredentialItem,
+    SourceCredentialWriteIn,
+    SourceCredentialWriteResponse,
     SourcesBrowserConfigOut,
     SourcesConfigOut,
     SourcesCredentialsResponse,
@@ -113,6 +135,7 @@ from openbiliclaw.api.models import (
     SourceShareSuggestionResponse,
     SourcesStatusResponse,
     SourceStatusItem,
+    SourceVerifyResponse,
     StorageConfigOut,
     TwitterSourceConfigOut,
     UpdateApplyIn,
@@ -124,16 +147,24 @@ from openbiliclaw.api.models import (
     WatchLaterStateResponse,
     XCookieIn,
     XCookieResponse,
+    XhsLoginStateIn,
+    XhsLoginStateResponse,
     XiaohongshuSourceConfigOut,
     XStatusResponse,
     YoutubeSourceConfigOut,
+    ZhihuLoginStateIn,
+    ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
+    validate_saved_item_key,
 )
+from openbiliclaw.llm.base import safe_llm_failure_message
+from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
 from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
     cleanup_image_cache,
     fetch_cover_bytes,
+    save_extension_cover,
     save_image_bytes,
 )
 from openbiliclaw.runtime.image_cache import (
@@ -146,40 +177,93 @@ from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
     source_keyword_id_from_xhs_task,
 )
+from openbiliclaw.saved_sync.extension_broker import (
+    ExtensionNativeSaveResultIn as BrokerExtensionNativeSaveResultIn,
+)
+from openbiliclaw.saved_sync.identity import make_item_key
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NativeSaveResult,
+    NativeSaveStatus,
+    SavedItemInput,
+    SavedListKind,
+    SavedSyncBatchResult,
+)
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
     topics_for_confirmed_avoidance,
+)
+from openbiliclaw.sources.platforms import (
+    CANONICAL_SOURCE_FAMILIES,
+    normalize_source_platform,
+    overseas_network_hint,
+    requires_overseas_network,
+)
+from openbiliclaw.sources.platforms import (
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from openbiliclaw.api.source_auth.contract import SourceAuthContract
+    from openbiliclaw.api.source_auth.write import CredentialWriteOutcome
+
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
-# /api/health embedding readiness: cache the live-probe result for this many
-# seconds so Docker healthchecks and popup re-polls don't hit the embedding
-# provider on every call. Kept short so a freshly-fixed provider (e.g. right
-# after `ollama pull bge-m3`) clears the popup's "semantic dedup off" banner
-# quickly. The probe itself is capped by a separate timeout so a hung/retrying
-# provider can never stall /api/health. The timeout is generous enough to
-# absorb an Ollama cold model-load (bge-m3 unloads after keep_alive idle; the
-# first embed re-loads it — measured ~3s), and a timeout is treated as
-# "loading, optimistically ready", NOT a hard failure — otherwise the banner
-# would flash on every popup-open-after-idle. A genuinely-missing model 404s
-# *fast*, so it still resolves to not-ready well within the cap.
+# Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
+# provider call, so ``touch()`` proves that the wrapper/event loop still owns the
+# run. It deliberately does not advance the separate useful-progress clock.
+_INIT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+async def _run_init_heartbeat(
+    coordinator: Any, run_id: str, *, interval: float = _INIT_HEARTBEAT_INTERVAL_SECONDS
+) -> None:
+    """Refresh the init owner lease during long, silent stages.
+
+    ``touch()`` publishes no SSE event and does not claim useful progress. A
+    heartbeat failure must not kill init, so it is swallowed at WARNING.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await coordinator.touch(run_id)
+        except Exception:
+            logger.warning("init heartbeat touch failed for run %s", run_id, exc_info=True)
+
+
+# /api/health embedding readiness: cache the raw live-probe outcome so Docker
+# healthchecks and popup re-polls don't hit the embedding provider on every
+# call. Success caches for 30s; failure/timeout for 8s so a freshly-fixed or
+# just-finished cold load greens quickly. The probe itself is capped at 15s,
+# but local bge-m3 cold loads were observed at 16-29s on 2026-07-11. Ordinary
+# health therefore treats only a loopback-Ollama timeout as cold-loading and
+# optimistically available; guided init remains strict until a real vector
+# succeeds. Explicit False/errors still fail everywhere.
 _EMBEDDING_READY_TTL_SECONDS = 30.0
-# Strict readiness (gui-init): a failure/timeout caches briefly so a service
-# that finished a cold model load greens within seconds; the probe timeout is
-# generous enough for a cold Ollama load but still fails (does not optimistically
-# pass) if the embedding service never answers.
 _EMBEDDING_FAIL_TTL_SECONDS = 8.0
 _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
+_EmbeddingProbeOutcome = Literal["ready", "failed", "timed_out"]
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
 _FEEDBACK_BATCH_DEBOUNCE_SECONDS = 5.0
+# GET /api/recommendations serves from the pool when the unprocessed history
+# window is thinner than this — a first page of 2-3 cards reads as "broken"
+# even though the pool has stock (issue #81 挤牙膏首载).
+_FIRST_PAGE_TOPUP_FLOOR = 10
+# The thin-history top-up is a side-effecting write on a GET, so debounce it:
+# if serve() cannot actually raise the row count (all pool items filtered),
+# polling clients must not re-run it every few seconds. An empty history
+# (fresh install) bypasses the debounce — matching the original bootstrap.
+_FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
+# Collapse simultaneous boot reads from restored/stale browser tabs. The cache
+# is intentionally tiny: it is a load-shedding single-flight window, not a
+# user-visible freshness policy. Mutating recommendation routes invalidate it.
+_RECOMMENDATION_SNAPSHOT_TTL_SECONDS = 1.0
 _PROFILE_UPDATE_BACKFILL_LIMIT = 200
 _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
     "view",
@@ -193,9 +277,11 @@ _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
 
 # Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
 # re-exported here because callers historically imported from api.app.
-from openbiliclaw.sources.x_auth import (  # noqa: E402
-    X_REQUIRED_COOKIE_NAMES as _X_REQUIRED_COOKIE_NAMES,
-)
+#
+# ``X_REQUIRED_COOKIE_NAMES`` used to be re-exported here too. It no longer is:
+# which cookie names X requires is now stated once, in the write path's
+# ``CREDENTIAL_SPECS``, and a second copy in this file is exactly how a check
+# and its endpoint drift apart.
 from openbiliclaw.sources.x_auth import (  # noqa: E402, F401
     XCookieManager,
     resolve_x_cookie,
@@ -215,6 +301,7 @@ _SOURCE_SHARE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -224,6 +311,7 @@ _INIT_SOURCE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -255,6 +343,158 @@ _E2E_ACTION_EVENT_TYPES: dict[ExtensionE2EAction, frozenset[str]] = {
     "repost": frozenset({"share", "repost"}),
     "bookmark": frozenset({"bookmark", "favorite"}),
 }
+_NATIVE_SAVE_E2E_CONTENT_TYPES: dict[str, frozenset[str]] = {
+    "youtube": frozenset({"video"}),
+    "xiaohongshu": frozenset({"note", "video"}),
+    "douyin": frozenset({"aweme", "video"}),
+    "twitter": frozenset({"tweet", "status"}),
+    "zhihu": frozenset({"question", "answer", "article"}),
+    "reddit": frozenset({"post", "comment"}),
+}
+
+
+def _native_save_e2e_content_id_from_url(
+    platform: str,
+    content_type: str,
+    value: str,
+) -> str:
+    """Return the exact identity accepted by the production content executor."""
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 2048
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        return ""
+    try:
+        parsed = urlparse(value)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or hostname.endswith(".")
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return ""
+
+    def host_is_or_subdomain(*hosts: str) -> bool:
+        return any(hostname == host or hostname.endswith(f".{host}") for host in hosts)
+
+    if platform == "youtube":
+        if hostname == "youtu.be":
+            if parsed.query:
+                return ""
+            match = re.fullmatch(r"/([A-Za-z0-9_-]{11})/?", parsed.path)
+            return match.group(1) if match else ""
+        if hostname not in {"youtube.com", "www.youtube.com"}:
+            return ""
+        if parsed.path == "/watch":
+            match = re.fullmatch(r"v=([A-Za-z0-9_-]{11})", parsed.query)
+            return match.group(1) if match else ""
+        if parsed.query:
+            return ""
+        match = re.fullmatch(r"/shorts/([A-Za-z0-9_-]{11})/?", parsed.path)
+        return match.group(1) if match else ""
+    if parsed.query and platform != "xiaohongshu":
+        return ""
+    if platform == "xiaohongshu":
+        if not host_is_or_subdomain("xiaohongshu.com"):
+            return ""
+        if parsed.query:
+            try:
+                query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                return ""
+            if (
+                any(key not in {"xsec_token", "xsec_source"} or not item for key, item in query)
+                or len({key for key, _item in query}) != len(query)
+                or "xsec_token" not in {key for key, _item in query}
+            ):
+                return ""
+        match = re.fullmatch(
+            r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
+            parsed.path,
+        )
+        return match.group(1) if match else ""
+    if platform == "douyin":
+        if not host_is_or_subdomain("douyin.com"):
+            return ""
+        match = re.fullmatch(r"/video/([A-Za-z0-9_-]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    if platform == "twitter":
+        if not host_is_or_subdomain("x.com", "twitter.com"):
+            return ""
+        match = re.fullmatch(r"/(?:i|[^/]+)/status/([0-9]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    elif platform == "zhihu":
+        if hostname not in {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"}:
+            return ""
+        if content_type == "article":
+            match = re.fullmatch(r"/p/([0-9]+)/?", parsed.path)
+            return f"article:{match.group(1)}" if match else ""
+        if hostname not in {"zhihu.com", "www.zhihu.com"}:
+            return ""
+        if content_type == "question":
+            match = re.fullmatch(r"/question/([0-9]+)/?", parsed.path)
+            return f"question:{match.group(1)}" if match else ""
+        if content_type == "answer":
+            match = re.fullmatch(r"/question/[0-9]+/answer/([0-9]+)/?", parsed.path)
+            return f"answer:{match.group(1)}" if match else ""
+    elif platform == "reddit":
+        if not host_is_or_subdomain("reddit.com", "redd.it"):
+            return ""
+        parts = [part.lower() for part in parsed.path.split("/") if part]
+        if content_type == "post" and host_is_or_subdomain("redd.it"):
+            if len(parts) == 1 and re.fullmatch(r"[a-z0-9]+", parts[0]):
+                return f"t3_{parts[0]}"
+            return ""
+        try:
+            index = parts.index("comments")
+        except ValueError:
+            return ""
+        if content_type == "post" and len(parts) > index + 1:
+            post_id = parts[index + 1]
+            return f"t3_{post_id}" if re.fullmatch(r"[a-z0-9]+", post_id) else ""
+        if content_type == "comment" and len(parts) > index + 3:
+            comment_id = parts[index + 3]
+            return f"t1_{comment_id}" if re.fullmatch(r"[a-z0-9]+", comment_id) else ""
+    return ""
+
+
+def _native_save_e2e_membership_matches(
+    authorization: ExtensionNativeSaveE2EAuthorizationIn,
+    item: SavedItemInput,
+    route: object,
+) -> bool:
+    content_type = item.content_type.strip()
+    if (
+        item.platform != authorization.platform
+        or item.content_id != authorization.content_id
+        or content_type not in _NATIVE_SAVE_E2E_CONTENT_TYPES[authorization.platform]
+        or _native_save_e2e_content_id_from_url(
+            authorization.platform,
+            content_type,
+            item.content_url,
+        )
+        != authorization.content_id
+    ):
+        return False
+    return (
+        getattr(route, "requested_action", None) == authorization.action
+        and getattr(route, "resolved_action", None)
+        == (
+            authorization.action
+            if authorization.platform == "youtube" or authorization.action == "favorite"
+            else "favorite"
+        )
+        and getattr(route, "resolved_target", None) == authorization.expected_target
+    )
 
 
 @dataclass
@@ -265,6 +505,7 @@ class _ExtensionE2ERunState:
     after_event_id: int
     expected_actions: dict[ExtensionE2EPlatform, list[ExtensionE2EAction]]
     event: asyncio.Event
+    native_save_authorization: ExtensionNativeSaveE2EAuthorizationIn | None = None
     extension_result: ExtensionE2EResultIn | None = None
     error: str = ""
 
@@ -490,43 +731,35 @@ def _normalize_init_source_key(source: object) -> str:
     return _normalize_source_platform(source_key)
 
 
+def _init_crash_detail(exc: BaseException) -> str:
+    """One-line, length-capped exception summary for guided-init failures.
+
+    Persisted with the ``internal_error`` reason and surfaced through
+    ``GET /api/init-status`` so a community user can report the actual cause
+    without digging through server logs (field report 2026-07-05: the generic
+    「初始化过程中出错了」left the failure undiagnosable from the UI).
+
+    An LLM-shaped failure (moderation refusal / exhausted providers / rate
+    limit) is rewritten into a human-readable reason so the page shows advice
+    instead of a raw ``InternalServerError: 非常抱歉…`` traceback fragment.
+    """
+    from openbiliclaw.llm.base import describe_llm_failure
+
+    llm_reason = describe_llm_failure(exc)
+    if llm_reason:
+        return llm_reason[:300]
+    lines = str(exc).strip().splitlines()
+    message = lines[0].strip() if lines else ""
+    text = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return text[:300]
+
+
 def _normalize_source_platform(source: object) -> str:
-    source_key = str(source or "").strip().lower()
-    if source_key in {"x", "twitter"}:
-        return "twitter"
-    if source_key in {"xhs", "rednote"}:
-        return "xiaohongshu"
-    if source_key in {"yt", "youtube"}:
-        return "youtube"
-    if source_key in {"douyin", "tiktok"}:
-        return "douyin"
-    if source_key in {"zhihu", "知乎"}:
-        return "zhihu"
-    if source_key in {"reddit", "rd"}:
-        return "reddit"
-    if source_key in {"bilibili", "bili", ""}:
-        return "bilibili"
-    return source_key
+    return normalize_source_platform(source, default="bilibili")
 
 
 def _infer_source_platform_from_url(url: object) -> str:
-    text = str(url or "").strip().lower()
-    if "youtube.com" in text or "youtu.be" in text:
-        return "youtube"
-    host = (urlparse(text if "://" in text else f"https://{text}").hostname or "").lower()
-    if host in {"x.com", "twitter.com"} or host.endswith(".x.com") or host.endswith(".twitter.com"):
-        return "twitter"
-    if "xiaohongshu.com" in text or "xhslink.com" in text:
-        return "xiaohongshu"
-    if "douyin.com" in text:
-        return "douyin"
-    if "zhihu.com" in text:
-        return "zhihu"
-    if "reddit.com" in text or "redd.it" in text:
-        return "reddit"
-    if "bilibili.com" in text or "b23.tv" in text:
-        return "bilibili"
-    return ""
+    return _registry_infer_source_platform_from_url(url)
 
 
 def _extension_e2e_actions_for_request(
@@ -618,6 +851,43 @@ def _latest_e2e_event_id(ctx: Any) -> int:
     return 0
 
 
+def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
+    """Discount stored positives undone by retractions in this batch (Phase 0 face 2).
+
+    For every ``feedback``/``retraction`` event with a whitelisted
+    ``retracted_action`` and a usable event time, mark matching stored positive
+    rows (identity key + causally-earlier event time) via
+    ``Database.mark_positive_events_retracted``. Out-of-whitelist actions are
+    logged and skipped (invariant 4); per-event failures are swallowed at
+    WARNING so a bad retraction never blocks event ingest. Returns rows marked.
+    """
+    from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
+
+    marker = getattr(database, "mark_positive_events_retracted", None)
+    if not callable(marker):
+        return 0
+    total = 0
+    for event in events:
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+            continue
+        action = str(metadata.get("retracted_action") or "").strip().lower()
+        if action not in RETRACTABLE_ACTIONS:
+            logger.warning("api retraction: skipping out-of-whitelist retracted_action %r", action)
+            continue
+        url = str(event.get("url") or "")
+        retraction_at = parse_event_timestamp(metadata)
+        if not url or retraction_at is None:
+            continue
+        try:
+            total += marker([url], action, retraction_at=retraction_at)
+        except Exception:
+            logger.warning("api retraction DB mark failed", exc_info=True)
+    return total
+
+
 def _query_e2e_events(ctx: Any, *, after_event_id: int, limit: int = 1000) -> list[dict[str, Any]]:
     memory_manager = getattr(ctx, "memory_manager", None)
     query_events = getattr(memory_manager, "query_events", None)
@@ -695,6 +965,31 @@ def _build_extension_e2e_report(
     timeout_seconds: int,
 ) -> ExtensionE2ERunOut:
     result = state.extension_result
+    if state.native_save_authorization is not None:
+        native_result = result.native_save_result if result is not None else None
+        error = state.error
+        if timed_out:
+            native_run_status: ExtensionE2ERunStatus = "timeout"
+            error = error or "extension e2e result timed out"
+        elif native_result is None:
+            native_run_status = "failed"
+            error = error or "native save result missing"
+        elif native_result.task_status in {"synced", "already_synced"}:
+            native_run_status = "ok"
+        elif native_result.task_status in {"pending", "syncing"}:
+            native_run_status = "timeout"
+            error = "native save task did not reach a terminal state"
+        else:
+            native_run_status = "failed"
+            error = native_result.error_code or native_result.task_status
+        return ExtensionE2ERunOut(
+            run_id=state.run_id,
+            status=native_run_status,
+            error=error,
+            timeout_seconds=timeout_seconds,
+            native_save_result=native_result,
+        )
+
     action_results: dict[
         tuple[ExtensionE2EPlatform, ExtensionE2EAction], tuple[ExtensionE2EActionStatus, str]
     ] = {}
@@ -805,6 +1100,8 @@ def _fallback_recommendation_click_url(
     if source_platform == "reddit":
         reddit_id = item_id[3:] if item_id.startswith("t3_") else item_id
         return f"https://www.reddit.com/comments/{quote(reddit_id, safe='')}/"
+    if source_platform == "bangumi":
+        return f"https://bgm.tv/subject/{quote(item_id, safe='')}"
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
@@ -939,6 +1236,55 @@ def _image_cache_response(url: str) -> FileResponse | None:
     )
 
 
+def _derive_keyword_generation_mode(
+    enabled: bool, replace: bool
+) -> Literal["legacy", "hybrid", "inspiration"]:
+    """Derive the UI-facing keyword-generation mode from the two canonical
+    ``DiscoveryConfig`` booleans (``inspiration_search_enabled`` /
+    ``inspiration_replace_merged_keywords``).
+
+    Read-tolerant: ``enabled=False`` → ``"legacy"`` regardless of ``replace``
+    (an off inspiration switch is legacy no matter what the stale replace flag
+    says). ``enabled=True`` → ``"inspiration"`` when ``replace`` else
+    ``"hybrid"``. This is a derived convenience for the UI/API only; the two
+    booleans remain the single source of truth in ``config.toml``.
+    """
+    if not enabled:
+        return "legacy"
+    return "inspiration" if replace else "hybrid"
+
+
+def _mode_to_flags(mode: str) -> tuple[bool, bool]:
+    """Translate a UI keyword-generation mode into the canonical
+    ``(inspiration_search_enabled, inspiration_replace_merged_keywords)``
+    booleans. Every mode writes BOTH booleans so no stale ``replace`` residue
+    survives a mode change: ``legacy → (False, False)``, ``hybrid → (True,
+    False)``, ``inspiration → (True, True)``. ``mode`` must already be a valid
+    Literal (the handler validates before calling).
+    """
+    return (mode != "legacy", mode == "inspiration")
+
+
+def _mask_proxy_userinfo(url: str) -> str:
+    """Mask any ``user:pass@`` credential in a proxy URL for GET responses.
+
+    ``socks5://u:p@host:1`` → ``socks5://***@host:1``. A bare
+    ``socks5://host:1`` has no secret and is returned verbatim.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _is_masked_proxy_echo(value: str) -> bool:
+    """Whether a submitted proxy value is a masked GET echo (contains ``***``)."""
+    return "***" in value
+
+
 def create_app(
     *,
     memory_manager: Any | None = None,
@@ -983,6 +1329,30 @@ def create_app(
     # ── Build RuntimeContext ────────────────────────────────────────
     config = load_config()
 
+    # Mirror the overseas-outbound proxy into the process-level source of truth
+    # before any LLM/updater client is built. CN-direct clients never read it.
+    # getattr-guarded so a partial config object never hard-crashes app boot.
+    #
+    # The guard falls back to ``system``, not ``direct``. A config object missing
+    # ``network`` / ``mode`` is the in-memory analogue of an *absent* key, not of
+    # an invalid one: there is no user-written value here to disrespect, so it
+    # takes the same default an absent key takes in ``_build_network_config``.
+    # (``direct`` is reserved for present-but-broken values, where the user did
+    # write something and silently inheriting an env proxy would override it.)
+    # ``direct`` is also not the neutral choice — it actively sets
+    # ``trust_env=False`` and overrides the user's environment, whereas ``system``
+    # defers to it. When the config is too damaged to state a preference,
+    # deferring beats overriding, and matching the normal default keeps an
+    # already-degraded boot from growing a second, invisible failure mode
+    # (opaque overseas timeouts on a machine that has a working proxy).
+    from openbiliclaw.network import set_outbound_proxy
+
+    network_config = getattr(config, "network", None)
+    set_outbound_proxy(
+        getattr(network_config, "proxy", "") or "",
+        mode=getattr(network_config, "mode", "system") or "system",
+    )
+
     # Auto-generate the session signing secret on first enable so login state
     # survives restarts (see docs/plans/2026-05-30-web-password-auth-design.md).
     from openbiliclaw.api.auth import (
@@ -993,6 +1363,7 @@ def create_app(
         make_auth_middleware,
         reconcile_password_fingerprint,
         register_auth_routes,
+        websocket_session_token,
     )
     from openbiliclaw.config import ApiAuthConfig as _ApiAuthConfig
 
@@ -1011,6 +1382,8 @@ def create_app(
     if soul_engine is not None:
         # Injection path: caller provides swappable components.
         # Auto-create stable components (database, memory_manager) if missing.
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
         from openbiliclaw.runtime.events import RuntimeEventHub as _RuntimeEventHub
 
         _db = database
@@ -1028,6 +1401,100 @@ def create_app(
             _mm = MemoryManager(config.data_path, database=_db if _created_db else None)
             _mm.initialize()
 
+        soul_service = getattr(soul_engine, "_llm_service", None)
+        soul_declared_gate = getattr(soul_engine, "_llm_concurrency_gate", None)
+        soul_service_gate = getattr(soul_service, "concurrency_gate", None)
+        dialogue_service = getattr(dialogue, "_llm_service", None)
+        dialogue_declared_gate = getattr(dialogue, "_llm_concurrency_gate", None) or getattr(
+            dialogue, "llm_concurrency_gate", None
+        )
+        dialogue_service_gate = getattr(dialogue_service, "concurrency_gate", None)
+        controller_gate = getattr(runtime_controller, "llm_concurrency_gate", None)
+        recommendation_llm = getattr(recommendation_engine, "_llm", None)
+        recommendation_gate = getattr(recommendation_llm, "concurrency_gate", None)
+        account_soul = getattr(account_sync_service, "soul_engine", None)
+        account_soul_service = getattr(account_soul, "_llm_service", None)
+        controller_soul = getattr(runtime_controller, "soul_engine", None)
+        controller_soul_service = getattr(controller_soul, "_llm_service", None)
+        controller_recommendation = getattr(runtime_controller, "recommendation_engine", None)
+        controller_recommendation_llm = getattr(controller_recommendation, "_llm", None)
+        controller_discovery = getattr(runtime_controller, "discovery_engine", None)
+        controller_discovery_llm = getattr(controller_discovery, "_llm_service", None)
+        gate_sources = [
+            ("SoulEngine", soul_declared_gate),
+            ("SoulEngine service", soul_service_gate),
+            ("dialogue", dialogue_declared_gate),
+            ("dialogue service", dialogue_service_gate),
+            ("runtime controller", controller_gate),
+            ("recommendation service", recommendation_gate),
+            ("account-sync SoulEngine", getattr(account_soul, "_llm_concurrency_gate", None)),
+            (
+                "account-sync SoulEngine service",
+                getattr(account_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine",
+                getattr(controller_soul, "_llm_concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine service",
+                getattr(controller_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller recommendation service",
+                getattr(controller_recommendation_llm, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller discovery service",
+                getattr(controller_discovery_llm, "concurrency_gate", None),
+            ),
+        ]
+        provided_gates = [(label, gate) for label, gate in gate_sources if gate is not None]
+        injected_gate = provided_gates[0][1] if provided_gates else None
+        conflicting_labels = [label for label, gate in provided_gates if gate is not injected_gate]
+        if conflicting_labels:
+            sources = ", ".join([provided_gates[0][0], *conflicting_labels])
+            raise ValueError(
+                f"Injected LLM-bearing components use different LLM concurrency gates: {sources}."
+            )
+        if injected_gate is None:
+            injected_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+        with suppress(Exception):
+            soul_engine._llm_concurrency_gate = injected_gate
+        if soul_service is not None:
+            with suppress(Exception):
+                soul_service.concurrency_gate = injected_gate
+        if dialogue is not None:
+            with suppress(Exception):
+                dialogue._llm_concurrency_gate = injected_gate
+        if dialogue_service is not None:
+            with suppress(Exception):
+                dialogue_service.concurrency_gate = injected_gate
+        if runtime_controller is not None:
+            with suppress(Exception):
+                runtime_controller.llm_concurrency_gate = injected_gate
+        if recommendation_llm is not None:
+            with suppress(Exception):
+                recommendation_llm.concurrency_gate = injected_gate
+        for nested_soul, nested_service in (
+            (account_soul, account_soul_service),
+            (controller_soul, controller_soul_service),
+        ):
+            if nested_soul is not None:
+                with suppress(Exception):
+                    nested_soul._llm_concurrency_gate = injected_gate
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
+        for nested_service in (
+            controller_recommendation_llm,
+            controller_discovery_llm,
+        ):
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
+
         ctx = RuntimeContext(
             database=_db,
             memory_manager=_mm,
@@ -1043,6 +1510,7 @@ def create_app(
             recommendation_engine=recommendation_engine,
             account_sync_service=account_sync_service,
             auto_update_service=auto_update_service,
+            llm_concurrency_gate=injected_gate,
         )
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import SocraticDialogue
@@ -1077,9 +1545,73 @@ def create_app(
                 ctx.degraded_reason,
                 "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
             )
+    if ctx.llm_concurrency_gate is None:
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+        ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+    def _inventory_target() -> int:
+        controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
+        if controller_target is not None:
+            with suppress(TypeError, ValueError):
+                return max(0, int(controller_target))
+        runtime_scheduler = getattr(getattr(ctx, "config", None), "scheduler", None)
+        configured_target = getattr(runtime_scheduler, "pool_target_count", None)
+        if configured_target is None:
+            configured_target = getattr(
+                getattr(config, "scheduler", None),
+                "pool_target_count",
+                0,
+            )
+        with suppress(TypeError, ValueError):
+            return max(0, int(cast("Any", configured_target)))
+        return 0
+
+    def _xhs_self_nickname() -> str:
+        """Persisted xhs nickname used by the pool's self-authored guard."""
+        load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
+        if callable(load_state):
+            with suppress(Exception):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    return str(info.get("nickname", "") or "").strip()
+        return ""
+
+    def _canonical_pool_available() -> int | None:
+        nickname = _xhs_self_nickname()
+        readiness = getattr(ctx.database, "count_pool_readiness", None)
+        if callable(readiness):
+            with suppress(Exception):
+                counts = readiness(xhs_self_nickname=nickname)
+                if isinstance(counts, dict):
+                    return max(0, int(counts.get("available", 0)))
+        count_pool = getattr(ctx.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            with suppress(TypeError):
+                return max(0, int(count_pool(xhs_self_nickname=nickname)))
+            with suppress(Exception):
+                return max(0, int(count_pool()))
+        return None
+
+    initial_available = _canonical_pool_available()
+    update_inventory = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+    if initial_available is not None and callable(update_inventory):
+        update_inventory(available=initial_available, target=_inventory_target())
     app.state.runtime_context = ctx
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
+    first_page_topup_attempted_at = 0.0
+    recommendation_snapshot_cache: RecommendationListResponse | None = None
+    recommendation_snapshot_cached_at = 0.0
+    recommendation_snapshot_lock = asyncio.Lock()
+
+    def _invalidate_recommendation_snapshot() -> None:
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        recommendation_snapshot_cache = None
+        recommendation_snapshot_cached_at = 0.0
+
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
@@ -1272,15 +1804,49 @@ def create_app(
             "issues": _degraded_issues_payload(),
         }
 
+    # Shared copy for the degraded-mode init rejection (POST /api/init) and the
+    # degraded-aware /api/init-status reason detail, so both surfaces explain
+    # the same actionable cause: the backend could not build its LLM registry,
+    # so init is impossible until the LLM config is repaired (mirrors the
+    # config-recovery message on PUT /api/config).
+    _degraded_init_detail = (
+        "LLM 配置有误，AI 服务无法启动，暂时无法初始化。"
+        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
+        "然后 restart daemon 让新配置生效后再试。"
+    )
+
+    def _init_blocked_by_degraded() -> bool:
+        """True when the backend is degraded because the LLM registry never
+        built — the one degraded reason that makes guided init impossible.
+
+        Gated on the canonical ``llm_registry_unavailable`` reason (the only
+        value ``build_degraded_runtime_context`` ever emits) rather than the
+        bare ``degraded`` flag, so this stays a precise "LLM config is broken"
+        signal and does not swallow other, init-compatible degraded states.
+        """
+        return (
+            bool(getattr(ctx, "degraded", False))
+            and str(getattr(ctx, "degraded_reason", "")) == "llm_registry_unavailable"
+        )
+
     @app.middleware("http")
     async def _degraded_mode_guard(request: Request, call_next: Any) -> Any:
         if not bool(getattr(ctx, "degraded", False)):
             return await call_next(request)
         path = request.url.path
         method = request.method.upper()
+        static_recovery_surface = (
+            path == "/"
+            or path in {"/m", "/web", "/setup"}
+            # /shared/ hosts modules the recovery shells load at parse time
+            # (e.g. source-status.js); blocking it kills the setup wizard's
+            # script and leaves the degraded config unrepairable.
+            or path.startswith(("/m/", "/web/", "/setup/", "/shared/"))
+        )
         allowed = (
             method == "OPTIONS"
             or path == "/api/ping"
+            or path == "/api/qr-info"
             or path == "/api/health"
             or path == "/api/runtime-status"
             or path == "/favicon.ico"
@@ -1292,8 +1858,22 @@ def create_app(
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            # LLM-independent repair/config surfaces (degraded ctx has config +
+            # database, which is all these handlers touch). Blocking them made
+            # the settings 平台源 tab and the embedding banner fail with
+            # misleading "backend unavailable" copy while degraded, even though
+            # fixing platform logins / pulling bge-m3 is exactly what a user
+            # can usefully do while repairing the LLM config.
+            or path == "/api/sources/status"
+            or (path.startswith("/api/sources/") and path.endswith("/verify"))
+            or path == "/api/embedding/repair"
             or path.startswith("/api/auth")
-            or path.startswith("/m")
+            # Keep every browser recovery shell loadable. Their static assets
+            # do not depend on the LLM registry, and the desktop/setup forms
+            # use the allowed config endpoints above to repair the blocking
+            # provider configuration. Blocking these paths exposes the raw 503
+            # envelope instead of the recovery UI.
+            or static_recovery_surface
         )
         if allowed:
             return await call_next(request)
@@ -1353,6 +1933,12 @@ def create_app(
     #  - /api/sources/*/task-result         — init bootstrap results (the handler
     #                                         self-guards: skips pool writes and
     #                                         only propagates init-owned results)
+    #  - /api/sources/bangumi/identity       — extension-reported Bangumi account
+    #                                         (public uid + username). Init is the
+    #                                         moment three-tier account resolution
+    #                                         (token > explicit username > extension
+    #                                         identity) needs the freshly-reported
+    #                                         identity, so it must land even mid-init.
     # (GET reads — /api/sources/*/next-task, /api/init-status, … — are never
     #  gated since only mutating methods are checked.)
     _init_write_allowlist = frozenset(
@@ -1360,6 +1946,7 @@ def create_app(
             "/api/init",
             "/api/init/cancel",
             "/api/bilibili/cookie",
+            "/api/sources/bangumi/identity",
         }
     )
 
@@ -1787,14 +2374,176 @@ def create_app(
         _lan_ip_checked_at = time.monotonic()
         return _lan_ip_value
 
+    async def _fresh_lan_ip() -> str | None:
+        """Detect the LAN IP now, bypassing the ``/api/health`` TTL cache.
+
+        Opening the QR panel is a rare, user-initiated action, and a stale
+        address there is worse than a marginally slower panel: right after a
+        Wi-Fi switch the cached value still encodes a host the phone cannot
+        reach. Detection shells out to ifconfig / ip, so it runs in a worker
+        thread to keep the event loop responsive, and the result refreshes the
+        shared cache that ``/api/health`` reads.
+        """
+        nonlocal _lan_ip_value, _lan_ip_checked_at
+        _lan_ip_value = await asyncio.to_thread(_detect_lan_ip)
+        _lan_ip_checked_at = time.monotonic()
+        return _lan_ip_value
+
     # Embedding readiness is probed live (see _health_embedding_ready) and the
     # result cached here so frequent /api/health polls share one provider call.
-    _embedding_ready_value = False
+    _embedding_probe_outcome: _EmbeddingProbeOutcome = "failed"
     _embedding_ready_checked_at = float("-inf")
     _embedding_ready_lock = asyncio.Lock()
+    # Classified not-ready cause (v0.3.155+), cached on the same cadence so
+    # init-status polls don't re-diagnose Ollama on every request.
+    _embedding_diag_value: tuple[str, str] = ("ok", "")
+    _embedding_diag_checked_at = float("-inf")
+    _embedding_diag_lock = asyncio.Lock()
 
-    async def _health_embedding_ready() -> bool:
-        """Whether the embedding service can *currently* produce a vector.
+    def _expire_embedding_ready_cache() -> None:
+        """Force the next readiness/diagnosis check to re-probe immediately."""
+        nonlocal _embedding_ready_checked_at, _embedding_diag_checked_at
+        _embedding_ready_checked_at = float("-inf")
+        _embedding_diag_checked_at = float("-inf")
+
+    def _embedding_ollama_target() -> tuple[str, str]:
+        """(base_url, model) the embedding path would use for Ollama.
+
+        Mirrors registry defaults: empty base_url → local daemon, empty
+        model → bge-m3.
+        """
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
+        model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
+        return base_url, model
+
+    def _embedding_probe_ttl(outcome: _EmbeddingProbeOutcome) -> float:
+        return _EMBEDDING_READY_TTL_SECONDS if outcome == "ready" else _EMBEDDING_FAIL_TTL_SECONDS
+
+    def _embedding_probe_result(outcome: _EmbeddingProbeOutcome, *, strict: bool) -> bool:
+        if outcome == "ready":
+            return True
+        if outcome != "timed_out" or strict:
+            return False
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        if provider != "ollama":
+            return False
+        from openbiliclaw.runtime.ollama_supervisor import is_loopback
+
+        base_url, _ = _embedding_ollama_target()
+        return is_loopback(base_url)
+
+    def _peek_embedding_ready(*, strict: bool = False) -> bool:
+        """Read the last embedding outcome without starting provider I/O.
+
+        Guided init already performs a strict pre-flight probe. While that run
+        owns the LLM/embedding budget, status polling must remain observational
+        and must not contend with or bill another provider request.
+        """
+        soul_engine = getattr(ctx, "soul_engine", None)
+        service = getattr(soul_engine, "_embedding_service", None)
+        if service is None:
+            return False
+        if not callable(getattr(service, "probe", None)):
+            return True
+        return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
+
+    async def _diagnose_embedding(ready: bool) -> tuple[str, str]:
+        """Classify why embedding is not ready (``("ok", "")`` when it is).
+
+        Cheap cases (disabled / misconfigured) are answered from config
+        alone; the Ollama case runs a real classification (is the daemon
+        up / is the model installed / does it load) behind a TTL cache.
+        Non-Ollama providers get a generic ``provider_error`` — their
+        failure detail already lands in logs and re-probing a cloud
+        provider from a poll loop would burn quota.
+        """
+        nonlocal _embedding_diag_value, _embedding_diag_checked_at
+        if ready:
+            return ("ok", "")
+        # An in-flight one-click repair is the freshest possible signal —
+        # report live pull progress (no TTL cache: progress changes every
+        # poll, and the classification is already known).
+        pull_progress = _embedding_pull_progress_view()
+        if pull_progress["running"]:
+            return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip()
+        if not provider:
+            return ("disabled", "")
+        soul_engine = getattr(ctx, "soul_engine", None)
+        service = getattr(soul_engine, "_embedding_service", None)
+        if service is None:
+            # Configured but the registry couldn't build it. Distinguish an
+            # unknown provider NAME (e.g. a browser-translated value like
+            # '奥拉玛' — re-pick in settings) from a known provider whose
+            # build failed (usually missing key / base_url — fix credentials).
+            from openbiliclaw.llm.registry import _EMBEDDING_CAPABLE_PROVIDERS
+
+            if provider.lower() in _EMBEDDING_CAPABLE_PROVIDERS:
+                return (
+                    "misconfigured",
+                    f"embedding 服务未能构建（provider={provider}）——"
+                    "请到设置页检查该 provider 的 API Key / base_url 后重新保存。",
+                )
+            return (
+                "misconfigured",
+                f"embedding 配置无效（provider={provider!r}），"
+                "请到设置页重新选择 provider 并保存。",
+            )
+        if provider.lower() != "ollama":
+            return (
+                "provider_error",
+                f"embedding provider（{provider}）探测失败——"
+                "请检查 API Key / base_url / 网络后重试。",
+            )
+
+        _diag_ttl = _EMBEDDING_FAIL_TTL_SECONDS
+        if time.monotonic() - _embedding_diag_checked_at < _diag_ttl:
+            return _embedding_diag_value
+        async with _embedding_diag_lock:
+            if time.monotonic() - _embedding_diag_checked_at < _diag_ttl:
+                return _embedding_diag_value
+            from openbiliclaw.llm.ollama_diagnostics import diagnose_ollama_embedding
+
+            base_url, model = _embedding_ollama_target()
+            try:
+                diag = await asyncio.wait_for(
+                    diagnose_ollama_embedding(base_url, model),
+                    timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS,
+                )
+                if diag[0] == "error":
+                    diag = ("provider_error", _provider_error_detail(diag[1]))
+            except TimeoutError:
+                diag = (
+                    "provider_error",
+                    "Ollama 诊断超时——服务可能正在冷加载模型，稍后自动重试。",
+                )
+            except Exception:
+                logger.debug("Embedding diagnosis errored", exc_info=True)
+                diag = ("provider_error", "embedding 诊断失败，请查看后端日志。")
+            _embedding_diag_value = diag
+            _embedding_diag_checked_at = time.monotonic()
+            return diag
+
+    def _peek_embedding_diagnosis(ready: bool) -> tuple[str, str]:
+        """Return a non-I/O embedding diagnosis while guided init is active."""
+        if ready:
+            return ("ok", "")
+        pull_progress = _embedding_pull_progress_view()
+        if pull_progress["running"]:
+            return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip()
+        if not provider:
+            return ("disabled", "")
+        if _embedding_diag_checked_at != float("-inf"):
+            return _embedding_diag_value
+        return ("checking", "初始化正在使用 AI 服务，完成后会自动重新检测向量服务。")
+
+    async def _health_embedding_ready(*, strict: bool = False) -> bool:
+        """Interpret the cached live embedding probe for health or strict init.
 
         This is a live signal, not a build-time one. A service object that
         was constructed at startup but whose provider now 404s (``bge-m3``
@@ -1808,9 +2557,10 @@ def create_app(
           - service without a ``probe()`` (legacy/stub) -> build-only ``True``;
           - otherwise a cache-bypassing ``probe()``, result cached for
             ``_EMBEDDING_READY_TTL_SECONDS`` and single-flighted so concurrent
-            polls share one provider round-trip.
+            polls share one provider round-trip. A loopback-Ollama timeout is
+            optimistic only when ``strict`` is false; init always passes true.
         """
-        nonlocal _embedding_ready_value, _embedding_ready_checked_at
+        nonlocal _embedding_probe_outcome, _embedding_ready_checked_at
 
         soul_engine = getattr(ctx, "soul_engine", None)
         service = getattr(soul_engine, "_embedding_service", None)
@@ -1821,39 +2571,32 @@ def create_app(
             # Legacy service without a live probe — "built" is the best signal.
             return True
 
-        _embedding_ttl = (
-            _EMBEDDING_READY_TTL_SECONDS if _embedding_ready_value else _EMBEDDING_FAIL_TTL_SECONDS
-        )
+        _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
         if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-            return _embedding_ready_value
+            return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
 
         async with _embedding_ready_lock:
             # Another request may have refreshed the cache while we waited.
-            _embedding_ttl = (
-                _EMBEDDING_READY_TTL_SECONDS
-                if _embedding_ready_value
-                else _EMBEDDING_FAIL_TTL_SECONDS
-            )
+            _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
             if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-                return _embedding_ready_value
+                return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
             try:
                 ready = bool(
                     await asyncio.wait_for(probe(), timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS)
                 )
+                outcome: _EmbeddingProbeOutcome = "ready" if ready else "failed"
             except TimeoutError:
-                # Strict (gui-init): a prereq is "ok" only on a confirmed real
-                # embedding round-trip. A timeout (even a cold model load) within
-                # the generous window means we could NOT confirm it works → report
-                # not-ready, and the short fail-TTL re-probes soon so it greens
-                # quickly once the load finishes.
-                logger.debug("Embedding readiness probe timed out; reporting not ready")
-                ready = False
+                logger.debug(
+                    "Embedding readiness probe timed out; ordinary loopback-Ollama health "
+                    "treats this as cold-loading while init remains strict"
+                )
+                outcome = "timed_out"
             except Exception:
                 logger.debug("Embedding readiness probe errored", exc_info=True)
-                ready = False
-            _embedding_ready_value = ready
+                outcome = "failed"
+            _embedding_probe_outcome = outcome
             _embedding_ready_checked_at = time.monotonic()
-            return ready
+            return _embedding_probe_result(outcome, strict=strict)
 
     def _embedding_required_for_init() -> bool:
         """Whether guided init must wait for a configured embedding provider."""
@@ -1872,7 +2615,32 @@ def create_app(
         the panel. UI liveness indicators should hit this instead and keep
         ``/api/health`` for profile/embedding state.
         """
-        return JSONResponse({"status": "ok", "service": "openbiliclaw-api"})
+        body: dict[str, object] = {"status": "ok", "service": "openbiliclaw-api"}
+        if bool(getattr(ctx, "degraded", False)):
+            # Preserve pure liveness semantics (status stays "ok") while
+            # giving browser shells a provider-free fast path to avoid firing
+            # every intentionally-blocked business request before /config
+            # reveals the recovery state.
+            body.update(
+                {
+                    "degraded": True,
+                    "degraded_reason": str(getattr(ctx, "degraded_reason", "")),
+                    "issues": _degraded_issues_payload(),
+                }
+            )
+        return JSONResponse(body)
+
+    @app.get("/api/qr-info")
+    async def qr_info() -> JSONResponse:
+        """Lightweight endpoint for mobile QR code: LAN IP only.
+
+        Unlike ``/api/health``, this skips the embedding readiness probe
+        so the QR drawer never blocks on a cold Ollama model load, and it
+        detects the address fresh instead of serving the health TTL cache
+        (see ``_fresh_lan_ip``) so a scanned code is never a network change
+        behind.
+        """
+        return JSONResponse({"lan_ip": await _fresh_lan_ip()})
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
@@ -1911,53 +2679,157 @@ def create_app(
 
         coord = ctx.init_coordinator
         prereqs = ctx.init_prereqs
+        # A task can finish after its terminal DB write fails. Reconcile that
+        # orphan before reporting status so retry/cancel is never blocked by a
+        # logical ``running`` row with no owner.
+        await coord.reconcile_orphaned_run()
         run = coord.get_status()
-        # Probe the three services concurrently — each is a real (now strict)
-        # request with a generous cold-load timeout, so running them sequentially
-        # could stack to ~40s. gather() bounds the wait to the slowest single
-        # probe (TTL-cached, so steady-state polls are instant).
-        bili, chat, embedding = await asyncio.gather(
-            prereqs.bilibili_check(),
-            prereqs.chat_ready(),
-            _health_embedding_ready(),
-        )
-        platforms = prereqs.enabled_platforms()
         initialized = bool(_health_profile_ready())
+        running = bool(run["running"])
+        terminal = run.get("status") in ("failed", "cancelled")
+        embedding_required = _embedding_required_for_init()
+        has_cached_readiness = getattr(prereqs, "has_cached_readiness", None)
+        terminal_cache_ready = bool(
+            terminal
+            and callable(has_cached_readiness)
+            and has_cached_readiness()
+            and (not embedding_required or _embedding_ready_checked_at != float("-inf"))
+        )
+        if running:
+            # Status polling is strictly observational while init owns the
+            # expensive providers. Pre-flight already established readiness;
+            # cached values are enough for a disabled checklist.
+            bili = prereqs.peek_bilibili()
+            chat = prereqs.peek_chat()
+            embedding = _peek_embedding_ready(strict=True)
+        elif initialized:
+            # Steady state: once a profile exists the checklist is
+            # informational only (can_start is false regardless, and POST
+            # /api/init revalidates live before any force rebuild). Skip the
+            # real chat/Bilibili probes so an open polling page — /setup/ or
+            # the desktop web waiting for the first pool — no longer burns a
+            # billable LLM ping per TTL window. Embedding is cache-only here
+            # too: immediately after init, background prewarm can occupy its
+            # provider semaphore for minutes, and a live status probe then
+            # makes the completed page look frozen. /api/health remains the
+            # dedicated live readiness surface; POST /api/init revalidates a
+            # force rebuild before reserving a new run.
+            bili = prereqs.peek_bilibili()
+            chat = prereqs.peek_chat()
+            embedding = _peek_embedding_ready(strict=True)
+        elif terminal_cache_ready:
+            # The just-finished run already passed a strict pre-flight. Return
+            # its terminal state immediately so cancel/failure feedback is not
+            # hidden behind a second 30s cold-model probe. After a process
+            # restart these in-memory caches are absent and the live branch
+            # below still refreshes the checklist normally.
+            bili = prereqs.peek_bilibili()
+            chat = prereqs.peek_chat()
+            embedding = _peek_embedding_ready(strict=True)
+        else:
+            # Probe the three services concurrently — each is a real (now
+            # strict) request with a generous cold-load timeout, so running
+            # them sequentially could stack to ~40s. gather() bounds the wait
+            # to the slowest single probe (TTL-cached, so steady-state polls
+            # are instant).
+            bili, chat, embedding = await asyncio.gather(
+                prereqs.bilibili_check(),
+                prereqs.chat_ready(),
+                _health_embedding_ready(strict=True),
+            )
+        platforms = prereqs.enabled_platforms()
         trusted = _get_auth_gate().is_trusted_local(request)
         supported = not is_running_in_container()
-        running = bool(run["running"])
         # v0.3.118+: bilibili login is no longer a server-side hard gate —
         # whether it blocks depends on the client's per-run source selection,
         # which only POST /api/init sees. ``bilibili_logged_in`` stays in the
         # prerequisites payload so clients gate the start button themselves
         # when B站 is among the checked sources; POST revalidates regardless.
-        embedding_required = _embedding_required_for_init()
         hard_ok = chat and (embedding or not embedding_required)
         # Mirror POST /api/init's guards: an already-initialized profile blocks
         # a (non-force) start, so can_start must reflect that too — otherwise E1
         # and E2 disagree and a client could offer "start" that E2 rejects.
         can_start = trusted and supported and hard_ok and not running and not initialized
 
+        # Account sync may be the first owner that tries to build preferences
+        # after desktop startup. It persists a safe, user-facing failure, but
+        # init-status historically never read it despite being the page's
+        # authoritative source — so the UI still sat at 49% with no reason.
+        account_profile_error = ""
+        if not initialized and not running:
+            sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
+            if callable(sync_status):
+                with suppress(Exception):
+                    raw_status = sync_status()
+                    if isinstance(raw_status, dict):
+                        candidate = str(raw_status.get("last_account_sync_error", "")).strip()
+                        if candidate.startswith("画像分析失败："):
+                            account_profile_error = candidate[:500]
+
+        embedding_check, embedding_detail = (
+            _peek_embedding_diagnosis(bool(embedding))
+            if running or terminal_cache_ready or initialized
+            else await _diagnose_embedding(bool(embedding))
+        )
+        pull_progress = _embedding_pull_progress_view()
+        pull_status = str(pull_progress.get("status_text") or "")
+
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
+        elif _init_blocked_by_degraded():
+            # LLM registry never built → init is impossible until config is
+            # repaired. Surface the same actionable cause as POST /api/init so
+            # the checklist doesn't read as a generic "AI 服务不可用".
+            reason, detail = "degraded", _degraded_init_detail
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
-            reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
+            if bool(run["partial_success"]):
+                # Profile creation succeeded but the first discovery pass did
+                # not. Preserve the terminal cause written by complete() so
+                # setup / desktop / popup can explain the degraded result and
+                # offer a safe way forward instead of appearing stuck at 95%.
+                reason = str(run.get("reason") or "discovery_partial")
+                detail = str(
+                    run.get("detail")
+                    or "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。"
+                )
+            else:
+                reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
+        elif not trusted:
+            # trusted participates in can_start but had no reason branch, so
+            # remote/paired-mobile viewers got can_start=false with
+            # reason="none" — every client fell back to a generic "条件未满足"
+            # while the checklist showed all-green (field report 2026-07-05).
+            # All clients already map local_only to "只能在本机发起初始化。".
+            reason, detail = "local_only", "只能在本机发起初始化"
+        elif run.get("status") in ("failed", "cancelled"):
+            # The terminal run is the authoritative explanation of what just
+            # happened.  A follow-up readiness probe can independently fail
+            # (for example a cold local model timing out), but must not replace
+            # a precise persisted "analysis exceeded six minutes" error with
+            # the generic "AI service unavailable" banner.
+            reason = run.get("reason") or str(run.get("status"))
+            detail = str(run.get("detail") or "")
         elif not chat:
-            reason, detail = "llm_not_ready", "AI 服务还没配好或当前不可用"
+            reason = "llm_not_ready"
+            # Prefer the classified probe cause (无效 API Key / 服务不可达 /
+            # 模型不存在) so the checklist explains WHY chat is down; a stored
+            # account-analysis failure still wins as the more specific history.
+            detail = (
+                account_profile_error or prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用"
+            )
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
             # Informational (does not flip can_start): blocks only if the
             # client keeps bilibili selected, which the UI enforces.
             reason, detail = "bilibili_not_logged_in", "还没检测到 B站 登录"
-        elif run.get("status") in ("failed", "cancelled"):
-            # Prereqs are fine and nothing is running, but the last run ended
-            # badly — surface why so the UI can show it (can_start stays true so
-            # the user can retry) (gui-init review).
-            reason = run.get("reason") or str(run.get("status"))
-            detail = "上次初始化未完成，可重试"
+        elif account_profile_error:
+            # The current probe is healthy again, so retry is allowed, but the
+            # previous background analysis failure still explains why no
+            # profile exists yet.
+            reason, detail = "analyze_failed", account_profile_error
         else:
             reason, detail = "none", ""
 
@@ -1975,13 +2847,25 @@ def create_app(
             prerequisites=InitPrerequisitesOut(
                 bilibili_logged_in=(bili == "ok"),
                 bilibili_check=bili,
+                bilibili_detail=prereqs.peek_bilibili_detail() if bili == "failed" else "",
                 llm_ready=chat,
                 embedding_ready=embedding,
+                embedding_check=embedding_check,
+                embedding_detail=embedding_detail,
+                embedding_repair_running=bool(pull_progress["running"]),
+                embedding_repair_completed=_progress_int(pull_progress.get("completed")),
+                embedding_repair_total=_progress_int(pull_progress.get("total")),
+                ollama_phase=embedding_progress.ollama_phase(),
+                embedding_pull_status=pull_status,
                 embedding_required=embedding_required,
                 enabled_platforms=platforms,
             ),
             reason=reason,
             detail=detail,
+            last_activity=str(run.get("last_activity") or ""),
+            last_heartbeat_at=str(run.get("last_heartbeat_at") or ""),
+            last_progress_at=str(run.get("last_progress_at") or ""),
+            progress_sequence=int(run.get("progress_sequence") or 0),
         )
 
     def _init_runtime_supported() -> tuple[bool, str]:
@@ -2000,7 +2884,12 @@ def create_app(
                 pass
         return True, ""
 
-    async def _persist_guided_init_source_opt_in(effective_sources: set[str]) -> None:
+    async def _persist_guided_init_source_opt_in(
+        effective_sources: set[str],
+        *,
+        bangumi_username: str | None = None,
+        bangumi_token: str | None = None,
+    ) -> None:
         """Best-effort: checked guided-init sources become enabled settings.
 
         The run itself uses ``effective_sources`` directly, so a config write
@@ -2022,6 +2911,25 @@ def create_app(
             if source_cfg is not None and not bool(getattr(source_cfg, "enabled", False)):
                 source_cfg.enabled = True
                 changed = True
+        bangumi_cfg = getattr(sources_cfg, "bangumi", None)
+        if (
+            bangumi_cfg is not None
+            and "bangumi" in effective_sources
+            and bangumi_username is not None
+            and str(getattr(bangumi_cfg, "username", "") or "").strip() != bangumi_username
+        ):
+            bangumi_cfg.username = bangumi_username
+            changed = True
+        # Persist the validated token so background discovery and later syncs
+        # authenticate without re-prompting (rule 7: only after /v0/me passed).
+        if (
+            bangumi_cfg is not None
+            and "bangumi" in effective_sources
+            and bangumi_token is not None
+            and str(getattr(bangumi_cfg, "access_token", "") or "").strip() != bangumi_token
+        ):
+            bangumi_cfg.access_token = bangumi_token
+            changed = True
         if not changed:
             return
 
@@ -2052,7 +2960,10 @@ def create_app(
             logger.warning("guided init source opt-in hot-reload failed", exc_info=True)
 
     async def _run_guided_init_wrapper(
-        run_id: str, selected_sources: set[str] | None = None
+        run_id: str,
+        selected_sources: set[str] | None = None,
+        bangumi_username: str = "",
+        bangumi_token: str = "",
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -2076,18 +2987,30 @@ def create_app(
         coord = ctx.init_coordinator
 
         async def _api_discover_backfill(
-            profile: Any, *, target_pool_count: int, label_suffix: str = ""
+            profile: Any,
+            *,
+            target_pool_count: int,
+            label_suffix: str = "",
+            progress_callback: Any = None,
         ) -> int:
             # API path backfills through the live controller so it holds the
             # refresh lock (B1); ``label_suffix`` is CLI-only console flavour.
             return int(
                 await ctx.runtime_controller.run_init_backfill(
-                    profile, target_pool_count, fully_parallel=True
+                    profile,
+                    target_pool_count,
+                    fully_parallel=True,
+                    progress_callback=progress_callback,
                 )
             )
 
+        heartbeat_task: asyncio.Task[None] | None = None
         try:
             await coord.mark_running(run_id)
+            # Liveness heartbeat: even if a single stage-2 LLM call blocks for
+            # minutes, last_activity stays ≤30s fresh so the GUI never falsely
+            # reads "stalled" (init-progress spec Phase 0). Torn down in finally.
+            heartbeat_task = asyncio.create_task(_run_init_heartbeat(coord, run_id))
             enabled = set(ctx.init_prereqs.enabled_platforms())
             effective = _select_init_platforms(enabled, selected_sources)
             result = await run_guided_init(
@@ -2103,12 +3026,20 @@ def create_app(
                 include_x="twitter" in effective,
                 include_zhihu="zhihu" in effective,
                 include_reddit="reddit" in effective,
+                include_bangumi="bangumi" in effective,
+                bangumi_username=bangumi_username,
+                bangumi_token=bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
                 run_id=run_id,
             )
-            await coord.complete(run_id, partial_success=result.discovery_error)
+            await coord.complete(
+                run_id,
+                partial_success=result.discovery_error,
+                reason=getattr(result, "discovery_reason", None),
+                detail=getattr(result, "discovery_detail", None),
+            )
         except asyncio.CancelledError:
             # Cancel was requested via /api/init/cancel — shield the terminal
             # write so the cancelled status still lands before we propagate.
@@ -2118,12 +3049,16 @@ def create_app(
         except GuidedInitError as exc:
             logger.warning("guided init %s failed: %s", run_id, exc.reason)
             with suppress(Exception):
-                await coord.fail(run_id, exc.reason)
-        except Exception:
+                await coord.fail(run_id, exc.reason, detail=exc.message)
+        except Exception as exc:
             logger.exception("guided init %s crashed", run_id)
             with suppress(Exception):
-                await coord.fail(run_id, "internal_error")
+                await coord.fail(run_id, "internal_error", detail=_init_crash_detail(exc))
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with suppress(BaseException):
+                    await heartbeat_task
             if not bool(getattr(ctx, "degraded", False)):
                 with suppress(Exception):
                     await ctx.restart_background_tasks(app)
@@ -2138,6 +3073,15 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
+        # Degraded mode reaches this handler (the guard allow-lists /api/init so
+        # the recovery UI stays live), but no LLM registry means init cannot run.
+        # Reject with an actionable cause instead of crashing on a missing
+        # coordinator or bubbling a bare error (project rule 7).
+        if _init_blocked_by_degraded():
+            return JSONResponse(
+                {"error": "degraded", "detail": _degraded_init_detail},
+                status_code=409,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -2149,8 +3093,83 @@ def create_app(
         # for this local guided-init run.
         raw_sources = body.get("sources") if isinstance(body, dict) else None
         selected_sources = {str(s) for s in raw_sources} if isinstance(raw_sources, list) else None
+        source_options = body.get("source_options") if isinstance(body, dict) else None
+        if source_options is not None and not isinstance(source_options, dict):
+            return JSONResponse(
+                {"error": "invalid_source_options", "detail": "source_options 必须是对象"},
+                status_code=400,
+            )
+        source_options = source_options or {}
+        unknown_source_options = sorted(set(source_options) - {"bangumi"})
+        if unknown_source_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": f"不支持的 source_options: {', '.join(unknown_source_options)}",
+                },
+                status_code=400,
+            )
+        bangumi_options = source_options.get("bangumi", {})
+        if not isinstance(bangumi_options, dict):
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": "source_options.bangumi 必须是对象",
+                },
+                status_code=400,
+            )
+        unknown_bangumi_options = sorted(set(bangumi_options) - {"username", "access_token"})
+        if unknown_bangumi_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": (
+                        "不支持的 source_options.bangumi 字段: "
+                        + ", ".join(unknown_bangumi_options)
+                    ),
+                },
+                status_code=400,
+            )
+        scoped_bangumi_username = "username" in bangumi_options
+        legacy_bangumi_username = isinstance(body, dict) and "bangumi_username" in body
+        bangumi_username_supplied = scoped_bangumi_username or legacy_bangumi_username
+        selected_bangumi_username: str | None = None
+        if bangumi_username_supplied:
+            from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+            try:
+                raw_bangumi_username = (
+                    bangumi_options.get("username")
+                    if scoped_bangumi_username
+                    else body.get("bangumi_username")
+                )
+                selected_bangumi_username = validate_bangumi_username(raw_bangumi_username)
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_bangumi_username", "detail": str(exc)},
+                    status_code=400,
+                )
+        scoped_bangumi_token = "access_token" in bangumi_options
+        selected_bangumi_token: str | None = None
+        if scoped_bangumi_token:
+            from openbiliclaw.sources.bangumi_client import validate_bangumi_access_token
+
+            try:
+                selected_bangumi_token = validate_bangumi_access_token(
+                    bangumi_options.get("access_token")
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_bangumi_access_token", "detail": str(exc)},
+                    status_code=400,
+                )
 
         coord = ctx.init_coordinator
+
+        # Release a previous ownerless active row before source persistence or
+        # the single-flight CAS. Fresh ``starting`` rows retain their 120s
+        # lease, so concurrent starts are rejected rather than stolen.
+        await coord.reconcile_orphaned_run()
 
         supported, detail = _init_runtime_supported()
         if not supported:
@@ -2172,8 +3191,138 @@ def create_app(
                 {"error": "no_sources_selected", "detail": "至少选择一个有效数据来源"},
                 status_code=409,
             )
+        configured_bangumi_username = str(
+            getattr(
+                getattr(
+                    getattr(getattr(ctx, "config", None), "sources", None),
+                    "bangumi",
+                    None,
+                ),
+                "username",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_bangumi_username = (
+            configured_bangumi_username
+            if selected_bangumi_username is None
+            else selected_bangumi_username
+        )
+        configured_bangumi_token = str(
+            getattr(
+                getattr(
+                    getattr(getattr(ctx, "config", None), "sources", None),
+                    "bangumi",
+                    None,
+                ),
+                "access_token",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_bangumi_token = (
+            configured_bangumi_token if selected_bangumi_token is None else selected_bangumi_token
+        )
+        warnings: list[str] = []
+        # A personal access token identifies the account via /v0/me, so validate
+        # it live and resolve the username BEFORE reserving a run or persisting —
+        # reject a bad/expired token with its real cause (project rule 7) instead
+        # of writing an unusable secret.
+        if "bangumi" in effective_sources and effective_bangumi_token:
+            from openbiliclaw.sources.bangumi_client import (
+                BangumiAPIError,
+                resolve_access_token_identity,
+            )
+
+            try:
+                resolved_bangumi_username = await resolve_access_token_identity(
+                    effective_bangumi_token
+                )
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    return JSONResponse(
+                        {
+                            "error": "invalid_bangumi_access_token",
+                            "detail": (
+                                "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 "
+                                "https://next.bgm.tv/demo/access-token 重新生成后重试。"
+                            ),
+                        },
+                        status_code=400,
+                    )
+                return JSONResponse(
+                    {"error": "bangumi_token_check_failed", "detail": str(exc)},
+                    status_code=502,
+                )
+            if (
+                effective_bangumi_username
+                and effective_bangumi_username != resolved_bangumi_username
+            ):
+                warnings.append(
+                    f"Bangumi 令牌对应用户为 {resolved_bangumi_username}，已覆盖填写的用户名。"
+                )
+            effective_bangumi_username = resolved_bangumi_username
+        # Zero-config fallback: the content script on bgm.tv reports the
+        # logged-in account's public uid + username. Priority ladder:
+        # token /v0/me > explicit/configured username > extension-reported
+        # username > reject. Never overrides an explicit choice.
+        if (
+            "bangumi" in effective_sources
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            identity_loader = getattr(app.state, "load_bangumi_identity", None)
+            extension_bangumi_username, extension_identity_verified = (
+                identity_loader() if callable(identity_loader) else ("", False)
+            )
+            if extension_bangumi_username:
+                effective_bangumi_username = extension_bangumi_username
+                # Say which one it is. An unverified identity is a best-effort
+                # DOM read that bgm.tv never confirmed, so the user has to be
+                # able to catch a wrong account instead of trusting the same
+                # confident sentence for both cases.
+                warnings.append(
+                    f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}。"
+                    if extension_identity_verified
+                    else (
+                        f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}"
+                        "（未经 bgm.tv 校验，可能不准）。如果不是你本人，请填写公开用户名"
+                        "或个人令牌后重新初始化。"
+                    )
+                )
+        if (
+            effective_sources == {"bangumi"}
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            return JSONResponse(
+                {
+                    "error": "no_profile_signal_sources",
+                    "detail": (
+                        "只选择 Bangumi 初始化时，需提供个人令牌（推荐，自动识别当前用户）、"
+                        "公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别。"
+                    ),
+                },
+                status_code=409,
+            )
+        if (
+            "bangumi" in effective_sources
+            and not effective_bangumi_username
+            and not effective_bangumi_token
+        ):
+            warnings.append("Bangumi 未填写令牌或公开用户名：本次仅启用条目发现，不提供画像信号。")
         if selected_sources is not None:
-            await _persist_guided_init_source_opt_in(effective_sources)
+            # With a token the username was resolved from /v0/me; persist that so
+            # status/config reflect the real account. Otherwise keep the explicit
+            # supplied value (None = leave the configured username untouched).
+            username_to_persist = (
+                effective_bangumi_username if effective_bangumi_token else selected_bangumi_username
+            )
+            await _persist_guided_init_source_opt_in(
+                effective_sources,
+                bangumi_username=username_to_persist,
+                bangumi_token=selected_bangumi_token,
+            )
 
         run_id = uuid.uuid4().hex
         if not coord.try_start(run_id):
@@ -2187,22 +3336,450 @@ def create_app(
             bili = await ctx.init_prereqs.bilibili_check()
             if bili != "ok":
                 coord.reset_to_idle(run_id, reason="bilibili_not_logged_in")
-                return JSONResponse({"error": "bilibili_not_logged_in"}, status_code=409)
+                return JSONResponse(
+                    {
+                        "error": "bilibili_not_logged_in",
+                        "detail": ctx.init_prereqs.peek_bilibili_detail(),
+                    },
+                    status_code=409,
+                )
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
-            return JSONResponse({"error": "llm_not_ready"}, status_code=409)
-        if _embedding_required_for_init() and not await _health_embedding_ready():
+            # Propagate the classified cause the live probe just diagnosed
+            # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
+            # actionable rather than a generic "not ready" (project rule 7).
+            chat_detail = ctx.init_prereqs.peek_chat_detail() or "AI 服务还没配好或当前不可用。"
+            return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
+        if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
+            pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
-            return JSONResponse({"error": "embedding_not_ready"}, status_code=409)
+            detail = (
+                _repair_progress_detail()
+                if pulling
+                else "向量模型还没就绪。请在初始化页点「修复向量模型」，或等待自动下载完成后重试。"
+            )
+            return JSONResponse({"error": "embedding_not_ready", "detail": detail}, status_code=409)
+        with suppress(Exception):
+            await _maybe_autostart_embedding_pull()
 
         registry = getattr(ctx, "task_registry", None)
         if registry is not None:
-            task = registry.track("guided_init", _run_guided_init_wrapper(run_id, selected_sources))
+            task = registry.track(
+                "guided_init",
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                    effective_bangumi_token,
+                ),
+            )
         else:
-            task = asyncio.create_task(_run_guided_init_wrapper(run_id, selected_sources))
+            task = asyncio.create_task(
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                    effective_bangumi_token,
+                )
+            )
         coord.attach_task(run_id, task)
-        return JSONResponse({"run_id": run_id, **coord.get_status()}, status_code=202)
+        return JSONResponse(
+            {"run_id": run_id, **coord.get_status(), "warnings": warnings},
+            status_code=202,
+        )
+
+    # ── embedding one-click repair (v0.3.155+) ──────────────────────────
+    # Single-flight background `ollama pull` so the popup's "语义去重未启用"
+    # banner can actually FIX a missing/corrupt bge-m3 instead of retrying a
+    # call that can never succeed. State is process-local (mirrors the
+    # readiness cache): a restart simply forgets an old run.
+    _embedding_repair_state: dict[str, Any] = {
+        "running": False,
+        "model": "",
+        "status": "",
+        "completed": 0,
+        "total": 0,
+        "done": False,
+        "ok": False,
+        "error": "",
+    }
+    _embedding_repair_lock = asyncio.Lock()
+    _max_embedding_repair_actions = 3
+
+    def _repair_progress_detail() -> str:
+        """Human progress line for the in-flight pull (init pages render it)."""
+        state = _embedding_repair_state
+        model = str(state.get("model") or "向量模型")
+        completed = int(state.get("completed") or 0)
+        total = int(state.get("total") or 0)
+        if total > 0:
+            pct = min(99, round(completed * 100 / total))
+            done_mb = completed // (1024 * 1024)
+            total_mb = total // (1024 * 1024)
+            return f"正在下载 {model}：{pct}%（{done_mb}MB / {total_mb}MB），完成后自动就绪。"
+        return f"正在下载 {model}（准备中…），完成后自动就绪。"
+
+    def _progress_int(value: object) -> int:
+        if isinstance(value, int):
+            return value
+        if value is None:
+            return 0
+        try:
+            return int(str(value))
+        except ValueError:
+            return 0
+
+    def _embedding_pull_progress_view() -> dict[str, object]:
+        """Combined app-local repair + process-global auto-pull progress."""
+        snap = embedding_progress.snapshot()
+        if bool(snap.get("running")):
+            return {
+                "running": True,
+                "completed": _progress_int(snap.get("completed")),
+                "total": _progress_int(snap.get("total")),
+                "status_text": str(snap.get("status_text") or _repair_progress_detail()),
+            }
+        if _embedding_repair_state["running"]:
+            return {
+                "running": True,
+                "completed": _progress_int(_embedding_repair_state.get("completed")),
+                "total": _progress_int(_embedding_repair_state.get("total")),
+                "status_text": _repair_progress_detail(),
+            }
+        return {
+            "running": False,
+            "completed": 0,
+            "total": 0,
+            "status_text": str(snap.get("status_text") or ""),
+        }
+
+    def _provider_error_detail(detail: str) -> str:
+        base = detail.strip() or "Ollama 响应异常。"
+        return (
+            f"{base} 请升级 Ollama 到较新版本，确认 11434 端口没有被其他程序占用；"
+            "如果本机回环被代理劫持，请关闭代理或设置 NO_PROXY=127.0.0.1,localhost 后重试。"
+        )
+
+    async def _run_embedding_repair(base_url: str, model: str) -> None:
+        from openbiliclaw.llm.ollama_diagnostics import pull_ollama_model
+
+        def _on_progress(status: str, completed: int, total: int) -> None:
+            embedding_progress.report_pull(status, completed, total)
+            _embedding_repair_state.update(
+                {"status": status, "completed": completed, "total": total}
+            )
+
+        try:
+            ok, error = await pull_ollama_model(base_url, model, on_progress=_on_progress)
+        except Exception as exc:  # defensive: pull_ollama_model shouldn't raise
+            ok, error = False, f"{type(exc).__name__}: {exc}"
+        embedding_progress.mark_pull_done(ok, error)
+        _embedding_repair_state.update({"running": False, "done": True, "ok": ok, "error": error})
+        if ok:
+            logger.info("Embedding repair: pulled %s successfully", model)
+            # Next health/init-status poll re-probes immediately, so the
+            # banner and checklist green up without waiting out the TTL.
+            _expire_embedding_ready_cache()
+        else:
+            logger.warning("Embedding repair: pull %s failed: %s", model, error)
+
+    async def _maybe_autostart_embedding_pull() -> bool:
+        """Best-effort auto-pull for a locally hosted missing/broken model.
+
+        Also self-heals ``DIAG_NOT_RUNNING`` (managed Ollama simply not up yet)
+        by starting it first — reusing the same guards the manual repair
+        endpoint applies — then re-diagnosing so a genuinely missing/broken
+        model still gets auto-pulled. Any guard miss or start failure just
+        leaves the manual "修复向量模型" path to fix it (stays non-blocking).
+        """
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
+            return False
+        try:
+            base_url, model = _embedding_ollama_target()
+            from openbiliclaw.llm.ollama_diagnostics import (
+                DIAG_MODEL_BROKEN,
+                DIAG_MODEL_MISSING,
+                DIAG_NOT_RUNNING,
+                diagnose_ollama_embedding,
+                ollama_embedding_disk_space_error,
+            )
+            from openbiliclaw.runtime.ollama_supervisor import (
+                effective_ollama_endpoint,
+                ensure_managed_ollama,
+                is_loopback,
+                may_manage_ollama_endpoint,
+                ollama_required,
+            )
+
+            if not is_loopback(base_url):
+                return False
+            async with _embedding_repair_lock:
+                if _embedding_repair_state["running"] or bool(
+                    embedding_progress.snapshot().get("running")
+                ):
+                    return True
+                code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_NOT_RUNNING:
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage or not ensure_managed_ollama(endpoint):
+                        return False
+                    # Re-diagnose now that the daemon is up: a missing/broken
+                    # model falls through to the auto-pull below.
+                    code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code not in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
+                    return False
+                if ollama_embedding_disk_space_error(model):
+                    return False
+                _embedding_repair_state.update(
+                    {
+                        "running": True,
+                        "model": model,
+                        "status": "starting",
+                        "completed": 0,
+                        "total": 0,
+                        "done": False,
+                        "ok": False,
+                        "error": "",
+                    }
+                )
+                embedding_progress.mark_pull_running(model)
+                coro = _run_embedding_repair(base_url, model)
+                try:
+                    registry = getattr(ctx, "task_registry", None)
+                    if registry is not None:
+                        registry.track("embedding_repair", coro)
+                    else:
+                        task = asyncio.create_task(coro)
+                        _fire_and_forget_tasks.add(task)
+                        task.add_done_callback(_fire_and_forget_tasks.discard)
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    _embedding_repair_state.update(
+                        {"running": False, "done": True, "ok": False, "error": error}
+                    )
+                    embedding_progress.mark_pull_done(False, error)
+                    coro.close()
+                    logger.debug("auto embedding pull scheduling failed", exc_info=True)
+                    return False
+            logger.info("Auto-started embedding pull for %s at init", model)
+            return True
+        except Exception:
+            logger.debug("auto embedding pull skipped", exc_info=True)
+            return False
+
+    @app.post("/api/embedding/repair")
+    async def start_embedding_repair(request: Request) -> JSONResponse:
+        """(Re-)pull the configured Ollama embedding model (local-only).
+
+        409s: not Ollama-backed (fix config instead), unmanaged Ollama is not
+        running, managed Ollama failed to start, or a repair already in flight.
+        """
+        if not _get_auth_gate().is_trusted_local(request):
+            return JSONResponse({"error": "local_only"}, status_code=403)
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        if provider != "ollama":
+            return JSONResponse(
+                {
+                    "error": "unsupported_provider",
+                    "detail": "一键修复只支持本地 Ollama embedding；"
+                    "请到设置页把 Embedding Provider 设为 ollama 后重试。",
+                },
+                status_code=409,
+            )
+        base_url, model = _embedding_ollama_target()
+
+        from openbiliclaw.llm.ollama_diagnostics import (
+            DIAG_DISK_FULL,
+            DIAG_ERROR,
+            DIAG_MODEL_BROKEN,
+            DIAG_MODEL_MISSING,
+            DIAG_MODEL_OOM,
+            DIAG_MODEL_PATH_ENCODING,
+            DIAG_NETWORK,
+            DIAG_NOT_RUNNING,
+            DIAG_OK,
+            diagnose_ollama_embedding,
+            ollama_embedding_disk_space_error,
+        )
+
+        async with _embedding_repair_lock:
+            if _embedding_repair_state["running"]:
+                return JSONResponse({"error": "already_running"}, status_code=409)
+            actions = 0
+            provider_error_restarted = False
+            while True:
+                code, detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_OK:
+                    _expire_embedding_ready_cache()
+                    return JSONResponse({"ok": True, "already_ok": True, "model": model})
+                if code == DIAG_NOT_RUNNING:
+                    from openbiliclaw.runtime.ollama_supervisor import (
+                        effective_ollama_endpoint,
+                        ensure_managed_ollama,
+                        is_loopback,
+                        may_manage_ollama_endpoint,
+                        ollama_required,
+                    )
+
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage:
+                        return JSONResponse(
+                            {"error": "not_running", "detail": detail},
+                            status_code=409,
+                        )
+                    if actions >= _max_embedding_repair_actions:
+                        return JSONResponse(
+                            {
+                                "error": "not_running",
+                                "detail": f"自动修复已达到上限：{detail}",
+                            },
+                            status_code=409,
+                        )
+                    if not ensure_managed_ollama(endpoint):
+                        return JSONResponse(
+                            {"error": "not_running", "detail": detail},
+                            status_code=409,
+                        )
+                    actions += 1
+                    continue
+                if code == DIAG_MODEL_PATH_ENCODING:
+                    from openbiliclaw.runtime.ollama_supervisor import (
+                        ollama_models_relocation_candidate,
+                        restart_managed_ollama_with_models_dir,
+                    )
+
+                    manual_detail = (
+                        "检测到模型路径含非 ASCII 字符（常见于中文 Windows 用户名），"
+                        "llama-server 无法从该路径加载模型，重新下载不能解决。"
+                        "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
+                        f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
+                    )
+                    models_dir = ollama_models_relocation_candidate()
+                    if models_dir is None:
+                        return JSONResponse(
+                            {"error": "manual_fix_required", "detail": manual_detail},
+                            status_code=409,
+                        )
+                    restarted, reason = restart_managed_ollama_with_models_dir(models_dir)
+                    if not restarted and reason == "external_ollama":
+                        return JSONResponse(
+                            {
+                                "error": "external_ollama",
+                                "detail": (
+                                    "检测到外部启动的 Ollama，我们无法带新模型目录重启它；"
+                                    "请手动设置 OLLAMA_MODELS，或退出外部 Ollama 后重试。"
+                                ),
+                            },
+                            status_code=409,
+                        )
+                    if not restarted:
+                        return JSONResponse(
+                            {
+                                "error": "restart_failed",
+                                "detail": (
+                                    "迁移模型目录后重启 Ollama 失败，"
+                                    "请重启应用或手动设置 OLLAMA_MODELS。"
+                                ),
+                            },
+                            status_code=409,
+                        )
+                    if disk_error := ollama_embedding_disk_space_error(model):
+                        disk_code, disk_detail = disk_error
+                        return JSONResponse(
+                            {"error": disk_code, "detail": disk_detail},
+                            status_code=409,
+                        )
+                    break
+                if code in {DIAG_DISK_FULL, DIAG_NETWORK, DIAG_MODEL_OOM}:
+                    return JSONResponse({"error": code, "detail": detail}, status_code=409)
+                if code == DIAG_ERROR:
+                    if not provider_error_restarted:
+                        from openbiliclaw.runtime.ollama_supervisor import (
+                            effective_ollama_endpoint,
+                            is_loopback,
+                            may_manage_ollama_endpoint,
+                            ollama_required,
+                            restart_managed_ollama,
+                        )
+
+                        cfg = ctx.config
+                        endpoint = effective_ollama_endpoint(cfg)
+                        may_manage = (
+                            bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                            and ollama_required(cfg)
+                            and is_loopback(endpoint)
+                            and may_manage_ollama_endpoint(endpoint)
+                        )
+                        provider_error_restarted = True
+                        if may_manage and actions < _max_embedding_repair_actions:
+                            restarted, _reason = restart_managed_ollama()
+                            if restarted:
+                                actions += 1
+                                continue
+                    return JSONResponse(
+                        {"error": "provider_error", "detail": _provider_error_detail(detail)},
+                        status_code=409,
+                    )
+                if code in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
+                    if disk_error := ollama_embedding_disk_space_error(model):
+                        disk_code, disk_detail = disk_error
+                        return JSONResponse(
+                            {"error": disk_code, "detail": disk_detail},
+                            status_code=409,
+                        )
+                    break
+                return JSONResponse(
+                    {"error": "provider_error", "detail": _provider_error_detail(detail)},
+                    status_code=409,
+                )
+            # model_missing / model_broken (and path migration) are pull-fixable.
+            _embedding_repair_state.update(
+                {
+                    "running": True,
+                    "model": model,
+                    "status": "starting",
+                    "completed": 0,
+                    "total": 0,
+                    "done": False,
+                    "ok": False,
+                    "error": "",
+                }
+            )
+            embedding_progress.mark_pull_running(model)
+            registry = getattr(ctx, "task_registry", None)
+            coro = _run_embedding_repair(base_url, model)
+            if registry is not None:
+                registry.track("embedding_repair", coro)
+            else:
+                task = asyncio.create_task(coro)
+                _fire_and_forget_tasks.add(task)
+                task.add_done_callback(_fire_and_forget_tasks.discard)
+        return JSONResponse(
+            {"started": True, "model": model, "diagnosis": code, "detail": detail},
+            status_code=202,
+        )
+
+    @app.get("/api/embedding/repair")
+    async def embedding_repair_status() -> JSONResponse:
+        """Progress of the in-flight (or last finished) embedding repair."""
+        return JSONResponse(dict(_embedding_repair_state))
 
     @app.post("/api/init/cancel")
     async def cancel_guided_init(request: Request) -> JSONResponse:
@@ -2210,6 +3787,7 @@ def create_app(
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
         coord = ctx.init_coordinator
+        await coord.reconcile_orphaned_run()
         run = ctx.database.get_latest_init_run() if ctx.database is not None else None
         if run is None or not coord.init_active():
             return JSONResponse({"error": "not_running"}, status_code=409)
@@ -2243,6 +3821,9 @@ def create_app(
             # failures (>=500) fall back to a cached copy when one appeared.
             if exc.status_code >= 500 and (cached := _image_cache_response(url)):
                 return cached
+            # fetch_cover_bytes already emits the per-host rate-limited WARNING;
+            # this line ties the failure to a concrete serve-time request.
+            logger.debug("image-proxy FAIL %d (%s) %s", exc.status_code, exc.detail, url[:100])
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
         save_image_bytes(url, data, content_type)
@@ -2259,12 +3840,21 @@ def create_app(
             },
         )
 
-    @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse)
+    @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse, deprecated=True)
     async def sync_bilibili_cookie(
         payload: BilibiliCookieIn,
     ) -> BilibiliCookieResponse | JSONResponse:
         """Receive a Bilibili cookie from the browser extension and persist
         it server-side so the backend can call B 站 API as the user.
+
+        **Deprecated** in favour of ``POST /api/sources/bilibili/credential``,
+        which speaks the one write shape every platform now shares. This route
+        stays, forwards into that same flow, and keeps its response byte-shape
+        exactly — installed extensions parse it, and breaking them would take a
+        user's login away with no visible cause. The deprecation marker is not
+        decorative: ``scripts/source_contract_metrics.py`` counts undeprecated
+        credential-write shapes, so leaving it off would keep the metric
+        reporting five ways to store a credential when there is now one.
 
         Replaces the manual "F12 → Network → copy cookie → paste into
         wizard" flow. The extension already runs on bilibili.com and has
@@ -2287,10 +3877,7 @@ def create_app(
         layer in front of the backend.
         """
         from openbiliclaw.bilibili.auth import AuthManager
-        from openbiliclaw.config import (
-            load_config_with_diagnostics,
-            save_config,
-        )
+        from openbiliclaw.config import load_config_with_diagnostics
 
         cookie_value = payload.cookie.strip()
         if not cookie_value:
@@ -2330,118 +3917,64 @@ def create_app(
                 status_code=409,
             )
 
-        config, diagnostics = load_config_with_diagnostics()
-        # 1) Validate the cookie if requested. We use the same auth
-        # manager the CLI's interactive wizard uses, for consistency.
-        auth_manager = AuthManager(data_dir=config.data_path)
-        if payload.validate_with_bilibili:
-            status = await auth_manager.validate_cookie(cookie_value)
-            if not status.authenticated:
-                # Distinguish "network couldn't reach api.bilibili.com"
-                # (transient — extension should retry quickly) from
-                # "Bilibili rejected this cookie" (cookie expired —
-                # extension should back off until next login). The
-                # heuristic relies on AuthManager.validate_cookie's
-                # ``message`` field — connection / timeout / DNS errors
-                # surface as the underlying httpx exception text, while
-                # an actual logged-out cookie surfaces as the literal
-                # "当前 Cookie 未登录或已失效。" message we set in
-                # validate_cookie.
-                msg = (status.message or "").lower()
-                network_markers = (
-                    "timeout",
-                    "connect",
-                    "dns",
-                    "ssl",
-                    "proxy",
-                    "name or service",
-                    "connection",
-                    "网络",
-                    "代理",
-                )
-                is_network_error = any(m in msg for m in network_markers)
-                error_code = "validation_network" if is_network_error else "cookie_invalid"
-                return BilibiliCookieResponse(
-                    ok=False,
-                    authenticated=False,
-                    message=status.message or "Cookie validation failed; not saved.",
-                    error_code=error_code,
-                )
-            authenticated = True
-            username = status.username or ""
-            user_id = int(status.user_id or 0)
-        else:
-            authenticated = False
-            username = ""
-            user_id = 0
-
-        # 2) Persist to both stores, but keep repeated extension syncs
-        # idempotent. Chrome may POST the same Cookie several times around
-        # startup; rebuilding for an unchanged effective cookie cancels and
-        # restarts producer loops for no behavioral gain.
-        stored_cookie = ""
-        with suppress(Exception):
-            stored_cookie = auth_manager.load_cookie().strip()
-        configured_cookie = config.bilibili.cookie.strip()
-        effective_cookie_before = configured_cookie or stored_cookie
-        cookie_file_changed = stored_cookie != cookie_value
-        config_changed = configured_cookie != cookie_value
-        runtime_cookie_changed = effective_cookie_before != cookie_value
-
-        if cookie_file_changed:
-            auth_manager.set_cookie(cookie_value)  # → data/bilibili_cookie.json
-        if config_changed:
-            config.bilibili.cookie = cookie_value
-            save_config(config, diagnostics.config_path)
-
-        # 3) Reload runtime so existing in-flight components pick up
-        # the new client. ``rebuild_from_config`` is atomic — if it
-        # fails partway, the old runtime stays intact.
-        runtime_refreshed = False
-        if runtime_cookie_changed or config_changed:
-            with suppress(Exception):
-                await ctx.rebuild_from_config(config)
-                await ctx.restart_background_tasks(app)
-                runtime_refreshed = True
-
-        # 4) Tell the extension UI the cookie just got refreshed —
-        # this is how the popup knows it can stop nagging the user
-        # to log in.
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "bilibili_cookie_synced",
-                    "username": username,
-                    "user_id": user_id,
-                    "source": payload.source,
-                }
+        # ``payload.validate_with_bilibili`` is deliberately not consulted. It is
+        # still accepted on the wire (installed extensions send it), but a
+        # request cannot buy a weaker check: sending false used to persist a
+        # dead cookie with the probe never called, which is the exact hole that
+        # got ``validate_live`` deleted from the unified endpoint. Leaving the
+        # identical switch running on the deprecated route made that deletion
+        # cosmetic — "the extension always sends true" is a statement about the
+        # extension, not about who can reach this port.
+        result = await _write_source_credential(
+            "bilibili",
+            kind="cookie",
+            value=cookie_value,
+            source=payload.source,
+        )
+        if not result.accepted:
+            return BilibiliCookieResponse(
+                ok=False,
+                authenticated=False,
+                message=result.message or "Cookie validation failed; not saved.",
+                error_code=result.error_code,
             )
 
         return BilibiliCookieResponse(
             ok=True,
-            authenticated=authenticated,
-            username=username,
-            user_id=user_id,
+            authenticated=result.authenticated,
+            username=result.username,
+            user_id=result.user_id,
             message=(
                 "Cookie synced and runtime refreshed."
-                if runtime_refreshed
+                if result.runtime_refreshed
                 else "Cookie already synced; runtime unchanged."
             ),
         )
 
-    @app.post("/api/sources/dy/cookie", response_model=DouyinCookieResponse)
+    @app.post("/api/sources/dy/cookie", response_model=DouyinCookieResponse, deprecated=True)
     async def sync_douyin_cookie(payload: DouyinCookieIn) -> DouyinCookieResponse:
         """Receive a Douyin cookie from the browser extension.
 
-        Unlike Bilibili, Douyin direct-cookie discovery currently has no
-        stable nav endpoint that cleanly distinguishes "logged out" from
-        "soft anti-bot returned HTTP 200 with empty data". We therefore
-        persist the browser-provided Cookie header as-is and let discovery
-        smoke surface whether search / hot / feed calls return content.
-        """
-        from openbiliclaw.sources.douyin_auth import DouyinCookieManager
-        from openbiliclaw.sources.douyin_direct import parse_cookie_header
+        **Deprecated** in favour of ``POST /api/sources/douyin/credential``;
+        forwards into it and keeps this response shape for installed
+        extensions.
 
+        This endpoint used to persist whatever header arrived, without any
+        check, and the reason recorded here was that Douyin "has no stable nav
+        endpoint that cleanly distinguishes 'logged out' from 'soft anti-bot
+        returned HTTP 200 with empty data'".
+
+        **That claim was false** (spec D11), and it was the sole reason Douyin
+        reported "unverified" forever even with a perfectly valid cookie. A
+        strip-down control experiment — same signer, same UA, same minute, only
+        the 12 login cookies removed — showed
+        ``/aweme/v1/web/user/profile/self/`` answers ``status_code=0`` plus a
+        real ``user.uid`` when logged in and ``status_code=8`` / "用户未登录"
+        when not: an explicit error code, not the ambiguity the claim feared.
+        So a Douyin cookie is now probed *before* it lands, like B站's. The
+        probe lives in :mod:`openbiliclaw.sources.douyin_login_probe`; do not
+        reintroduce the old conclusion without repeating the experiment.
+        """
         cookie_value = payload.cookie.strip()
         if not cookie_value:
             return DouyinCookieResponse(
@@ -2451,39 +3984,32 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        runtime_config = getattr(ctx, "config", None) or config
-        manager = DouyinCookieManager(runtime_config.data_path)
-        manager.set_cookie(cookie_value, source=payload.source)
-        cookie_names = sorted(parse_cookie_header(cookie_value).keys())
-
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "douyin_cookie_synced",
-                    "source": payload.source,
-                    "cookie_names": cookie_names,
-                }
-            )
-
+        result = await _write_source_credential(
+            "douyin", kind="cookie", value=cookie_value, source=payload.source
+        )
         return DouyinCookieResponse(
-            ok=True,
-            has_cookie=True,
-            cookie_names=cookie_names,
-            message="Douyin Cookie synced.",
+            ok=result.accepted,
+            has_cookie=result.accepted,
+            cookie_names=list(result.cookie_names),
+            message=result.message if not result.accepted else "Douyin Cookie synced.",
+            error_code=result.error_code,
         )
 
-    @app.post("/api/sources/x/cookie", response_model=XCookieResponse)
+    @app.post("/api/sources/x/cookie", response_model=XCookieResponse, deprecated=True)
     async def sync_x_cookie(payload: XCookieIn) -> XCookieResponse:
         """Receive an X (Twitter) cookie from the browser extension.
 
-        The browser extension already gates on ``auth_token`` + ``ct0`` before
-        posting, but we persist whatever header arrives and recompute
-        ``has_cookie`` server-side so the env-override path and the file stay
-        consistent. ``has_cookie`` is true only when BOTH required cookies are
-        present — twitter-cli 401s without either.
-        """
-        from openbiliclaw.sources.douyin_direct import parse_cookie_header
+        **Deprecated** in favour of ``POST /api/sources/twitter/credential``;
+        forwards into it and keeps this response shape.
 
+        ``has_cookie`` is true only when BOTH ``auth_token`` and ``ct0`` are
+        present — twitter-cli 401s without either. A jar missing them used to
+        be stored anyway and reported as ``ok`` with ``has_cookie=false``; it is
+        now refused, because storing a credential that provably cannot
+        authenticate is the "silent write" spec D5 flagged. The browser
+        extension already gated on both names before posting and keys its
+        success branch off ``ok && has_cookie``, so it sees no change.
+        """
         cookie_value = payload.cookie.strip()
         if not cookie_value:
             return XCookieResponse(
@@ -2493,54 +4019,30 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        runtime_config = getattr(ctx, "config", None) or config
-        XCookieManager(runtime_config.data_path).set_cookie(cookie_value, source=payload.source)
-        cookie_pairs = parse_cookie_header(cookie_value)
-        cookie_names = sorted(cookie_pairs.keys())
-        has_cookie = all(name in cookie_pairs for name in _X_REQUIRED_COOKIE_NAMES)
-
-        # A freshly synced valid cookie is the external re-login signal that
-        # clears a missing_cookie / expired_cookie / blocked health block.
-        # Without this the producer's is_ready() gate stays False forever, so
-        # discovery never retries even though auth is now fixed (the cookie
-        # handler is the only place a re-login state can be lifted).
-        if has_cookie:
-            with suppress(Exception):
-                from openbiliclaw.storage.x_health import XSourceHealthStore
-
-                XSourceHealthStore(ctx.database).clear_relogin_block()
-
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "x_cookie_synced",
-                    "source": payload.source,
-                    "has_cookie": has_cookie,
-                    "cookie_names": cookie_names,
-                }
-            )
-
+        result = await _write_source_credential(
+            "twitter", kind="cookie", value=cookie_value, source=payload.source
+        )
         return XCookieResponse(
-            ok=True,
-            has_cookie=has_cookie,
-            cookie_names=cookie_names,
-            message=(
-                "X Cookie synced."
-                if has_cookie
-                else "X Cookie stored but missing auth_token / ct0."
-            ),
+            ok=result.accepted,
+            has_cookie=result.accepted,
+            cookie_names=list(result.cookie_names),
+            message=result.message if not result.accepted else "X Cookie synced.",
+            error_code=result.error_code,
         )
 
-    @app.post("/api/sources/reddit/cookie", response_model=RedditCookieResponse)
+    @app.post("/api/sources/reddit/cookie", response_model=RedditCookieResponse, deprecated=True)
     async def sync_reddit_cookie(payload: RedditCookieIn) -> RedditCookieResponse:
         """Receive a Reddit cookie from the browser extension.
+
+        **Deprecated** in favour of ``POST /api/sources/reddit/credential``;
+        forwards into it and keeps this response shape.
 
         Reddit steady-state discovery defaults to rdt-cli. Instead of forcing
         users to run ``rdt login`` manually, the connected extension can read
         reddit.com cookies with Chrome's ``cookies`` permission and persist them
         in rdt-cli's own credential format.
         """
-        from openbiliclaw.sources.reddit_tasks import sync_rdt_credential_from_cookie_header
+        from openbiliclaw.sources.reddit_tasks import _rdt_credential_file
 
         cookie_value = payload.cookie.strip()
         if not cookie_value:
@@ -2551,25 +4053,28 @@ def create_app(
                 error_code="empty_cookie",
             )
 
-        result = sync_rdt_credential_from_cookie_header(cookie_value, source=payload.source)
-
-        if result.has_cookie:
+        result = await _write_source_credential(
+            "reddit", kind="cookie", value=cookie_value, source=payload.source
+        )
+        credential_file = result.credential_file
+        if not credential_file:
+            # A refused cookie never reached the writer, so the path has to come
+            # from the store itself — the settings page shows it either way, and
+            # "where would this have been written" is the first thing a user
+            # asks when a paste is rejected.
             with suppress(Exception):
-                await ctx.event_hub.publish(
-                    {
-                        "type": "reddit_cookie_synced",
-                        "source": payload.source,
-                        "has_cookie": result.has_cookie,
-                        "cookie_names": list(result.cookie_names),
-                    }
-                )
+                credential_file = str(_rdt_credential_file())
 
         return RedditCookieResponse(
-            ok=result.ok,
-            has_cookie=result.has_cookie,
+            ok=result.accepted,
+            has_cookie=result.accepted,
             cookie_names=list(result.cookie_names),
-            credential_file=str(result.credential_file),
-            message=result.message,
+            credential_file=credential_file,
+            message=(
+                result.message
+                if not result.accepted
+                else "Reddit Cookie synced into rdt credential store."
+            ),
             error_code=result.error_code,
         )
 
@@ -2595,10 +4100,22 @@ def create_app(
         return {"ok": True}
 
     def _serialize_recommendation_items(items: list[Any]) -> list[RecommendationOut]:
+        def item_key_for(content: Any) -> str:
+            explicit = str(getattr(content, "item_key", "") or "").strip()
+            if explicit:
+                return explicit
+            bvid = str(getattr(content, "bvid", "") or "")
+            return make_item_key(
+                str(getattr(content, "source_platform", "") or "bilibili"),
+                str(getattr(content, "content_id", "") or bvid),
+                str(getattr(content, "content_url", "") or ""),
+            )
+
         return [
             RecommendationOut(
                 id=int(item.recommendation_id),
                 bvid=str(item.content.bvid),
+                item_key=item_key_for(item.content),
                 title=str(item.content.title),
                 up_name=str(item.content.up_name),
                 cover_url=str(item.content.cover_url),
@@ -2609,8 +4126,24 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
+                published_at=str(getattr(item.content, "published_at", "") or ""),
+                published_label=str(getattr(item.content, "published_label", "") or ""),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
+                duration=int(getattr(item.content, "duration", 0) or 0),
+                view_count=int(getattr(item.content, "view_count", 0) or 0),
+                like_count=int(getattr(item.content, "like_count", 0) or 0),
+                danmaku_count=int(getattr(item.content, "danmaku_count", 0) or 0),
+                favorite_count=int(
+                    getattr(item.content, "favorite_count", 0)
+                    or getattr(item.content, "collect_count", 0)
+                    or 0
+                ),
+                comment_count=int(getattr(item.content, "comment_count", 0) or 0),
+                rating_score=float(getattr(item.content, "rating_score", 0.0) or 0.0),
+                rating_count=int(getattr(item.content, "rating_count", 0) or 0),
+                source_rank=int(getattr(item.content, "source_rank", 0) or 0),
+                up_mid=int(getattr(item.content, "up_mid", 0) or 0),
             )
             for item in items
         ]
@@ -2655,7 +4188,7 @@ def create_app(
         _ws_token = (
             None
             if (_ws_is_local or not _ws_gate.auth.enabled)
-            else _ws_gate.pick_token(websocket)[1]
+            else websocket_session_token(_ws_gate, websocket)
         )
 
         def _ws_revoked() -> bool:
@@ -2707,6 +4240,23 @@ def create_app(
                 from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
 
                 runtime_config = getattr(ctx, "config", None) or config
+                # Browser-only sources persist just a boolean login heartbeat.
+                # Ask once per runtime connection so settings immediately
+                # reflects the current browser, without contacting a platform.
+                await websocket.send_json(
+                    {
+                        "type": "xhs_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
+                await websocket.send_json(
+                    {
+                        "type": "zhihu_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
                 with suppress(Exception):
                     cookie = resolve_runtime_cookie(
                         data_dir=runtime_config.data_path,
@@ -2838,6 +4388,11 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        bangumi_client = getattr(ctx, "bangumi_client", None)
+        close_bangumi = getattr(bangumi_client, "aclose", None)
+        if callable(close_bangumi):
+            with suppress(Exception):
+                await close_bangumi()
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -3269,6 +4824,11 @@ def create_app(
             accepted += 1
             accepted_events.append(event)
         if accepted_events:
+            # Phase 0 face 2: mark stored positives undone by any retraction in
+            # this batch so offline reread paths (init rebuild / 12h cognition)
+            # see the discount. In-memory face is handled by the pipeline.
+            with suppress(Exception):
+                apply_retraction_db_marks(ctx.database, accepted_events)
             await _backfill_pending_discovery_events_to_profile_pipeline(
                 max_event_id=latest_event_id_before_ingest
             )
@@ -3291,8 +4851,9 @@ def create_app(
                     )
         return EventIngestResponse(accepted=accepted, rejected=rejected)
 
-    @app.get("/api/recommendations", response_model=RecommendationListResponse)
-    async def recommendations() -> RecommendationListResponse:
+    async def _load_recommendations() -> RecommendationListResponse:
+        nonlocal first_page_topup_attempted_at
+
         def _admission_min_score() -> float:
             runtime_config = getattr(ctx, "config", None) or config
             discovery_config = getattr(runtime_config, "discovery", None)
@@ -3326,32 +4887,42 @@ def create_app(
             ctx.database.get_recommendations(limit=40, exclude_processed=True)
         )
 
-        # Fresh-install bootstrap: ``recommendations`` table is the
-        # write-only history of items we've ever served. On first popup
-        # load nobody has called ``reshuffle`` / ``append`` / CLI
-        # ``recommend`` yet, so the table is empty even if the discovery
-        # pool already has 100+ scored candidates. Surface those by
-        # bootstrapping a single ``serve()`` call right here — it writes
-        # 10 fresh entries to the history table that the next ``rows =
-        # get_recommendations`` re-read will pick up. Failure is fully
-        # silent: any error returns the original empty list, leaving
-        # the popup's "正在补货" state intact and giving the regular
-        # refresh tick another chance.
-        # gui-init D1: this empty-history bootstrap calls serve(), which WRITES
+        # Fresh-install bootstrap + thin-first-page top-up (issue #81):
+        # ``recommendations`` table is the write-only history of items we've
+        # ever served. On first popup load nobody has called ``reshuffle`` /
+        # ``append`` / CLI ``recommend`` yet, so the table is empty even if
+        # the discovery pool already has 100+ scored candidates. And after a
+        # session of feedback the unprocessed window can shrink to 2-3 rows —
+        # a "挤牙膏" first page — while the pool still has stock. In both
+        # cases surface pool candidates by bootstrapping a ``serve()`` call
+        # right here — it writes up to 10 fresh entries to the history table
+        # that the next ``rows = get_recommendations`` re-read will pick up.
+        # Failure is fully silent: any error returns the original list,
+        # leaving the popup's "正在补货" state intact and giving the regular
+        # refresh tick another chance. The non-empty case is debounced so a
+        # filtered-out pool cannot make polling clients re-serve every tick.
+        # gui-init D1: this bootstrap calls serve(), which WRITES
         # (recommendation rows + pool "shown" markers). It's a side-effecting
         # GET, so the deny-by-default middleware (POST/PUT/PATCH/DELETE) doesn't
         # cover it — skip it during an active init so a read can't serve from /
         # mark a half-built pool. The post-init refresh tick serves normally.
         if (
-            not rows
+            len(rows) < _FIRST_PAGE_TOPUP_FLOOR
             and not _init_active_now()
             and ctx.recommendation_engine is not None
             and ctx.soul_engine is not None
+            and (
+                not rows
+                or time.monotonic() - first_page_topup_attempted_at
+                >= _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS
+            )
         ):
             with suppress(Exception):
                 pool_count_fn = getattr(ctx.database, "count_pool_candidates", None)
                 pool_count = int(pool_count_fn()) if callable(pool_count_fn) else 0
                 if pool_count > 0:
+                    first_page_topup_attempted_at = time.monotonic()
+                    row_count_before = len(rows)
                     profile = await ctx.soul_engine.get_profile()
                     await ctx.recommendation_engine.serve(profile, limit=10)
                     rows = _filter_low_confidence(
@@ -3359,8 +4930,9 @@ def create_app(
                     )
                     await _publish_pool_status_snapshot()
                     logger.info(
-                        "GET /api/recommendations bootstrap: served from "
-                        "empty history (pool_count=%d → wrote %d to history)",
+                        "GET /api/recommendations top-up: history had %d "
+                        "unprocessed row(s) (pool_count=%d → now %d rows)",
+                        row_count_before,
                         pool_count,
                         len(rows),
                     )
@@ -3371,6 +4943,7 @@ def create_app(
                 RecommendationOut(
                     id=int(row["id"]),
                     bvid=str(row.get("bvid", "")),
+                    item_key=str(row.get("item_key", "")),
                     title=str(row.get("title", "")),
                     up_name=str(row.get("up_name", "")),
                     cover_url=str(row.get("cover_url", "")),
@@ -3381,19 +4954,324 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
+                    duration=int(row.get("duration", 0) or 0),
+                    view_count=int(row.get("view_count", 0) or 0),
+                    like_count=int(row.get("like_count", 0) or 0),
+                    danmaku_count=int(row.get("danmaku_count", 0) or 0),
+                    favorite_count=int(
+                        row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                    ),
+                    comment_count=int(row.get("comment_count", 0) or 0),
+                    rating_score=float(row.get("rating_score", 0.0) or 0.0),
+                    rating_count=int(row.get("rating_count", 0) or 0),
+                    source_rank=int(row.get("source_rank", 0) or 0),
+                    up_mid=int(row.get("up_mid", 0) or 0),
                 )
                 for row in rows
             ]
         )
 
-    # ── Watch-later (稍后再看) ────────────────────────────────────
+    @app.get("/api/recommendations", response_model=RecommendationListResponse)
+    async def recommendations() -> RecommendationListResponse:
+        """Return one coalesced recommendation snapshot.
+
+        Restored browser sessions can contain dozens of stale dashboard tabs.
+        When the backend comes back, those tabs all issue the same expensive
+        history/content join at once. A one-second cache plus single-flight
+        lock turns that burst into one database read while keeping interactive
+        mutations immediately visible through explicit invalidation.
+        """
+        nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+
+        now = time.monotonic()
+        if (
+            recommendation_snapshot_cache is not None
+            and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+        ):
+            return recommendation_snapshot_cache.model_copy(deep=True)
+
+        async with recommendation_snapshot_lock:
+            now = time.monotonic()
+            if (
+                recommendation_snapshot_cache is not None
+                and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+            ):
+                return recommendation_snapshot_cache.model_copy(deep=True)
+            snapshot = await _load_recommendations()
+            recommendation_snapshot_cache = snapshot.model_copy(deep=True)
+            recommendation_snapshot_cached_at = time.monotonic()
+            return snapshot
+
+    # ── Platform-neutral saved memberships and native sync ─────────
+
+    saved_state_snapshot_cache: dict[
+        tuple[SavedListKind, str], tuple[float, SavedItemStateResponse]
+    ] = {}
+
+    def _invalidate_saved_state(list_kind: SavedListKind, item_key: str) -> None:
+        saved_state_snapshot_cache.pop((list_kind, item_key), None)
+
+    def _saved_service() -> Any:
+        service = getattr(ctx, "saved_sync_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="saved sync service unavailable")
+        return service
+
+    def _saved_count(list_kind: SavedListKind) -> int:
+        if list_kind == "favorite":
+            return int(ctx.database.count_favorites())
+        return int(ctx.database.count_watch_later())
+
+    def _safe_native_status(value: object) -> NativeSaveStatus:
+        if isinstance(value, str):
+            for status in NATIVE_SAVE_STATUSES:
+                if value == status:
+                    return status
+        return "failed"
+
+    def _safe_result_text(value: object, *, limit: int = 512) -> str:
+        if not isinstance(value, str):
+            return ""
+        filtered = "".join(
+            character for character in value if not unicodedata.category(character).startswith("C")
+        )
+        return filtered[:limit]
+
+    def _saved_state_response(
+        list_kind: SavedListKind,
+        item_key: str,
+    ) -> SavedItemStateResponse:
+        cache_key = (list_kind, item_key)
+        cached = saved_state_snapshot_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS:
+            return cached[1].model_copy(deep=True)
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        if row is None:
+            response = SavedItemStateResponse(saved=False, item_key=item_key)
+        else:
+            response = SavedItemStateResponse(
+                saved=True,
+                item_key=item_key,
+                sync_status=_safe_native_status(row.get("sync_status")),
+                sync_task_id=str(row.get("sync_task_id", "")),
+                resolved_action=str(row.get("resolved_action", "")),
+                resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                error_message=_safe_result_text(row.get("last_error_message", "")),
+            )
+        if len(saved_state_snapshot_cache) >= 1000:
+            saved_state_snapshot_cache.clear()
+        saved_state_snapshot_cache[cache_key] = (now, response.model_copy(deep=True))
+        return response
+
+    def _saved_list_item(row: dict[str, Any]) -> SavedListItem:
+        return SavedListItem(
+            item_key=str(row.get("item_key", "")),
+            source_platform=str(row.get("source_platform", "")),
+            content_id=str(row.get("content_id", "")),
+            content_url=str(row.get("content_url", "")),
+            content_type=str(row.get("content_type", "") or "video"),
+            title=str(row.get("title", "")),
+            author_name=str(row.get("author_name", "")),
+            cover_url=str(row.get("cover_url", "")),
+            note=str(row.get("note", "")),
+            added_at=str(row.get("added_at", "")),
+            sync_status=_safe_native_status(row.get("sync_status")),
+            sync_task_id=str(row.get("sync_task_id", "")),
+            requested_action=str(row.get("requested_action", "")),
+            resolved_action=str(row.get("resolved_action", "")),
+            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+            error_message=_safe_result_text(row.get("last_error_message", "")),
+        )
+
+    def _sync_item_response(result: NativeSaveResult) -> SavedSyncItemResponse:
+        return SavedSyncItemResponse(
+            item_key=result.item_key,
+            status=_safe_native_status(result.status),
+            resolved_action=result.resolved_action,
+            resolved_target=_safe_result_text(result.resolved_target, limit=256),
+            error_code=_safe_result_text(result.error_code, limit=128),
+            error_message=_safe_result_text(result.error_message),
+        )
+
+    def _sync_batch_response(result: SavedSyncBatchResult) -> SavedSyncBatchResponse:
+        return SavedSyncBatchResponse(
+            task_id=result.task_id,
+            items=[_sync_item_response(item) for item in result.items],
+        )
+
+    @app.post("/api/saved/{list_kind}", response_model=SavedItemStateResponse)
+    async def saved_add(
+        list_kind: SavedListKind,
+        payload: SavedItemIn,
+    ) -> SavedItemStateResponse:
+        item = SavedItemInput(
+            source_platform=payload.source_platform,
+            content_id=payload.content_id,
+            content_url=payload.content_url,
+            content_type=payload.content_type,
+            title=payload.title,
+            author_name=payload.author_name,
+            cover_url=payload.cover_url,
+        )
+        saved_sync = getattr(getattr(ctx, "config", None), "saved_sync", None)
+        auto_sync = bool(getattr(saved_sync, "auto_sync_enabled", False))
+        try:
+            result = _saved_service().save_local(
+                list_kind,
+                item,
+                note=payload.note,
+                auto_sync=auto_sync,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid saved item") from exc
+        _invalidate_saved_state(list_kind, result.item_key)
+        if result.sync_status == "pending" and result.sync_task_id:
+            return SavedItemStateResponse(
+                saved=result.saved,
+                item_key=result.item_key,
+                sync_status="pending",
+                sync_task_id=result.sync_task_id,
+            )
+        if result.sync_task_id:
+            try:
+                created = _saved_service().get_sync_task(result.sync_task_id)
+            except (AttributeError, ValueError):  # pragma: no cover - compatibility injection
+                created = SavedSyncBatchResult(task_id=result.sync_task_id, items=())
+            created_item = next(
+                (item for item in created.items if item.item_key == result.item_key),
+                None,
+            )
+            if created_item is not None:
+                item_response = _sync_item_response(created_item)
+                return SavedItemStateResponse(
+                    saved=result.saved,
+                    item_key=result.item_key,
+                    sync_status=item_response.status,
+                    sync_task_id=result.sync_task_id,
+                    resolved_action=item_response.resolved_action,
+                    resolved_target=item_response.resolved_target,
+                    error_code=item_response.error_code,
+                    error_message=item_response.error_message,
+                )
+        state = _saved_state_response(list_kind, result.item_key)
+        return state.model_copy(
+            update={
+                "saved": result.saved,
+                "sync_status": result.sync_status,
+                "sync_task_id": result.sync_task_id,
+            }
+        )
+
+    @app.post("/api/saved/{list_kind}/remove", response_model=SavedItemStateResponse)
+    async def saved_remove(
+        list_kind: SavedListKind,
+        payload: SavedItemKeyIn,
+    ) -> SavedItemStateResponse:
+        ctx.database.remove_saved_membership(list_kind, payload.item_key)
+        _invalidate_saved_state(list_kind, payload.item_key)
+        return _saved_state_response(list_kind, payload.item_key)
+
+    @app.get("/api/saved/{list_kind}/status", response_model=SavedItemStateResponse)
+    async def saved_status(
+        list_kind: SavedListKind,
+        item_key: str = Query(...),
+    ) -> SavedItemStateResponse:
+        try:
+            normalized_key = validate_saved_item_key(item_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid item_key") from exc
+        return _saved_state_response(list_kind, normalized_key)
+
+    @app.get("/api/saved/{list_kind}", response_model=SavedListResponse)
+    async def saved_list(
+        list_kind: SavedListKind,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> SavedListResponse:
+        rows = ctx.database.list_saved_memberships(list_kind, limit=limit, offset=offset)
+        return SavedListResponse(
+            items=[_saved_list_item(row) for row in rows],
+            total=_saved_count(list_kind),
+        )
+
+    @app.post("/api/saved/{list_kind}/sync", response_model=SavedSyncBatchResponse)
+    async def saved_sync(
+        list_kind: SavedListKind,
+        payload: SavedSyncRequest,
+    ) -> SavedSyncBatchResponse:
+        trigger = "manual_single" if len(payload.item_keys) == 1 else "manual_batch"
+        try:
+            created = _saved_service().create_sync_task(
+                list_kind,
+                payload.item_keys,
+                trigger,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid sync selection") from exc
+        return _sync_batch_response(created)
+
+    @app.get("/api/saved-sync/tasks/{task_id}", response_model=SavedSyncBatchResponse)
+    async def saved_sync_task(task_id: UUID) -> SavedSyncBatchResponse:
+        service = _saved_service()
+        try:
+            exists = service.has_sync_task(str(task_id))
+            result = service.get_sync_task(str(task_id)) if exists else None
+        except ValueError as exc:  # pragma: no cover - UUID path validation protects this
+            raise HTTPException(status_code=422, detail="invalid task_id") from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="saved sync task not found")
+        return _sync_batch_response(result)
+
+    # ── Legacy Bilibili watch-later (稍后再看) ─────────────────────
+
+    def _legacy_saved_state(
+        list_kind: SavedListKind,
+        bvid: str,
+    ) -> tuple[bool, str, NativeSaveStatus | None, str, str, str, str, str]:
+        normalized_bvid = bvid.strip()
+        if not normalized_bvid:
+            raise HTTPException(status_code=422, detail="bvid is required")
+        item_key = make_item_key("bilibili", normalized_bvid)
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        return (
+            row is not None,
+            item_key,
+            _safe_native_status(row.get("sync_status")) if row is not None else None,
+            str(row.get("sync_task_id", "")) if row is not None else "",
+            str(row.get("resolved_action", "")) if row is not None else "",
+            _safe_result_text(row.get("resolved_target", ""), limit=256) if row is not None else "",
+            _safe_result_text(row.get("last_error_code", ""), limit=128) if row is not None else "",
+            _safe_result_text(row.get("last_error_message", "")) if row is not None else "",
+        )
 
     def _watch_later_state(bvid: str) -> WatchLaterStateResponse:
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("watch_later", bvid)
         return WatchLaterStateResponse(
-            saved=ctx.database.is_in_watch_later(bvid),
+            saved=saved,
             total=ctx.database.count_watch_later(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/watch-later", response_model=WatchLaterStateResponse)
@@ -3401,6 +5279,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "watch_later",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_watch_later(bvid, note=payload.note.strip())
         return _watch_later_state(bvid)
 
@@ -3419,17 +5304,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> WatchLaterListResponse:
-        rows = ctx.database.list_watch_later(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("watch_later", limit=limit, offset=offset)
         return WatchLaterListResponse(
             items=[
                 WatchLaterItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],
@@ -3439,9 +5333,26 @@ def create_app(
     # ── Favorites (收藏夹) ────────────────────────────────────────
 
     def _favorite_state(bvid: str) -> FavoriteStateResponse:
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("favorite", bvid)
         return FavoriteStateResponse(
-            saved=ctx.database.is_in_favorites(bvid),
+            saved=saved,
             total=ctx.database.count_favorites(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/favorites", response_model=FavoriteStateResponse)
@@ -3449,6 +5360,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "favorite",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_favorites(bvid, note=payload.note.strip())
         return _favorite_state(bvid)
 
@@ -3467,17 +5385,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> FavoriteListResponse:
-        rows = ctx.database.list_favorites(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("favorite", limit=limit, offset=offset)
         return FavoriteListResponse(
             items=[
                 FavoriteItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],
@@ -3562,37 +5489,56 @@ def create_app(
         except Exception:
             logger.exception("Background pool classification failed")
 
-    async def _drain_discovery_candidates_once() -> None:
-        """Best-effort drain for newly enqueued source candidates."""
+    def _notify_discovery_candidates_enqueued(source: str) -> None:
+        """Wake continuous evaluation after the enqueue transaction commits."""
 
-        drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
-        if not callable(drain):
+        coordinator = getattr(ctx.runtime_controller, "candidate_eval_coordinator", None)
+        notify = getattr(coordinator, "notify", None)
+        if callable(notify):
+            notify(f"candidate_enqueued:{source}")
             return
-        try:
-            await drain(batch_size=30)
-        except Exception:
-            logger.exception("Background discovery candidate drain failed")
+
+        async def _drain_discovery_candidates_once() -> None:
+            drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
+            if not callable(drain):
+                return
+            try:
+                await drain(batch_size=30)
+            except Exception:
+                logger.exception("Background discovery candidate drain failed")
+
+        asyncio.create_task(_drain_discovery_candidates_once())
 
     def _pool_available_count() -> int | None:
         """Return the best available servable-pool count for hot-path guards."""
+
+        def _sync_inventory(available: int) -> int:
+            update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+            if callable(update):
+                update(
+                    available=available,
+                    target=_inventory_target(),
+                )
+            return available
+
         get_runtime_status = getattr(ctx.runtime_controller, "get_runtime_status", None)
         if callable(get_runtime_status):
             with suppress(Exception):
                 status = get_runtime_status()
                 if isinstance(status, dict) and "pool_available_count" in status:
-                    return max(0, int(status.get("pool_available_count") or 0))
+                    return _sync_inventory(max(0, int(status.get("pool_available_count") or 0)))
 
         readiness = getattr(ctx.database, "count_pool_readiness", None)
         if callable(readiness):
             with suppress(Exception):
                 counts = readiness()
                 if isinstance(counts, dict) and "available" in counts:
-                    return max(0, int(counts.get("available") or 0))
+                    return _sync_inventory(max(0, int(counts.get("available") or 0)))
 
         count_pool = getattr(ctx.database, "count_pool_candidates", None)
         if callable(count_pool):
             with suppress(Exception):
-                return max(0, int(count_pool()))
+                return _sync_inventory(max(0, int(count_pool())))
         return None
 
     def _runtime_pool_status_payload() -> dict[str, object]:
@@ -3652,24 +5598,91 @@ def create_app(
             ]
         return payload
 
-    async def _publish_pool_status_snapshot(message: str = "推荐池已同步") -> None:
-        """Broadcast pool counts after recommendation endpoints consume inventory."""
+    async def _publish_pool_status_snapshot(
+        counts: dict[str, int] | None = None,
+        message: str = "推荐池已同步",
+    ) -> None:
+        """Broadcast pool counts, avoiding a rescan when serve supplied them."""
+        status_started = time.perf_counter()
         event_hub = getattr(ctx, "event_hub", None) or getattr(
             ctx.runtime_controller, "event_hub", None
         )
         publish = getattr(event_hub, "publish", None)
         if not callable(publish):
             return
+        pool_status: dict[str, object]
+        if counts is not None:
+            pool_status = {
+                "pool_available_count": max(0, int(counts.get("available", 0))),
+                "pool_raw_count": max(
+                    0,
+                    int(counts.get("raw", counts.get("available", 0))),
+                ),
+                "pool_pending_count": max(0, int(counts.get("pending", 0))),
+                "pool_pending_eval_count": max(0, int(counts.get("pending_eval", 0))),
+                "pool_evaluated_pending_count": max(
+                    0,
+                    int(counts.get("evaluated_pending", 0)),
+                ),
+            }
+        else:
+            isolated_reader = getattr(
+                ctx.database,
+                "count_pool_readiness_isolated_async",
+                None,
+            )
+            if callable(isolated_reader):
+                exact = await isolated_reader()
+                pool_status = {
+                    "pool_available_count": max(0, int(exact.get("available", 0))),
+                    "pool_raw_count": max(0, int(exact.get("raw", 0))),
+                    "pool_pending_count": max(0, int(exact.get("pending", 0))),
+                    "pool_pending_eval_count": max(
+                        0,
+                        int(exact.get("pending_eval", 0)),
+                    ),
+                    "pool_evaluated_pending_count": max(
+                        0,
+                        int(exact.get("evaluated_pending", 0)),
+                    ),
+                }
+            else:
+                pool_status = await asyncio.to_thread(_runtime_pool_status_payload)
+        controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
+        if controller_target is not None:
+            pool_status["pool_target_count"] = max(0, int(controller_target))
         event = {
             "type": "refresh.pool_updated",
             "phase": "done",
             "message": message,
-            **_runtime_pool_status_payload(),
+            **pool_status,
         }
         with suppress(Exception):
             result = publish(event)
             if asyncio.iscoroutine(result):
                 await result
+        logger.info(
+            "recommendation_status_publish status_publish_ms=%.1f exact=%s",
+            (time.perf_counter() - status_started) * 1000.0,
+            counts is None,
+        )
+
+    def _schedule_exact_pool_status_snapshot() -> None:
+        """Refresh exact counts after the HTTP response-critical work."""
+        task = asyncio.create_task(_publish_pool_status_snapshot())
+        _fire_and_forget_tasks.add(task)
+        task.add_done_callback(_fire_and_forget_tasks.discard)
+
+    add_pool_commit_subscriber = getattr(ctx, "add_pool_inventory_commit_subscriber", None)
+    if callable(add_pool_commit_subscriber):
+        add_pool_commit_subscriber(_publish_pool_status_snapshot)
+    set_pool_commit_callback = getattr(
+        ctx.recommendation_engine,
+        "set_pool_inventory_commit_callback",
+        None,
+    )
+    if callable(set_pool_commit_callback):
+        set_pool_commit_callback(ctx.pool_inventory_commit_callback)
 
     async def _run_auto_replenishment(trigger: Callable[[], Any]) -> None:
         try:
@@ -3712,13 +5725,22 @@ def create_app(
                         return cast("dict[str, object]", result)
         return None
 
-    async def _trigger_replenishment_if_needed(*, force: bool = False) -> None:
+    async def _trigger_replenishment_if_needed(
+        *,
+        force: bool = False,
+        available_count: int | None = None,
+    ) -> None:
         """Fire a background Discovery refresh when the pool runs low."""
         if not force:
             curator = getattr(ctx.recommendation_engine, "_curator", None)
             if curator is None or not hasattr(curator, "needs_replenishment"):
                 return
-            if not curator.needs_replenishment():
+            count_gate = getattr(curator, "needs_replenishment_for_count", None)
+            if available_count is not None and callable(count_gate):
+                needs_replenishment = bool(count_gate(available_count))
+            else:
+                needs_replenishment = await asyncio.to_thread(curator.needs_replenishment)
+            if not needs_replenishment:
                 return
 
         nonlocal auto_replenishment_started_at, auto_replenishment_task
@@ -3742,42 +5764,239 @@ def create_app(
         _fire_and_forget_tasks.add(task)
         task.add_done_callback(_fire_and_forget_tasks.discard)
 
+    def _platform_scope_kwargs(source_platform: str) -> dict[str, str]:
+        """Forward the platform scope only when the client actually sent one.
+
+        Engines and test doubles that predate platform scoping implement the
+        historical signature, so an unscoped request must keep its old call
+        shape rather than passing an empty keyword they cannot accept.
+        """
+        scope = str(source_platform or "").strip()
+        return {"source_platform": scope} if scope else {}
+
+    def _scoped_batch_came_up_short(
+        source_platform: str,
+        items: list[Any],
+        limit: int,
+    ) -> bool:
+        """Whether a platform-scoped request under-delivered.
+
+        A short scoped batch is the only signal that one platform ran dry
+        while the pool as a whole looks healthy, so it wakes the existing
+        replenishment entry point. This only requests a background refresh —
+        no discovery runs inside the HTTP request, and nothing here promises
+        the platform is refilled by the time the response returns.
+        """
+        if not str(source_platform or "").strip():
+            return False
+        return len(items) < max(0, int(limit))
+
+    @app.get(
+        "/api/recommendations/platform-availability",
+        response_model=PlatformAvailabilityResponse,
+    )
+    async def recommendation_platform_availability() -> PlatformAvailabilityResponse:
+        """Report servable inventory per canonical platform for the tab badges."""
+        loader = getattr(ctx.database, "load_pool_platform_availability_async", None)
+        if not callable(loader):
+            raise HTTPException(
+                status_code=503,
+                detail="platform availability is unavailable on this storage backend",
+            )
+        try:
+            snapshot = await loader(xhs_self_nickname=_xhs_self_nickname())
+        except Exception as exc:
+            # Never answer a failed read with zeros: the desktop keeps its last
+            # good snapshot, and a silent all-zero would read as "no stock
+            # anywhere" and disable auto-load across every platform.
+            logger.exception("Failed to read platform availability snapshot")
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to read platform availability: {exc}",
+            ) from exc
+        by_platform = {
+            str(name): max(0, int(count))
+            for name, count in dict(getattr(snapshot, "by_platform", {}) or {}).items()
+        }
+        return PlatformAvailabilityResponse(
+            total_available=max(0, int(getattr(snapshot, "total_available", 0))),
+            by_platform=by_platform,
+        )
+
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
-    async def reshuffle_recommendations() -> RecommendationReshuffleResponse:
+    async def reshuffle_recommendations(
+        payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
+    ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
+        request_started = time.perf_counter()
+        precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
-            await _trigger_replenishment_if_needed(force=True)
-            return RecommendationReshuffleResponse(items=[])
+        result_fn = getattr(
+            ctx.recommendation_engine,
+            "reshuffle_recommendations_with_result",
+            None,
+        )
+        if not callable(result_fn):
+            precheck_started = time.perf_counter()
+            if await asyncio.to_thread(_pool_available_count) == 0:
+                await _trigger_replenishment_if_needed(force=True)
+                return RecommendationReshuffleResponse(items=[])
+            precheck_ms = (time.perf_counter() - precheck_started) * 1000.0
+        profile_started = time.perf_counter()
         try:
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
-        items = await ctx.recommendation_engine.reshuffle_recommendations(profile=profile, limit=10)
-        await _publish_pool_status_snapshot()
-        await _trigger_replenishment_if_needed()
+        profile_ms = (time.perf_counter() - profile_started) * 1000.0
+        excluded_bvids = list(
+            dict.fromkeys(
+                bvid.strip()
+                for bvid in (payload.excluded_bvids if payload is not None else [])
+                if bvid and bvid.strip()
+            )
+        )
+        source_platform = payload.source_platform if payload is not None else ""
+        scope_kwargs = _platform_scope_kwargs(source_platform)
+        if callable(result_fn):
+            serve_result = await result_fn(
+                profile=profile,
+                excluded_bvids=excluded_bvids,
+                limit=10,
+                **scope_kwargs,
+            )
+            items = serve_result.items
+            counts_after = dict(serve_result.pool_counts_after)
+            timings = serve_result.timings
+        else:
+            items = await ctx.recommendation_engine.reshuffle_recommendations(
+                profile=profile,
+                excluded_bvids=excluded_bvids,
+                limit=10,
+                **scope_kwargs,
+            )
+            counts_after = {}
+            timings = None
+        if items:
+            propagate_event = getattr(ctx.memory_manager, "propagate_event", None)
+            if callable(propagate_event):
+                from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
+
+                returned_item_ids = [
+                    str(getattr(getattr(item, "content", None), "bvid", "") or "").strip()
+                    for item in items
+                ]
+                returned_item_ids = [item_id for item_id in returned_item_ids if item_id]
+                try:
+                    await propagate_event(
+                        build_event(
+                            event_type="reshuffle",
+                            source_platform=SOURCE_WEB,
+                            title="推荐列表",
+                            context="你在推荐页换了一批内容。",
+                            metadata={
+                                "recommendation_source_platform": source_platform or "all",
+                                "excluded_item_ids": excluded_bvids[:100],
+                                "returned_item_ids": returned_item_ids[:100],
+                                "batch_size": len(items),
+                            },
+                        )
+                    )
+                except Exception:
+                    # A behavioral breadcrumb must never turn a successful
+                    # recommendation response into an HTTP failure.
+                    logger.warning("Failed to persist reshuffle batch event", exc_info=True)
+        _schedule_exact_pool_status_snapshot()
+        available_after = counts_after.get("available")
+        await _trigger_replenishment_if_needed(
+            force=available_after == 0 or _scoped_batch_came_up_short(source_platform, items, 10),
+            available_count=available_after,
+        )
+        logger.info(
+            "recommendation_request_timing action=reshuffle precheck_ms=%.1f "
+            "profile_ms=%.1f pool_snapshot_ms=%.1f embedding_ms=%.1f "
+            "selector_worker_ms=%.1f event_loop_resume_delay_ms=%.1f "
+            "persist_ms=%.1f status_publish_ms=0.0 total_ms=%.1f",
+            precheck_ms,
+            profile_ms,
+            float(getattr(timings, "pool_snapshot_ms", 0.0)),
+            float(getattr(timings, "embedding_ms", 0.0)),
+            float(getattr(timings, "selector_worker_ms", 0.0)),
+            float(getattr(timings, "event_loop_resume_delay_ms", 0.0)),
+            float(getattr(timings, "persist_ms", 0.0)),
+            (time.perf_counter() - request_started) * 1000.0,
+        )
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
     @app.post("/api/recommendations/append", response_model=RecommendationReshuffleResponse)
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
+        _invalidate_recommendation_snapshot()
+        request_started = time.perf_counter()
+        precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
-            await _trigger_replenishment_if_needed(force=True)
-            return RecommendationReshuffleResponse(items=[])
+        result_fn = getattr(
+            ctx.recommendation_engine,
+            "append_recommendations_with_result",
+            None,
+        )
+        if not callable(result_fn):
+            precheck_started = time.perf_counter()
+            if await asyncio.to_thread(_pool_available_count) == 0:
+                await _trigger_replenishment_if_needed(force=True)
+                return RecommendationReshuffleResponse(items=[])
+            precheck_ms = (time.perf_counter() - precheck_started) * 1000.0
+        profile_started = time.perf_counter()
         try:
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
-        items = await ctx.recommendation_engine.append_recommendations(
-            profile=profile,
-            excluded_bvids=payload.excluded_bvids,
-            limit=10,
+        profile_ms = (time.perf_counter() - profile_started) * 1000.0
+        scope_kwargs = _platform_scope_kwargs(payload.source_platform)
+        if callable(result_fn):
+            serve_result = await result_fn(
+                profile=profile,
+                excluded_bvids=payload.excluded_bvids,
+                limit=10,
+                **scope_kwargs,
+            )
+            items = serve_result.items
+            counts_after = dict(serve_result.pool_counts_after)
+            timings = serve_result.timings
+        else:
+            items = await ctx.recommendation_engine.append_recommendations(
+                profile=profile,
+                excluded_bvids=payload.excluded_bvids,
+                limit=10,
+                **scope_kwargs,
+            )
+            counts_after = {}
+            timings = None
+        _schedule_exact_pool_status_snapshot()
+        available_after = counts_after.get("available")
+        await _trigger_replenishment_if_needed(
+            force=(
+                available_after == 0
+                or _scoped_batch_came_up_short(payload.source_platform, items, 10)
+            ),
+            available_count=available_after,
         )
-        await _publish_pool_status_snapshot()
-        await _trigger_replenishment_if_needed()
+        logger.info(
+            "recommendation_request_timing action=append precheck_ms=%.1f "
+            "profile_ms=%.1f pool_snapshot_ms=%.1f embedding_ms=%.1f "
+            "selector_worker_ms=%.1f event_loop_resume_delay_ms=%.1f "
+            "persist_ms=%.1f status_publish_ms=0.0 total_ms=%.1f",
+            precheck_ms,
+            profile_ms,
+            float(getattr(timings, "pool_snapshot_ms", 0.0)),
+            float(getattr(timings, "embedding_ms", 0.0)),
+            float(getattr(timings, "selector_worker_ms", 0.0)),
+            float(getattr(timings, "event_loop_resume_delay_ms", 0.0)),
+            float(getattr(timings, "persist_ms", 0.0)),
+            (time.perf_counter() - request_started) * 1000.0,
+        )
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
     @app.post("/api/recommendations/refresh", response_model=RecommendationRefreshResponse)
@@ -3807,7 +6026,7 @@ def create_app(
                 pending_signal_events=0,
                 unread_count=0,
             )
-        payload = dict(get_runtime_status())
+        payload = dict(await asyncio.to_thread(get_runtime_status))
         get_account_sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
         if callable(get_account_sync_status):
             payload.update(get_account_sync_status())
@@ -3991,6 +6210,8 @@ def create_app(
                 "phase": "ready",
                 "message": "发现了一条你可能会意外喜欢的内容",
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),
@@ -3998,6 +6219,12 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
+                # body_text / content_type let the desktop delight card derive a
+                # readable title for legacy rows still holding answer_<id> (#79).
+                "content_type": str(row.get("content_type", "") or ""),
+                "body_text": str(row.get("body_text", "") or ""),
             }
             with suppress(Exception):
                 await ctx.event_hub.publish(payload_event)
@@ -4073,6 +6300,8 @@ def create_app(
         items = [
             {
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),
@@ -4080,6 +6309,21 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
+                # body_text / content_type let the desktop delight card derive a
+                # readable title for legacy rows still holding answer_<id> (#79).
+                "content_type": str(row.get("content_type", "") or ""),
+                "body_text": str(row.get("body_text", "") or ""),
+                # Engagement stats so the delight card shows the same ▶/👍/💬 row
+                # as the grid (0 = not fetched → the card renders nothing for it).
+                "view_count": int(row.get("view_count", 0) or 0),
+                "like_count": int(row.get("like_count", 0) or 0),
+                "comment_count": int(row.get("comment_count", 0) or 0),
+                "danmaku_count": int(row.get("danmaku_count", 0) or 0),
+                "favorite_count": int(
+                    row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                ),
                 "state": (
                     "liked" if str(row.get("feedback_type", "") or "") == "like" else "pending"
                 ),
@@ -4223,31 +6467,28 @@ def create_app(
             raw_message = f"聊聊你为什么觉得「{title or bvid}」我会喜欢"
         contextual_message = f"[关于惊喜推荐「{title or bvid}」的反馈] {raw_message}"
         if ctx.dialogue is None:
+            exc = RuntimeError("Dialogue service is not configured.")
             return JSONResponse(
-                content={"ok": False, "action": "chat", "bvid": bvid, "reply": "对话引擎暂不可用。"}
+                content={
+                    "ok": False,
+                    "action": "chat",
+                    "bvid": bvid,
+                    "reply": safe_llm_failure_message(exc),
+                }
             )
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
             concurrency.chat_active = True
         try:
             reply = await asyncio.wait_for(ctx.dialogue.respond(contextual_message), timeout=30)
-        except TimeoutError:
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "action": "chat",
-                    "bvid": bvid,
-                    "reply": "后台正忙，等一下再聊。",
-                }
-            )
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for delight chat: %s", bvid)
             return JSONResponse(
                 content={
                     "ok": False,
                     "action": "chat",
                     "bvid": bvid,
-                    "reply": "聊天出了点问题，稍后再试。",
+                    "reply": safe_llm_failure_message(exc),
                 }
             )
         finally:
@@ -4292,11 +6533,9 @@ def create_app(
             # truncated essentially every reply. Extension's AbortController
             # is sized to be generous enough to cover this end-to-end.
             reply = await asyncio.wait_for(ctx.dialogue.respond(message), timeout=120)
-        except TimeoutError:
-            reply = "后台正忙，等一下再聊。"
-        except Exception:
+        except Exception as exc:
             logger.exception("Chat dialogue failed")
-            reply = "聊天出了点问题，稍后再试。"
+            reply = safe_llm_failure_message(exc)
         finally:
             if concurrency is not None:
                 concurrency.chat_active = False
@@ -4494,7 +6733,7 @@ def create_app(
     ) -> tuple[str, str]:
         """Return ``(classification, classifier)`` for probe chat feedback."""
         llm_result = await _llm_judge_sentiment(user_message, ai_reply, domain)
-        if llm_result in {"strong_positive", "weak_positive", "negative"}:
+        if llm_result in {"strong_positive", "weak_positive", "negative", "neutral_deferred"}:
             return llm_result, "llm"
         keyword_result = _keyword_judge_sentiment(user_message)
         if keyword_result != "neutral":
@@ -4512,6 +6751,18 @@ def create_app(
             "没兴趣",
             "不想看",
         }
+        # Explicit "shelve it for now" — routes to the defer state machine.
+        # Ambiguous phrases (「不确定」「再看看」) are intentionally excluded:
+        # they stay plain neutral (no state change). Checked AFTER negatives so
+        # a message with both (e.g. 「不喜欢，先放着吧」) classifies negative.
+        deferred_terms = {
+            "暂时忽略",
+            "先放着",
+            "稍后再看",
+            "以后再说",
+            "回头再看",
+            "过段时间再说",
+        }
         strong_positive_terms = {
             "以后多推",
             "这就是我想看的",
@@ -4527,6 +6778,8 @@ def create_app(
         }
         if any(kw in msg for kw in negative_terms):
             return "negative"
+        if any(kw in msg for kw in deferred_terms):
+            return "neutral_deferred"
         if any(kw in msg for kw in strong_positive_terms):
             return "strong_positive"
         if any(kw in msg for kw in weak_positive_terms):
@@ -4544,23 +6797,16 @@ def create_app(
         llm = getattr(ctx.recommendation_engine, "_llm", None)
         if llm is None:
             return "neutral"
+        from openbiliclaw.llm.prompts import build_probe_sentiment_prompt
+
+        messages = build_probe_sentiment_prompt(domain=domain, user_message=user_message)
         try:
             response = await asyncio.wait_for(
                 llm.complete_with_core_memory(
-                    system_instruction=(
-                        "任务：判断用户对一个兴趣方向的态度。\n\n"
-                        "规则：\n"
-                        "1. 只输出一个英文标签："
-                        "strong_positive、weak_positive、neutral 或 negative\n"
-                        "2. 不要输出任何其他内容\n\n"
-                        "判断标准：\n"
-                        "- strong_positive = 用户明确要加入画像、以后多推、这就是想看的\n"
-                        "- weak_positive = 用户表达轻微兴趣、可以看看、偶尔看看，但未直接确认\n"
-                        "- negative = 用户表达了不喜欢、不感兴趣、太难、太无聊\n"
-                        "- neutral = 态度不明确\n"
-                    ),
-                    user_input=f"方向：{domain}\n用户：{user_message}",
-                    max_tokens=8,
+                    system_instruction=messages[0]["content"],
+                    user_input=messages[1]["content"],
+                    # 16 (not 8) so the longest label `neutral_deferred` can't truncate.
+                    max_tokens=16,
                     temperature=0.0,
                     json_mode=False,
                     caller="api.sentiment",
@@ -4577,6 +6823,7 @@ def create_app(
                     "weak_positive",
                     "negative",
                     "neutral",
+                    "neutral_deferred",
                 ):
                     logger.info("Sentiment LLM for '%s': %s (raw=%r)", domain, cleaned, raw)
                     return cleaned
@@ -4740,7 +6987,7 @@ def create_app(
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
         if ctx.dialogue is None:
-            return "对话引擎暂不可用。"
+            raise RuntimeError("Dialogue service is not configured.")
 
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -4752,15 +6999,18 @@ def create_app(
                     timeout=120,
                 )
                 reply = str(reply)
-        except TimeoutError:
-            return "后台正忙，等一下再聊。"
-        except Exception:
-            logger.exception("Durable chat turn failed: %s", turn.turn_id)
-            return "聊天出了点问题，稍后再试。"
         finally:
             if concurrency is not None:
                 concurrency.chat_active = False
 
+        if not reply.strip():
+            from openbiliclaw.llm.service import LLMResponseContentError
+
+            raise LLMResponseContentError("LLM returned an empty response")
+
+        return reply
+
+    async def _apply_durable_chat_success_side_effects(turn: ChatTurnOut, reply: str) -> None:
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id
             _record_probe_cognition(
@@ -4806,6 +7056,20 @@ def create_app(
                     source_event="weak_positive_chat",
                 )
                 summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    with suppress(Exception):
+                        defer_result = speculator.user_defer_speculation(domain)
+                        defer_outcome = defer_result.outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把「{domain}」先放一放，过阵子再聊。"
             else:
                 summary = f"关于「{domain}」你说：{turn.message}"
             if speculator is not None:
@@ -4857,6 +7121,21 @@ def create_app(
                         with suppress(Exception):
                             reject_fn(domain, cooldown_days=14)
                 summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    defer_fn = getattr(speculator, "user_defer_avoidance", None)
+                    if callable(defer_fn):
+                        with suppress(Exception):
+                            defer_outcome = defer_fn(domain).outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
             else:
                 chat_response = "avoidance_chat_neutral"
                 resulting_action = "none"
@@ -4885,8 +7164,6 @@ def create_app(
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
 
-        return reply
-
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:
             return
@@ -4898,11 +7175,27 @@ def create_app(
             turn = _normalize_chat_turn(row)
             if turn.status != "pending":
                 return
-            reply = await _generate_durable_chat_reply(turn)
-            _complete_chat_turn_row(turn_id, reply=reply)
-        except Exception as exc:
-            logger.exception("Failed to complete durable chat turn %s", turn_id)
-            _fail_chat_turn_row(turn_id, error=str(exc), reply="聊天出了点问题，稍后再试。")
+            try:
+                reply = await _generate_durable_chat_reply(turn)
+            except Exception as exc:
+                logger.exception("Failed to generate durable chat turn %s", turn_id)
+                _fail_chat_turn_row(
+                    turn_id,
+                    error=safe_llm_failure_message(exc),
+                    reply="",
+                )
+                return
+
+            try:
+                _complete_chat_turn_row(turn_id, reply=reply)
+            except Exception:
+                logger.exception("Failed to persist completed durable chat turn %s", turn_id)
+                return
+
+            try:
+                await _apply_durable_chat_success_side_effects(turn, reply)
+            except Exception:
+                logger.exception("Failed to apply durable chat side effects for %s", turn_id)
         finally:
             running_chat_turn_tasks.discard(turn_id)
 
@@ -4973,7 +7266,8 @@ def create_app(
         try:
             from openbiliclaw.soul.speculator import load_speculative_state
 
-            spec_state = load_speculative_state(ctx.config.data_path)
+            runtime_config = getattr(ctx, "config", None) or config
+            spec_state = load_speculative_state(runtime_config.data_path)
             active = [item for item in spec_state.active if item.status == "active"]
             items = []
             for item in active[:6]:
@@ -4996,10 +7290,11 @@ def create_app(
     async def respond_to_interest_probe(payload: dict[str, Any]) -> Any:
         """User responds to a speculated interest probe.
 
-        Body: { "domain": "...", "response": "confirm" | "reject" | "chat", "message": "..." }
+        Body: { "domain": "...", "response": "confirm" | "reject" | "defer" | "chat", ... }
 
         - confirm: Force-promote the speculation
         - reject: Move to cooldown (30 days)
+        - defer: Snooze the probe (暂时忽略); escalates on repeat, exhausts to cooldown
         - chat: Forward to dialogue engine with probe context, return reply
         """
         domain = str(payload.get("domain", "")).strip()
@@ -5007,8 +7302,10 @@ def create_app(
 
         if not domain:
             raise HTTPException(status_code=422, detail="domain is required")
-        if response_type not in {"confirm", "reject", "chat"}:
-            raise HTTPException(status_code=422, detail="response must be confirm, reject, or chat")
+        if response_type not in {"confirm", "reject", "defer", "chat"}:
+            raise HTTPException(
+                status_code=422, detail="response must be confirm, reject, defer, or chat"
+            )
 
         speculator = getattr(ctx.soul_engine, "_speculator", None)
         if speculator is None:
@@ -5136,6 +7433,55 @@ def create_app(
                 )
             return {"ok": ok, "action": "rejected", "domain": domain}
 
+        if response_type == "defer":
+            metadata = _probe_metadata_from_active_speculation(speculator, domain)
+            defer_result = speculator.user_defer_speculation(domain)
+            ok = defer_result.outcome in {"deferred", "exhausted"}
+            exhausted = defer_result.outcome == "exhausted"
+            if ok:
+                _record_probe_feedback_history(
+                    domain,
+                    "defer_exhausted" if exhausted else "defer",
+                    speculator=speculator,
+                    classification="defer",
+                    classifier="user_button",
+                    resulting_action="defer_exhausted" if exhausted else "deferred",
+                    metadata={
+                        **metadata,
+                        "defer_count": defer_result.defer_count,
+                        "deferred_until": defer_result.deferred_until,
+                    },
+                )
+                if exhausted:
+                    _record_probe_cognition(
+                        f"「{domain}」已被多次搁置，之后不再主动提。",
+                        domain,
+                        "rejected",
+                    )
+                    await _publish_probe_event(
+                        "interest.rejected",
+                        f"「{domain}」已被多次搁置，暂不再提。",
+                        domain,
+                    )
+                else:
+                    _record_probe_cognition(
+                        f"你把「{domain}」先放一放，过阵子再提。",
+                        domain,
+                        "deferred",
+                    )
+                    await _publish_probe_event(
+                        "interest.deferred",
+                        f"「{domain}」先放一放，过阵子可能再提。",
+                        domain,
+                    )
+            return {
+                "ok": ok,
+                "action": "defer_exhausted" if exhausted else "deferred",
+                "domain": domain,
+                "deferred_until": defer_result.deferred_until,
+                "defer_count": defer_result.defer_count,
+            }
+
         # Chat: forward to dialogue with domain context injected
         raw_message = str(payload.get("message", "")).strip()
         if not raw_message:
@@ -5144,7 +7490,13 @@ def create_app(
         # understand this is feedback on a specific speculated interest
         contextual_message = f"[关于猜测兴趣「{domain}」的反馈] {raw_message}"
         if ctx.dialogue is None:
-            return {"ok": False, "action": "chat", "domain": domain, "reply": "对话引擎暂不可用。"}
+            exc = RuntimeError("Dialogue service is not configured.")
+            return {
+                "ok": False,
+                "action": "chat",
+                "domain": domain,
+                "reply": safe_llm_failure_message(exc),
+            }
         # Pause discovery LLM calls while user is chatting
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -5156,20 +7508,13 @@ def create_app(
             )
             # Judge sentiment while discovery is still paused
             sentiment, classifier = await _classify_probe_sentiment(raw_message, reply, domain)
-        except TimeoutError:
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": "后台正忙，等一下再聊。",
-            }
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for probe chat: %s", domain)
             return {
                 "ok": False,
                 "action": "chat",
                 "domain": domain,
-                "reply": "聊天出了点问题，稍后再试。",
+                "reply": safe_llm_failure_message(exc),
             }
         finally:
             if concurrency is not None:
@@ -5199,6 +7544,16 @@ def create_app(
                 source_event="weak_positive_chat",
             )
             summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+        elif sentiment == "neutral_deferred":
+            defer_result = speculator.user_defer_speculation(domain)
+            if defer_result.outcome == "exhausted":
+                chat_response = "defer_exhausted"
+                resulting_action = "defer_exhausted"
+                summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+            else:
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把「{domain}」先放一放，过阵子再聊。"
         else:
             summary = f"关于「{domain}」你说：{raw_message}"
 
@@ -5275,8 +7630,10 @@ def create_app(
 
         if not domain:
             raise HTTPException(status_code=422, detail="domain is required")
-        if response_type not in {"confirm", "reject", "chat"}:
-            raise HTTPException(status_code=422, detail="response must be confirm, reject, or chat")
+        if response_type not in {"confirm", "reject", "defer", "chat"}:
+            raise HTTPException(
+                status_code=422, detail="response must be confirm, reject, defer, or chat"
+            )
 
         speculator = getattr(ctx.soul_engine, "_avoidance_speculator", None)
         if speculator is None:
@@ -5365,12 +7722,71 @@ def create_app(
                 )
             return {"ok": ok, "action": "rejected", "domain": domain}
 
+        if response_type == "defer":
+            metadata = metadata_fn(domain)
+            defer_fn = getattr(speculator, "user_defer_avoidance", None)
+            defer_result = defer_fn(domain) if callable(defer_fn) else None
+            ok = defer_result is not None and defer_result.outcome in {"deferred", "exhausted"}
+            exhausted = defer_result is not None and defer_result.outcome == "exhausted"
+            if ok and defer_result is not None:
+                _record_probe_feedback_history(
+                    domain,
+                    "defer_exhausted" if exhausted else "defer",
+                    speculator=speculator,
+                    classification="defer",
+                    classifier="user_button",
+                    resulting_action="defer_exhausted" if exhausted else "deferred",
+                    state_key="avoidance_probe_feedback_history",
+                    metadata={
+                        **metadata,
+                        "defer_count": defer_result.defer_count,
+                        "deferred_until": defer_result.deferred_until,
+                    },
+                )
+                if exhausted:
+                    _record_probe_cognition(
+                        f"避雷方向「{domain}」已被多次搁置，之后不再主动提。",
+                        domain,
+                        "rejected",
+                        source="avoidance_probe",
+                    )
+                    await _publish_probe_event(
+                        "avoidance.rejected",
+                        f"避雷方向「{domain}」已被多次搁置，暂不再提。",
+                        domain,
+                    )
+                else:
+                    _record_probe_cognition(
+                        f"你把避雷方向「{domain}」先放一放，过阵子再提。",
+                        domain,
+                        "deferred",
+                        source="avoidance_probe",
+                    )
+                    await _publish_probe_event(
+                        "avoidance.deferred",
+                        f"避雷方向「{domain}」先放一放，过阵子可能再提。",
+                        domain,
+                    )
+            return {
+                "ok": ok,
+                "action": "defer_exhausted" if exhausted else "deferred",
+                "domain": domain,
+                "deferred_until": defer_result.deferred_until if defer_result else "",
+                "defer_count": defer_result.defer_count if defer_result else 0,
+            }
+
         raw_message = str(payload.get("message", "")).strip()
         if not raw_message:
             raw_message = f"我想聊聊你猜我可能想避开的「{domain}」这个方向"
         contextual_message = f"[关于避雷方向「{domain}」的反馈] {raw_message}"
         if ctx.dialogue is None:
-            return {"ok": False, "action": "chat", "domain": domain, "reply": "对话引擎暂不可用。"}
+            exc = RuntimeError("Dialogue service is not configured.")
+            return {
+                "ok": False,
+                "action": "chat",
+                "domain": domain,
+                "reply": safe_llm_failure_message(exc),
+            }
 
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -5385,20 +7801,13 @@ def create_app(
                 reply,
                 domain,
             )
-        except TimeoutError:
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": "后台正忙，等一下再聊。",
-            }
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for avoidance probe chat: %s", domain)
             return {
                 "ok": False,
                 "action": "chat",
                 "domain": domain,
-                "reply": "聊天出了点问题，稍后再试。",
+                "reply": safe_llm_failure_message(exc),
             }
         finally:
             if concurrency is not None:
@@ -5428,6 +7837,17 @@ def create_app(
             if callable(reject_fn):
                 reject_fn(domain, cooldown_days=14)
             summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+        elif sentiment == "neutral_deferred":
+            defer_fn = getattr(speculator, "user_defer_avoidance", None)
+            defer_result = defer_fn(domain) if callable(defer_fn) else None
+            if defer_result is not None and defer_result.outcome == "exhausted":
+                chat_response = "defer_exhausted"
+                resulting_action = "defer_exhausted"
+                summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
+            else:
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
         else:
             chat_response = "avoidance_chat_neutral"
             resulting_action = "none"
@@ -5475,28 +7895,29 @@ def create_app(
             feedback_type=feedback_type,
             feedback_note=note,
         )
+        _invalidate_recommendation_snapshot()
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
+            format_event_context,
         )
 
         rec_title = str(recommendation.get("title", ""))
-        # Tailor a natural-language context per feedback type — the
-        # "feedback" verb in the generic table doesn't capture the
-        # like/dislike/comment distinction the LLM cares about.
-        feedback_label = {
-            "like": "点赞了",
-            "dislike": "踩了",
-            "comment": "评论了",
-            "dismiss": "忽略了",
-        }.get(feedback_type, "反馈了")
-        feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
+        source_platform = (
+            str(recommendation.get("source_platform") or SOURCE_BILIBILI).strip().lower()
+            or SOURCE_BILIBILI
+        )
+        feedback_context = format_event_context(
+            event_type=feedback_type,
+            source_platform=source_platform,
+            title=rec_title,
+        )
         if note:
             feedback_context = f"{feedback_context},备注:{note}"
         await ctx.memory_manager.propagate_event(
             build_event(
                 event_type="feedback",
-                source_platform=SOURCE_BILIBILI,
+                source_platform=source_platform,
                 title=rec_title,
                 context=feedback_context,
                 metadata={
@@ -5813,6 +8234,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -5836,6 +8258,10 @@ def create_app(
                 [str(item).strip() for item in tags_raw if str(item).strip()]
                 if isinstance(tags_raw, list)
                 else []
+            )
+            published = normalize_published_time(
+                video.get("published_at") or video.get("pubdate"),
+                label=video.get("published_label"),
             )
             item = DiscoveredContent(
                 bvid=bvid,
@@ -5865,6 +8291,8 @@ def create_app(
                 author_name=up_name,
                 score_threshold=0.60,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -6194,6 +8622,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -6202,6 +8631,7 @@ def create_app(
             self_info = _load_xhs_self_info()
         writes = []
         skipped_self = 0
+        covers_saved = 0
         for note in notes:
             if _is_self_authored_note(note, self_info):
                 skipped_self += 1
@@ -6223,7 +8653,37 @@ def create_app(
                 continue  # Skip notes with empty title — they produce blank recommendation cards
             author = str(note.get("author", "") or "").strip()
             cover_url = str(note.get("cover_url", "") or "").strip()
+            if cover_url.startswith("//"):
+                cover_url = f"https:{cover_url}"
+            if not cover_url.startswith(("http://", "https://")):
+                # Lazy-load data:/blob: placeholders from background-tab
+                # scrapes are not covers; storing them yields cards that can
+                # never render (the image proxy rejects non-http(s) URLs).
+                cover_url = ""
+            # Extension-harvested cover bytes: xhs card scrapes attach
+            # cover_data so the cover lands in the disk cache at ingest time
+            # (while the rotating xhscdn token is fresh) instead of depending
+            # on the backend's later fetch succeeding from this machine.
+            # Saved even when the note later dedupes as a known candidate —
+            # that heals stock rows whose cover was never cached.
+            # Best-effort: a bad cover never blocks the note.
+            cover_data = note.get("cover_data")
+            if (
+                cover_url
+                and isinstance(cover_data, str)
+                and cover_data
+                and save_extension_cover(
+                    cover_url,
+                    cover_data,
+                    str(note.get("cover_content_type", "") or ""),
+                )
+            ):
+                covers_saved += 1
             best_url = _pick_best_xhs_url(database, note_id, url)
+            published = normalize_published_time(
+                note.get("published_at") or note.get("pubdate"),
+                label=note.get("published_label"),
+            )
 
             item = DiscoveredContent(
                 bvid=note_id,
@@ -6249,6 +8709,8 @@ def create_app(
                 source_platform="xiaohongshu",
                 author_name=author,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -6269,6 +8731,12 @@ def create_app(
             logger.info(
                 "xhs ingest filter: dropped %d self-authored note(s) (%s)",
                 skipped_self,
+                page_type,
+            )
+        if covers_saved > 0:
+            logger.info(
+                "xhs ingest: cached %d extension-harvested cover(s) (%s)",
+                covers_saved,
                 page_type,
             )
         if not writes:
@@ -6312,11 +8780,17 @@ def create_app(
             _persist_xhs_self_info(self_info_now)
         self_info_for_filter = self_info_now or _load_xhs_self_info()
 
-        # Filter to valid xhs note URLs
+        # Filter to valid xhs note URLs. Accept both note-detail shapes xhs
+        # exposes — ``/explore/<id>`` and the legacy ``/discovery/item/<id>``
+        # — so the bare-``urls`` branch stops silently dropping discovery/item
+        # links the ``notes`` branch already ingests (both key on the same
+        # note id via sources.identity_keys).
         valid_urls = [
             u
             for u in urls_raw
-            if isinstance(u, str) and u.startswith(xhs_url_prefix) and "/explore/" in u
+            if isinstance(u, str)
+            and u.startswith(xhs_url_prefix)
+            and ("/explore/" in u or "/discovery/item/" in u)
         ]
 
         # Store bare URLs for tracking
@@ -6334,7 +8808,7 @@ def create_app(
                 self_info=self_info_for_filter or None,
             )
             if enqueued:
-                asyncio.create_task(_drain_discovery_candidates_once())
+                _notify_discovery_candidates_enqueued("xiaohongshu")
 
         return {
             "ok": True,
@@ -6342,8 +8816,8 @@ def create_app(
             "enqueued": enqueued,
         }
 
-    @app.post("/api/sources/xhs/tokens")
-    def ingest_xhs_tokens(payload: dict[str, Any]) -> dict[str, Any]:
+    @app.post("/api/sources/xhs/tokens", deprecated=True)
+    async def ingest_xhs_tokens(payload: dict[str, Any]) -> dict[str, Any]:
         """Ingest ``(note_id, xsec_token)`` pairs harvested by the MAIN-
         world fetch sniffer inside ``dist/main/xhs-token-sniffer.js``.
 
@@ -6352,25 +8826,387 @@ def create_app(
         (the typical search-page-sourced ones) get upgraded in place.
         Without this, clicking an xhs recommendation trips xhs's 300031
         access-denied gating because the stored URL lacks xsec_token.
+
+        **Deprecated** in favour of
+        ``POST /api/sources/xiaohongshu/credential`` with ``kind="token"``.
+        Note what that ``kind`` is for: an ``xsec_token`` is a *content access*
+        token for one note, not a login credential, and it says nothing about
+        whether anyone is logged in (spec D5). Keeping it a distinct kind is
+        what stops it from inheriting a login credential's promises.
         """
         raw = payload.get("pairs", [])
         if not isinstance(raw, list) or not raw:
             return {"ok": True, "upgraded": 0}
-        urls: list[str] = []
-        for pair in raw:
-            if not isinstance(pair, dict):
-                continue
-            note_id = str(pair.get("note_id", "") or "").strip()
-            token = str(pair.get("xsec_token", "") or "").strip()
-            # Guard against the noise the sniffer's deep-walk can surface
-            # — e.g. 24-hex ids that aren't notes. The backfill UPDATE is
-            # narrow (bvid match), so the worst case of a false id is a
-            # no-op, but the token must at least be non-empty.
-            if not note_id or not token:
-                continue
-            urls.append(f"{xhs_url_prefix}explore/{note_id}?xsec_token={token}")
-        upgraded = _backfill_xhs_tokens(ctx.database, urls)
-        return {"ok": True, "upgraded": upgraded}
+        result = await _write_source_credential(
+            "xiaohongshu", kind="token", value=raw, source="extension"
+        )
+        return {"ok": True, "upgraded": result.upgraded}
+
+    @app.post(
+        "/api/sources/xhs/login-state",
+        response_model=XhsLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_xhs_login_state(payload: XhsLoginStateIn) -> XhsLoginStateResponse:
+        """Persist the extension-observed xhs login state without storing cookies.
+
+        **Deprecated** in favour of
+        ``POST /api/sources/xiaohongshu/credential`` with
+        ``kind="login_state"``.
+        """
+        if not hasattr(ctx.database, "set_xhs_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        result = await _write_source_credential(
+            "xiaohongshu", kind="login_state", value=payload.logged_in, source="extension"
+        )
+        return XhsLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=result.updated_at,
+        )
+
+    @app.post(
+        "/api/sources/zhihu/login-state",
+        response_model=ZhihuLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_zhihu_login_state(payload: ZhihuLoginStateIn) -> ZhihuLoginStateResponse:
+        """Persist the extension-observed Zhihu login state without storing cookies.
+
+        **Deprecated** in favour of ``POST /api/sources/zhihu/credential`` with
+        ``kind="login_state"``.
+        """
+        if not hasattr(ctx.database, "set_zhihu_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        result = await _write_source_credential(
+            "zhihu", kind="login_state", value=payload.logged_in, source="extension"
+        )
+        return ZhihuLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=result.updated_at,
+        )
+
+    # ── Bangumi extension identity channel ──────────────────────────
+    # The content script on bgm.tv / bangumi.tv reads the page's public
+    # ``CHOBITS_UID`` global (MAIN-world bridge) plus the nav's own
+    # ``/user/<username>`` link and reports both. Only uid + username are
+    # collected — both public, no cookies — so guided init can identify
+    # the account with zero configuration when neither an access token
+    # nor an explicit username was supplied.
+
+    def _normalize_bangumi_identity(raw: Any) -> dict[str, str] | None:
+        """Validate an extension-reported Bangumi identity payload.
+
+        Returns ``{"uid": ..., "username": ...}`` when the uid is a positive
+        integer; malformed usernames are dropped (treated as missing) rather
+        than persisted, per the defensive-parse rule.
+        """
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        if not isinstance(raw, dict):
+            return None
+        try:
+            uid = int(str(raw.get("uid", "") or "").strip())
+        except (TypeError, ValueError):
+            return None
+        if uid <= 0:
+            return None
+        try:
+            username = validate_bangumi_username(raw.get("username"))
+        except ValueError:
+            logger.warning("bangumi identity: dropping malformed username from extension report")
+            username = ""
+        return {"uid": str(uid), "username": username}
+
+    def _persist_bangumi_identity(
+        identity: dict[str, str], *, verified: bool
+    ) -> dict[str, Any] | None:
+        """Save the extension-reported identity into discovery runtime state.
+
+        ``verified`` records whether bgm.tv positively confirmed the pair. It
+        is persisted alongside uid/username so every consumer can tell a
+        confirmed identity from a fail-open best-effort one instead of
+        treating both as equally true (project rule 7), and it is sticky-true
+        per identity so a later unreachable-bgm.tv report cannot erase a
+        confirmation we already hold (see ``_sticky_record``).
+
+        Returns the record as actually written, or ``None`` when it could not
+        be persisted at all. Callers MUST NOT report a state this did not
+        store — an unpersisted "verified" would be a claim the next read
+        contradicts.
+        """
+        memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
+        if memory_manager is None:
+            # No persistence backend: the report is dropped. Say so rather
+            # than echoing a flag nothing will read back (rule 7).
+            logger.warning(
+                "bangumi identity: no memory manager; cannot persist uid=%s",
+                identity.get("uid", ""),
+            )
+            return None
+
+        def _sticky_record(previous: object) -> dict[str, Any]:
+            """This round's record, upgraded to verified if ``previous`` proved it.
+
+            Evidence of a successful cross-check belongs to a specific
+            uid↔username pair and does not expire when bgm.tv is later
+            unreachable — downgrading it would erase proof we already hold and
+            make consumers call a genuinely checked identity "未经 bgm.tv 校验"
+            (flipping the flag, and rewriting the file, on every hiccup). So
+            the flag only ratchets up, and only for the SAME identity: a
+            changed uid or username is a different claim the old evidence says
+            nothing about, so it starts from this round's result.
+
+            Inheritance also requires the previous record to be one the current
+            rules could have produced, i.e. a non-empty username. Before the
+            flag meant "confirmed", the 404 path wrote
+            ``{"username": "", "verified": true}``; re-reporting that same 404
+            user matched on uid and on username (both ``""``) and inherited the
+            stale ``true``, pinning a record that contradicts the
+            verified-implies-a-username invariant. An illegal record is not
+            evidence, so it is not inherited.
+            """
+            sticky = bool(verified)
+            previous_username = previous.get("username") if isinstance(previous, dict) else None
+            if (
+                not sticky
+                and isinstance(previous, dict)
+                and previous.get("verified") is True
+                # A confirmed record always names someone; an empty username
+                # with verified=true can only come from the superseded rules.
+                and isinstance(previous_username, str)
+                and previous_username
+                and previous.get("uid") == identity["uid"]
+                and previous_username == identity["username"]
+            ):
+                sticky = True
+            return {**identity, "verified": sticky}
+
+        record: dict[str, Any] = {}
+        try:
+            update_state = getattr(memory_manager, "update_discovery_runtime_state", None)
+            if callable(update_state):
+
+                def _mutate(runtime_state: dict[str, Any]) -> None:
+                    # The merge runs ONLY here. update_json_state holds a
+                    # process + file lock and re-reads from disk before calling
+                    # us, so this sees the authoritative current value; a
+                    # pre-read outside the lock could be stale by now and was
+                    # how a concurrent confirmation used to get reported away.
+                    record.update(_sticky_record(runtime_state.get("bangumi_self_info")))
+                    runtime_state["bangumi_self_info"] = record
+
+                # Deliberately no lock-free write-avoidance fast path.
+                # update_json_state writes unconditionally, so re-reporting an
+                # unchanged identity costs one idempotent rewrite — accepted,
+                # because the only way to decide "unchanged" without the lock
+                # is a snapshot that a concurrent writer can already have
+                # invalidated, and answering from that snapshot contradicts
+                # what the next read returns.
+                update_state(_mutate)
+            else:
+                # Non-atomic fallback for runtimes without the atomic entry
+                # point (stubs). Same merge, weaker concurrency guarantee.
+                state = memory_manager.load_discovery_runtime_state()
+                record.update(_sticky_record(state.get("bangumi_self_info")))
+                state["bangumi_self_info"] = record
+                memory_manager.save_discovery_runtime_state(state)
+        except Exception:
+            logger.exception(
+                "Failed to persist bangumi identity (uid=%s); reporting it as not stored",
+                identity.get("uid", ""),
+            )
+            return None
+        logger.info(
+            "bangumi identity persisted: uid=%s username=%r verified=%s",
+            record.get("uid", ""),
+            record.get("username", ""),
+            record.get("verified"),
+        )
+        return record
+
+    def _load_bangumi_identity() -> tuple[str, bool]:
+        """Extension-reported Bangumi ``(username, verified)`` from runtime state.
+
+        Returns ``("", False)`` on any miss. Records written before the
+        ``verified`` flag existed have no way to prove they were cross-checked,
+        so they read back as UNVERIFIED rather than silently claiming a check
+        that may never have run — the next bgm.tv page view re-reports and
+        upgrades the record in place.
+
+        Records that cannot be legal under the current rules are normalised
+        here too: a ``verified`` record with no username (what the superseded
+        404 path used to write) reads back as unverified. Doing this on read as
+        well as on write means an installation that never revisits bgm.tv
+        still stops seeing the stale claim, instead of waiting for a report
+        that may never come.
+        """
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
+        if memory_manager is None:
+            return "", False
+        try:
+            state = memory_manager.load_discovery_runtime_state()
+            info = state.get("bangumi_self_info")
+            if not isinstance(info, dict):
+                return "", False
+            username = validate_bangumi_username(info.get("username"))
+            return username, bool(username) and info.get("verified") is True
+        except Exception:
+            logger.debug("bangumi identity: runtime state unavailable", exc_info=True)
+            return "", False
+
+    # Publish for start_guided_init's username fallback ladder — that route is
+    # defined earlier in this factory, so it reads the hook off app.state at
+    # request time (by then create_app has finished wiring everything).
+    app.state.load_bangumi_identity = _load_bangumi_identity
+
+    async def _verify_bangumi_identity(identity: dict[str, str]) -> tuple[dict[str, str], bool]:
+        """Authoritatively cross-check an extension-reported identity.
+
+        A real-page E2E (2026-07-18) showed a DOM-scraped username can be a
+        timeline stranger's, so the DOM value is never trusted as-is. The
+        anonymous public endpoint ``GET /v0/users/{username}`` returns the
+        account's ``id``; users without a custom slug keep ``str(uid)`` as
+        their username, so a uid-only report also resolves for them.
+
+        Returns ``(identity, verified)``. ``verified`` is True only when bgm.tv
+        actually answered — the caller persists that flag so a fail-open value
+        is never mistaken for a checked one.
+
+        ``verified`` is True **only when bgm.tv positively confirmed this
+        uid↔username pair** — i.e. ``get_user`` returned and its ``id`` equals
+        the reported uid, yielding a non-empty username. Everything else is
+        False, including cases where bgm.tv answered clearly: a 404 *refutes*
+        the username, it does not confirm who the uid belongs to, and a
+        uid-only lookup that 404s never checked anything at all. Treating
+        "bgm.tv replied" as "identity confirmed" would let sticky-true pin an
+        account we never actually established as ``verified`` forever.
+
+        Rules (never cache failures; ``trust_env=False`` via BangumiClient):
+        - API ``id`` matches the reported uid → persist the API's username,
+          VERIFIED.
+        - Username resolves to a DIFFERENT id, or does not exist → keep the
+          uid, DISCARD the username, log WARNING (plausible-but-wrong guard);
+          NOT verified — a refutation is not a confirmation.
+        - Network / upstream failure → accept the DOM username best-effort but
+          mark it UNVERIFIED and log WARNING with the real cause. Staying
+          fail-open keeps zero-config users working when bgm.tv is unreachable
+          (bgm.tv sits behind overseas CF, and the default ``[network] mode =
+          system`` only reaches it when the machine already has a working
+          proxy), so the guard's honesty has to come from the flag + log rather
+          than from rejecting the report.
+        """
+        from openbiliclaw.sources.bangumi_client import (
+            BangumiAPIError,
+            BangumiClient,
+            validate_bangumi_username,
+        )
+
+        uid = identity["uid"]
+        reported_username = identity["username"]
+        lookup = reported_username or uid
+        try:
+            async with BangumiClient(request_interval_seconds=0) as bangumi_client:
+                user = await bangumi_client.get_user(lookup)
+        except BangumiAPIError as exc:
+            if exc.code == "not_found":
+                if reported_username:
+                    logger.warning(
+                        "bangumi identity: reported username %r does not exist; "
+                        "keeping uid=%s only (NOT verified — a 404 refutes the "
+                        "username, it does not confirm the uid's owner)",
+                        reported_username,
+                        uid,
+                    )
+                    return {"uid": uid, "username": ""}, False
+                # uid-only report from a custom-slug user: bgm.tv answered, but
+                # nothing about this uid's owner was established, so not verified.
+                return identity, False
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                exc.code,
+                exc,
+            )
+            return identity, False
+        except Exception as exc:
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return identity, False
+        api_id = user.get("id")
+        try:
+            api_uid = str(int(str(api_id).strip()))
+        except (TypeError, ValueError):
+            api_uid = ""
+        if api_uid != uid:
+            logger.warning(
+                "bangumi identity: reported username %r belongs to uid %s, not %s; "
+                "discarding username (NOT verified)",
+                reported_username or lookup,
+                api_uid or "?",
+                uid,
+            )
+            return {"uid": uid, "username": ""}, False
+        try:
+            api_username = validate_bangumi_username(user.get("username"))
+        except ValueError:
+            api_username = ""
+        confirmed_username = api_username or reported_username
+        # Only a non-empty username makes this a confirmed *pair*. bgm.tv
+        # returning an unusable username leaves nothing to have confirmed, so
+        # the flag stays False rather than claiming a pair that does not exist.
+        return {"uid": uid, "username": confirmed_username}, bool(confirmed_username)
+
+    @app.post("/api/sources/bangumi/identity")
+    async def ingest_bangumi_identity(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist the extension-observed Bangumi account (uid + username).
+
+        Both values are public page data; no cookies or tokens are accepted
+        here. A payload without a positive uid is rejected so a logged-out
+        page can never overwrite a previously known identity. The username is
+        cross-checked against ``GET /v0/users/{username}`` before persisting —
+        a mismatching or unknown username is dropped (uid kept) so a DOM
+        drift can never store a stranger's identity. When bgm.tv is
+        unreachable the report is still stored (zero-config users must keep
+        working) but flagged ``verified: false``.
+
+        The whole body is read back off the record that was actually written,
+        so a 200 always describes what a subsequent read returns. If the
+        identity could not be persisted the request fails with 500 instead of
+        echoing a state nothing stored — the extension treats a failed report
+        as best-effort and re-reports on the next bgm.tv page view.
+        """
+        identity = _normalize_bangumi_identity(payload)
+        if identity is None:
+            raise HTTPException(status_code=422, detail="uid must be a positive integer")
+        identity, verified = await _verify_bangumi_identity(identity)
+        stored = _persist_bangumi_identity(identity, verified=verified)
+        if stored is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Bangumi identity could not be persisted; see server logs. "
+                    "The next bgm.tv page view will re-report it."
+                ),
+            )
+        return {
+            "ok": True,
+            "uid": stored["uid"],
+            "username": stored["username"],
+            "verified": stored["verified"],
+        }
 
     # ── Bilibili extension search fallback endpoints ────────────────
 
@@ -6452,7 +9288,7 @@ def create_app(
                     source_keyword_id=source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("bilibili")
             return {"ok": True, "enqueued": enqueued}
 
         _bili_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
@@ -6466,6 +9302,69 @@ def create_app(
         if callable(publish):
             with suppress(Exception):
                 await publish({"type": "bili_task_available", "source": "task_kick"})
+        return {"ok": True}
+
+    def _claim_extension_native_task(slug: str) -> dict[str, Any] | None:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        if broker is None:
+            return None
+        job = broker.claim_next(slug)
+        if job is None:
+            return None
+        return {
+            "id": job.job_id,
+            "type": "native_save",
+            "item_key": job.item_key,
+            "platform": job.platform,
+            "platform_slug": job.platform_slug,
+            "content_id": job.content_id,
+            "content_url": job.content_url,
+            "content_type": job.content_type,
+            "requested_action": job.requested_action,
+            "resolved_action": job.resolved_action,
+            "target_label": job.target_label,
+        }
+
+    def _is_extension_native_job(task_id: str, slug: str | None = None) -> bool:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        return bool(broker is not None and broker.owns(task_id, slug))
+
+    def _submit_extension_native_result(slug: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from pydantic import ValidationError
+
+        try:
+            result = ExtensionNativeSaveResultIn.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="invalid native-save result") from exc
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        accepted = bool(
+            broker is not None
+            and broker.submit_result(
+                slug,
+                BrokerExtensionNativeSaveResultIn(
+                    task_id=result.task_id,
+                    item_key=result.item_key,
+                    status=result.status,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                ),
+            )
+        )
+        if not accepted:
+            raise HTTPException(status_code=409, detail="native_save_result_conflict")
+        return {"ok": True}
+
+    def _require_legacy_task(queue: Any, task_id: str) -> dict[str, Any]:
+        task = queue.get(task_id) if queue is not None else None
+        if task is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return cast("dict[str, Any]", task)
+
+    async def _kick_source_task(slug: str) -> dict[str, Any]:
+        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
+        if callable(publish):
+            with suppress(Exception):
+                await publish({"type": f"{slug}_task_available", "source": "task_kick"})
         return {"ok": True}
 
     # ── XHS task queue endpoints (extension dispatcher) ──────────────
@@ -6489,6 +9388,10 @@ def create_app(
     def xhs_next_task(response: Any = None) -> Any:
         """Claim and return the oldest runnable xhs task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("xhs")
+        if native_task is not None:
+            return native_task
 
         # 204 No Content responses MUST NOT carry a body (RFC 7230).
         # JSONResponse(204, None) serialises None to "null" (4 bytes),
@@ -6514,7 +9417,14 @@ def create_app(
     @app.post("/api/sources/xhs/task-result")
     async def xhs_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "xhs"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("xhs", payload)
+
         status = payload.get("status", "")
         urls = payload.get("urls", [])
         notes = [note for note in payload.get("notes", []) if isinstance(note, dict)]
@@ -6525,20 +9435,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _xhs_task_queue is None:
-            return {"ok": True}
-
-        task = _xhs_task_queue.get(task_id)
+        legacy_queue = _xhs_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes = _xhs_task_queue.merge_result(
+            added_notes, enriched_notes = legacy_queue.merge_result_with_enrichment(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -6581,7 +9486,8 @@ def create_app(
             if valid_urls and not _init_busy:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            if added_notes and not _init_busy:
+            candidate_notes = [*added_notes, *enriched_notes]
+            if candidate_notes and not _init_busy:
                 # P1.8: a planner-driven xhs *search* task carries its
                 # ``source_keyword_id`` on the payload → thread it onto the
                 # ingested candidates so admission backfills the keyword's yield.
@@ -6593,13 +9499,13 @@ def create_app(
                 )
                 enqueued = _cache_xhs_notes(
                     ctx.database,
-                    added_notes,
+                    candidate_notes,
                     "task",
                     self_info_now,
                     source_keyword_id=task_source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("xiaohongshu")
             if task_type == "bootstrap_profile" and added_notes and not _skip_profile:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",
@@ -6640,7 +9546,7 @@ def create_app(
                         propagated,
                     )
         else:
-            _xhs_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if task is not None:
@@ -6754,373 +9660,432 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
-    # Window for treating synced 小红书 access tokens as fresh. xsec_tokens
-    # die well within a day, so /api/sources/status only reports "ready" when
-    # token activity happened inside this window — older-only rows degrade to
-    # the yellow "stale" state instead of staying green forever.
-    _xhs_token_fresh_hours = 24
+    def _bangumi_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Bangumi's status item: the auth contract plus its two extra axes.
 
-    # Human-readable detail for each X (twitter) health state, reused by the
-    # unified /api/sources/status chip below.
-    _x_state_detail = {
-        "ok": "X 来源正常，cookie 有效。",
-        "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
-        "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "被限流，正在退避冷却中，稍后会自动重试。",
-        "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
-    }
+        Bangumi's *auth* verdict now comes from ``auth_bangumi`` like every other
+        source (``auth_required=False`` — anonymous-public — with an optional,
+        live-verifiable personal token). But it carries two dimensions the
+        uniform ``SourceStatusItem`` the loop builds cannot express, so it is
+        assembled here rather than inline in ``sources_status()``:
+
+        * a **discovery-health** ``detail`` (``尚未运行`` / 退避冷却 / run outcomes)
+          — the chip the settings page renders, distinct from the contract's own
+          auth-focused ``detail``. Keeping it means moving to the contract does
+          not silently drop the discovery status users already saw.
+        * the **``token_state``** axis (``ok`` / ``rejected`` / ``""``), which the
+          frontend overlays as 「令牌已失效」 when discovery rejected the token.
+
+        ``state`` / ``logged_in`` follow the contract (``no_auth`` / ``True``): the
+        discovery-health string lives in ``detail`` now, not in ``state``, so the
+        legacy field stops conflating scheduling and discovery with auth
+        readiness — the D1 conflation the contract exists to remove. The
+        ``enabled`` switch stays its own field, never folded back into ``state``.
+        """
+        from openbiliclaw.api.source_auth.providers import auth_bangumi
+        from openbiliclaw.runtime.bangumi_producer import (
+            bangumi_disabled_detail,
+            bangumi_source_status,
+        )
+
+        srcs = cfg.sources
+        bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
+        bgm_token_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
+        )
+        bgm_username_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "username", "") or "").strip()
+        )
+        bgm_status = (
+            bangumi_source_status(
+                ctx.database,
+                enabled=bgm_enabled,
+                token_configured=bgm_token_configured,
+                username_configured=bgm_username_configured,
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if bgm_enabled else "disabled",
+                # No ledger to read here, so a saved token can only be reported
+                # as "ok" — but the disabled wording still has to name it.
+                "detail": (
+                    "Bangumi 使用官方公开 API，尚未运行内容发现。"
+                    if bgm_enabled
+                    else bangumi_disabled_detail(
+                        token_state="ok" if bgm_token_configured else "",
+                        username_configured=bgm_username_configured,
+                    )
+                ),
+                **({"token_state": "ok"} if bgm_token_configured else {}),
+            }
+        )
+        # ``state`` / ``logged_in`` now come from the auth contract (always
+        # ``no_auth`` / ``True`` for an anonymous-public source); the
+        # discovery-health string moves to ``detail``, and ``token_state`` stays
+        # its own axis. The contract itself carries the optional-token verdict.
+        return SourceStatusItem(
+            enabled=bgm_enabled,
+            state="no_auth",
+            detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
+            logged_in=True,
+            token_state=str(bgm_status.get("token_state") or ""),
+            auth=auth_bangumi(auth_ctx),
+        )
+
+    def _attach_network_hints(statuses: SourcesStatusResponse, cfg: Any) -> None:
+        """Attach the overseas-egress advisory to every source in *statuses*.
+
+        A separate pass from assembling the auth status, and separate on
+        purpose: this one is uniform over all families and reads a table in
+        ``sources.platforms``, so it never grows a per-platform branch the way
+        the aggregator it sits next to once did. The platform list AND both
+        wordings live in that table; the settings surfaces render
+        ``network_hint`` verbatim and never learn a platform name
+        (``tests/test_source_network_hints.py`` pins that).
+        """
+        network_mode = str(getattr(getattr(cfg, "network", None), "mode", "") or "")
+        for family in CANONICAL_SOURCE_FAMILIES:
+            item = getattr(statuses, family, None)
+            if not isinstance(item, SourceStatusItem):
+                continue
+            item.requires_overseas_network = requires_overseas_network(family)
+            item.network_hint = overseas_network_hint(family, network_mode=network_mode)
 
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
 
-        Local-only: each source's state is derived from config cookie fields,
-        the Douyin cookie file/env, the count of token-bearing 小红书 cache
-        rows, and the X health store — no outbound platform requests. See
-        :class:`SourcesStatusResponse`. ``ready`` means a credential is present
-        and structurally valid (not live-validated); only X reports a真正
-        live-validated ``ok``.
+        Local-only: every verdict comes from config, local credential files,
+        the extension's login heartbeats, the X health store and cached probe
+        results — this handler makes **no outbound platform request**, which
+        matters because open settings pages poll it every ~30s.
+
+        Each platform's logic lives in one provider in
+        ``api/source_auth/providers.py``; this endpoint only walks the registry
+        and assembles the response. The legacy ``state`` / ``logged_in`` /
+        ``detail`` fields are carried verbatim from each provider (Wave A
+        promises byte-identical output), while the new ``auth`` sub-object
+        exposes the same knowledge as independent dimensions. See
+        :class:`SourceAuthContract` and ``source_auth/legacy.py``.
+
+        Bangumi is answered by ``auth_bangumi`` like the rest, but its item is
+        re-assembled by ``_bangumi_status_item`` to carry two axes the uniform
+        item cannot: a discovery-health ``detail`` and the ``token_state`` chip.
         """
+        from openbiliclaw.api.source_auth.providers import (
+            SOURCE_AUTH_PROVIDERS,
+            SourceAuthContext,
+            source_enabled,
+            source_feed_paused,
+        )
         from openbiliclaw.config import load_config
 
         cfg = load_config()
-        srcs = cfg.sources
+        auth_ctx = SourceAuthContext(cfg=cfg, database=ctx.database)
+        items: dict[str, SourceStatusItem] = {}
+        for slug, provider in SOURCE_AUTH_PROVIDERS.items():
+            contract = provider(auth_ctx)
+            items[slug] = SourceStatusItem(
+                enabled=source_enabled(auth_ctx, slug),
+                state=contract.legacy_state,
+                detail=contract.detail,
+                logged_in=contract.legacy_logged_in,
+                feed_paused=source_feed_paused(auth_ctx, slug),
+                auth=contract,
+            )
+        # Bangumi's uniform item (built above) is replaced: it carries a
+        # discovery-health detail and the token_state axis the loop cannot model.
+        # Do not delete this line thinking the loop covers it — it does not.
+        items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
+        statuses = SourcesStatusResponse(**items)
+        _attach_network_hints(statuses, cfg)
+        return statuses
 
-        # ── Bilibili: cookie present with the core login fields ──
-        # config.toml is the mirror, data/bilibili_cookie.json is the runtime
-        # store (CLI QR login writes only the file) — check both, like the
-        # douyin/x branches resolve env + file.
-        bili_cookie = str(getattr(cfg.bilibili, "cookie", "") or "")
-        if not bili_cookie.strip():
-            with suppress(Exception):
-                from openbiliclaw.bilibili.auth import AuthManager
+    @app.post("/api/sources/{slug}/verify", response_model=SourceVerifyResponse)
+    async def verify_source_credential(slug: str) -> SourceVerifyResponse:
+        """Verify one source's credential on demand and return its fresh contract.
 
-                bili_cookie = AuthManager(data_dir=cfg.data_path).load_cookie()
-        bili_enabled = bool(getattr(srcs.bilibili, "enabled", True))
-        has_fields = sum(
-            1 for f in ("SESSDATA", "bili_jct", "DedeUserID") if f"{f}=" in bili_cookie
-        )
-        if getattr(cfg.bilibili, "auth_method", "cookie") == "none":
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="no_auth",
-                detail="未启用 B 站登录（auth_method=none）。",
-                logged_in=True,
-            )
-        elif has_fields >= 3:
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="ready",
-                detail="Cookie 就绪（含 SESSDATA / bili_jct / DedeUserID）。",
-                logged_in=True,
-            )
-        elif bili_cookie.strip():
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="partial",
-                detail="Cookie 已配置，但缺少部分登录字段，可能未完整登录。",
-            )
-        else:
-            bilibili = SourceStatusItem(
-                enabled=bili_enabled,
-                state="missing",
-                detail="未配置 Cookie —— 在浏览器登录 bilibili.com，插件会自动同步。",
-            )
+        The counterpart to ``GET /api/sources/status``: that route is polled and
+        therefore never goes out, while this one is an explicit user action and
+        is the only place a platform is probed. Which of the five verification
+        actions runs is a fixed per-platform property — see
+        ``source_auth/verify.py`` for why it is not keyed off the contract's
+        ``verify_method``.
 
-        # ── 小红书: token-bearing cache rows = extension is syncing tokens ──
-        # A bare COUNT(*) is sticky: one token row from weeks ago keeps the
-        # status green forever after the extension stops syncing, while the
-        # stored tokens are long dead (xhs 300031 access-denied). Gate "ready"
-        # on recent activity instead — a token-bearing cache row discovered,
-        # or a candidate token-backfilled (``_backfill_xhs_tokens`` refreshes
-        # ``last_seen_at`` without touching ``discovered_at``), inside the
-        # freshness window. Old-only rows degrade to ``stale``.
-        xhs_enabled = bool(getattr(srcs.xiaohongshu, "enabled", False))
-        xhs_tokens = 0
-        xhs_fresh = 0
-        if hasattr(ctx.database, "conn"):
-            window = f"-{_xhs_token_fresh_hours} hours"
-            try:
-                row = ctx.database.conn.execute(
-                    "SELECT COUNT(*), "
-                    "COALESCE(SUM(discovered_at >= datetime('now', ?)), 0) "
-                    "FROM content_cache "
-                    "WHERE source_platform = 'xiaohongshu' "
-                    "AND content_url LIKE '%xsec_token=%'",
-                    (window,),
-                ).fetchone()
-                xhs_tokens = int(row[0]) if row else 0
-                xhs_fresh = int(row[1]) if row else 0
-            except Exception:  # pragma: no cover - defensive
-                xhs_tokens = 0
-                xhs_fresh = 0
-            if xhs_tokens and not xhs_fresh:
-                try:
-                    row = ctx.database.conn.execute(
-                        "SELECT COUNT(*) FROM discovery_candidates "
-                        "WHERE source_platform = 'xiaohongshu' "
-                        "AND content_url LIKE '%xsec_token=%' "
-                        "AND last_seen_at >= datetime('now', ?)",
-                        (window,),
-                    ).fetchone()
-                    xhs_fresh = int(row[0]) if row else 0
-                except Exception:  # pragma: no cover - defensive
-                    xhs_fresh = 0
-        if xhs_fresh > 0:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="ready",
-                detail=(
-                    f"访问令牌已同步（最近 {_xhs_token_fresh_hours} 小时内 {xhs_fresh} 条，"
-                    f"共 {xhs_tokens} 条带 xsec_token 的缓存内容）。"
-                ),
-                logged_in=True,
-            )
-        elif xhs_tokens > 0:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="stale",
-                detail=(
-                    f"令牌可能已失效 —— 超过 {_xhs_token_fresh_hours} 小时未同步新令牌"
-                    f"（存量 {xhs_tokens} 条）。在浏览器逛逛小红书即可自动刷新。"
-                ),
-            )
-        else:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="missing",
-                detail="未检测到访问令牌 —— 在浏览器登录小红书后插件会自动同步。",
-            )
+        Always 200 for a known slug, including when the answer is "could not
+        tell": an unreachable proxy or a disconnected extension is not a client
+        error, and turning it into one would strip the frontends of the message
+        explaining what to do about it.
+        """
+        from openbiliclaw.api.source_auth.verify import verify_source
+        from openbiliclaw.config import load_config
 
-        # ── 抖音: cookie resolvable from env / data/douyin_cookie.json ──
-        dy_enabled = bool(getattr(srcs.douyin, "enabled", False))
-        dy_cookie = ""
         try:
-            from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+            result = await verify_source(
+                slug,
+                cfg=load_config(),
+                database=ctx.database,
+                event_hub=getattr(ctx, "event_hub", None),
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown source: {slug}") from None
 
-            dy_cookie = resolve_douyin_cookie(
-                data_dir=cfg.data_path,
-                cookie_env=getattr(srcs.douyin, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"),
-            )
-        except Exception:  # pragma: no cover - defensive
-            dy_cookie = ""
-        if dy_cookie.strip():
-            douyin = SourceStatusItem(
-                enabled=dy_enabled, state="ready", detail="Cookie 就绪。", logged_in=True
-            )
-        else:
-            douyin = SourceStatusItem(
-                enabled=dy_enabled,
-                state="missing",
-                detail="未配置 Cookie —— 设置环境变量，或登录抖音后由插件同步。",
-            )
-
-        # ── YouTube: public, no login required ──
-        youtube = SourceStatusItem(
-            enabled=bool(getattr(srcs.youtube, "enabled", False)),
-            state="no_auth",
-            detail="公开源 · 无需登录。",
-            logged_in=True,
+        return SourceVerifyResponse(
+            slug=result.slug,
+            outcome=result.outcome,
+            changed=result.changed,
+            message=result.message,
+            replayed=result.replayed,
+            retry_after_seconds=result.retry_after_seconds,
+            auth=result.contract,
         )
 
-        # ── X (Twitter): reuse the live health store ──
-        tw_enabled = bool(getattr(srcs.twitter, "enabled", False))
-        tw_state, tw_feed_paused = "missing_cookie", False
-        if hasattr(ctx.database, "conn"):
-            from openbiliclaw.storage.x_health import XSourceHealthStore
+    def _xhs_token_urls(pairs: Any) -> list[str]:
+        """Rebuild tokenised note URLs from ``(note_id, xsec_token)`` pairs."""
+        urls: list[str] = []
+        for pair in pairs if isinstance(pairs, list) else []:
+            if not isinstance(pair, dict):
+                continue
+            # Guard against the noise the sniffer's deep-walk can surface — e.g.
+            # 24-hex ids that aren't notes. The backfill UPDATE is narrow (bvid
+            # match), so a false id is a no-op, but the token must be non-empty.
+            note_id = str(pair.get("note_id", "") or "").strip()
+            token = str(pair.get("xsec_token", "") or "").strip()
+            if not note_id or not token:
+                continue
+            urls.append(f"{xhs_url_prefix}explore/{note_id}?xsec_token={token}")
+        return urls
 
-            h = XSourceHealthStore(ctx.database).get()
-            tw_state = str(h.get("state", "ok"))
-            tw_feed_paused = bool(h.get("feed_paused", False))
-        # The health row defaults to ``ok`` before any fetch has run, so an
-        # ``ok`` without an actual cookie would falsely report a logged-in
-        # source — gate it on the resolved credential, like the douyin branch.
-        if tw_state == "ok":
-            tw_cookie = ""
+    def _source_auth_contract(slug: str) -> SourceAuthContract:
+        """Freshly recomputed contract for *slug*, or an empty one if unknown."""
+        from openbiliclaw.api.source_auth.contract import SourceAuthContract
+        from openbiliclaw.api.source_auth.providers import (
+            SOURCE_AUTH_PROVIDERS,
+            SourceAuthContext,
+        )
+        from openbiliclaw.config import load_config
+
+        provider = SOURCE_AUTH_PROVIDERS.get(slug)
+        if provider is None:
+            return SourceAuthContract()
+        return provider(SourceAuthContext(cfg=load_config(), database=ctx.database))
+
+    def _credential_landed(slug: str, *, verdict: Any, value: str, changed: bool) -> None:
+        """Bookkeeping every credential write owes once the value is really stored.
+
+        Both write surfaces call this, and neither may skip it — the two steps
+        below used to be done by ``POST /api/sources/{slug}/credential`` alone,
+        so one cookie ended up in two different states depending on which page
+        the user had open (invariant I5, the outcome half rather than the
+        validation half):
+
+        1. **Record the verdict the gate already paid for.** ``PUT /api/config``
+           genuinely probed the platform and genuinely refused what failed, then
+           dropped the answer — leaving the status chip on ``unverified`` for a
+           credential the backend had just watched log in.
+        2. **Drop the platform's debounced verify result.** It describes the
+           credential that was there a moment ago; replaying it would tell a
+           user their fix had not taken.
+
+        A verdict served *from the cache* is not re-recorded: it would extend
+        its own freshness window on every extension re-post, so a credential
+        could stay "recently verified" indefinitely without anyone re-checking
+        it — the failure this whole path was tightened to prevent, arriving one
+        indirection later.
+        """
+        from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+        from openbiliclaw.api.source_auth.verify import note_credential_changed
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+        if verdict.checked == "live_probe" and not verdict.from_cache:
+            LIVE_PROBES.record(
+                slug,
+                authenticated=verdict.authenticated,
+                detail=verdict.message,
+                network_error=False,
+                fingerprint=credential_fingerprint(slug, value),
+                username=verdict.username,
+                user_id=verdict.user_id,
+            )
+        if changed:
+            note_credential_changed(slug)
+
+    async def _write_source_credential(
+        slug: str,
+        *,
+        kind: str = "cookie",
+        value: Any = "",
+        source: str = "settings",
+    ) -> CredentialWriteOutcome:
+        """Validate → persist → broadcast → re-read. The one credential write.
+
+        Every credential-bearing route funnels through here. Whether a route
+        writes a credential is decided by what it stores, never by what its path
+        spells (invariant I7) — reading the path is how ``PUT /api/config``, the
+        single largest credential writer in the codebase, went unnoticed long
+        enough to skip validation entirely (spec D4/D5). That route delegates to
+        the same :func:`validate_credential` gate; it keeps its own persistence
+        only because it is mid-transaction on ``config.toml`` and must not have
+        its pending edits flushed out from under it.
+
+        The returned ``auth`` is recomputed *after* the write, so the save and
+        the next status poll cannot disagree. For the live-probe platforms the
+        gate has already recorded a fresh verdict, so this costs no second round
+        trip — the receipt is free, which is why there is no longer any excuse
+        for the silent save that spec D7 complained about.
+        """
+        from openbiliclaw.api.source_auth.write import (
+            CredentialWriteOutcome,
+            cookie_names,
+            current_credential,
+            persist_credential,
+            validate_credential,
+        )
+        from openbiliclaw.config import load_config
+
+        cfg = load_config()
+        verdict = await validate_credential(slug, kind, value, cfg=cfg)
+        if not verdict.ok:
+            return CredentialWriteOutcome(
+                slug=slug,
+                accepted=False,
+                error_code=verdict.error_code,
+                message=verdict.message,
+                checked=verdict.checked,
+                unverified_reason=verdict.unverified_reason,
+                # Reported even on refusal: "which names did you actually see"
+                # is the first question a user asks when a paste is rejected,
+                # and it is derived from the payload, never from the store.
+                cookie_names=(cookie_names(str(value or "")) if kind == "cookie" and value else ()),
+                contract=_source_auth_contract(slug),
+            )
+
+        payload: Any = value
+        if kind == "token":
+            payload = _xhs_token_urls(value)
+
+        # An unchanged cookie is an accepted no-op: the extension re-posts the
+        # same jar around every startup, and rewriting the stores would restart
+        # producer loops for no behavioural gain.
+        text = str(value or "").strip() if kind == "cookie" else ""
+        unchanged = bool(text) and text == current_credential(slug, cfg=cfg)
+
+        written = persist_credential(
+            slug,
+            kind,
+            payload,
+            cfg=cfg,
+            database=ctx.database,
+            source=source,
+            token_sink=lambda urls: _backfill_xhs_tokens(ctx.database, urls),
+        )
+
+        # The candidate is now the stored credential, so its verdict finally
+        # describes something real and may be recorded (the gate deliberately
+        # withheld it while the value was only a candidate). A ``token`` write
+        # is excluded from the change signal: 小红书's ``xsec_token`` is per-note
+        # content access, not a login, so it cannot invalidate a login verdict.
+        if written.persisted:
+            _credential_landed(
+                slug,
+                verdict=verdict,
+                value=text,
+                changed=kind != "token" and not unchanged,
+            )
+
+        if slug == "twitter" and written.persisted:
+            # A freshly synced valid cookie is the external re-login signal that
+            # clears a missing/expired/blocked health block. Without it the
+            # producer's is_ready() gate stays False forever, so discovery never
+            # retries even though auth is now fixed.
             with suppress(Exception):
-                tw_cookie = resolve_x_cookie(
-                    data_dir=cfg.data_path,
-                    cookie_env=getattr(srcs.twitter, "cookie_env", "OPENBILICLAW_X_COOKIE"),
-                )
-            if not tw_cookie.strip():
-                tw_state = "missing_cookie"
-        tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
-        if tw_feed_paused:
-            tw_detail += " For-You 因连续失败已自动暂停。"
-        twitter = SourceStatusItem(
-            enabled=tw_enabled,
-            state=tw_state,
-            detail=tw_detail,
-            logged_in=tw_state == "ok",
-            feed_paused=tw_feed_paused,
+                from openbiliclaw.storage.x_health import XSourceHealthStore
+
+                XSourceHealthStore(ctx.database).clear_relogin_block()
+
+        runtime_refreshed = False
+        if slug == "bilibili" and written.runtime_dirty:
+            # Atomic by contract: a partial ``rebuild_from_config`` leaves the
+            # old runtime intact, so a failure here costs a stale client, never
+            # a broken one.
+            with suppress(Exception):
+                await ctx.rebuild_from_config(load_config())
+                await ctx.restart_background_tasks(app)
+                runtime_refreshed = True
+
+        event_type = {
+            "bilibili": "bilibili_cookie_synced",
+            "douyin": "douyin_cookie_synced",
+            "twitter": "x_cookie_synced",
+            "reddit": "reddit_cookie_synced",
+        }.get(slug, "")
+        if event_type and written.persisted:
+            event: dict[str, Any] = {"type": event_type, "source": source}
+            if slug == "bilibili":
+                event["username"] = verdict.username
+                event["user_id"] = verdict.user_id
+            else:
+                event["cookie_names"] = list(written.cookie_names)
+            if slug in {"twitter", "reddit"}:
+                event["has_cookie"] = True
+            with suppress(Exception):
+                await ctx.event_hub.publish(event)
+
+        return CredentialWriteOutcome(
+            slug=slug,
+            accepted=True,
+            message=verdict.message,
+            persisted=bool(written.persisted) and not unchanged,
+            checked=verdict.checked,
+            unverified_reason=verdict.unverified_reason,
+            cookie_names=written.cookie_names,
+            authenticated=verdict.authenticated,
+            username=verdict.username,
+            user_id=verdict.user_id,
+            credential_file=written.credential_file,
+            updated_at=written.updated_at,
+            upgraded=written.upgraded,
+            runtime_refreshed=runtime_refreshed,
+            contract=_source_auth_contract(slug),
         )
 
-        zh_cfg = getattr(srcs, "zhihu", None)
-        zh_enabled = bool(getattr(zh_cfg, "enabled", False))
-        zhihu = SourceStatusItem(
-            enabled=zh_enabled,
-            state="unverified",
-            detail=(
-                "浏览器插件登录态源 · 尚未看到知乎任务结果，"
-                "保存后可运行 init 或 discover 验证登录态。"
-            ),
-            logged_in=False,
+    @app.post("/api/sources/{slug}/credential", response_model=SourceCredentialWriteResponse)
+    async def write_source_credential(
+        slug: str, payload: SourceCredentialWriteIn
+    ) -> SourceCredentialWriteResponse:
+        """Store one source's credential, then report what that credential is worth.
+
+        The single write shape all six older endpoints now forward into. Always
+        200 for a known slug: a rejected credential is a normal outcome the UI
+        has to render, and turning it into a 4xx would leave the frontends
+        parsing error bodies to find the message explaining what to fix.
+        """
+        from openbiliclaw.api.source_auth.contract import SourceAuthContract
+        from openbiliclaw.api.source_auth.providers import SOURCE_AUTH_PROVIDERS
+
+        if slug not in SOURCE_AUTH_PROVIDERS:
+            raise HTTPException(status_code=404, detail=f"unknown source: {slug}")
+
+        value: Any = payload.pairs if payload.kind == "token" else payload.value
+        # No ``live=`` argument: this route always runs the strongest check the
+        # platform allows. See ``SourceCredentialWriteIn`` for why the request
+        # cannot ask for less.
+        result = await _write_source_credential(
+            slug,
+            kind=payload.kind,
+            value=value,
+            source=payload.source,
         )
-        if hasattr(ctx.database, "conn"):
-            try:
-                row = ctx.database.conn.execute(
-                    """
-                    SELECT type, status, result_json, created_at, completed_at
-                    FROM zhihu_tasks
-                    WHERE status IN ('pending', 'in_progress', 'completed', 'failed')
-                    ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-            except Exception:
-                row = None
-            if row is not None:
-                task_type = str(row["type"] if hasattr(row, "keys") else row[0])
-                status = str(row["status"] if hasattr(row, "keys") else row[1])
-                result_json = row["result_json"] if hasattr(row, "keys") else row[2]
-                payload: dict[str, Any] = {}
-                with suppress(Exception):
-                    parsed = json.loads(str(result_json or "{}"))
-                    if isinstance(parsed, dict):
-                        payload = parsed
-                items = payload.get("items")
-                item_count = len(items) if isinstance(items, list) else 0
-                error_code = str(payload.get("error", "") or "").strip()
-                debug = payload.get("debug")
-                login_required = error_code == "zhihu_login_required" or (
-                    isinstance(debug, dict) and bool(debug.get("login_required"))
-                )
-                if status == "completed":
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="ready",
-                        detail=f"最近任务完成（{task_type}，{item_count} 条）。",
-                        logged_in=True,
-                    )
-                elif login_required:
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="missing",
-                        detail="最近知乎任务提示需要登录知乎。请在当前浏览器登录知乎后重试。",
-                        logged_in=False,
-                    )
-                elif status == "failed":
-                    suffix = f"：{error_code}" if error_code else ""
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="partial",
-                        detail=f"最近知乎任务失败{suffix}。可在浏览器登录态正常后重试。",
-                        logged_in=False,
-                    )
-                elif status in {"pending", "in_progress"}:
-                    zhihu = SourceStatusItem(
-                        enabled=zh_enabled,
-                        state="unverified",
-                        detail=f"知乎任务正在等待插件执行（{task_type} / {status}）。",
-                        logged_in=False,
-                    )
-
-        rd_cfg = getattr(srcs, "reddit", None)
-        rd_enabled = bool(getattr(rd_cfg, "enabled", False))
-        rd_backend = str(getattr(rd_cfg, "backend", "rdt") or "rdt").strip().lower()
-        if rd_backend in {"extension", "openbiliclaw", "plugin"}:
-            reddit = SourceStatusItem(
-                enabled=rd_enabled,
-                state="unverified",
-                detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
-                logged_in=False,
-            )
-            db_conn = getattr(ctx.database, "conn", None)
-            if db_conn is not None and hasattr(db_conn, "execute"):
-                with suppress(Exception):
-                    row = db_conn.execute(
-                        """
-                        SELECT type, status, result_json
-                        FROM reddit_tasks
-                        ORDER BY COALESCE(completed_at, claimed_at, created_at) DESC,
-                                 created_at DESC
-                        LIMIT 1
-                        """
-                    ).fetchone()
-                    if row is not None:
-                        task_type = str(row["type"] if hasattr(row, "keys") else row[0])
-                        status = str(row["status"] if hasattr(row, "keys") else row[1])
-                        result_json = row["result_json"] if hasattr(row, "keys") else row[2]
-                        error_code = ""
-                        reddit_debug: dict[str, Any] = {}
-                        with suppress(Exception):
-                            parsed = json.loads(str(result_json or "{}"))
-                            if isinstance(parsed, dict):
-                                error_code = str(parsed.get("error", "") or "")
-                                if isinstance(parsed.get("debug"), dict):
-                                    reddit_debug = parsed["debug"]
-                        login_required = error_code == "reddit_login_required" or bool(
-                            reddit_debug.get("login_required")
-                        )
-                        if status == "completed":
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="ready",
-                                detail=f"最近 Reddit 插件任务已完成（{task_type}）。",
-                                logged_in=True,
-                            )
-                        elif login_required:
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="missing",
-                                detail=(
-                                    "最近 Reddit 任务提示需要登录 Reddit。"
-                                    "请在当前浏览器登录后重试。"
-                                ),
-                                logged_in=False,
-                            )
-                        elif status == "failed":
-                            suffix = f"：{error_code}" if error_code else ""
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="partial",
-                                detail=f"最近 Reddit 插件任务失败{suffix}。",
-                                logged_in=False,
-                            )
-                        elif status in {"pending", "in_progress"}:
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="unverified",
-                                detail=f"Reddit 任务正在等待插件执行（{task_type} / {status}）。",
-                                logged_in=False,
-                            )
-        else:
-            try:
-                from openbiliclaw.sources.reddit_tasks import probe_reddit_command_backend
-
-                rd_status = probe_reddit_command_backend(rd_backend)
-                reddit = SourceStatusItem(
-                    enabled=rd_enabled,
-                    state=rd_status.state,
-                    detail=rd_status.message,
-                    logged_in=rd_status.state == "ready",
-                )
-            except Exception:
-                reddit = SourceStatusItem(
-                    enabled=rd_enabled,
-                    state="missing",
-                    detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
-                    logged_in=False,
-                )
-
-        return SourcesStatusResponse(
-            bilibili=bilibili,
-            xiaohongshu=xiaohongshu,
-            douyin=douyin,
-            youtube=youtube,
-            twitter=twitter,
-            zhihu=zhihu,
-            reddit=reddit,
+        return SourceCredentialWriteResponse(
+            slug=result.slug,
+            accepted=result.accepted,
+            error_code=result.error_code,
+            message=result.message,
+            persisted=result.persisted,
+            checked=result.checked,
+            unverified_reason=result.unverified_reason,
+            cookie_names=list(result.cookie_names),
+            auth=result.contract or SourceAuthContract(),
         )
 
     def _mask_source_credential(value: str, *, reveal: bool) -> str:
@@ -7167,7 +10132,17 @@ def create_app(
 
     @app.get("/api/sources/credentials", response_model=SourcesCredentialsResponse)
     def sources_credentials(reveal_keys: bool = False) -> SourcesCredentialsResponse:
-        """Return current local Cookie / token snapshots for source settings pages."""
+        """Return masked local credential snapshots for settings pages.
+
+        ``reveal_keys`` remains a no-op for older desktop/extension builds.
+        Secrets are write-only: a same-origin settings read must not become a
+        bulk credential export.
+        """
+        del reveal_keys
+        from openbiliclaw.api.source_auth.forms import (
+            build_credential_form,
+            credential_summary,
+        )
         from openbiliclaw.bilibili.auth import resolve_runtime_cookie
         from openbiliclaw.config import load_config
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
@@ -7191,42 +10166,110 @@ def create_app(
         xhs_token = _latest_xhs_token()
         reddit_cookie_names = rdt_credential_cookie_names()
 
-        def item(label: str, value: str, detail: str) -> SourceCredentialItem:
+        def item(
+            slug: str, label: str, value: str, detail: str, *, secret: bool = True
+        ) -> SourceCredentialItem:
+            """One credential row, form descriptor included.
+
+            Every platform goes through here — including the three that store
+            nothing — so a source can never ship without a ``form``. That is
+            what lets the frontends drop their per-platform branches: an
+            absent descriptor would just move the special-casing back to them.
+
+            ``secret=False`` is for values that are not credentials: Reddit
+            shows the *names* of the cookies rdt-cli holds, and masking a list
+            of names would hide the only thing that row exists to tell you.
+            """
+            available = bool(value.strip())
+            form = build_credential_form(slug, cfg=cfg)
             return SourceCredentialItem(
                 label=label,
-                value=_mask_source_credential(value, reveal=reveal_keys),
-                available=bool(value.strip()),
+                value=_mask_source_credential(value, reveal=not secret),
+                available=available,
                 detail=detail,
+                form=form,
+                summary=credential_summary(form, label=label, available=available, detail=detail),
+            )
+
+        def _bangumi_credential_detail(sources: Any) -> str:
+            base = (
+                "Bangumi 公开收藏走官方只读 API 无需凭据；如需自动识别当前用户或读取"
+                "私密收藏，可在下方填写个人令牌（后端仅保存该令牌，不保存 Cookie）。"
+            )
+            token_set = bool(
+                str(getattr(getattr(sources, "bangumi", None), "access_token", "") or "").strip()
+            )
+            if not token_set or not hasattr(ctx.database, "conn"):
+                return base
+            from openbiliclaw.runtime.bangumi_producer import _read_token_rejection
+
+            try:
+                rejected = _read_token_rejection(ctx.database) is not None
+            except Exception:
+                rejected = False
+            if rejected:
+                return (
+                    "已配置的个人令牌已被 Bangumi 拒绝（可能过期），当前已降级为匿名公开发现；"
+                    "请到 https://next.bgm.tv/demo/access-token 重新生成后在下方填写替换。"
+                )
+            return base
+
+        def _bangumi_credential_item(sources: Any, config: Any) -> SourceCredentialItem:
+            """Bangumi's credential row: no pasteable value, but a real form.
+
+            The token is write-only through the config / init form, never shown
+            back (privacy: it reads private collections), so ``value`` stays empty
+            and ``available`` only reports whether one is configured. The form
+            descriptor (``form_kind='none'`` + verify / 去获取令牌 actions) is what
+            gives the settings page its 「测试连接」 button and login link without a
+            paste box that would write nowhere.
+            """
+            token_set = bool(
+                str(getattr(getattr(sources, "bangumi", None), "access_token", "") or "").strip()
+            )
+            detail = _bangumi_credential_detail(sources)
+            form = build_credential_form("bangumi", cfg=config)
+            return SourceCredentialItem(
+                label="可选个人令牌",
+                available=token_set,
+                detail=detail,
+                form=form,
+                summary=credential_summary(
+                    form, label="个人令牌", available=token_set, detail=detail
+                ),
             )
 
         return SourcesCredentialsResponse(
-            bilibili=item("Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
+            bilibili=item("bilibili", "Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
             xiaohongshu=item(
+                "xiaohongshu",
                 "xsec_token",
                 xhs_token,
-                "小红书不保存整站 Cookie；这里展示最近同步内容 URL 中的 xsec_token。",
+                "小红书不保存整站 Cookie；xsec_token 只是内容访问令牌，不代表账号登录。",
             ),
-            douyin=item("Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
-            youtube=SourceCredentialItem(
-                label="Cookie",
-                available=False,
-                detail="YouTube 当前按公开源接入，后端不保存 Cookie。",
+            douyin=item("douyin", "Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
+            youtube=item(
+                "youtube",
+                "Cookie",
+                "",
+                "YouTube 当前按公开源接入，后端不保存 Cookie。",
             ),
-            twitter=item("Cookie", tw_cookie, "X 当前 resolved Cookie。"),
-            zhihu=SourceCredentialItem(
-                label="Cookie",
-                available=False,
-                detail="知乎登录态保存在浏览器站点 / 插件上下文中，后端不保存可展示 Cookie。",
+            twitter=item("twitter", "Cookie", tw_cookie, "X 当前 resolved Cookie。"),
+            zhihu=item(
+                "zhihu",
+                "Cookie",
+                "",
+                "知乎登录态保存在浏览器站点 / 插件上下文中，后端不保存可展示 Cookie。",
             ),
-            reddit=SourceCredentialItem(
-                label="rdt credential",
-                value=", ".join(reddit_cookie_names),
-                available=bool(reddit_cookie_names),
-                detail=(
-                    "Reddit Cookie 由插件同步到 rdt-cli credential store；"
-                    "这里只展示 Cookie 名称。"
-                ),
+            reddit=item(
+                "reddit",
+                "rdt credential",
+                ", ".join(reddit_cookie_names),
+                "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
+                "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。",
+                secret=False,
             ),
+            bangumi=_bangumi_credential_item(srcs, cfg),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
@@ -7249,6 +10292,10 @@ def create_app(
     def dy_next_task(response: Any = None) -> Any:
         """Return the oldest pending dy task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("dy")
+        if native_task is not None:
+            return native_task
 
         if _dy_task_queue is None:
             return Response(status_code=204)
@@ -7276,7 +10323,14 @@ def create_app(
         (Douyin has its own posts in ``dy_post`` scope which we treat as
         a weak ``view`` signal — they're meant to count as input).
         """
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "dy"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("dy", payload)
+
         status = payload.get("status", "")
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
         # TEMP DEBUG: surface incoming partial debug field for the dy
@@ -7294,20 +10348,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _dy_task_queue is None:
-            return {"ok": True}
-
-        task = _dy_task_queue.get(task_id)
+        legacy_queue = _dy_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_videos = _dy_task_queue.merge_result(
+            added_videos = legacy_queue.merge_result(
                 task_id,
                 videos=videos if videos else None,
                 scope_counts=scope_counts,
@@ -7339,7 +10388,7 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("dy", propagated_keys)
         else:
-            _dy_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
@@ -7364,7 +10413,7 @@ def create_app(
         source = str(payload.get("source", "?"))[:8]
         event = str(payload.get("event", "?"))[:80]
         data = payload.get("data")
-        logger.warning("[ext-debug] [%s] %s data=%s", source, event, data)
+        logger.debug("[ext-debug] [%s] %s data=%s", source, event, data)
         return {"ok": True}
 
     @app.post("/api/sources/xhs/kick")
@@ -7372,21 +10421,38 @@ def create_app(
         """Broadcast `xhs_task_available` so any subscribed extension
         service-worker triggers an immediate poll. Idempotent and best
         effort — failures here never affect task state."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "xhs_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("xhs")
 
     @app.post("/api/sources/dy/kick")
     async def dy_task_kick() -> dict[str, Any]:
         """Broadcast `dy_task_available` over runtime-stream. See
         xhs_task_kick docstring for rationale."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "dy_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("dy")
+
+    @app.get("/api/sources/x/next-task")
+    def x_next_task(response: Any = None) -> Any:
+        """Return the oldest pending X native-save task, or 204 if none."""
+        from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("x")
+        return native_task if native_task is not None else Response(status_code=204)
+
+    @app.post("/api/sources/x/task-result")
+    async def x_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Accept an X native-save callback from the extension dispatcher."""
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if not _is_extension_native_job(task_id):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        if not _is_extension_native_job(task_id, "x"):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return _submit_extension_native_result("x", payload)
+
+    @app.post("/api/sources/x/kick")
+    async def x_task_kick() -> dict[str, Any]:
+        """Broadcast `x_task_available` over runtime-stream."""
+        return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
     from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
@@ -7413,6 +10479,10 @@ def create_app(
         """Return the oldest pending Reddit task, or 204 if none."""
         from starlette.responses import Response
 
+        native_task = _claim_extension_native_task("reddit")
+        if native_task is not None:
+            return native_task
+
         if _reddit_task_queue is None:
             return Response(status_code=204)
         task = _reddit_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -7432,6 +10502,13 @@ def create_app(
     async def reddit_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a Reddit task result from the extension dispatcher."""
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "reddit"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("reddit", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -7441,16 +10518,13 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _reddit_task_queue is None:
-            return {"ok": True}
+        legacy_queue = _reddit_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        _require_legacy_task(legacy_queue, task_id)
 
         if status in {"partial", "ok", "empty"}:
-            _reddit_task_queue.merge_result(
+            legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -7458,7 +10532,7 @@ def create_app(
                 complete=status in {"ok", "empty"},
             )
         else:
-            _reddit_task_queue.fail(
+            legacy_queue.fail(
                 task_id,
                 error=str(payload.get("error", "") or ""),
                 debug=debug,
@@ -7469,16 +10543,16 @@ def create_app(
     @app.post("/api/sources/reddit/kick")
     async def reddit_task_kick() -> dict[str, Any]:
         """Broadcast `reddit_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "reddit_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("reddit")
 
     @app.get("/api/sources/zhihu/next-task")
     def zhihu_next_task(response: Any = None) -> Any:
         """Return the oldest pending Zhihu task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("zhihu")
+        if native_task is not None:
+            return native_task
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)
@@ -7505,6 +10579,13 @@ def create_app(
         pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "zhihu"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("zhihu", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -7514,15 +10595,10 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _zhihu_task_queue is None:
-            return {"ok": True}
-
-        task = _zhihu_task_queue.get(task_id)
+        legacy_queue = _zhihu_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
         task_payload: dict[str, Any] = {}
         if task and task.get("payload_json"):
@@ -7534,7 +10610,7 @@ def create_app(
 
         if status in {"partial", "ok"} or status == "empty":
             is_final = status in {"ok", "empty"}
-            added_items = _zhihu_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -7567,18 +10643,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("zhihu", propagated_keys)
         else:
-            _zhihu_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
+            legacy_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/zhihu/kick")
     async def zhihu_task_kick() -> dict[str, Any]:
         """Broadcast `zhihu_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "zhihu_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("zhihu")
 
     _yt_task_queue: YtTaskQueue | None = None
     if hasattr(ctx.database, "conn"):
@@ -7588,6 +10660,10 @@ def create_app(
     def yt_next_task(response: Any = None) -> Any:
         """Return the oldest pending YouTube task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("yt")
+        if native_task is not None:
+            return native_task
 
         if _yt_task_queue is None:
             return Response(status_code=204)
@@ -7607,7 +10683,14 @@ def create_app(
     @app.post("/api/sources/yt/task-result")
     async def yt_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a YouTube task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "yt"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("yt", payload)
+
         status = payload.get("status", "")
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -7617,20 +10700,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _yt_task_queue is None:
-            return {"ok": True}
-
-        task = _yt_task_queue.get(task_id)
+        legacy_queue = _yt_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_items = _yt_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -7662,18 +10740,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("yt", propagated_keys)
         else:
-            _yt_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/yt/kick")
     async def yt_task_kick() -> dict[str, Any]:
         """Broadcast `yt_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "yt_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("yt")
 
     @app.post("/api/extension/e2e/run", response_model=ExtensionE2ERunOut)
     async def extension_e2e_run(
@@ -7688,7 +10762,36 @@ def create_app(
         if registry:
             raise HTTPException(status_code=409, detail="e2e_run_in_progress")
 
-        expected_actions = _extension_e2e_actions_for_request(payload)
+        native_save_authorization = payload.native_save_authorization
+        expected_actions = (
+            {}
+            if native_save_authorization is not None
+            else _extension_e2e_actions_for_request(payload)
+        )
+        if native_save_authorization is not None:
+            item_key = make_item_key(
+                native_save_authorization.platform,
+                native_save_authorization.content_id,
+            )
+            try:
+                item, route = _saved_service().validate_native_save_selection(
+                    native_save_authorization.action,
+                    item_key,
+                )
+            except (AttributeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                ) from None
+            if not _native_save_e2e_membership_matches(
+                native_save_authorization,
+                item,
+                route,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                )
         if not payload.allow_state_changing:
             blocked_actions = sorted(
                 {
@@ -7717,6 +10820,7 @@ def create_app(
             after_event_id=after_event_id,
             expected_actions=expected_actions,
             event=asyncio.Event(),
+            native_save_authorization=native_save_authorization,
         )
         registry[run_id] = state
         timed_out = False
@@ -7726,21 +10830,32 @@ def create_app(
             if not callable(publish):
                 state.error = "extension_runtime_unavailable"
             else:
-                delivered = await publish(
-                    {
-                        "type": "extension_e2e_run",
-                        "source": "api",
-                        "run_id": run_id,
-                        "token": token,
-                        "platforms": list(expected_actions.keys()),
-                        "actions": {
-                            platform: list(actions)
-                            for platform, actions in expected_actions.items()
-                        },
-                        "allow_state_changing": payload.allow_state_changing,
-                        "timeout_seconds": payload.timeout_seconds,
-                    }
-                )
+                runtime_event: dict[str, object] = {
+                    "type": "extension_e2e_run",
+                    "source": "api",
+                    "run_id": run_id,
+                    "token": token,
+                    "platforms": list(expected_actions.keys()),
+                    "actions": {
+                        platform: list(actions) for platform, actions in expected_actions.items()
+                    },
+                    "allow_state_changing": payload.allow_state_changing,
+                    "timeout_seconds": payload.timeout_seconds,
+                }
+                if native_save_authorization is not None:
+                    native_save_callback_deadline_ms = (
+                        int(time.time() * 1000) + payload.timeout_seconds * 1000
+                    )
+                    runtime_event["native_save_authorization"] = (
+                        native_save_authorization.model_dump()
+                    )
+                    runtime_event["native_save_execution_deadline_ms"] = (
+                        native_save_callback_deadline_ms - 1000
+                    )
+                    runtime_event["native_save_callback_deadline_ms"] = (
+                        native_save_callback_deadline_ms
+                    )
+                delivered = await publish(runtime_event)
                 if delivered is False:
                     state.error = "extension_runtime_unavailable"
 
@@ -7776,6 +10891,21 @@ def create_app(
         if not secrets.compare_digest(state.token, payload.token):
             raise HTTPException(status_code=403, detail="bad token")
 
+        authorization = getattr(state, "native_save_authorization", None)
+        if authorization is not None:
+            result = payload.native_save_result
+            if result is None:
+                raise HTTPException(status_code=409, detail="native_save_result_required")
+            if (
+                result.platform != authorization.platform
+                or result.action != authorization.action
+                or result.content_id != authorization.content_id
+                or result.expected_target != authorization.expected_target
+            ):
+                raise HTTPException(status_code=409, detail="native_save_result_mismatch")
+        elif payload.native_save_result is not None:
+            raise HTTPException(status_code=409, detail="unexpected_native_save_result")
+
         state.extension_result = payload
         state.event.set()
         return {"ok": True, "run_id": payload.run_id}
@@ -7788,11 +10918,12 @@ def create_app(
         in chrome://extensions.
 
         Best-effort — silent when no event-hub is wired."""
+        delivered = False
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                await publish({"type": "extension_reload", "source": "dev"})
-        return {"ok": True}
+                delivered = bool(await publish({"type": "extension_reload", "source": "dev"}))
+        return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(
         request: Request,
@@ -8046,6 +11177,11 @@ def create_app(
         from openbiliclaw.config import (
             _normalize_pool_source_shares as _normalized_config_pool_source_shares,
         )
+        from openbiliclaw.config import (
+            effective_llm_default_chain,
+            effective_llm_instances,
+            effective_llm_routes,
+        )
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
 
         dy_cookie = ""
@@ -8067,10 +11203,72 @@ def create_app(
                 model=p.model,
                 base_url=p.base_url,
                 auth_mode=getattr(p, "auth_mode", ""),
+                api_flavor=getattr(p, "api_flavor", ""),
                 http_referer=getattr(p, "http_referer", ""),
                 x_title=getattr(p, "x_title", ""),
                 reasoning_effort=getattr(p, "reasoning_effort", ""),
+                num_ctx=int(getattr(p, "num_ctx", 0) or 0),
             )
+
+        instances = effective_llm_instances(cfg.llm)
+        default_chain = effective_llm_default_chain(cfg.llm)
+        routes = effective_llm_routes(cfg.llm)
+
+        def _instance_out(instance: Any) -> LLMInstanceConfigOut:
+            return LLMInstanceConfigOut(
+                **_provider_out(instance).model_dump(),
+                name=str(getattr(instance, "name", "") or ""),
+                provider_type=str(getattr(instance, "provider_type", "") or ""),
+                enabled=bool(getattr(instance, "enabled", True)),
+            )
+
+        def _legacy_provider_projection(provider_type: str) -> Any:
+            ordered_ids = [
+                *default_chain,
+                *[instance_id for instance_id in instances if instance_id not in default_chain],
+            ]
+            for instance_id in ordered_ids:
+                instance = instances.get(instance_id)
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == provider_type
+                ):
+                    return instance
+            return getattr(cfg.llm, provider_type)
+
+        def _legacy_module_out(bucket: str) -> ModuleLLMConfigOut:
+            route = routes[bucket]
+            provider = str(getattr(route, "provider", "") or "")
+            model = str(getattr(route, "model", "") or "")
+            if (
+                bool(getattr(cfg.llm, "instance_routing", False))
+                and not route.inherit
+                and route.chain
+            ):
+                instance = instances.get(str(route.chain[0]).strip().lower())
+                if instance is not None:
+                    provider = str(getattr(instance, "provider_type", "") or "")
+                    model = str(getattr(instance, "model", "") or "")
+            return ModuleLLMConfigOut(
+                provider=provider,
+                model=model,
+                inherit=bool(route.inherit),
+                chain=list(route.chain),
+            )
+
+        first_instance = instances.get(default_chain[0]) if default_chain else None
+        second_instance = instances.get(default_chain[1]) if len(default_chain) > 1 else None
+        legacy_default_provider = (
+            str(getattr(first_instance, "provider_type", "") or "")
+            if first_instance is not None
+            else str(cfg.llm.default_provider)
+        )
+        legacy_fallback_provider = (
+            str(getattr(second_instance, "provider_type", "") or "")
+            if second_instance is not None
+            else str(cfg.llm.fallback_provider)
+        )
 
         issue_list = [
             ConfigIssueOut(
@@ -8087,18 +11285,27 @@ def create_app(
             degraded=degraded,
             degraded_reason=degraded_reason,
             llm=LLMConfigOut(
-                default_provider=cfg.llm.default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
+                routing_version=2,
+                instances={
+                    instance_id: _instance_out(instance)
+                    for instance_id, instance in instances.items()
+                },
+                default_chain=default_chain,
+                routes={
+                    bucket: _legacy_module_out(bucket)
+                    for bucket in ("soul", "discovery", "recommendation", "evaluation")
+                },
+                default_provider=legacy_default_provider,
+                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
                 timeout=int(getattr(cfg.llm, "timeout", 300)),
-                fallback_enabled=cfg.llm.fallback_enabled,
-                fallback_provider=cfg.llm.fallback_provider,
-                openai=_provider_out(cfg.llm.openai),
-                claude=_provider_out(cfg.llm.claude),
-                gemini=_provider_out(cfg.llm.gemini),
-                deepseek=_provider_out(cfg.llm.deepseek),
-                ollama=_provider_out(cfg.llm.ollama),
-                openrouter=_provider_out(cfg.llm.openrouter),
-                openai_compatible=_provider_out(cfg.llm.openai_compatible),
+                fallback_provider=legacy_fallback_provider,
+                openai=_provider_out(_legacy_provider_projection("openai")),
+                claude=_provider_out(_legacy_provider_projection("claude")),
+                gemini=_provider_out(_legacy_provider_projection("gemini")),
+                deepseek=_provider_out(_legacy_provider_projection("deepseek")),
+                ollama=_provider_out(_legacy_provider_projection("ollama")),
+                openrouter=_provider_out(_legacy_provider_projection("openrouter")),
+                openai_compatible=_provider_out(_legacy_provider_projection("openai_compatible")),
                 embedding=EmbeddingConfigOut(
                     provider=cfg.llm.embedding.provider,
                     model=cfg.llm.embedding.model,
@@ -8108,29 +11315,22 @@ def create_app(
                     similarity_threshold=cfg.llm.embedding.similarity_threshold,
                     fallback_enabled=cfg.llm.embedding.fallback_enabled,
                     fallback_provider=cfg.llm.embedding.fallback_provider,
+                    multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
                 ),
-                soul=ModuleLLMConfigOut(
-                    provider=cfg.llm.soul.provider,
-                    model=cfg.llm.soul.model,
-                ),
-                discovery=ModuleLLMConfigOut(
-                    provider=cfg.llm.discovery.provider,
-                    model=cfg.llm.discovery.model,
-                ),
-                recommendation=ModuleLLMConfigOut(
-                    provider=cfg.llm.recommendation.provider,
-                    model=cfg.llm.recommendation.model,
-                ),
-                evaluation=ModuleLLMConfigOut(
-                    provider=cfg.llm.evaluation.provider,
-                    model=cfg.llm.evaluation.model,
-                ),
+                soul=_legacy_module_out("soul"),
+                discovery=_legacy_module_out("discovery"),
+                recommendation=_legacy_module_out("recommendation"),
+                evaluation=_legacy_module_out("evaluation"),
             ),
             bilibili=BilibiliConfigOut(
                 auth_method=cfg.bilibili.auth_method,
                 cookie=_mask(cfg.bilibili.cookie),
                 browser_executable=cfg.bilibili.browser_executable,
                 browser_headed=cfg.bilibili.browser_headed,
+            ),
+            network=NetworkConfigOut(
+                mode=cfg.network.mode,
+                proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
             ),
             sources=SourcesConfigOut(
                 browser=SourcesBrowserConfigOut(
@@ -8197,6 +11397,19 @@ def create_app(
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
                 ),
+                bangumi=BangumiSourceConfigOut(
+                    enabled=cfg.sources.bangumi.enabled,
+                    username=cfg.sources.bangumi.username,
+                    access_token_set=bool(str(cfg.sources.bangumi.access_token or "").strip()),
+                    subject_types=list(cfg.sources.bangumi.subject_types),
+                    source_modes=list(cfg.sources.bangumi.source_modes),
+                    daily_search_budget=cfg.sources.bangumi.daily_search_budget,
+                    daily_ranked_budget=cfg.sources.bangumi.daily_ranked_budget,
+                    daily_latest_budget=cfg.sources.bangumi.daily_latest_budget,
+                    request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
+                    bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -8256,15 +11469,23 @@ def create_app(
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
+                candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
                 multimodal_image_quality=cfg.discovery.multimodal_image_quality,
                 multimodal_image_timeout_seconds=(cfg.discovery.multimodal_image_timeout_seconds),
+                keyword_generation_mode=_derive_keyword_generation_mode(
+                    cfg.discovery.inspiration_search_enabled,
+                    cfg.discovery.inspiration_replace_merged_keywords,
+                ),
             ),
             autostart=AutostartConfigOut(
                 enabled=cfg.autostart.enabled,
                 manage_ollama=cfg.autostart.manage_ollama,
+            ),
+            saved_sync=SavedSyncConfigOut(
+                auto_sync_enabled=cfg.saved_sync.auto_sync_enabled,
             ),
             storage=StorageConfigOut(db_path=cfg.storage.db_path),
             logging=LoggingConfigOut(
@@ -8284,7 +11505,14 @@ def create_app(
 
     @app.get("/api/config", response_model=ConfigResponse)
     def get_config(reveal_keys: bool = False) -> ConfigResponse:
-        """Return the current configuration (API keys masked by default)."""
+        """Return the current configuration with every secret masked.
+
+        Older clients append ``?reveal_keys=true``. Keep accepting that query
+        parameter so they continue to load, but never put raw API keys or
+        credential-bearing proxy userinfo in a browser-readable response.
+        Masked echoes are already treated as "keep existing" by PUT /api/config.
+        """
+        del reveal_keys
         from openbiliclaw.config import (
             _collect_config_issues,
             load_config,
@@ -8297,7 +11525,7 @@ def create_app(
         return _config_to_response(
             cfg,
             issues,
-            mask_keys=not reveal_keys,
+            mask_keys=True,
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
         )
@@ -8318,17 +11546,252 @@ def create_app(
         """Apply the LLM subset of a config update to an in-memory config."""
         if not isinstance(llm_data, dict):
             return
-        from openbiliclaw.config import _normalize_llm_concurrency, _normalize_llm_timeout
+        from openbiliclaw.config import (
+            _LLM_PROVIDER_DISPLAY_NAMES,
+            LLMInstanceConfig,
+            _normalize_llm_concurrency,
+            _normalize_llm_timeout,
+            effective_llm_instances,
+            effective_llm_routes,
+        )
 
-        if "default_provider" in llm_data:
+        native_payload = any(
+            key in llm_data for key in ("instances", "default_chain", "routes", "routing_version")
+        )
+        if native_payload:
+            current_instances = effective_llm_instances(cfg.llm)
+            current_routes = effective_llm_routes(cfg.llm)
+            was_native = bool(getattr(cfg.llm, "instance_routing", False))
+            cfg.llm.instance_routing = True
+            if not was_native:
+                for module_name, route in current_routes.items():
+                    setattr(cfg.llm, module_name, route)
+            if "instances" in llm_data:
+                raw_instances = llm_data["instances"]
+                if not isinstance(raw_instances, dict):
+                    raise HTTPException(status_code=400, detail="llm.instances must be an object")
+                replacement: dict[str, LLMInstanceConfig] = {}
+                for raw_instance_id, raw_instance in raw_instances.items():
+                    if not isinstance(raw_instance, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"llm.instances.{raw_instance_id} must be an object",
+                        )
+                    instance_id = str(raw_instance_id).strip().lower()
+                    if not instance_id:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="llm instance IDs cannot be empty",
+                        )
+                    if instance_id in replacement:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"duplicate normalized LLM instance ID: {instance_id}",
+                        )
+                    existing = current_instances.get(instance_id)
+                    target = (
+                        LLMInstanceConfig(
+                            **{
+                                field_name: getattr(existing, field_name)
+                                for field_name in (
+                                    "api_key",
+                                    "model",
+                                    "base_url",
+                                    "auth_mode",
+                                    "api_flavor",
+                                    "http_referer",
+                                    "x_title",
+                                    "reasoning_effort",
+                                    "num_ctx",
+                                    "name",
+                                    "provider_type",
+                                    "enabled",
+                                )
+                            }
+                        )
+                        if existing is not None
+                        else LLMInstanceConfig(name=instance_id)
+                    )
+                    for field_name in (
+                        "name",
+                        "provider_type",
+                        "api_key",
+                        "model",
+                        "base_url",
+                        "auth_mode",
+                        "api_flavor",
+                        "http_referer",
+                        "x_title",
+                        "reasoning_effort",
+                    ):
+                        if field_name not in raw_instance:
+                            continue
+                        new_value = str(raw_instance[field_name])
+                        if field_name == "api_key" and "*" in new_value:
+                            continue
+                        if field_name in {"provider_type", "auth_mode", "api_flavor"}:
+                            new_value = new_value.strip().lower()
+                        setattr(target, field_name, new_value)
+                    if "enabled" in raw_instance:
+                        target.enabled = _as_bool(raw_instance["enabled"])
+                    if "num_ctx" in raw_instance:
+                        try:
+                            target.num_ctx = int(raw_instance["num_ctx"] or 0)
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"llm.instances.{instance_id}.num_ctx must be an integer",
+                            ) from exc
+                    if (
+                        existing is None
+                        and "reasoning_effort" not in raw_instance
+                        and target.provider_type == "openai_compatible"
+                    ):
+                        # The compatible adapter ignored its inherited
+                        # "medium" default before explicit pass-through was
+                        # supported. New clients send this field; old clients
+                        # must retain the historical omit-on-wire behavior.
+                        target.reasoning_effort = ""
+                    replacement[instance_id] = target
+                cfg.llm.instances = replacement
+            if "default_chain" in llm_data:
+                raw_chain = llm_data["default_chain"]
+                if not isinstance(raw_chain, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="llm.default_chain must be an array",
+                    )
+                cfg.llm.default_chain = [
+                    str(item).strip().lower() for item in raw_chain if str(item).strip()
+                ]
+            if "routes" in llm_data:
+                raw_routes = llm_data["routes"]
+                if not isinstance(raw_routes, dict):
+                    raise HTTPException(status_code=400, detail="llm.routes must be an object")
+                for module_name in ("soul", "discovery", "recommendation", "evaluation"):
+                    if module_name not in raw_routes:
+                        continue
+                    route_data = raw_routes[module_name]
+                    if not isinstance(route_data, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"llm.routes.{module_name} must be an object",
+                        )
+                    route = getattr(cfg.llm, module_name)
+                    if "inherit" in route_data:
+                        route.inherit = _as_bool(route_data["inherit"])
+                    if "chain" in route_data:
+                        raw_route_chain = route_data["chain"]
+                        if not isinstance(raw_route_chain, list):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"llm.routes.{module_name}.chain must be an array",
+                            )
+                        route.chain = [
+                            str(item).strip().lower()
+                            for item in raw_route_chain
+                            if str(item).strip()
+                        ]
+                    route.provider = ""
+                    route.model = ""
+
+        def _native_instance_for_provider(
+            provider_type: str,
+            *,
+            create: bool = False,
+        ) -> tuple[str, Any] | tuple[str, None]:
+            normalized_type = provider_type.strip().lower()
+            ordered_ids = [
+                *getattr(cfg.llm, "default_chain", []),
+                *[
+                    instance_id
+                    for instance_id in getattr(cfg.llm, "instances", {})
+                    if instance_id not in getattr(cfg.llm, "default_chain", [])
+                ],
+            ]
+            for instance_id in ordered_ids:
+                instance = cfg.llm.instances.get(instance_id)
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == normalized_type
+                ):
+                    return instance_id, instance
+            if not create or normalized_type not in {
+                "openai",
+                "claude",
+                "gemini",
+                "deepseek",
+                "ollama",
+                "openrouter",
+                "openai_compatible",
+            }:
+                return "", None
+            instance_id = normalized_type.replace("_", "-")
+            suffix = 2
+            while instance_id in cfg.llm.instances:
+                instance_id = f"{normalized_type.replace('_', '-')}-{suffix}"
+                suffix += 1
+            legacy = getattr(cfg.llm, normalized_type)
+            instance = LLMInstanceConfig(
+                api_key=legacy.api_key,
+                model=legacy.model,
+                base_url=legacy.base_url,
+                auth_mode=legacy.auth_mode,
+                api_flavor=legacy.api_flavor,
+                http_referer=legacy.http_referer,
+                x_title=legacy.x_title,
+                reasoning_effort=legacy.reasoning_effort,
+                num_ctx=legacy.num_ctx,
+                name=_LLM_PROVIDER_DISPLAY_NAMES.get(normalized_type, normalized_type),
+                provider_type=normalized_type,
+                enabled=True,
+            )
+            cfg.llm.instances[instance_id] = instance
+            return instance_id, instance
+
+        if (
+            bool(getattr(cfg.llm, "instance_routing", False))
+            and not native_payload
+            and "default_provider" in llm_data
+        ):
+            requested_type = str(llm_data["default_provider"]).strip().lower()
+            instance_id, _instance = _native_instance_for_provider(requested_type, create=True)
+            if instance_id:
+                cfg.llm.default_chain = [
+                    instance_id,
+                    *[item for item in cfg.llm.default_chain if item != instance_id],
+                ]
+        elif "default_provider" in llm_data and not native_payload:
             cfg.llm.default_provider = str(llm_data["default_provider"])
         if "concurrency" in llm_data:
             cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
         if "timeout" in llm_data:
             cfg.llm.timeout = _normalize_llm_timeout(llm_data["timeout"])
-        if "fallback_enabled" in llm_data:
-            cfg.llm.fallback_enabled = _as_bool(llm_data["fallback_enabled"])
-        if "fallback_provider" in llm_data:
+        # Legacy clients (older extension popups) still send
+        # "fallback_enabled" — deliberately ignored: a non-empty
+        # fallback_provider is the only enable switch.
+        if (
+            bool(getattr(cfg.llm, "instance_routing", False))
+            and not native_payload
+            and "fallback_provider" in llm_data
+        ):
+            requested_type = str(llm_data["fallback_provider"]).strip().lower()
+            primary = cfg.llm.default_chain[:1]
+            remainder = cfg.llm.default_chain[1:]
+            if requested_type:
+                fallback_id, _instance = _native_instance_for_provider(
+                    requested_type,
+                    create=True,
+                )
+                remainder = [
+                    fallback_id,
+                    *[item for item in remainder if item != fallback_id],
+                ]
+            else:
+                remainder = []
+            cfg.llm.default_chain = [*primary, *remainder]
+        elif "fallback_provider" in llm_data and not native_payload:
             cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
         for provider_name in (
             "openai",
@@ -8340,7 +11803,15 @@ def create_app(
             "openai_compatible",
         ):
             if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
-                provider_cfg = getattr(cfg.llm, provider_name)
+                if bool(getattr(cfg.llm, "instance_routing", False)) and not native_payload:
+                    _instance_id, provider_cfg = _native_instance_for_provider(
+                        provider_name,
+                        create=True,
+                    )
+                else:
+                    provider_cfg = getattr(cfg.llm, provider_name)
+                if provider_cfg is None:
+                    continue
                 pdata = llm_data[provider_name]
                 skipped_fields: list[str] = []
                 for field_name in (
@@ -8348,6 +11819,7 @@ def create_app(
                     "model",
                     "base_url",
                     "auth_mode",
+                    "api_flavor",
                     "http_referer",
                     "x_title",
                     "reasoning_effort",
@@ -8357,12 +11829,14 @@ def create_app(
                         if field_name == "api_key" and "*" in new_value:
                             skipped_fields.append(f"{field_name}=masked")
                             continue
-                        existing = getattr(provider_cfg, field_name, "")
+                        existing_value: object = getattr(provider_cfg, field_name, "")
                         if (
-                            field_name not in {"auth_mode", "reasoning_effort"}
+                            # These accept an explicit empty value ("" = back
+                            # to default); the others treat empty as "keep".
+                            field_name not in {"auth_mode", "reasoning_effort", "api_flavor"}
                             and not new_value.strip()
-                            and isinstance(existing, str)
-                            and existing.strip()
+                            and isinstance(existing_value, str)
+                            and existing_value.strip()
                         ):
                             skipped_fields.append(f"{field_name}=empty_skip")
                             continue
@@ -8408,66 +11882,358 @@ def create_app(
                 cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
             if "fallback_provider" in emb:
                 cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
+            if "multimodal_enabled" in emb:
+                cfg.llm.embedding.multimodal_enabled = _as_bool(emb["multimodal_enabled"])
         for module_name in ("soul", "discovery", "recommendation", "evaluation"):
             if module_name in llm_data and isinstance(llm_data[module_name], dict):
                 mod_cfg = getattr(cfg.llm, module_name)
                 mdata = llm_data[module_name]
+                if bool(getattr(cfg.llm, "instance_routing", False)) and not native_payload:
+                    provider_type = str(mdata.get("provider", "") or "").strip().lower()
+                    model = str(mdata.get("model", "") or "").strip()
+                    if not provider_type and not model:
+                        mod_cfg.inherit = True
+                        mod_cfg.chain = []
+                        mod_cfg.provider = ""
+                        mod_cfg.model = ""
+                        continue
+                    if not provider_type:
+                        primary_id = cfg.llm.default_chain[0] if cfg.llm.default_chain else ""
+                        primary = cfg.llm.instances.get(primary_id)
+                        provider_type = (
+                            str(getattr(primary, "provider_type", "") or "").strip().lower()
+                        )
+                    instance_id, instance = _native_instance_for_provider(
+                        provider_type,
+                        create=True,
+                    )
+                    if instance is None:
+                        continue
+                    if model and str(getattr(instance, "model", "") or "").strip() != model:
+                        derived_id = f"legacy-{module_name}"
+                        instance = LLMInstanceConfig(
+                            api_key=instance.api_key,
+                            model=model,
+                            base_url=instance.base_url,
+                            auth_mode=instance.auth_mode,
+                            api_flavor=instance.api_flavor,
+                            http_referer=instance.http_referer,
+                            x_title=instance.x_title,
+                            reasoning_effort=instance.reasoning_effort,
+                            num_ctx=instance.num_ctx,
+                            name=f"{module_name} · {instance.name}",
+                            provider_type=instance.provider_type,
+                            enabled=instance.enabled,
+                        )
+                        cfg.llm.instances[derived_id] = instance
+                        instance_id = derived_id
+                    mod_cfg.inherit = False
+                    mod_cfg.chain = [instance_id]
+                    mod_cfg.provider = ""
+                    mod_cfg.model = ""
+                    continue
                 if "provider" in mdata:
                     mod_cfg.provider = str(mdata["provider"])
                 if "model" in mdata:
                     mod_cfg.model = str(mdata["model"])
 
-    async def _probe_llm_config(cfg: Any) -> ConfigServiceProbeResponse:
+    def _reasoning_effort_advisory(provider: str, model: str) -> list[str]:
+        """Return local UI suggestions without claiming protocol discovery.
+
+        OpenAI-compatible ``GET /models`` standardizes identity metadata only;
+        it has no portable endpoint for enumerating reasoning-effort values.
+        Keep this ladder deliberately advisory and let the instance probe be
+        the authority for a particular endpoint/model combination.
+        """
+
+        normalized_provider = provider.strip().lower()
+        normalized_model = model.strip().lower()
+        if normalized_provider == "openai":
+            if normalized_model and not (
+                normalized_model.startswith("gpt-5")
+                or (
+                    len(normalized_model) > 1
+                    and normalized_model[0] == "o"
+                    and normalized_model[1].isdigit()
+                )
+            ):
+                return []
+            return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if normalized_provider in {"openai_compatible", "openrouter"}:
+            return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if normalized_provider == "deepseek":
+            return ["none", "high", "max"]
+        if normalized_provider == "claude":
+            return ["low", "medium", "high"]
+        if normalized_provider == "gemini":
+            return ["none", "minimal", "low", "medium", "high"]
+        return []
+
+    def _safe_model_discovery_error(exc: Exception, api_key: str) -> str:
+        """Render a compact provider error without reflecting submitted keys."""
+
+        message = " ".join(str(exc).split()) or type(exc).__name__
+        secret = api_key.strip()
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+        return message[:1000] + ("..." if len(message) > 1000 else "")
+
+    async def _discover_llm_models(
+        cfg: Any,
+        *,
+        instance_id: str,
+    ) -> ConfigModelDiscoveryResponse:
+        from openbiliclaw.config import effective_llm_instances
+        from openbiliclaw.llm.openai_provider import OpenAIProvider
+        from openbiliclaw.llm.registry import _build_instance_provider
+
+        started = time.perf_counter()
+        target_instance_id = str(instance_id or "").strip().lower()
+        instances = effective_llm_instances(cfg.llm)
+        instance = instances.get(target_instance_id)
+        if not target_instance_id or instance is None:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                error="LLM instance was not found in the submitted configuration.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        provider = str(getattr(instance, "provider_type", "") or "").strip().lower()
+        model = str(getattr(instance, "model", "") or "").strip()
+        api_key = str(getattr(instance, "api_key", "") or "")
+        efforts = _reasoning_effort_advisory(provider, model)
+        effort_source: Literal["local_advisory", "not_available"] = (
+            "local_advisory" if efforts else "not_available"
+        )
+        if provider not in {
+            "openai",
+            "deepseek",
+            "openrouter",
+            "ollama",
+            "openai_compatible",
+        }:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                provider=provider,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                error=(
+                    f"{provider or 'This provider'} does not expose the OpenAI-compatible "
+                    "GET /models contract; keep or enter the model name manually."
+                ),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        try:
+            if provider == "ollama":
+                base_url = (
+                    str(getattr(instance, "base_url", "") or "").strip()
+                    or "http://127.0.0.1:11434/v1"
+                )
+                if not base_url.rstrip("/").endswith("/v1"):
+                    base_url = base_url.rstrip("/") + "/v1"
+                provider_obj: Any = OpenAIProvider(
+                    api_key=api_key or "ollama",
+                    model=model or "__model_discovery__",
+                    base_url=base_url,
+                    provider_name="ollama",
+                    timeout=20.0,
+                    trust_env=False,
+                )
+            else:
+                provider_obj = _build_instance_provider(cfg, provider, instance)
+            list_models = getattr(provider_obj, "list_models", None)
+            if not callable(list_models):
+                raise RuntimeError(
+                    "The submitted endpoint could not be constructed for model discovery."
+                )
+            models = await asyncio.wait_for(list_models(), timeout=20.0)
+            return ConfigModelDiscoveryResponse(
+                ok=True,
+                instance_id=target_instance_id,
+                provider=provider,
+                models=models,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                message=(
+                    f"GET /models returned {len(models)} model(s); manual entry remains available."
+                    if models
+                    else "GET /models returned no models; manual entry remains available."
+                ),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            return ConfigModelDiscoveryResponse(
+                ok=False,
+                instance_id=target_instance_id,
+                provider=provider,
+                reasoning_efforts=efforts,
+                reasoning_efforts_source=effort_source,
+                error=_safe_model_discovery_error(exc, api_key),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+    async def _probe_llm_config(
+        cfg: Any,
+        *,
+        kind: Literal["llm", "llm_instance", "llm_chain", "llm_fallback"] = "llm",
+        instance_id: str = "",
+    ) -> ConfigServiceProbeResponse:
+        from openbiliclaw.config import effective_llm_default_chain
         from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS
         from openbiliclaw.llm.registry import build_llm_registry
 
         started = time.perf_counter()
-        provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+        is_fallback = kind == "llm_fallback"
+        is_chain = kind == "llm_chain"
+        is_instance = kind == "llm_instance"
+        target_instance = str(instance_id or "").strip().lower()
+        configured_chain = effective_llm_default_chain(cfg.llm)
+        if is_fallback:
+            legacy_routing = not bool(getattr(cfg.llm, "instance_routing", False))
+            legacy_default = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+            legacy_fallback = str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
+            target_instance = (
+                legacy_fallback
+                if legacy_routing
+                else configured_chain[1]
+                if len(configured_chain) > 1
+                else ""
+            )
+            if not target_instance:
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind=kind,
+                    error="Fallback LLM provider is not configured.",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            if target_instance == (
+                legacy_default
+                if legacy_routing
+                else configured_chain[0]
+                if configured_chain
+                else ""
+            ):
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind=kind,
+                    instance_id=target_instance,
+                    provider=target_instance,
+                    error=(
+                        f"Fallback provider {target_instance!r} is the same as the "
+                        "default provider — it would never be used."
+                    ),
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+        elif not is_chain and not is_instance:
+            target_instance = (
+                configured_chain[0]
+                if configured_chain
+                else str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+            )
+        provider = ""
         model = ""
         try:
             registry = build_llm_registry(cfg)
-            provider = provider or str(getattr(registry, "default_provider", "") or "")
-            provider_cfg = getattr(cfg.llm, provider, None)
-            model = str(getattr(provider_cfg, "model", "") or "").strip()
-            if not registry.is_chat_capable(provider):
+            if not is_chain and not is_instance and not is_fallback and not target_instance:
+                target_instance = str(getattr(registry, "default_provider", "") or "")
+            if is_instance and not target_instance:
                 return ConfigServiceProbeResponse(
                     ok=False,
-                    kind="llm",
-                    provider=provider,
-                    model=model,
-                    error=f"LLM provider {provider!r} is not registered or not chat-capable.",
+                    kind=kind,
+                    error="LLM instance_id is required.",
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
+            if not is_chain:
+                if not registry.is_chat_capable(target_instance):
+                    return ConfigServiceProbeResponse(
+                        ok=False,
+                        kind=kind,
+                        instance_id=target_instance,
+                        provider=target_instance,
+                        model=model,
+                        error=(
+                            f"LLM instance {target_instance!r} is not registered "
+                            "or not chat-capable."
+                        ),
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                    )
+                provider_type_fn = getattr(registry, "provider_type", None)
+                provider = (
+                    str(provider_type_fn(target_instance) or "")
+                    if callable(provider_type_fn)
+                    else target_instance
+                )
+                provider_obj: Any = None
+                get_provider = getattr(registry, "get", None)
+                if callable(get_provider):
+                    with suppress(Exception):
+                        provider_obj = get_provider(target_instance)
+                provider_cfg = getattr(cfg.llm, provider, None)
+                model = str(
+                    getattr(provider_obj, "_model", "") or getattr(provider_cfg, "model", "") or ""
+                ).strip()
             timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
-            response = await asyncio.wait_for(
-                registry.complete_provider(
-                    provider,
-                    [
+
+            async def _complete_probe() -> Any:
+                async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
+                    messages = [
                         {"role": "system", "content": "Reply with only OK."},
                         {"role": "user", "content": "OpenBiliClaw connectivity probe."},
-                    ],
-                    temperature=0,
-                    max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
-                    reasoning_effort="",
-                    model=model or None,
-                ),
+                    ]
+                    if is_chain:
+                        return await registry.complete(
+                            messages,
+                            temperature=0,
+                            max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                            reasoning_effort="",
+                        )
+                    return await registry.complete_provider(
+                        target_instance,
+                        messages,
+                        temperature=0,
+                        max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                        reasoning_effort="",
+                        model=model or None,
+                    )
+
+            response = await asyncio.wait_for(
+                _complete_probe(),
                 timeout=timeout_s,
             )
             ok = bool(str(getattr(response, "content", "") or "").strip())
+            target_instance = str(getattr(response, "instance_id", "") or target_instance).strip()
+            provider_type = getattr(registry, "provider_type", None)
+            provider = str(
+                getattr(response, "provider", "")
+                or (provider_type(target_instance) if callable(provider_type) else "")
+                or provider
+            )
             response_model = str(getattr(response, "model", "") or model)
+            label = (
+                "LLM chain"
+                if is_chain
+                else "Fallback LLM instance"
+                if is_fallback
+                else "LLM instance"
+            )
             return ConfigServiceProbeResponse(
                 ok=ok,
-                kind="llm",
+                kind=kind,
+                instance_id=target_instance,
                 provider=provider,
                 model=response_model,
-                message="LLM provider is available." if ok else "",
-                error="" if ok else "LLM provider returned an empty response.",
+                message=f"{label} is available." if ok else "",
+                error="" if ok else f"{label} returned an empty response.",
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
         except Exception as exc:
             return ConfigServiceProbeResponse(
                 ok=False,
-                kind="llm",
+                kind=kind,
+                instance_id=target_instance,
                 provider=provider,
                 model=model,
                 error=str(exc),
@@ -8527,9 +12293,118 @@ def create_app(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+    async def _probe_network_proxy(mode: str, proxy: str) -> ConfigServiceProbeResponse:
+        """Probe the submitted overseas routing policy without saving config.
+
+        Fetches a tiny always-204 endpoint using the same explicit direct,
+        system-inherited, or custom-proxy policy used by runtime clients.
+        """
+        import httpx
+
+        from openbiliclaw.network import httpx_kwargs_for
+
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=5.0, **httpx_kwargs_for(mode, proxy)) as client:
+                resp = await client.get("https://www.gstatic.com/generate_204")
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            if resp.status_code in (200, 204):
+                return ConfigServiceProbeResponse(
+                    ok=True,
+                    kind="network_proxy",
+                    message="海外网络连通正常。",
+                    latency_ms=latency_ms,
+                )
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="unexpected_status",
+                message=f"探测返回 HTTP {resp.status_code}。",
+                latency_ms=latency_ms,
+            )
+        except httpx.ProxyError:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_rejected",
+                message="代理拒绝了连接，请检查代理认证 / 协议是否正确。",
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_unreachable",
+                message="无法建立连接，请检查网络、系统代理或自定义代理是否可用。",
+            )
+        except (httpx.TimeoutException, TimeoutError):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="timeout",
+                message="海外网络访问超时（5 秒），请检查当前路由模式。",
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a safe, classified failure
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="failed",
+                message=f"海外网络探测失败:{type(exc).__name__}。",
+            )
+
     @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
     async def probe_config_service(payload: ConfigServiceProbeIn) -> ConfigServiceProbeResponse:
-        """Probe submitted LLM / embedding settings without saving config.toml."""
+        """Probe submitted LLM / embedding / proxy settings without saving config.toml."""
+        from copy import deepcopy
+
+        from openbiliclaw.config import (
+            load_config,
+            normalize_outbound_proxy,
+            normalize_outbound_proxy_mode,
+        )
+
+        update = payload.config if isinstance(payload.config, dict) else {}
+        if payload.kind == "network_proxy":
+            network_data = update.get("network")
+            proxy_raw = ""
+            mode_raw = ""
+            if isinstance(network_data, dict):
+                proxy_raw = str(network_data.get("proxy", ""))
+                mode_raw = str(network_data.get("mode", ""))
+            try:
+                proxy = normalize_outbound_proxy(proxy_raw)
+                # A payload without ``mode`` is the "never configured" case, so it
+                # resolves the same way ``_build_network_config`` resolves an absent
+                # key: legacy proxy-only clients stay ``custom``, everything else
+                # takes the ``system`` default. Probing ``direct`` here would report
+                # on a policy the runtime would not actually use.
+                mode = (
+                    normalize_outbound_proxy_mode(mode_raw)
+                    if mode_raw.strip()
+                    else ("custom" if proxy else "system")
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if mode == "custom" and not proxy:
+                raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
+            return await _probe_network_proxy(mode, proxy)
+
+        cfg = deepcopy(load_config())
+        llm_data = update.get("llm")
+        if isinstance(llm_data, dict):
+            _apply_llm_update(cfg, llm_data)
+        if payload.kind == "embedding":
+            return await _probe_embedding_config(cfg)
+        return await _probe_llm_config(
+            cfg,
+            kind=payload.kind,
+            instance_id=payload.instance_id,
+        )
+
+    @app.post("/api/config/discover-models", response_model=ConfigModelDiscoveryResponse)
+    async def discover_config_models(
+        payload: ConfigModelDiscoveryIn,
+    ) -> ConfigModelDiscoveryResponse:
+        """List models for one submitted instance without saving config.toml."""
         from copy import deepcopy
 
         from openbiliclaw.config import load_config
@@ -8539,9 +12414,7 @@ def create_app(
         llm_data = update.get("llm")
         if isinstance(llm_data, dict):
             _apply_llm_update(cfg, llm_data)
-        if payload.kind == "llm":
-            return await _probe_llm_config(cfg)
-        return await _probe_embedding_config(cfg)
+        return await _discover_llm_models(cfg, instance_id=payload.instance_id)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
     async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:
@@ -8553,6 +12426,7 @@ def create_app(
         """
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
+            _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
             _DEFAULT_EXPLORE_REFRESH_HOURS,
@@ -8572,7 +12446,10 @@ def create_app(
             _normalize_pool_source_shares,
             _normalize_probability,
             _normalize_scheduler_int,
+            _validate_auto_update_check_interval,
             load_config,
+            normalize_outbound_proxy,
+            normalize_outbound_proxy_mode,
             save_config,
         )
 
@@ -8608,6 +12485,59 @@ def create_app(
         def _is_masked_echo(value: str) -> bool:
             return "****" in value
 
+        async def _gate_credential(slug: str, value: str) -> Any:
+            """Run the shared write-time gate, or 400 carrying its verdict.
+
+            This delegation *is* the fix for spec D4. This route writes four
+            platforms' credentials — more platforms than any other endpoint in
+            the codebase — yet validated none of them, while
+            ``POST /api/bilibili/cookie`` refused the very same dead cookie
+            after a live probe. Which page a user happened to paste into
+            decided whether their credential was checked. It no longer does:
+            both surfaces call :func:`validate_credential` with the same
+            arguments, so they cannot reach different conclusions.
+
+            Empty and masked-echo values never arrive here. Those are this
+            route's *partial-update* semantics — "this field was not edited" —
+            resolved by the callers before validation is reached, which is why
+            they are not a strength difference between the two paths.
+
+            Returns the verdict rather than discarding it. Equal validation
+            strength was only half of invariant I5; the probe this just paid
+            for is the same evidence the status endpoint and the verify button
+            read, and throwing it away here is why one cookie showed
+            ``verified`` when saved from the extension and ``unverified`` when
+            saved from the settings page.
+            """
+            from openbiliclaw.api.source_auth.write import validate_credential
+
+            verdict = await validate_credential(slug, "cookie", value, cfg=cfg)
+            if verdict.ok:
+                return verdict
+            raise HTTPException(
+                status_code=400,
+                detail={"error": verdict.error_code, "message": verdict.message},
+            )
+
+        # Credential writes, deferred to the save path.
+        #
+        # ``config.toml`` is written once, at the end, under a lock and behind a
+        # snapshot. The other three credential stores —
+        # ``data/douyin_cookie.json``, ``data/x_cookie.json`` and rdt-cli's own
+        # credential file — used to be written *where their fields are parsed*,
+        # hundreds of lines before validation finishes. A single PUT carrying a
+        # valid 抖音 cookie and an invalid ``[network]`` block therefore returned
+        # 400 "配置校验失败，未写入" having already overwritten the cookie, and
+        # those stores have neither snapshot nor rollback to undo it with.
+        #
+        # Deferring also puts them under ``_CONFIG_SAVE_LOCK``, so two
+        # concurrent PUTs can no longer interleave into a state where the config
+        # came from one request and the credentials from another. The
+        # persistence stays in this handler by design (spec: it is mid
+        # transaction on config.toml and must not have a shared writer flush its
+        # pending edits); what changes is *when* it runs, not where it lives.
+        pending_credential_writes: list[tuple[str, Callable[[], None]]] = []
+
         # Apply bilibili updates
         if "bilibili" in update:
             bdata = update["bilibili"]
@@ -8622,6 +12552,28 @@ def create_app(
                 if not _is_masked_echo(new_cookie) and (
                     new_cookie.strip() or not cfg.bilibili.cookie.strip()
                 ):
+                    if new_cookie.strip():
+                        from openbiliclaw.api.source_auth.write import current_credential
+
+                        bili_verdict = await _gate_credential("bilibili", new_cookie.strip())
+                        # Read before the assignment below, or "did this change"
+                        # compares the new value against itself.
+                        bili_changed = new_cookie.strip() != current_credential("bilibili", cfg=cfg)
+
+                        def _note_bilibili(
+                            cookie: str = new_cookie.strip(),
+                            verdict: Any = bili_verdict,
+                            changed: bool = bili_changed,
+                        ) -> None:
+                            # B站's store on this route *is* config.toml, so
+                            # ``save_config`` has already persisted it by the
+                            # time this runs; only the verdict and the debounce
+                            # are still outstanding.
+                            _credential_landed(
+                                "bilibili", verdict=verdict, value=cookie, changed=changed
+                            )
+
+                        pending_credential_writes.append(("bilibili", _note_bilibili))
                     cfg.bilibili.cookie = new_cookie
             if "browser_executable" in bdata:
                 cfg.bilibili.browser_executable = str(bdata["browser_executable"])
@@ -8685,11 +12637,23 @@ def create_app(
                                     cookie_env=cfg.sources.douyin.cookie_env,
                                 )
                             # Unchanged form echo → no write (env override
-                            # must not be copied into the file needlessly).
+                            # must not be copied into the file needlessly), and
+                            # no probe either: re-asking 抖音 about a cookie it
+                            # already answered for is free risk.
                             if new_cookie != current:
-                                DouyinCookieManager(cfg.data_path).set_cookie(
-                                    new_cookie, source="config-update"
-                                )
+                                dy_verdict = await _gate_credential("douyin", new_cookie)
+
+                                def _store_douyin(
+                                    cookie: str = new_cookie, verdict: Any = dy_verdict
+                                ) -> None:
+                                    DouyinCookieManager(cfg.data_path).set_cookie(
+                                        cookie, source="config-update"
+                                    )
+                                    _credential_landed(
+                                        "douyin", verdict=verdict, value=cookie, changed=True
+                                    )
+
+                                pending_credential_writes.append(("douyin", _store_douyin))
                     for key in (
                         "daily_search_budget",
                         "daily_hot_budget",
@@ -8735,27 +12699,33 @@ def create_app(
                                     cookie_env=cfg.sources.twitter.cookie_env,
                                 )
                             if new_cookie != current:
-                                XCookieManager(cfg.data_path).set_cookie(
-                                    new_cookie, source="config-update"
-                                )
-                                # A pasted valid cookie is a re-login signal,
-                                # same as the extension sync endpoint: lift any
-                                # missing/expired/blocked health block so
-                                # discovery retries instead of staying parked.
-                                from openbiliclaw.sources.douyin_direct import (
-                                    parse_cookie_header,
-                                )
+                                x_verdict = await _gate_credential("twitter", new_cookie)
 
-                                pairs = parse_cookie_header(new_cookie)
-                                if all(
-                                    name in pairs for name in _X_REQUIRED_COOKIE_NAMES
-                                ) and hasattr(ctx.database, "conn"):
-                                    with suppress(Exception):
-                                        from openbiliclaw.storage.x_health import (
-                                            XSourceHealthStore,
-                                        )
+                                def _store_twitter(
+                                    cookie: str = new_cookie, verdict: Any = x_verdict
+                                ) -> None:
+                                    XCookieManager(cfg.data_path).set_cookie(
+                                        cookie, source="config-update"
+                                    )
+                                    # A pasted valid cookie is a re-login signal,
+                                    # same as the extension sync endpoint: lift
+                                    # any missing/expired/blocked health block so
+                                    # discovery retries instead of staying parked.
+                                    # The gate above already established that
+                                    # both required names are present — a jar
+                                    # without them no longer reaches this point.
+                                    if hasattr(ctx.database, "conn"):
+                                        with suppress(Exception):
+                                            from openbiliclaw.storage.x_health import (
+                                                XSourceHealthStore,
+                                            )
 
-                                        XSourceHealthStore(ctx.database).clear_relogin_block()
+                                            XSourceHealthStore(ctx.database).clear_relogin_block()
+                                    _credential_landed(
+                                        "twitter", verdict=verdict, value=cookie, changed=True
+                                    )
+
+                                pending_credential_writes.append(("twitter", _store_twitter))
                     for key in (
                         "daily_search_budget",
                         "daily_feed_budget",
@@ -8808,6 +12778,48 @@ def create_app(
                         cfg.sources.reddit.backend = (
                             backend if backend in {"extension", "opencli", "rdt", "auto"} else "rdt"
                         )
+                    if "cookie" in reddit_data:
+                        # Manual paste — routed to rdt-cli's credential store,
+                        # same shape the extension auto-sync endpoint
+                        # (POST /api/sources/reddit/cookie) writes; secrets
+                        # never land in config.toml.
+                        from openbiliclaw.sources.reddit_tasks import (
+                            sync_rdt_credential_from_cookie_header,
+                        )
+
+                        new_cookie = str(reddit_data["cookie"]).strip()
+                        if new_cookie and not _is_masked_echo(new_cookie):
+                            # Reddit was already the one platform here that
+                            # rejected visibly instead of pretending the paste
+                            # took effect. The gate now decides that for all
+                            # four, so the check happens *before* the write
+                            # rather than being inferred from its result.
+                            rd_verdict = await _gate_credential("reddit", new_cookie)
+
+                            def _store_reddit(
+                                cookie: str = new_cookie, verdict: Any = rd_verdict
+                            ) -> None:
+                                sync_result = sync_rdt_credential_from_cookie_header(
+                                    cookie, source="config-update"
+                                )
+                                if not sync_result.has_cookie:
+                                    # Unreachable through the gate, which has
+                                    # already established a non-empty
+                                    # ``reddit_session``. Kept because the two
+                                    # sides parse the Cookie header with
+                                    # different parsers: if they ever disagree,
+                                    # the write must fail loudly with the real
+                                    # reason rather than report a save that did
+                                    # not happen (pitfall #7).
+                                    raise RuntimeError(
+                                        sync_result.message
+                                        or "reddit credential store refused the cookie"
+                                    )
+                                _credential_landed(
+                                    "reddit", verdict=verdict, value=cookie, changed=True
+                                )
+
+                            pending_credential_writes.append(("reddit", _store_reddit))
                     if "source_modes" in reddit_data:
                         raw_modes = reddit_data["source_modes"]
                         if isinstance(raw_modes, str):
@@ -8833,6 +12845,143 @@ def create_app(
                     ):
                         if key in reddit_data:
                             setattr(cfg.sources.reddit, key, int(reddit_data[key]))
+
+                bangumi_data = sources_data.get("bangumi")
+                if isinstance(bangumi_data, dict):
+                    from openbiliclaw.sources.bangumi_client import (
+                        validate_bangumi_access_token,
+                        validate_bangumi_username,
+                    )
+
+                    if "enabled" in bangumi_data:
+                        cfg.sources.bangumi.enabled = _as_bool(bangumi_data["enabled"])
+                    if "username" in bangumi_data:
+                        try:
+                            cfg.sources.bangumi.username = validate_bangumi_username(
+                                bangumi_data["username"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    # A masked echo (the GET response never returns the real token)
+                    # means "unchanged" — skip it so a settings round-trip cannot
+                    # clobber a stored token with dots.
+                    if "access_token" in bangumi_data and not _is_masked_echo(
+                        str(bangumi_data["access_token"] or "").strip()
+                    ):
+                        try:
+                            new_bangumi_token = validate_bangumi_access_token(
+                                bangumi_data["access_token"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if new_bangumi_token:
+                            # A new personal token identifies the account via
+                            # /v0/me. Mirror the guided-init path: validate it
+                            # live BEFORE persisting so a bad/expired token is
+                            # rejected with its real cause (project rule 7), and
+                            # record the /v0/me username as the source of truth.
+                            from openbiliclaw.sources.bangumi_client import (
+                                BangumiAPIError,
+                                resolve_access_token_identity,
+                            )
+
+                            try:
+                                resolved_username = await resolve_access_token_identity(
+                                    new_bangumi_token
+                                )
+                            except BangumiAPIError as exc:
+                                if exc.code == "unauthorized":
+                                    return JSONResponse(
+                                        {
+                                            "error": "invalid_bangumi_access_token",
+                                            "message": (
+                                                "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。"
+                                                "请到 https://next.bgm.tv/demo/access-token "
+                                                "重新生成后重试。"
+                                            ),
+                                        },
+                                        status_code=400,
+                                    )
+                                return JSONResponse(
+                                    {
+                                        "error": "bangumi_token_check_failed",
+                                        "message": (
+                                            "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。"
+                                        ),
+                                    },
+                                    status_code=502,
+                                )
+                            cfg.sources.bangumi.access_token = new_bangumi_token
+                            cfg.sources.bangumi.username = resolved_username
+                        else:
+                            # Explicit clear ("" submitted): drop the stored token
+                            # with no network call.
+                            cfg.sources.bangumi.access_token = ""
+                        # Whether re-armed with a validated token or cleared, any
+                        # stale rejection marker no longer applies.
+                        if hasattr(ctx.database, "conn"):
+                            from openbiliclaw.runtime.bangumi_producer import (
+                                _clear_token_rejection,
+                            )
+
+                            with suppress(Exception):
+                                _clear_token_rejection(ctx.database)
+                    if "subject_types" in bangumi_data:
+                        raw_types = bangumi_data["subject_types"]
+                        if not isinstance(raw_types, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 必须是数组"
+                            )
+                        selected_types = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_types)
+                        )
+                        if not selected_types or any(
+                            value not in {"book", "anime", "music", "game", "real"}
+                            for value in selected_types
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.subject_types = selected_types
+                    if "source_modes" in bangumi_data:
+                        raw_modes = bangumi_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in {"search", "ranked", "latest"} for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_ranked_budget",
+                        "daily_latest_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                        "bootstrap_limit",
+                    ):
+                        if key not in bangumi_data:
+                            continue
+                        try:
+                            value = int(bangumi_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 必须是整数"
+                            ) from exc
+                        minimum = 1 if key == "bootstrap_limit" else 0
+                        maximum = 1000 if key == "bootstrap_limit" else None
+                        if value < minimum or (maximum is not None and value > maximum):
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 超出允许范围"
+                            )
+                        setattr(cfg.sources.bangumi, key, value)
 
         # Apply scheduler updates
         if "scheduler" in update:
@@ -8914,6 +13063,12 @@ def create_app(
                             key,
                             _normalize_extension_disconnect_grace(sdata[key]),
                         )
+                    elif key == "auto_update_check_interval_hours":
+                        try:
+                            interval = _validate_auto_update_check_interval(sdata[key])
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        setattr(cfg.scheduler, key, interval)
                     elif key in scheduler_int_limits:
                         default, min_value, max_value = scheduler_int_limits[key]
                         setattr(
@@ -8942,6 +13097,11 @@ def create_app(
             ddata = update["discovery"]
             if isinstance(ddata, dict):
                 discovery_int_limits = {
+                    "candidate_eval_concurrency": (
+                        _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+                        1,
+                        3,
+                    ),
                     "multimodal_batch_size": (
                         _DEFAULT_MULTIMODAL_BATCH_SIZE,
                         1,
@@ -8984,6 +13144,33 @@ def create_app(
                                 max_value=max_value,
                             ),
                         )
+                # Keyword-generation mode: a UI/API-derived enum translated to the
+                # two canonical DiscoveryConfig booleans. discovery is a raw dict
+                # (Pydantic does NOT validate the nested Literal), so validate the
+                # value manually → 422 on anything illegal. This block runs LAST
+                # in the discovery section so that if a request also carries the
+                # raw inspiration_* booleans, the mode wins (deterministic UI
+                # semantics). ``keyword_generation_mode`` itself is never set on
+                # cfg.discovery / written to config.toml — only the two booleans.
+                if "keyword_generation_mode" in ddata:
+                    raw_mode = ddata["keyword_generation_mode"]
+                    if raw_mode not in ("legacy", "hybrid", "inspiration"):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                "discovery.keyword_generation_mode must be one of: "
+                                "legacy, hybrid, inspiration"
+                            ),
+                        )
+                    enabled, replace = _mode_to_flags(cast("str", raw_mode))
+                    cfg.discovery.inspiration_search_enabled = enabled
+                    cfg.discovery.inspiration_replace_merged_keywords = replace
+
+        # Apply saved-sync updates
+        if "saved_sync" in update:
+            saved_sync_data = update["saved_sync"]
+            if "auto_sync_enabled" in saved_sync_data:
+                cfg.saved_sync.auto_sync_enabled = saved_sync_data["auto_sync_enabled"]
 
         # Apply storage updates
         if "storage" in update:
@@ -9006,6 +13193,33 @@ def create_app(
             ):
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
+
+        # Apply the overseas routing policy. Proxy-only payloads from older UI
+        # versions carry no opinion about ``mode``, so they resolve exactly as an
+        # absent ``[network].mode`` key does in ``_build_network_config``: a
+        # non-empty proxy is still custom, and clearing the proxy falls back to
+        # the ``system`` default rather than pinning the user to direct.
+        if "network" in update:
+            ndata = update["network"]
+            if isinstance(ndata, dict):
+                mode_supplied = "mode" in ndata
+                if mode_supplied:
+                    try:
+                        cfg.network.mode = normalize_outbound_proxy_mode(str(ndata["mode"]))
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                if "proxy" in ndata:
+                    raw_proxy = str(ndata["proxy"])
+                    # A masked GET echo must never overwrite stored credentials.
+                    if not _is_masked_proxy_echo(raw_proxy):
+                        try:
+                            cfg.network.proxy = normalize_outbound_proxy(raw_proxy)
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if not mode_supplied:
+                            cfg.network.mode = "custom" if cfg.network.proxy else "system"
+                if cfg.network.mode == "custom" and not cfg.network.proxy:
+                    raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
@@ -9060,6 +13274,41 @@ def create_app(
             saved_path = save_config(cfg)
             logger.info("Configuration saved to %s", saved_path)
 
+            # Only now do the external credential stores get touched. Every
+            # validation has passed, the 400 and 409 exits are behind us, and
+            # config.toml is committed — so "the response said saved" and "the
+            # credential is on disk" can no longer disagree. Ordered after
+            # ``save_config`` deliberately: a failure to write the config aborts
+            # before any credential moves, which is the direction that leaves
+            # the least behind.
+            #
+            # No transaction spans four independent stores, so an I/O failure
+            # part-way through genuinely leaves some applied. That cannot be
+            # prevented here; what it must not do is surface as an opaque 500.
+            # The raised error names the platform that failed and the ones that
+            # already landed, because "which of my credentials actually saved?"
+            # is the only question worth answering at that point (pitfall #7).
+            landed: list[str] = []
+            for slug, apply_credential in pending_credential_writes:
+                try:
+                    apply_credential()
+                except Exception as exc:
+                    logger.exception("credential write failed after config save: slug=%s", slug)
+                    already = ", ".join(landed) if landed else "none"
+                    raise RuntimeError(
+                        f"config.toml saved, but storing the {slug} credential failed: {exc}. "
+                        f"Credentials already written this request: {already}. "
+                        f"Re-save to retry; the write is idempotent."
+                    ) from exc
+                landed.append(slug)
+
+            # Refresh the process-level outbound-proxy mirror BEFORE any runtime
+            # rebuild so the rebuilt LLM registry constructs its clients with the
+            # new proxy. CN-direct clients never read this value.
+            from openbiliclaw.network import set_outbound_proxy
+
+            set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
+
             if bool(getattr(ctx, "degraded", False)):
                 return ConfigUpdateResponse(
                     ok=True,
@@ -9071,8 +13320,8 @@ def create_app(
                         degraded_reason=str(getattr(ctx, "degraded_reason", "")),
                     ),
                     message=(
-                        f"配置已保存到 {saved_path}。当前后端处于降级模式，"
-                        "请 restart daemon 后让新配置生效。"
+                        f"配置已保存到 {saved_path}。AI 服务配置修复后，"
+                        "请重启后端（restart daemon）让新配置生效。"
                     ),
                     reloaded=False,
                     rollback_applied=False,
@@ -9231,6 +13480,7 @@ def create_app(
     from fastapi.staticfiles import StaticFiles as _StaticFiles
 
     _web_dir = _Path(__file__).resolve().parent.parent / "web"
+    _shared_web_dir = _web_dir / "shared"
     if _web_dir.is_dir():
         _favicon_path = _web_dir / "icon-192.png"
 
@@ -9242,6 +13492,14 @@ def create_app(
 
         app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
 
+    # ── Shared frontend modules ──────────────────────────────────
+    # Its own mount rather than a subdirectory of an existing one: `/web` is
+    # rooted at `web/desktop`, so a file in `web/shared/` is only reachable
+    # through the *mobile* mount (`/m/shared/…`). Serving cross-surface code
+    # from a surface-specific URL is how it ends up copied instead of shared.
+    if _shared_web_dir.is_dir():
+        app.mount("/shared", _StaticFiles(directory=_shared_web_dir), name="shared-web")
+
     # ── Desktop Web UI ───────────────────────────────────────────
     _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
     if _desktop_dir.is_dir():
@@ -9251,8 +13509,16 @@ def create_app(
             import hashlib
 
             digest = hashlib.sha256()
-            for relative in ("assets/css/app.css", "assets/js/app.js"):
-                path = _desktop_dir / relative
+            # Paths are relative to the desktop root except the shared modules,
+            # which live outside it — an upgrade that only changed
+            # source-status.js would otherwise be served from cache forever.
+            for relative, root in (
+                ("assets/css/app.css", _desktop_dir),
+                ("assets/css/classic.css", _desktop_dir),
+                ("assets/js/app.js", _desktop_dir),
+                ("source-status.js", _shared_web_dir),
+            ):
+                path = root / relative
                 if not path.is_file():
                     continue
                 stat = path.stat()
@@ -9271,8 +13537,16 @@ def create_app(
                 f'href="/web/assets/css/app.css?v={version}"',
             )
             html = html.replace(
+                'href="/web/assets/css/classic.css"',
+                f'href="/web/assets/css/classic.css?v={version}"',
+            )
+            html = html.replace(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/shared/source-status.js"',
+                f'src="/shared/source-status.js?v={version}"',
             )
             return Response(
                 html,
@@ -9292,6 +13566,15 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         def _root_redirect() -> RedirectResponse:
+            # Mirror packaging/entry.py's _decide_landing_path for browsers
+            # that reach the port without the packaged launcher (git/docker
+            # installs, manual visits): a degraded backend or one whose init
+            # never completed lands on the setup wizard, not the SPA. Unknown
+            # readiness keeps the /web fallback — the SPA's onboarding gate
+            # is the safety net, not a wall.
+            needs_setup = bool(getattr(ctx, "degraded", False)) or _health_profile_ready() is False
+            if needs_setup and (_web_dir / "setup").is_dir():
+                return RedirectResponse(url="/setup/", status_code=302)
             return RedirectResponse(url="/web", status_code=302)
 
     # ── First-run Setup Wizard ──────────────────────────────────

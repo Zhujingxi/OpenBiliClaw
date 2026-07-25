@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 import httpx
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.douyin_signature import XBogusSigner
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ def normalize_aweme_item(
     if not isinstance(raw_statistics, dict):
         raw_statistics = item.get("stats")
     statistics: dict[str, Any] = raw_statistics if isinstance(raw_statistics, dict) else {}
+    published = normalize_published_time(item.get("create_time"))
 
     return DiscoveredContent(
         bvid=f"dy:{aweme_id}",
@@ -99,6 +101,8 @@ def normalize_aweme_item(
         content_url=f"https://www.douyin.com/video/{aweme_id}",
         source_platform="douyin",
         author_name=author,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
 
 
@@ -125,7 +129,11 @@ class DouyinDirectClient:
             raise DouyinDirectAuthError("Douyin direct discovery requires a cookie.")
 
         self._owns_http_client = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=30.0)
+        # douyin.com is a CN domain: never inherit env/system proxies — proxy
+        # exit IPs trip Douyin risk control the same way they broke the B站
+        # login probe (see bilibili/api.py). Injected clients are the
+        # caller's responsibility.
+        self._http = http_client or httpx.AsyncClient(timeout=30.0, trust_env=False)
         self._signer = signer or XBogusSigner(user_agent)
         self._user_agent = self._signer.user_agent
 
@@ -262,6 +270,15 @@ class DouyinDirectClient:
             return []
         items = [item for item in raw_items if isinstance(item, dict)]
         return _dedupe_awemes(items)[:limit]
+
+    async def request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Public seam for a signed GET against an arbitrary Douyin web path.
+
+        Discovery surfaces should use the dedicated methods above. This exists
+        for callers that need a non-discovery endpoint — currently only
+        ``douyin_login_probe``, which reads ``/aweme/v1/web/user/profile/self/``.
+        """
+        return await self._request_json(path, params)
 
     async def _request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         query = {**self._default_query(), **params}
