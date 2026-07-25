@@ -3080,3 +3080,92 @@ class TestNetworkProxyConfig:
         config_path = tmp_path / "config.toml"
         config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
         assert load_config(config_path).network.mode == "system"
+
+
+class TestUnknownConfigKeysAreTolerated:
+    """A config.toml written by a newer build must not brick an older one.
+
+    Real incident: a worktree config carried ``[scheduler].source_incremental_hours``
+    (a field that only exists on another branch). ``SchedulerConfig(**sched_raw)``
+    splatted it straight into the dataclass, so ``load_config()`` died with a bare
+    ``TypeError: unexpected keyword argument`` and every code path that loads config
+    went down with it — including 74 unrelated tests. Downgrading after an upgrade
+    wrote new fields is the same failure in production.
+    """
+
+    def test_unknown_scheduler_key_is_ignored_instead_of_crashing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[scheduler]
+source_incremental_hours = 24
+discovery_limit = 17
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING"):
+            config = load_config(config_path)
+
+        # Known siblings keep working — the unknown key is dropped, not the section.
+        assert config.scheduler.discovery_limit == 17
+        assert not hasattr(config.scheduler, "source_incremental_hours")
+        assert "source_incremental_hours" in caplog.text
+        assert "scheduler" in caplog.text
+
+    def test_unknown_keys_are_tolerated_across_provider_and_plain_sections(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Coverage must not be scheduler-only — every ``**raw`` splat is a hazard."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[llm]
+default_provider = "ollama"
+
+[llm.ollama]
+model = "llama3"
+future_provider_field = "v9"
+
+[storage]
+unknown_storage_key = 7
+
+[logging]
+unknown_logging_key = "loud"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING"):
+            config = load_config(config_path)
+
+        assert config.llm.ollama.model == "llama3"
+        for section, key in (
+            ("llm.ollama", "future_provider_field"),
+            ("storage", "unknown_storage_key"),
+            ("logging", "unknown_logging_key"),
+        ):
+            assert key in caplog.text, f"{key} should be reported"
+            assert section in caplog.text, f"{section} should be named in the warning"
+
+    def test_known_scheduler_values_survive_alongside_unknown_keys(self, tmp_path: Path) -> None:
+        """The filter must not silently reset neighbours to their defaults."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[scheduler]
+enabled = false
+source_incremental_hours = 24
+refresh_check_interval_seconds = 75
+trending_refresh_hours = 5
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        assert config.scheduler.enabled is False
+        assert config.scheduler.refresh_check_interval_seconds == 75
+        assert config.scheduler.trending_refresh_hours == 5

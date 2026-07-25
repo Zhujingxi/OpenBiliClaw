@@ -16,6 +16,8 @@ from openbiliclaw.docker_runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 
 def _closed_local_port() -> int:
     """Bind then release an ephemeral port so nothing listens on it."""
@@ -322,3 +324,44 @@ def test_is_running_in_container_ignores_blank_env(monkeypatch) -> None:
     )
     assert is_running_in_container({"OPENBILICLAW_IN_CONTAINER": "   "}) is False
     assert is_running_in_container({}) is False
+
+
+def test_docker_runtime_root_survives_a_version_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unknown config keys must not brick the container on a downgrade.
+
+    A newer image writes a field this build's dataclass has never heard of; the
+    user rolls back. ``load_config()`` used to splat the raw section straight
+    into the dataclass and die with a bare TypeError, taking every code path
+    that loads config down with it — in Docker that is a container that never
+    becomes healthy, with an unreadable traceback. Verified in the Docker shape
+    specifically (own runtime root + config template + ollama seeding) because
+    the fix is install/update-adjacent.
+    """
+    from openbiliclaw.config import load_config
+
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text(
+        '[general]\nlanguage = "zh"\n\n[scheduler]\nenabled = true\n', encoding="utf-8"
+    )
+
+    bootstrap_runtime_root(runtime_root=runtime_root, template_path=template)
+    config_path = runtime_root / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "[scheduler]", "[scheduler]\nsource_incremental_hours = 24", 1
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(runtime_root))
+    with caplog.at_level("WARNING"):
+        config = load_config()
+
+    assert config.scheduler.enabled is True, "known siblings keep working"
+    assert "source_incremental_hours" in caplog.text
+    assert "scheduler" in caplog.text

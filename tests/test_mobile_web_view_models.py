@@ -1513,3 +1513,49 @@ class TestMobileWebViewModels:
             assert.match(localPending.detail, /手动同步/);
         """)
         )
+
+
+class TestMobileWebDialogueConfirmationIsReadOnly:
+    """Four-surface contract: mobile web shows insights but never settles them.
+
+    Confirming a hypothesis is a durable settlement that must flow through the
+    one dialogue settlement queue, so the only active entries are the extension
+    popup and desktop web. Mobile web previously had its own 准/不准 buttons
+    wired straight to the deprecated `POST /api/insights/feedback`, bypassing
+    the anchor/queue path entirely. Nothing guarded the removal, so a future
+    edit could silently reintroduce a second settlement entry point.
+    """
+
+    def _profile_js(self) -> str:
+        return (ROOT / "src/openbiliclaw/web/js/views/profile.js").read_text(encoding="utf-8")
+
+    def test_mobile_insights_have_no_settlement_buttons(self) -> None:
+        profile_js = self._profile_js()
+        after_marker = profile_js.split("// Active insights", 1)[1]
+        insight_block = after_marker.split("// Recent awareness", 1)[0]
+        assert 'data-action="confirm"' not in insight_block
+        assert 'data-action="reject"' not in insight_block
+        assert "insight-actions" not in insight_block
+
+    def test_mobile_web_does_not_call_the_legacy_feedback_endpoint(self) -> None:
+        profile_js = self._profile_js()
+        assert "submitInsightFeedback" not in profile_js, (
+            "mobile web must not reach the deprecated settlement endpoint"
+        )
+        assert "bindInsightActions" not in profile_js
+
+    def test_mobile_insights_point_users_at_the_real_entry(self) -> None:
+        """Read-only is only honest if the user is told where to act."""
+        profile_js = self._profile_js()
+        assert "insight-readonly" in profile_js
+        assert "请在插件或桌面端的对话入口确认" in profile_js
+
+    def test_mobile_web_ships_no_card_action_helper(self) -> None:
+        """The shared card helper belongs to popup/desktop only."""
+        mobile_dir = ROOT / "src/openbiliclaw/web/js"
+        offenders = [
+            path.relative_to(ROOT)
+            for path in mobile_dir.rglob("*.js")
+            if "executeCardAction" in path.read_text(encoding="utf-8")
+        ]
+        assert not offenders, f"mobile web must not wire card actions: {offenders}"

@@ -1005,6 +1005,32 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _filter_dataclass_kwargs(
+    cls: type[Any],
+    raw: dict[str, Any],
+    *,
+    section: str,
+) -> dict[str, Any]:
+    """Drop unknown keys before ``cls(**kwargs)`` so a newer-branch field
+    (or a typo) cannot crash ``load_config`` with a bare TypeError.
+
+    Logs one WARNING per ignored key, naming the TOML section and key so
+    the user can clean up after a version rollback. Known fields keep their
+    raw values; callers still apply type coercion after this filter.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    known = {item.name for item in fields(cls)}
+    unknown = sorted(key for key in raw if key not in known)
+    for key in unknown:
+        logger.warning(
+            "config: [%s].%s ignored (unknown key for this version)",
+            section,
+            key,
+        )
+    return {key: value for key, value in raw.items() if key in known}
+
+
 def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
     """Warn once per process for per-source budgets that look like misused toggles.
 
@@ -1148,36 +1174,73 @@ def _build_config(raw: dict[str, Any]) -> Config:
     store_raw = raw.get("storage", {})
     logging_raw = raw.get("logging", {})
 
-    embedding_raw = llm_raw.get("embedding", {})
+    embedding_raw = (
+        llm_raw.get("embedding", {}) if isinstance(llm_raw.get("embedding"), dict) else {}
+    )
     llm = LLMConfig(
         default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
         fallback_provider=llm_raw.get("fallback_provider", ""),
-        openai=LLMProviderConfig(**llm_raw.get("openai", {})),
-        claude=LLMProviderConfig(**llm_raw.get("claude", {})),
-        gemini=LLMProviderConfig(**llm_raw.get("gemini", {})),
-        deepseek=LLMProviderConfig(**llm_raw.get("deepseek", {})),
-        ollama=LLMProviderConfig(**llm_raw.get("ollama", {})),
-        openrouter=LLMProviderConfig(**llm_raw.get("openrouter", {})),
-        openai_compatible=LLMProviderConfig(**llm_raw.get("openai_compatible", {})),
+        openai=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("openai", {}) if isinstance(llm_raw.get("openai"), dict) else {},
+                section="llm.openai",
+            )
+        ),
+        claude=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("claude", {}) if isinstance(llm_raw.get("claude"), dict) else {},
+                section="llm.claude",
+            )
+        ),
+        gemini=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("gemini", {}) if isinstance(llm_raw.get("gemini"), dict) else {},
+                section="llm.gemini",
+            )
+        ),
+        deepseek=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("deepseek", {}) if isinstance(llm_raw.get("deepseek"), dict) else {},
+                section="llm.deepseek",
+            )
+        ),
+        ollama=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("ollama", {}) if isinstance(llm_raw.get("ollama"), dict) else {},
+                section="llm.ollama",
+            )
+        ),
+        openrouter=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("openrouter", {})
+                if isinstance(llm_raw.get("openrouter"), dict)
+                else {},
+                section="llm.openrouter",
+            )
+        ),
+        openai_compatible=LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                llm_raw.get("openai_compatible", {})
+                if isinstance(llm_raw.get("openai_compatible"), dict)
+                else {},
+                section="llm.openai_compatible",
+            )
+        ),
         embedding=EmbeddingConfig(
-            **{
-                k: v
-                for k, v in embedding_raw.items()
-                if k
-                in (
-                    "provider",
-                    "model",
-                    "api_key",
-                    "base_url",
-                    "output_dimensionality",
-                    "similarity_threshold",
-                    "fallback_enabled",
-                    "fallback_provider",
-                    "multimodal_enabled",
-                )
-            }
+            **_filter_dataclass_kwargs(
+                EmbeddingConfig,
+                embedding_raw,
+                section="llm.embedding",
+            )
         ),
         soul=ModuleLLMConfig(
             **{k: v for k, v in llm_raw.get("soul", {}).items() if k in ("provider", "model")}
@@ -1356,131 +1419,135 @@ def _build_config(raw: dict[str, Any]) -> Config:
         network=_build_network_config(raw),
         sources=sources,
         scheduler=SchedulerConfig(
-            **{
-                **sched_raw,
-                # Environment overrides arrive as strings. Leaving these raw
-                # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
-                # CLI while still being the string ``""``; the typed config
-                # API then rejected that same value. Normalize every scheduler
-                # boolean at the boundary so all consumers see a real bool.
-                "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
-                "pause_on_extension_disconnect": _coerce_bool(
-                    sched_raw.get("pause_on_extension_disconnect"),
-                    default=False,
-                ),
-                "profile_consolidation_enabled": _coerce_bool(
-                    sched_raw.get("profile_consolidation_enabled"),
-                    default=True,
-                ),
-                "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
-                    sched_raw.get("extension_disconnect_grace_seconds")
-                ),
-                "pool_source_shares": _normalize_pool_source_shares(
-                    sched_raw.get("pool_source_shares")
-                ),
-                "refresh_check_interval_seconds": _normalize_scheduler_int(
-                    sched_raw.get("refresh_check_interval_seconds"),
-                    default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
-                    min_value=15,
-                ),
-                "signal_event_threshold": _normalize_scheduler_int(
-                    sched_raw.get("signal_event_threshold"),
-                    default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
-                    min_value=1,
-                ),
-                "trending_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("trending_refresh_hours"),
-                    default=_DEFAULT_TRENDING_REFRESH_HOURS,
-                    min_value=1,
-                ),
-                "explore_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("explore_refresh_hours"),
-                    default=_DEFAULT_EXPLORE_REFRESH_HOURS,
-                    min_value=1,
-                ),
-                "discovery_limit": _normalize_scheduler_int(
-                    sched_raw.get("discovery_limit"),
-                    default=_DEFAULT_DISCOVERY_LIMIT,
-                    min_value=1,
-                    max_value=60,
-                ),
-                "delight_queue_limit": _normalize_scheduler_int(
-                    sched_raw.get("delight_queue_limit"),
-                    default=_DEFAULT_DELIGHT_QUEUE_LIMIT,
-                    min_value=1,
-                    max_value=100,
-                ),
-                "proactive_push_interval_seconds": _normalize_scheduler_int(
-                    sched_raw.get("proactive_push_interval_seconds"),
-                    default=_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
-                    min_value=30,
-                ),
-                "speculator_idle_interval_minutes": _normalize_scheduler_int(
-                    sched_raw.get("speculator_idle_interval_minutes"),
-                    default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
-                    min_value=5,
-                ),
-                "profile_consolidation_interval_hours": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_interval_hours"),
-                    default=12,
-                    min_value=1,
-                ),
-                "profile_consolidation_like_target_upper": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_like_target_upper"),
-                    default=512,
-                    min_value=1,
-                ),
-                "profile_consolidation_like_target_soft": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_like_target_soft"),
-                    default=450,
-                    min_value=1,
-                ),
-                "profile_consolidation_archive_enabled": _coerce_bool(
-                    sched_raw.get("profile_consolidation_archive_enabled"),
-                    default=True,
-                ),
-                "auto_update_enabled": _coerce_bool(
-                    sched_raw.get("auto_update_enabled"),
-                    default=False,
-                ),
-                "auto_update_allow_prerelease": _coerce_bool(
-                    sched_raw.get("auto_update_allow_prerelease"),
-                    default=False,
-                ),
-                "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_interval_minutes"),
-                    default=10,
-                    min_value=1,
-                ),
-                "avoidance_speculation_ttl_days": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_ttl_days"),
-                    default=3,
-                    min_value=1,
-                ),
-                "avoidance_speculation_cooldown_days": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_cooldown_days"),
-                    default=7,
-                    min_value=1,
-                ),
-                "avoidance_speculation_confirmation_threshold": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_confirmation_threshold"),
-                    default=3,
-                    min_value=1,
-                ),
-                "avoidance_speculation_max_active": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_max_active"),
-                    default=5,
-                    min_value=1,
-                ),
-                "auto_update_check_interval_hours": _normalize_scheduler_int(
-                    sched_raw.get("auto_update_check_interval_hours"),
-                    default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
-                    min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
-                ),
-                "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
-                    sched_raw.get("auto_update_allowed_remotes")
-                ),
-            }
+            **_filter_dataclass_kwargs(
+                SchedulerConfig,
+                {
+                    **sched_raw,
+                    # Environment overrides arrive as strings. Leaving these raw
+                    # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
+                    # CLI while still being the string ``""``; the typed config
+                    # API then rejected that same value. Normalize every scheduler
+                    # boolean at the boundary so all consumers see a real bool.
+                    "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
+                    "pause_on_extension_disconnect": _coerce_bool(
+                        sched_raw.get("pause_on_extension_disconnect"),
+                        default=False,
+                    ),
+                    "profile_consolidation_enabled": _coerce_bool(
+                        sched_raw.get("profile_consolidation_enabled"),
+                        default=True,
+                    ),
+                    "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
+                        sched_raw.get("extension_disconnect_grace_seconds")
+                    ),
+                    "pool_source_shares": _normalize_pool_source_shares(
+                        sched_raw.get("pool_source_shares")
+                    ),
+                    "refresh_check_interval_seconds": _normalize_scheduler_int(
+                        sched_raw.get("refresh_check_interval_seconds"),
+                        default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
+                        min_value=15,
+                    ),
+                    "signal_event_threshold": _normalize_scheduler_int(
+                        sched_raw.get("signal_event_threshold"),
+                        default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
+                        min_value=1,
+                    ),
+                    "trending_refresh_hours": _normalize_scheduler_int(
+                        sched_raw.get("trending_refresh_hours"),
+                        default=_DEFAULT_TRENDING_REFRESH_HOURS,
+                        min_value=1,
+                    ),
+                    "explore_refresh_hours": _normalize_scheduler_int(
+                        sched_raw.get("explore_refresh_hours"),
+                        default=_DEFAULT_EXPLORE_REFRESH_HOURS,
+                        min_value=1,
+                    ),
+                    "discovery_limit": _normalize_scheduler_int(
+                        sched_raw.get("discovery_limit"),
+                        default=_DEFAULT_DISCOVERY_LIMIT,
+                        min_value=1,
+                        max_value=60,
+                    ),
+                    "delight_queue_limit": _normalize_scheduler_int(
+                        sched_raw.get("delight_queue_limit"),
+                        default=_DEFAULT_DELIGHT_QUEUE_LIMIT,
+                        min_value=1,
+                        max_value=100,
+                    ),
+                    "proactive_push_interval_seconds": _normalize_scheduler_int(
+                        sched_raw.get("proactive_push_interval_seconds"),
+                        default=_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
+                        min_value=30,
+                    ),
+                    "speculator_idle_interval_minutes": _normalize_scheduler_int(
+                        sched_raw.get("speculator_idle_interval_minutes"),
+                        default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
+                        min_value=5,
+                    ),
+                    "profile_consolidation_interval_hours": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_interval_hours"),
+                        default=12,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_like_target_upper": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_like_target_upper"),
+                        default=512,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_like_target_soft": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_like_target_soft"),
+                        default=450,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_archive_enabled": _coerce_bool(
+                        sched_raw.get("profile_consolidation_archive_enabled"),
+                        default=True,
+                    ),
+                    "auto_update_enabled": _coerce_bool(
+                        sched_raw.get("auto_update_enabled"),
+                        default=False,
+                    ),
+                    "auto_update_allow_prerelease": _coerce_bool(
+                        sched_raw.get("auto_update_allow_prerelease"),
+                        default=False,
+                    ),
+                    "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_interval_minutes"),
+                        default=10,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_ttl_days": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_ttl_days"),
+                        default=3,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_cooldown_days": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_cooldown_days"),
+                        default=7,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_confirmation_threshold": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_confirmation_threshold"),
+                        default=3,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_max_active": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_max_active"),
+                        default=5,
+                        min_value=1,
+                    ),
+                    "auto_update_check_interval_hours": _normalize_scheduler_int(
+                        sched_raw.get("auto_update_check_interval_hours"),
+                        default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                        min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                    ),
+                    "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
+                        sched_raw.get("auto_update_allowed_remotes")
+                    ),
+                },
+                section="scheduler",
+            )
         ),
         discovery=_build_discovery(discovery_raw),
         autostart=AutostartConfig(
@@ -1490,8 +1557,20 @@ def _build_config(raw: dict[str, Any]) -> Config:
         saved_sync=SavedSyncConfig(
             auto_sync_enabled=_coerce_bool(saved_sync_raw.get("auto_sync_enabled"), default=False),
         ),
-        storage=StorageConfig(**store_raw),
-        logging=LoggingConfig(**logging_raw),
+        storage=StorageConfig(
+            **_filter_dataclass_kwargs(
+                StorageConfig,
+                store_raw if isinstance(store_raw, dict) else {},
+                section="storage",
+            )
+        ),
+        logging=LoggingConfig(
+            **_filter_dataclass_kwargs(
+                LoggingConfig,
+                logging_raw if isinstance(logging_raw, dict) else {},
+                section="logging",
+            )
+        ),
         soul=soul,
     )
 
