@@ -2,6 +2,7 @@
 
 from .base import (
     HealthCheckResult,
+    LLMAuthError,
     LLMFallbackError,
     LLMProvider,
     LLMProviderError,
@@ -36,6 +37,7 @@ __all__ = [
     "DeepSeekProvider",
     "GeminiProvider",
     "HealthCheckResult",
+    "LLMAuthError",
     "LLMFallbackError",
     "LLMProvider",
     "LLMProviderError",

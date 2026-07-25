@@ -24,7 +24,8 @@
 | 2.2 Provider Registry | ✅ | 多端点实例注册 + 全局 / 模块有序链 + 实例级 cooldown + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
-| v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
+| v0.3.185+ 401 终态化与归属可见 | ✅ | `llm.base.LLMAuthError` 携带 `provider_name` / `endpoint`；OpenAI 系（openai / deepseek / ollama / openrouter / openai_compatible）、Claude、Gemini 的 `_map_error()` 在 401 时统一抛出它并记 WARNING（含 base_url + 上游 body 摘要），三家 `_is_retryable()` 一致视其为终态、**零重试**（此前 401 被当作可重试的通用 `LLMProviderError`，每分片白跑 3 次，在 provider 后台留下大量被拒请求）。`describe_llm_failure()` 的鉴权文案改为指名「{provider}（{host}）拒绝了当前 API key」并提示临时 token 过期这一成因；host 经 `urlsplit().hostname` 提取，base_url 内联凭据不外泄。裸子串 `"401"` 判定收紧为 `_LLM_AUTH_STATUS_RE` 限定形式（`HTTP 401` / `Error code: 401` / `"code":401` / `status_code=401`，排除 4010/4011），避免 request id 或 402 余额不足回包里的 `401` 让 auth 桶盖掉 rate-limited 桶 |
+| v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / unauthenticated / invalid API key / api key not valid 与限定形式 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
 | v0.3.160+ Discovery 统一评估契约 | ✅ | 单条与 batch 内容评估 prompt 仅允许 `explore` 保留主题距离例外；`search` / `trending` / `hot` / `feed` / `related_chain` / `channel` / `creator` 及所有平台不得获得基础分、自动加分、较低门槛或事后画像关联，明显不匹配内容允许低于 admission 门槛 |
 | 4.5 核心记忆加载 | ✅ | 统一 core memory 注入入口，覆盖 Soul 全链路 |
@@ -356,6 +357,7 @@ stats = cache.stats()
 ```
 LLMProviderError          # 基类
 ├── LLMRateLimitError     # 429 / rate limit
+├── LLMAuthError          # 401 凭据被拒（终态，不重试）；带 provider_name / endpoint
 ├── LLMTimeoutError       # 请求超时
 └── LLMResponseError      # 响应无效（空内容）
 
@@ -369,7 +371,8 @@ LLMServiceError           # Service 层基类
 
 `openbiliclaw.llm.base.describe_llm_failure(exc)` 返回面向用户的中文错因，未识别时返回 `None`。特异性顺序为 moderation → auth → quota/rate-limit → timeout / provider / empty response，避免 401 或配额耗尽被降级成泛化不可用。
 
-- `describe_llm_failure(exc) -> str | None`：识别 moderation、鉴权、额度/限流、超时、provider 全部不可用、provider/service 空响应。
+- `describe_llm_failure(exc) -> str | None`：识别 moderation、鉴权、额度/限流、超时、provider 全部不可用、provider/service 空响应。链上存在 `LLMAuthError` 时，鉴权文案会指名被拒的 provider 与 endpoint 主机名（凭据经 `urlsplit().hostname` 剥离）。
+- 401 判定不接受裸 `"401"` 子串：auth 桶优先级高于 rate-limit 桶，若 request id（`req-1401ab`）或 402 余额回包里的数字也算，配额问题会被误报成 API key 填错。
 - `safe_llm_failure_message(exc) -> str`：公共边界使用；未知异常退化为固定安全提示，不回传上游异常文本。
 
 ### `json_utils.validated_text_field`

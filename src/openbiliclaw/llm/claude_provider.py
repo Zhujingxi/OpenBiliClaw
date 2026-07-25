@@ -11,6 +11,7 @@ from anthropic import AsyncAnthropic
 
 from .base import (
     DEFAULT_REASONING_EFFORT,
+    LLMAuthError,
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
@@ -240,11 +241,20 @@ class ClaudeProvider(LLMProvider):
         message = str(exc).lower()
         if "rate limit" in message or "too many requests" in message:
             return LLMRateLimitError("claude rate limit exceeded")
+        if getattr(exc, "status_code", None) == 401:
+            logger.warning("claude rejected our credentials with HTTP 401: %s", exc)
+            return LLMAuthError(
+                f"claude authentication failed: HTTP 401: {exc}",
+                provider_name="claude",
+                endpoint=self.base_url,
+            )
 
         return LLMProviderError(f"claude request failed: {exc}")
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         """Whether a mapped exception should be retried."""
-        if isinstance(exc, LLMRateLimitError):
+        # See OpenAIProvider._is_retryable: a 401 is terminal until the user
+        # fixes their key, so retrying only delays the actionable error.
+        if isinstance(exc, (LLMRateLimitError, LLMAuthError)):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import errno
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,33 @@ class LLMProviderError(Exception):
 
 class LLMRateLimitError(LLMProviderError):
     """Raised when a provider rate-limits a request."""
+
+
+class LLMAuthError(LLMProviderError):
+    """Raised when a provider rejects our credentials (HTTP 401).
+
+    Carries the configured endpoint identity so user-facing copy can name
+    *which* key to fix. A user running SenseNova as ``openai_compatible``
+    alongside a stale ``openai`` key otherwise gets a bare "check your API
+    key" and no way to tell the two apart.
+
+    Retrying is futile until the user edits config, so provider retry loops
+    treat this as terminal — retrying a 401 three times per shard only
+    multiplies the failed requests visible in the provider's console (which
+    then reads as "my token has usage records, why 401?") and stretches the
+    perceived hang.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_name: str = "",
+        endpoint: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.provider_name = provider_name
+        self.endpoint = endpoint
 
 
 class LLMTimeoutError(LLMProviderError):
@@ -85,7 +114,59 @@ _LLM_MODERATION_MARKERS = (
     "10013",
 )
 
-_LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+_LLM_AUTH_MARKERS = (
+    "authentication",
+    "unauthorized",
+    "unauthenticated",
+    "invalid api key",
+    "api key not valid",
+)
+# The bare status number is deliberately NOT a marker: these run against
+# free-form upstream error bodies, where a request id (``req-1401ab``) or a
+# 402 billing payload that happens to contain "401" would be misread as a bad
+# API key — and auth outranks ``rate_limited`` in both classifiers below, so a
+# quota problem would surface as "your key is wrong". Require the number to be
+# qualified as a status: ``HTTP 401``, ``Error code: 401``, ``"code":401``,
+# ``status_code=401``. ``(?!\d)`` keeps 4010 / 4011 out.
+_LLM_AUTH_STATUS_RE = re.compile(r"(?:http|status|status_code|code|error code)\W{0,3}401(?!\d)")
+
+
+def _is_auth_failure(exc: BaseException, message: str) -> bool:
+    """Whether one link of an exception chain is a credential rejection."""
+    if isinstance(exc, LLMAuthError):
+        return True
+    if any(marker in message for marker in _LLM_AUTH_MARKERS):
+        return True
+    return bool(_LLM_AUTH_STATUS_RE.search(message))
+
+
+def _endpoint_host(endpoint: str) -> str:
+    """Return the bare host of *endpoint*, or "" when it has none.
+
+    Goes through ``urlsplit().hostname`` so a base_url carrying inline
+    credentials (``https://user:secret@host/v1``) never reaches user-facing
+    copy.
+    """
+    raw = (endpoint or "").strip()
+    if not raw:
+        return ""
+    host = urlsplit(raw if "//" in raw else f"//{raw}").hostname or ""
+    return host
+
+
+def _auth_failure_target(auth_error: LLMAuthError | None) -> str:
+    """Name the provider whose key was rejected, for user-facing copy."""
+    provider = (auth_error.provider_name if auth_error else "").strip()
+    host = _endpoint_host(auth_error.endpoint if auth_error else "")
+    if provider and host:
+        return f"{provider}（{host}）"
+    if provider:
+        return provider
+    if host:
+        return host
+    return "所配置的 AI 服务"
+
+
 # The provider host was reachable and answered, but the configured *model* is
 # missing: a local Ollama model that was never pulled returns HTTP 404 with
 # ``{"type": "not_found_error", "message": "model 'x' not found, try pulling it
@@ -187,7 +268,7 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
             "model" in message and "not found" in message
         ):
             model_not_found = True
-        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+        if _is_auth_failure(current, message):
             auth_failed = True
         if isinstance(current, (LLMTimeoutError, TimeoutError)) or any(
             marker in message for marker in _LLM_TIMEOUT_MARKERS
@@ -258,6 +339,7 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     moderation = auth_failed = rate_limited = False
     timed_out = no_provider = empty_response = False
     ssl_failed = connect_failed = model_not_found = False
+    auth_error: LLMAuthError | None = None
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
@@ -267,8 +349,14 @@ def describe_llm_failure(exc: BaseException) -> str | None:
             "model" in message and "not found" in message
         ):
             model_not_found = True
-        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+        if _is_auth_failure(current, message):
             auth_failed = True
+            # First typed error along the chain. Wrappers (fallback / service)
+            # are never LLMAuthError, so this is the adapter that actually got
+            # the 401 — and when a fallback chain had several, it is the last
+            # instance tried, which is the one the user just watched fail.
+            if auth_error is None and isinstance(current, LLMAuthError):
+                auth_error = current
         if isinstance(current, LLMRateLimitError) or any(
             marker in message for marker in _LLM_QUOTA_MARKERS
         ):
@@ -312,9 +400,11 @@ def describe_llm_failure(exc: BaseException) -> str | None:
             "请到设置页核对对话模型名称后重试。"
         )
     if auth_failed:
+        target = _auth_failure_target(auth_error)
         return (
-            "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
-            "请到设置页检查 LLM provider 的 API key 后重试。"
+            f"AI 服务鉴权失败（HTTP 401）：{target}拒绝了当前 API key。"
+            "key 可能填错、已失效，或是有有效期的临时 token（过期后需重新生成）。"
+            "请到设置页检查该 provider 的 API key 后重试。"
         )
     if rate_limited:
         return (

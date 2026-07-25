@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 
 from .base import (
     DEFAULT_REASONING_EFFORT,
+    LLMAuthError,
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
@@ -459,6 +460,19 @@ class OpenAIProvider(LLMProvider):
                 f"{self._provider_name} provider backoff: HTTP {status_code_int or status_code}: "
                 f"{detail}"
             )
+        if status_code_int == 401:
+            detail = body_excerpt or str(exc)
+            logger.warning(
+                "%s rejected our credentials with HTTP 401 (base_url=%s): %s",
+                self._provider_name,
+                self.base_url or "<default>",
+                detail,
+            )
+            return LLMAuthError(
+                f"{self._provider_name} authentication failed: HTTP 401: {detail}",
+                provider_name=self._provider_name,
+                endpoint=self.base_url,
+            )
         if status_code_int and status_code_int >= 500:
             return LLMProviderError(f"{self._provider_name} server error: {status_code}")
         if status_code and body_excerpt:
@@ -516,7 +530,10 @@ class OpenAIProvider(LLMProvider):
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         """Whether a mapped exception should be retried."""
-        if isinstance(exc, LLMRateLimitError):
+        # A 401 stays a 401 until the user edits config. Retrying only
+        # multiplies rejected requests in the provider console and drags out
+        # the wait before the actionable error reaches the user.
+        if isinstance(exc, (LLMRateLimitError, LLMAuthError)):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))
 

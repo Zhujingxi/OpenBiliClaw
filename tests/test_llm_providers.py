@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+    LLMAuthError,
     LLMProviderError,
     LLMRateLimitError,
     LLMResponseError,
@@ -387,6 +388,47 @@ async def test_openai_provider_does_not_retry_rate_limit(
         await provider.complete([{"role": "user", "content": "hi"}])
 
     assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_does_not_retry_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 is terminal until the user edits config.
+
+    Retrying it three times per shard multiplied the rejected requests visible
+    in the provider console — a reporter saw "my token has usage records" while
+    init still failed with 401 — and stretched the perceived hang.
+    """
+    provider = OpenAIProvider(
+        api_key="test-key",
+        base_url="https://api.sensenova.cn/compatible-mode/v1",
+        provider_name="openai_compatible",
+    )
+    calls = {"count": 0}
+
+    class UnauthorizedError(Exception):
+        status_code = 401
+        body = {"error": {"message": "invalid token", "type": "authentication_error"}}
+
+    async def fake_sleep(_: float) -> None:
+        pytest.fail("auth failures should not burn provider retries")
+
+    async def fake_create(**_: object) -> SimpleNamespace:
+        calls["count"] += 1
+        raise UnauthorizedError("Error code: 401")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(LLMAuthError) as exc_info:
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert calls["count"] == 1
+    # The identity travels with the error so user-facing copy can name which
+    # of several configured keys was rejected.
+    assert exc_info.value.provider_name == "openai_compatible"
+    assert exc_info.value.endpoint == "https://api.sensenova.cn/compatible-mode/v1"
 
 
 @pytest.mark.asyncio

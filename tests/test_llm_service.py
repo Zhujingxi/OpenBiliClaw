@@ -10,6 +10,7 @@ import pytest
 
 import openbiliclaw.llm.base as llm_base
 from openbiliclaw.llm.base import (
+    LLMAuthError,
     LLMFallbackError,
     LLMProviderError,
     LLMRateLimitError,
@@ -244,6 +245,83 @@ def test_classify_llm_failure_kind_preserves_auth_precedence_over_wrapper_text()
         wrapped = LLMProviderExecutionError("connection reset while reporting failure")
         wrapped.__cause__ = inner
     assert classify_llm_failure_kind(wrapped) == "auth_failed"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        # Qualified status forms every gateway we've seen actually emits.
+        (LLMProviderError("openai_compatible request failed: HTTP 401: {}"), "auth_failed"),
+        (LLMProviderError("Error code: 401 - permission denied"), "auth_failed"),
+        (LLMProviderError('request failed: {"code":401,"msg":"bad token"}'), "auth_failed"),
+        (LLMProviderError("openai request failed: status_code=401"), "auth_failed"),
+        (LLMAuthError("openai_compatible authentication failed"), "auth_failed"),
+        # A bare "401" inside a request id / trace id is NOT a credential
+        # rejection: auth outranks every other bucket, so a false positive here
+        # sends the user to re-check a key that was fine all along.
+        (LLMProviderError("openai request failed: req id req-1401ab timed out"), "timeout"),
+        (LLMProviderError("gateway trace 401-7de2 connection reset"), "connection"),
+        (LLMProviderError("HTTP 4011 unknown gateway status"), None),
+    ],
+)
+def test_classify_llm_failure_kind_requires_qualified_401(
+    error: BaseException, expected: str | None
+) -> None:
+    assert classify_llm_failure_kind(error) == expected
+
+
+def test_classify_llm_failure_kind_keeps_billing_402_out_of_auth_bucket() -> None:
+    """A 402 body carrying an unrelated "401" must still read as quota.
+
+    ``auth`` is checked before ``rate_limited``, so a bare-substring match on
+    "401" would tell a user with an empty balance to go fix their API key.
+    """
+    error = LLMRateLimitError(
+        "deepseek provider backoff: HTTP 402: "
+        '{"error": {"message": "Insufficient Balance"}, "request_id": "r-401f2"}'
+    )
+    assert classify_llm_failure_kind(error) == "rate_limited"
+
+
+def test_describe_llm_failure_auth_names_the_rejected_provider() -> None:
+    """Users running two providers need to know which key to fix."""
+    try:
+        raise LLMAuthError(
+            "openai_compatible authentication failed: HTTP 401: invalid token",
+            provider_name="openai_compatible",
+            endpoint="https://api.sensenova.cn/compatible-mode/v1",
+        )
+    except LLMAuthError as inner:
+        wrapped = LLMProviderExecutionError("preference analysis failed")
+        wrapped.__cause__ = inner
+
+    reason = describe_llm_failure(wrapped)
+
+    assert reason is not None
+    assert "openai_compatible" in reason
+    assert "api.sensenova.cn" in reason
+    # Temporary AK/SK-derived tokens expire mid-run, which reads as "the key
+    # worked, why 401?" — the copy has to name that case.
+    assert "临时 token" in reason
+
+
+def test_describe_llm_failure_auth_never_leaks_inline_credentials() -> None:
+    reason = describe_llm_failure(
+        LLMAuthError(
+            "openai_compatible authentication failed",
+            provider_name="openai_compatible",
+            endpoint="https://user:s3cret@gateway.internal/v1",
+        )
+    )
+    assert reason is not None
+    assert "s3cret" not in reason
+    assert "gateway.internal" in reason
+
+
+def test_describe_llm_failure_auth_without_identity_stays_generic() -> None:
+    reason = describe_llm_failure(LLMProviderError("HTTP 401 unauthorized: invalid api key"))
+    assert reason is not None
+    assert "所配置的 AI 服务" in reason
 
 
 @pytest.mark.parametrize(

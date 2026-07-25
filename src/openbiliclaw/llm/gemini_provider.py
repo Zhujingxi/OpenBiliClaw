@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, NoReturn
 
 from .base import (
     DEFAULT_REASONING_EFFORT,
+    LLMAuthError,
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
@@ -14,6 +16,8 @@ from .base import (
     LLMResponseError,
     LLMTimeoutError,
 )
+
+logger = logging.getLogger(__name__)
 
 genai: Any | None
 errors: Any | None
@@ -278,6 +282,15 @@ class GeminiProvider(LLMProvider):
         message = (getattr(exc, "message", None) or str(exc)).lower()
         if status_code == 429 or "rate limit" in message or "resource_exhausted" in message:
             return LLMRateLimitError("gemini rate limit exceeded")
+        # Gemini reports a bad key as 401 UNAUTHENTICATED, but also as 400
+        # INVALID_ARGUMENT with "API key not valid" — key off both.
+        if status_code == 401 or "api key not valid" in message or "unauthenticated" in message:
+            logger.warning("gemini rejected our credentials: %s", exc)
+            return LLMAuthError(
+                f"gemini authentication failed: HTTP {status_code or 401}: {exc}",
+                provider_name="gemini",
+                endpoint="",
+            )
         if (errors is not None and isinstance(exc, errors.ServerError)) or (
             status_code and int(status_code) >= 500
         ):
@@ -285,7 +298,8 @@ class GeminiProvider(LLMProvider):
         return LLMProviderError(f"gemini request failed: {exc}")
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
-        if isinstance(exc, LLMRateLimitError):
+        # See OpenAIProvider._is_retryable: a rejected key is terminal.
+        if isinstance(exc, (LLMRateLimitError, LLMAuthError)):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))
 
