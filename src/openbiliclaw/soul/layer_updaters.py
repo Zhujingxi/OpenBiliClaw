@@ -144,6 +144,53 @@ def _record_layer_ledger(
     )
 
 
+def _apply_topic_lifecycle_evidence(
+    *,
+    memory: MemoryManager,
+    existing_preference: dict[str, Any],
+    updated_preference: dict[str, Any],
+) -> None:
+    """Stamp lifecycle state on interests produced by the incremental pipeline.
+
+    Without this, only ``analyze_events`` / ``learn_from_dialogue`` /
+    the feedback batch stamped ``state``. Ordinary browsing — the dominant
+    input path — went through here and produced interests with no ``state``
+    at all, which ``get_state()`` reads as ``active``. New topics therefore
+    skipped the trial period entirely and immediately competed for
+    recommendation weight, and the 12h ``scan_lifecycle`` never backfilled
+    them (it treats a stateless interest as already active).
+
+    Mirrors ``SoulEngine._apply_topic_lifecycle_evidence``; ``source`` is
+    ``pipeline`` so the ledger still shows which path stamped the transition.
+    Best-effort: any failure is logged at DEBUG and never breaks the update.
+    """
+    try:
+        from openbiliclaw.soul.ledger import ProfileLedger
+        from openbiliclaw.soul.topic_lifecycle import apply_evidence
+
+        existing_interests = [
+            item for item in existing_preference.get("interests", []) if isinstance(item, dict)
+        ]
+        updated_interests = updated_preference.get("interests")
+        if not isinstance(updated_interests, list):
+            return
+        merged, transitions = apply_evidence(existing_interests, updated_interests)
+        updated_preference["interests"] = merged
+        if not transitions:
+            return
+        ledger = ProfileLedger(getattr(memory, "_database", None))
+        for tr in transitions:
+            ledger.record(
+                write_point="topic_lifecycle",
+                source="pipeline",
+                before={"topic": tr.name, "state": tr.from_state},
+                after={"topic": tr.name, "state": tr.to_state},
+                source_refs=[f"reason:{tr.reason}"],
+            )
+    except Exception:
+        logger.debug("pipeline topic lifecycle evidence overlay failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Surface layer — computational, no LLM
 # ---------------------------------------------------------------------------
@@ -230,6 +277,14 @@ async def _update_interest(
     except Exception:
         logger.exception("PreferenceAnalyzer failed during interest update")
         return LayerUpdateResult(layer=OnionLayer.INTEREST, changed=False)
+
+    # Count this analysis as one unit of lifecycle evidence before persisting,
+    # so pipeline-born topics enter `trial` like every other write path.
+    _apply_topic_lifecycle_evidence(
+        memory=memory,
+        existing_preference=existing_preference,
+        updated_preference=updated_preference,
+    )
 
     # Persist flat preference (unchanged pipeline)
     preference_layer.data.clear()

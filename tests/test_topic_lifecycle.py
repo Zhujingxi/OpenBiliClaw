@@ -350,3 +350,90 @@ def test_flat_preference_round_trips_lifecycle_state() -> None:
         {"interests": [{"name": "航海", "category": "航海", "weight": 0.6, "state": "archived"}]}
     )
     assert layer.interests[0].state == "archived"
+
+
+class _StructuredPreferenceRegistry:
+    """Registry stub whose structured task returns one brand-new interest."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
+    ) -> object:
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(content=self.payload, provider="openai")
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: object) -> object:
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(content=self.payload, provider="openai")
+
+
+@pytest.mark.asyncio
+async def test_incremental_pipeline_stamps_trial_on_new_interests(tmp_path: Path) -> None:
+    """Ordinary browsing must enter the trial period like every other path.
+
+    The incremental pipeline (`ProfileUpdatePipeline` -> `_update_interest`) is
+    where day-to-day browsing lands. It used to persist interests with no
+    ``state`` at all; ``get_state()`` reads that as ``active``, so a topic seen
+    once immediately competed for recommendation weight, and the 12h
+    ``scan_lifecycle`` never repaired it (a stateless interest already looks
+    active). Only ``analyze_events`` / dialogue / feedback-batch stamped trial.
+    """
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.soul.engine import SoulEngine
+    from openbiliclaw.soul.layer_updaters import update_layer
+    from openbiliclaw.soul.pipeline import OnionLayer
+    from openbiliclaw.soul.profile import OnionProfile
+    from openbiliclaw.soul.topic_lifecycle import get_state
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    registry = _StructuredPreferenceRegistry(
+        '{"interests": [{"name": "木工制作", "category": "生活", "weight": 0.9}]}'
+    )
+    engine = SoulEngine(llm=registry, memory=memory)
+
+    signals: list[dict[str, object]] = [
+        {"payload": {"event_type": "view", "title": "榫卯小凳制作", "id": index}}
+        for index in range(1, 4)
+    ]
+    result = await update_layer(
+        layer=OnionLayer.INTEREST,
+        signals=signals,
+        profile=OnionProfile(),
+        memory=memory,
+        preference_analyzer=engine._preference_analyzer,
+        profile_builder=engine._profile_builder,
+    )
+    assert result.changed, "the stub returns a new interest, so the layer must change"
+
+    interests = memory.get_layer("preference").data.get("interests", [])
+    assert interests, "the new interest must be persisted"
+    woodworking = next(i for i in interests if i.get("name") == "木工制作")
+    assert woodworking.get("state") == "trial", (
+        "a pipeline-born interest must start in trial, not go straight to active"
+    )
+    assert get_state(woodworking) == "trial"
+    assert woodworking.get("evidence_count") == 1
+
+    rows = [
+        row
+        for row in (memory._database.query_profile_ledger(days=1, limit=50) or [])
+        if row.get("write_point") == "topic_lifecycle"
+    ]
+    assert rows, "the trial transition must be ledgered like every other path"
+    assert any(row.get("source") == "pipeline" for row in rows), (
+        "the ledger must name the path that stamped the transition"
+    )

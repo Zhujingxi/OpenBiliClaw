@@ -307,22 +307,68 @@ class AwarenessAnalyzer:
         raw_item: dict[str, object],
         source_event_ids: list[int],
     ) -> AwarenessNote:
+        # Prefer the per-note attribution the model returned, but only after
+        # checking it against the batch actually shown to it (pitfall #4:
+        # validate structured LLM output before persisting). Anything outside
+        # the batch is a hallucinated citation — an evidence chain that points
+        # at events which never fed the observation is worse than an honest
+        # approximate one, so a single bad id demotes the whole note back to
+        # batch attribution rather than silently keeping the survivors.
+        allowed = set(source_event_ids)
+        claimed = _coerce_event_ids(raw_item.get("source_event_ids"))
+        precise: list[int] = []
+        if claimed:
+            unknown = [item for item in claimed if item not in allowed]
+            if unknown:
+                logger.warning(
+                    "awareness note cited %d event id(s) outside the analysed batch "
+                    "(%s...); falling back to approximate batch attribution",
+                    len(unknown),
+                    unknown[:5],
+                )
+            else:
+                precise = claimed
         return AwarenessNote(
             date=str(raw_item.get("date", "")).strip(),
             observation=str(raw_item.get("observation", "")).strip(),
             trend=str(raw_item.get("trend", "")).strip(),
             emotion_guess=str(raw_item.get("emotion_guess", "")).strip(),
             note_id=uuid4().hex[:12],
-            source_event_ids=list(source_event_ids),
-            # Attribution is per-round, not per-note: the LLM does not map
-            # observations to specific events, so the whole consumed batch is
-            # attached to every note and flagged approximate.
-            source_event_ids_approximate=bool(source_event_ids),
+            source_event_ids=precise or list(source_event_ids),
+            # Only a validated per-note citation is exact. Without one the whole
+            # consumed batch is attached and flagged approximate, so a consumer
+            # can always tell "these events produced this note" from "this note
+            # came from somewhere in this batch".
+            source_event_ids_approximate=not precise and bool(source_event_ids),
         )
 
     @staticmethod
     def _normalize_text(value: str) -> str:
         return "".join(value.split())
+
+
+def _coerce_event_ids(value: object) -> list[int]:
+    """Read a note's claimed evidence ids, dropping anything unusable.
+
+    Order-preserving and deduplicated so a model repeating an id cannot inflate
+    the chain. ``bool`` is rejected explicitly (it is an ``int`` subclass).
+    """
+    if not isinstance(value, list):
+        return []
+    seen: set[int] = set()
+    ids: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int | str | float):
+            continue
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number in seen:
+            continue
+        seen.add(number)
+        ids.append(number)
+    return ids
 
 
 def _clamp_unit(value: object) -> float:

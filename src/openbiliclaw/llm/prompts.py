@@ -756,7 +756,9 @@ _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
 
 <rules>
 1. 输出必须是严格 JSON 对象：{"notes": [...], "confusions": [...]}，不要附带解释。
-2. notes 的每条字段与老版本一致：date / observation / trend / emotion_guess；措辞保守，不下人格定论。
+2. notes 的每条字段：date / observation / trend / emotion_guess / source_event_ids；措辞保守，不下人格定论。
+   - source_event_ids：**这条观察实际依据的事件 id 数组**，只能从 recent_events 里各事件的 `id` 中选，
+     不要编造、不要把整批都塞进去；确实说不清是哪几条时给空数组（系统会退回整批归属并标记为近似）。
 3. confusions 只在你「真的不确定该怎么解读」时才产出，宁缺毋滥，最多 2 条。每条包含：
    - topic：这个疑惑关联的话题/领域（简短，可为空）。
    - observation：看到的、说不清的行为现象。
@@ -775,7 +777,8 @@ _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
       "date": "2026-03-08",
       "observation": "最近连续浏览高信息密度内容。",
       "trend": "更偏向深度解释而非轻量消遣。",
-      "emotion_guess": "可能处于主动吸收和整理信息的阶段。"
+      "emotion_guess": "可能处于主动吸收和整理信息的阶段。",
+      "source_event_ids": [12, 15, 17]
     }
   ],
   "confusions": [
