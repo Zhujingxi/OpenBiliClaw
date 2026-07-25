@@ -341,7 +341,10 @@ def test_tab_resume_hydration_preserves_locally_loaded_cards(
     chromium_page.evaluate("() => window.__obcSetHidden(true)")
     chromium_page.wait_for_timeout(400)
     chromium_page.evaluate("() => window.__obcSetHidden(false)")
-    chromium_page.wait_for_timeout(1200)
+    # 再水合是异步链（ensureAuthenticated → 多个快照请求 → 应用 → 重渲染）。真实
+    # 后端上实测整表替换要 7.5–10 秒才落地，早采样会漏判成通过；stub 快得多，这里
+    # 留足余量即可。
+    chromium_page.wait_for_timeout(4000)
 
     assert stub.recommendation_gets > gets_before, "切回标签页没有再水合，这个用例就没意义了"
     after = _card_report(chromium_page)
