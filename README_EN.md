@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.184 (2026-07-23)**
+📌 Latest: **v0.3.185 (2026-07-26)**
 
-- **One brand icon across every surface** — the extension, PWA, desktop and mobile Web, website, Windows / macOS packages, and tray or menu bar now use the new pink paw icon.
-
-Full changelog: [docs/changelog.md](docs/changelog.md).
+- **Desktop Web list stops jumping** — with scroll auto-load on, background replenishment no longer rebuilds cards and returning to the tab no longer reorders the list.
+- **X discovery works again** — the root cause behind the always-404 search is fixed, so keyword discovery returns real posts.
+- **Model auth failures name names** — a 401 no longer retries in a loop and says exactly which provider and host rejected the key.
+- **X / Reddit honour the network mode** — both sources' CLI paths now follow `[network].mode` instead of inheriting whatever proxy happened to be set.
 
 ## Community
 
