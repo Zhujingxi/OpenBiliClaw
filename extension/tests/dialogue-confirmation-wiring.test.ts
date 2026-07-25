@@ -55,6 +55,35 @@ test("desktop mirrors popup semantics with webui session and a visible pending c
   assert.match(html, /\/shared\/dialogue-confirmation\.js/);
 });
 
+test("popup and desktop toast honestly when anchor refusal becomes retryable_error", () => {
+  // Shared helper maps stale_anchor → retryable_error with reason; both
+  // surfaces must surface that reason instead of the success "已确认" branch.
+  const popup = extensionFile("popup/popup.js");
+  const desktop = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
+  const shared = projectFile("src/openbiliclaw/web/shared/dialogue-confirmation.js");
+
+  assert.match(shared, /ANCHOR_REFUSAL_OUTCOMES/);
+  assert.match(shared, /stale_anchor/);
+  assert.match(shared, /anchor_dependency_failed/);
+  assert.match(shared, /retryableCardResult\(original, action, outcome/);
+
+  for (const [name, source] of [
+    ["popup", popup],
+    ["desktop", desktop],
+  ] as const) {
+    assert.match(
+      source,
+      /stale_anchor[\s\S]*anchor_dependency_failed|anchor_dependency_failed[\s\S]*stale_anchor/,
+      `${name} must branch on both anchor-refusal reasons`,
+    );
+    assert.match(
+      source,
+      /这条暂时结算不了：你正在聊另一条，先把那条聊完或结束再试/,
+      `${name} must show the honest anchor-refusal copy`,
+    );
+  }
+});
+
 test("mobile active insights are read-only in Wave C", () => {
   const profile = projectFile("src/openbiliclaw/web/js/views/profile.js");
 

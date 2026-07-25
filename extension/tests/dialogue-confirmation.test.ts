@@ -276,6 +276,72 @@ test("failed card action rolls the optimistic state back to the durable original
   assert.deepEqual(updates, ["confirmed", "pending"]);
 });
 
+test("stale_anchor refusal never presents confirmed; final markup stays retryable", async () => {
+  // Real backend body when card A is confirmed while card B owns the anchor.
+  // Regression: responseCardState("stale") fell through to optimistic
+  // "confirmed", so both toast and card label lied that settlement worked.
+  const realBackendResponse = {
+    outcome: "stale_anchor",
+    state: "stale",
+    settlement_ref: "ref/alpha",
+    settlement_verdict: "",
+  };
+  const updateSequence: Array<Record<string, unknown>> = [];
+  let lastTurn: Record<string, unknown> | null = null;
+
+  const result = await dialogue!.executeCardAction(cardTurn("pending"), "confirm", {
+    async request() {
+      return realBackendResponse;
+    },
+    onUpdate(turn, response) {
+      lastTurn = turn;
+      updateSequence.push({
+        state: String((turn.payload as Record<string, unknown>)?.state ?? ""),
+        ...(response ? { outcome: String(response.outcome ?? "") } : {}),
+      });
+    },
+  });
+
+  assert.deepEqual(updateSequence, [
+    { state: "confirmed" },
+    { state: "retryable_error", outcome: "retryable_error" },
+  ]);
+  assert.equal(result.response.outcome, "retryable_error");
+  assert.equal(result.response.reason, "stale_anchor");
+  assert.equal((result.turn.payload as Record<string, unknown>).state, "retryable_error");
+  assert.notEqual((result.turn.payload as Record<string, unknown>).state, "confirmed");
+
+  const markup = dialogue!.renderTurnMarkup(lastTurn!, { surface: "popup" });
+  assert.match(markup, /data-card-state="retryable_error"/);
+  assert.match(markup, /处理结果暂未同步/);
+  assert.doesNotMatch(markup, /已确认/);
+  assert.doesNotMatch(markup, /data-card-state="confirmed"/);
+});
+
+test("anchor_dependency_failed refusal also rolls back to retryable_error", async () => {
+  const updates: string[] = [];
+  const result = await dialogue!.executeCardAction(cardTurn("pending"), "reject", {
+    async request() {
+      return {
+        outcome: "anchor_dependency_failed",
+        state: "stale",
+        settlement_ref: "ref/alpha",
+        settlement_verdict: "",
+      };
+    },
+    onUpdate(turn) {
+      updates.push(String((turn.payload as Record<string, unknown>)?.state ?? ""));
+    },
+  });
+
+  assert.deepEqual(updates, ["rejected", "retryable_error"]);
+  assert.equal(result.response.outcome, "retryable_error");
+  assert.equal(result.response.reason, "anchor_dependency_failed");
+  const markup = dialogue!.renderTurnMarkup(result.turn, { surface: "desktop" });
+  assert.match(markup, /data-card-state="retryable_error"/);
+  assert.doesNotMatch(markup, /已标记不准/);
+});
+
 test("pending list markup opens an encoded ref and selected flow excludes probe/delight turns", () => {
   const markup = dialogue!.renderPendingListMarkup([
     { kind: "hypothesis", ref: "hash/8", title: "喜欢系统分析", confidence: 0.81 },

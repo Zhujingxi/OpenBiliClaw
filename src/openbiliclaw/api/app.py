@@ -220,6 +220,10 @@ _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
 _HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
+# Settled for good — no reconcile, no further action. ``revised`` belongs here:
+# the user replaced the wording and accepted the correction, which is as final
+# as a plain confirm/reject and must not read back as 已标记不准.
+_TERMINAL_CARD_STATES = frozenset({"confirmed", "rejected", "revised"})
 # First-round calibration (2026-07-22): 0.60 is the lower edge at which an
 # unvalidated hypothesis is concrete enough to ask about; open confusions use
 # 0.50 because their explicit contradiction is already stronger evidence.
@@ -227,6 +231,16 @@ _HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
 _PENDING_HYPOTHESIS_MIN_CONFIDENCE = 0.60
 _PENDING_CONFUSION_MIN_CONFIDENCE = 0.50
 _PENDING_CONFIRMATION_LIMIT = 3
+# Seats reserved for confusions when any qualify. The two kinds score confidence
+# on opposite scales: a hypothesis' confidence means "how sure am I this is
+# true" (higher = more worth asking), while a confusion's
+# interpretation_confidence means "how sure am I of my guess" — and the prompt
+# explicitly says only a LOW-confidence reading should become a confusion. Sorting
+# both into one descending list therefore buries the least-understood items
+# last, and a real profile carries hundreds of ≥0.60 hypotheses (334 on the
+# author's own data, top-3 cutoff at 0.76), so confusions could never surface in
+# the user-initiated list at all. Unused seats fall back to hypotheses.
+_PENDING_CONFUSION_RESERVED_SLOTS = 1
 # First-round calibration (2026-07-24): confirmation turn creation is a local
 # SQLite effect budgeted at 1 second. A 30x fence distinguishes that live
 # claim→create window from a crashed creator before orphan recovery may run.
@@ -2480,24 +2494,37 @@ def create_app(
         }
 
     def _pending_confirmation_items(*, limit: int) -> list[dict[str, Any]]:
-        items = _hypothesis_confirmation_items()
+        def rank(item: dict[str, Any]) -> tuple[float, int, str]:
+            return (
+                -float(item.get("confidence", 0.0) or 0.0),
+                0 if item.get("kind") == "confusion" else 1,
+                str(item.get("ref", "")),
+            )
+
+        hypotheses = sorted(_hypothesis_confirmation_items(), key=rank)
+        confusions: list[dict[str, Any]] = []
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
         if confusion_manager is not None:
             try:
                 for confusion in confusion_manager.list_open():
                     item = _confusion_confirmation_item(confusion)
                     if item is not None:
-                        items.append(item)
+                        confusions.append(item)
             except Exception:
                 logger.debug("Failed to load pending confusions", exc_info=True)
-        items.sort(
-            key=lambda item: (
-                -float(item.get("confidence", 0.0) or 0.0),
-                0 if item.get("kind") == "confusion" else 1,
-                str(item.get("ref", "")),
-            )
-        )
-        return items[: max(0, int(limit))]
+        confusions.sort(key=rank)
+
+        capacity = max(0, int(limit))
+        # Reserve seats for confusions first (see _PENDING_CONFUSION_RESERVED_SLOTS
+        # for why a single descending sort starves them), then fill the rest with
+        # hypotheses, then hand any still-unused capacity back to the other kind.
+        reserved = min(len(confusions), _PENDING_CONFUSION_RESERVED_SLOTS, capacity)
+        picked = confusions[:reserved]
+        picked += hypotheses[: capacity - len(picked)]
+        if len(picked) < capacity:
+            picked += confusions[reserved : reserved + (capacity - len(picked))]
+        picked.sort(key=rank)
+        return picked
 
     def _pending_confirmation_by_ref(ref: str) -> dict[str, Any] | None:
         normalized_ref = ref.strip()
@@ -2764,7 +2791,7 @@ def create_app(
         if not isinstance(raw_payload, dict) or raw_payload.get("type") != "card":
             return
         state = str(raw_payload.get("state", "")).strip().lower()
-        if state in {"confirmed", "rejected"}:
+        if state in _TERMINAL_CARD_STATES:
             return
         ref = str(raw_payload.get("ref", "")).strip()
         kind = str(raw_payload.get("kind", "hypothesis")).strip().lower()
@@ -8091,7 +8118,7 @@ def create_app(
     def _defer_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
         _require_dialogue_settlement_worker()
         state = str(turn.payload.get("state", "")).strip().lower()
-        if state in {"confirmed", "rejected"}:
+        if state in _TERMINAL_CARD_STATES:
             return {
                 "ok": True,
                 "outcome": "already_settled",
@@ -9749,12 +9776,31 @@ def create_app(
             turn_id=f"legacy-{uuid.uuid4().hex}",
             source="legacy_endpoint",
         )
-        response.headers["Deprecation"] = "true"
-        response.headers["Link"] = '</api/chat/pending-confirmations>; rel="successor-version"'
-        if result.get("outcome") == "processing":
+        deprecation_headers = {
+            "Deprecation": "true",
+            "Link": '</api/chat/pending-confirmations>; rel="successor-version"',
+        }
+        for header_name, header_value in deprecation_headers.items():
+            response.headers[header_name] = header_value
+        outcome = str(result.get("outcome", "")).strip().lower()
+        # Anchor refusal is a real failure: nothing was written to
+        # card_settlements / profile_update_ledger. Never report ok=true
+        # (the previous silent-success path broke old clients that only
+        # checked the HTTP status / ok flag).
+        if outcome in {"stale_anchor", "anchor_dependency_failed"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot settle this insight while another dialogue anchor "
+                    f"is active (outcome={outcome}). Finish or release the "
+                    "active conversation first, then retry."
+                ),
+                headers=deprecation_headers,
+            )
+        if outcome == "processing":
             response.status_code = 202
         return InsightFeedbackResponse(
-            ok=result.get("outcome") != "processing",
+            ok=outcome != "processing",
             matched=bool(result.get("matched", False)),
             hypothesis=str(result.get("hypothesis", hypothesis)),
             signal=str(result.get("signal", action)),

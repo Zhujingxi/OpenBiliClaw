@@ -2465,8 +2465,8 @@ class Database:
     ) -> bool:
         """Atomically move a card payload through its declared state graph."""
         allowed_transitions = {
-            "pending": frozenset({"confirmed", "rejected", "deferred", "discussing"}),
-            "discussing": frozenset({"confirmed", "rejected", "deferred", "pending"}),
+            "pending": frozenset({"confirmed", "rejected", "revised", "deferred", "discussing"}),
+            "discussing": frozenset({"confirmed", "rejected", "revised", "deferred", "pending"}),
         }
         if new_state not in allowed_transitions.get(expected_state, frozenset()):
             raise ValueError(
@@ -2652,8 +2652,12 @@ class Database:
             "confirmed": "confirmed",
             "reject": "rejected",
             "rejected": "rejected",
-            "revise": "rejected",
-            "revised": "rejected",
+            # A revise is not a plain rejection: the user replaced the wording
+            # and accepted the corrected version, and a derived hypothesis was
+            # written. Projecting it as "rejected" made the card read 已标记不准
+            # right after the user said 我认可修正版.
+            "revise": "revised",
+            "revised": "revised",
         }.get(str(row.get("verdict", "")).strip().lower())
         if terminal is None:
             return 0

@@ -11548,7 +11548,12 @@ class TestDialogueConfirmationCards:
             "/api/insights/feedback",
             json={"hypothesis": legacy_hypothesis, "signal": "confirm"},
         )
-        assert legacy.status_code == 200
+        # The `discuss` action above left its card owning the dialogue anchor,
+        # so this legacy settle is refused. It must still be refused *honestly*
+        # (409, nothing written) rather than the old silent 200 {"ok":true}.
+        # The point of this test is unchanged: the typed job is still submitted
+        # to — and executed by — the one worker, which `observed` below asserts.
+        assert legacy.status_code == 409, legacy.text
         assert observed == [
             (DialogueJobKind.SETTLE_HYPOTHESIS, True),
             (DialogueJobKind.SETTLE_HYPOTHESIS, True),
@@ -12415,6 +12420,52 @@ class TestPendingDialogueConfirmations:
         assert validated_ref not in refs
         assert count.status_code == 200
         assert count.json() == {"count": 3}
+
+    def test_confusion_keeps_a_seat_when_every_hypothesis_scores_higher(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A confusion must surface even when it scores below every hypothesis.
+
+        The two kinds measure confidence on opposite scales — a hypothesis'
+        score is "how sure am I this is true", a confusion's is "how sure am I
+        of my guess", and the awareness prompt only emits a confusion when that
+        guess is weak. One descending sort plus a top-3 cap therefore buried
+        confusions permanently: a real profile carries hundreds of ≥0.60
+        hypotheses (334 on the author's data, cutoff at 0.76) while genuine
+        confusions land around 0.3–0.5.
+        """
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        for index in range(6):
+            self._seed_hypothesis(memory, f"高置信假设-{index}", 0.90 - index / 100)
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="露营兴趣的突然性",
+            observation="只看几十秒就收藏，和木工的深看模式完全不同",
+            interpretation_confidence=0.50,
+        )
+
+        body = client.get("/api/chat/pending-confirmations").json()
+
+        assert body["count"] == 3
+        refs = [item["ref"] for item in body["items"]]
+        assert str(confusion_id) in refs, (
+            "the confusion holds a reserved seat despite scoring lowest"
+        )
+        kinds = [item["kind"] for item in body["items"]]
+        assert kinds.count("confusion") == 1, "exactly one seat is reserved, not more"
+        assert kinds.count("hypothesis") == 2, "the remaining seats still go to hypotheses"
+
+    def test_unused_confusion_seat_falls_back_to_hypotheses(self, tmp_path: Path) -> None:
+        """With no confusion pending, the reserved seat must not be wasted."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        for index in range(5):
+            self._seed_hypothesis(memory, f"只有假设-{index}", 0.90 - index / 100)
+
+        body = client.get("/api/chat/pending-confirmations").json()
+
+        assert body["count"] == 3
+        assert all(item["kind"] == "hypothesis" for item in body["items"])
 
     def test_manual_open_three_items_ignores_both_cooldowns(self, tmp_path: Path) -> None:
         client, memory, _engine, _dialogue = self._build(tmp_path)

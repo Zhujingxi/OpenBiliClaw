@@ -5781,7 +5781,12 @@ ${cardFeedbackBarHtml()}`;
           onUpdate: updateDesktopDialogueTurn
         });
         if (response?.outcome === "retryable_error") {
-          showToast("后端结果暂未同步；可刷新确认，或直接重试这次操作");
+          const reason = String(response?.reason || "").toLowerCase();
+          if (reason === "stale_anchor" || reason === "anchor_dependency_failed") {
+            showToast("这条暂时结算不了：你正在聊另一条，先把那条聊完或结束再试");
+          } else {
+            showToast("后端结果暂未同步；可刷新确认，或直接重试这次操作");
+          }
           return;
         }
         if (response?.outcome === "already_settled") showToast("这条已在另一个窗口结算，已同步最终状态");
@@ -5789,6 +5794,7 @@ ${cardFeedbackBarHtml()}`;
           showToast("好，沿着这条猜测继续聊");
           $("#chatInput")?.focus();
         } else if (action === "defer") showToast("先放一放，之后再聊");
+        else if (response?.state === "revised") showToast("已按你的修正记下这条");
         else showToast(action === "confirm" ? "已确认这条猜测" : "已记下这条猜测不准");
         await refreshDialogueConfirmationSurface();
       } catch {
@@ -5834,6 +5840,36 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
+    // Same backoff shape as the card-action helper, driven by the chat path.
+    // Only runs while an unsettled card is actually on screen. The budget
+    // matches CARD_ACTION_POLL_DEADLINE_MS (~30s) rather than a few seconds:
+    // an anchored settlement lands *after* the reply — the worker still has to
+    // run attribution and the queue job — and an 8s budget measurably missed it
+    // in browser E2E, leaving the card stuck on 正在聊这条 until a manual reload.
+    const DIALOGUE_CARD_TERMINAL_STATES = new Set([
+      "confirmed",
+      "rejected",
+      "revised",
+      "deferred",
+    ]);
+
+    function hasUnsettledDialogueCard() {
+      return state.chat.some((entry) => {
+        const payload = entry?.turn?.payload;
+        if (!payload || payload.type !== "card") return false;
+        return !DIALOGUE_CARD_TERMINAL_STATES.has(String(payload.state || "").toLowerCase());
+      });
+    }
+
+    async function refreshUntilDialogueCardsSettle() {
+      if (!hasUnsettledDialogueCard()) return;
+      for (const delay of [1000, 2000, 5000, 5000, 5000, 5000, 5000]) {
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        await refreshDialogueTurns().catch(() => {});
+        if (!hasUnsettledDialogueCard()) return;
+      }
+    }
+
     async function sendChat(message, options = {}) {
       const payloadMessage = options.contextPrefix ? `${options.contextPrefix}\n\n${message}` : message;
       state.chat.push({ role: "user", text: message });
@@ -5868,6 +5904,10 @@ ${cardFeedbackBarHtml()}`;
         }
         if (latest?.status === "completed" || latest?.reply) {
           await refreshDialogueConfirmationSurface();
+          // 回复完成 ≠ 结算完成：锚归属（support/contradict/revise/answer）是在回复
+          // 之后由结算 worker 落库的，所以此刻卡片往往还停在 discussing。不补这一步，
+          // 用户说完「我认可修正版」后卡片会一直显示「正在聊这条」，直到手动刷新。
+          await refreshUntilDialogueCardsSettle();
           return;
         }
         window.setTimeout(poll, 1200);

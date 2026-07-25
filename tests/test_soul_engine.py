@@ -3031,7 +3031,11 @@ async def test_hypothesis_anchor_revise_rejects_original_and_persists_confirmed_
     assert settlement is not None
     assert (settlement["verdict"], settlement["applied"]) == ("revised", 1)
     assert result["anchor_outcome"] == "revised"
-    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "rejected"
+    # The card reads "已按你的修正记下", not "已标记不准": the user replaced the
+    # wording and accepted the correction, and the derived hypothesis above was
+    # persisted as validated. Projecting a revise as a plain rejection told the
+    # user the opposite of what they had just agreed to.
+    assert memory._database.get_chat_turn("anchor-card")["payload"]["state"] == "revised"
     assert analyzer_calls == ["不是只要理论，我更看重能落地", "修正后的下一轮正常对话"]
     assert "anchor_outcome" not in next_result
 
@@ -4321,9 +4325,11 @@ async def test_hypothesis_revise_crash_gap_retry_upserts_derived_once(
     marker = engine._load_rebuild_state()["pending"]
     assert len(marker["trigger_refs"]) == 2
     for session in ("popup", "webui"):
+        # Cross-session projection of a revise is "revised" on every surface —
+        # a revise is terminal but is not a rejection.
         assert (
             memory._database.get_chat_turn(f"revise-{session}-{checkpoint}")["payload"]["state"]
-            == "rejected"
+            == "revised"
         )
 
 

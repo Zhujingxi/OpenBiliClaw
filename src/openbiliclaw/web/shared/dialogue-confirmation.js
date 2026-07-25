@@ -11,6 +11,9 @@
   const CARD_STATE_LABELS = {
     confirmed: "已确认",
     rejected: "已标记不准",
+    // A revise is not a rejection — the user corrected the wording and
+    // accepted it, and a derived hypothesis was recorded.
+    revised: "已按你的修正记下",
     discussing: "正在聊这条",
     deferred: "已稍后再聊",
     processing: "正在处理，以后端结算为准",
@@ -20,15 +23,17 @@
     "pending",
     "confirmed",
     "rejected",
+    "revised",
     "discussing",
     "deferred",
     "processing",
     "retryable_error",
   ]);
-  const TERMINAL_CARD_STATES = new Set(["confirmed", "rejected", "deferred"]);
+  const TERMINAL_CARD_STATES = new Set(["confirmed", "rejected", "revised", "deferred"]);
   const POLL_TERMINAL_CARD_STATES = new Set([
     "confirmed",
     "rejected",
+    "revised",
     "deferred",
     "discussing",
   ]);
@@ -38,6 +43,10 @@
   // provider timeout or introduce a durable job table.
   const CARD_ACTION_POLL_DEADLINE_MS = 30_000;
   const DIALOGUE_SCOPES = new Set(["chat", "hypothesis", "confusion"]);
+  // Backend refuses settlement when another card owns the dialogue anchor.
+  // These outcomes are honest failures — never fall back to the optimistic
+  // terminal state, or the UI will claim "已确认" while nothing was written.
+  const ANCHOR_REFUSAL_OUTCOMES = new Set(["stale_anchor", "anchor_dependency_failed"]);
 
   function isRecord(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -247,13 +256,16 @@
       const response = await options.request(cardActionPath(original.turn_id), {
         action: text(action).toLowerCase(),
       });
-      if (
-        text(response?.outcome).toLowerCase() === "processing"
-        || responseCardState(response, "") === "processing"
-      ) {
+      const outcome = text(response?.outcome).toLowerCase();
+      if (outcome === "processing" || responseCardState(response, "") === "processing") {
         const processing = withCardState(original, "processing");
         options.onUpdate(processing, response);
         return await pollProcessingCard(original, action, response, options);
+      }
+      // Anchor owned by another card: backend wrote nothing. Reuse the
+      // retryable path so the optimistic "confirmed" flash is rolled back.
+      if (ANCHOR_REFUSAL_OUTCOMES.has(outcome)) {
+        return retryableCardResult(original, action, outcome, options.onUpdate);
       }
       // `already_settled` is authoritative, including the opposite verdict.
       // Replacing the optimistic state here is the cross-screen rollback path.

@@ -30,7 +30,7 @@ _VALID_ENTRIES = frozenset(
 )
 _VALID_KINDS = frozenset({"hypothesis", "confusion"})
 _VALID_RELEASE_REASONS = frozenset({"settled", "unrelated", "ttl", "replaced"})
-_TERMINAL_CARD_STATES = frozenset({"confirmed", "rejected", "deferred"})
+_TERMINAL_CARD_STATES = frozenset({"confirmed", "rejected", "revised", "deferred"})
 
 # First-round calibration (2026-07-22): two hours covers one complete focused
 # discussion without letting yesterday's topic capture a later conversation.

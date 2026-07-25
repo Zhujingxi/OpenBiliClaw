@@ -117,6 +117,19 @@ _REBUILD_CONTEXT_HYPOTHESIS_CAP = 12
 # First-round calibration (2026-07-22): 0.5 rejects clear paraphrases without
 # suppressing a side topic that merely shares one generic word. Recalibrate
 # after the first production month or any tokenizer/model swap.
+#
+# Known bound (measured 2026-07-26): this is a *lexical* defence. It reliably
+# catches restatements that reuse wording ("用户喜欢深度技术内容" vs
+# "喜欢深度技术内容" scores 0.78) and reliably misses semantic duplicates that
+# reword ("用户喜欢深度技术内容" vs "用户偏好硬核原理讲解" scores 0.06). A
+# bge-m3 cosine pass was calibrated as a second layer and rejected: over five
+# duplicate and five side-topic pairs the classes were 0.599–0.796 and
+# 0.446–0.569, i.e. a 0.03-wide separation band. No threshold in that band is
+# trustworthy, and a false positive (silently discarding a genuine side remark
+# the user just made) costs more than the false negative it would prevent (one
+# redundant candidate, which downstream consolidation already merges). If this
+# is revisited, calibrate on real dialogue transcripts rather than synthetic
+# pairs, and keep the asymmetry in mind: prefer under- to over-filtering.
 _ANCHOR_CANDIDATE_JACCARD_THRESHOLD = 0.5
 # Product calibration (2026-07-22): one clarification is enough to distinguish
 # hesitation from avoidance without turning the dialogue into an interrogation.
@@ -1024,9 +1037,14 @@ class SoulEngine:
             if signal in {"confirm", "like", "support"}:
                 item.validated = True
                 item.confidence = min(1.0, round(max(item.confidence, 0.75), 4))
+                item.user_verdict = "confirmed"
             elif signal in {"reject", "dislike", "deny"}:
                 item.validated = False
                 item.confidence = max(0.0, round(min(item.confidence, 0.35), 4))
+                # Record that the user ruled on this, not just the low score:
+                # a later insight pass must not talk it back up (see
+                # InsightAnalyzer._merge_confidence).
+                item.user_verdict = "rejected"
             changed = item.validated != previous_validated or item.confidence != previous_confidence
             result["matched"] = True
             result["hypothesis"] = item.hypothesis
@@ -2003,7 +2021,10 @@ class SoulEngine:
             return
         if kind == "hypothesis":
             verdict = str(settlement.get("verdict", "")).strip().lower()
-            card_state = "confirmed" if verdict == "confirmed" else "rejected"
+            card_state = {
+                "confirmed": "confirmed",
+                "revised": "revised",
+            }.get(verdict, "rejected")
             self._dialogue_anchor_manager.release(
                 reason="settled",
                 card_state=card_state,
@@ -2029,7 +2050,10 @@ class SoulEngine:
         if kind == "confusion" or stored_verdict.startswith("answer:"):
             public_verdict = "answered"
         else:
-            public_verdict = "confirmed" if stored_verdict == "confirmed" else "rejected"
+            public_verdict = {
+                "confirmed": "confirmed",
+                "revised": "revised",
+            }.get(stored_verdict, "rejected")
         response: dict[str, Any] = {
             "ok": outcome != "processing",
             "outcome": outcome,
@@ -3673,6 +3697,10 @@ class SoulEngine:
                     confidence=round(confidence, 4),
                     validated=True,
                     created_at=datetime.now().isoformat(),
+                    # The user supplied this wording themselves in the dialogue,
+                    # so it counts as a user verdict — a later insight pass must
+                    # not talk its confidence down.
+                    user_verdict="confirmed",
                 )
                 existing.append(hypothesis)
                 by_text[normalized] = hypothesis
@@ -3681,6 +3709,9 @@ class SoulEngine:
                 next_confidence = round(max(hypothesis.confidence, confidence), 4)
                 if not hypothesis.validated:
                     hypothesis.validated = True
+                    changed = True
+                if hypothesis.user_verdict != "confirmed":
+                    hypothesis.user_verdict = "confirmed"
                     changed = True
                 if hypothesis.confidence != next_confidence:
                     hypothesis.confidence = next_confidence

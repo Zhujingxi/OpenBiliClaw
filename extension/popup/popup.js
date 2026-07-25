@@ -6722,7 +6722,12 @@ async function handleDialogueCardAction(button) {
       onUpdate: updateDialogueTurn,
     });
     if (response?.outcome === "retryable_error") {
-      setHint("后端结果暂未同步；可刷新确认，或直接重试这次操作。", "error");
+      const reason = String(response?.reason || "").toLowerCase();
+      if (reason === "stale_anchor" || reason === "anchor_dependency_failed") {
+        setHint("这条暂时结算不了：你正在聊另一条，先把那条聊完或结束再试。", "error");
+      } else {
+        setHint("后端结果暂未同步；可刷新确认，或直接重试这次操作。", "error");
+      }
       return;
     }
     if (response?.outcome === "already_settled") {
@@ -6733,7 +6738,14 @@ async function handleDialogueCardAction(button) {
     } else if (action === "defer") {
       setHint("先放一放，之后再聊。", "success");
     } else {
-      setHint(action === "confirm" ? "已确认这条猜测。" : "已记下这条猜测不准。", "success");
+      setHint(
+        response?.state === "revised"
+          ? "已按你的修正记下这条。"
+          : action === "confirm"
+            ? "已确认这条猜测。"
+            : "已记下这条猜测不准。",
+        "success",
+      );
     }
     await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
   } catch {
