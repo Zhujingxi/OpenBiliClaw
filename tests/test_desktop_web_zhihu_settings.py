@@ -99,7 +99,11 @@ def test_desktop_current_credentials_render_in_collapsed_panels() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
-    assert 'id="sourceCredentialList"' in html
+    # Credentials no longer live in their own list: each source card carries its
+    # own masked credential box, so status and credential renderers resolve rows
+    # from the single card container.
+    assert 'id="sourceCredentialList"' not in html
+    assert 'id="sourceStatusList"' in html
     for source_key in (
         "bilibili",
         "xiaohongshu",

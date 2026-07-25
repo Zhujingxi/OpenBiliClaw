@@ -6334,7 +6334,9 @@ ${cardFeedbackBarHtml()}`;
       if (!node) {
         node = document.createElement("p");
         node.className = "source-network-hint";
-        row.appendChild(node);
+        // The card face owns a dedicated slot so the hint lands under the
+        // status line instead of after the (collapsed) configuration body.
+        (row.querySelector(".source-card-hint-slot") || row).appendChild(node);
       }
       node.textContent = text;
     }
@@ -6440,7 +6442,9 @@ ${cardFeedbackBarHtml()}`;
     });
 
     function renderSourceCredentialRows(data) {
-      const list = $("#sourceCredentialList");
+      // Status and credentials now live on the same per-source card, so both
+      // renderers resolve their rows from one container.
+      const list = $("#sourceStatusList");
       if (!list) return;
       SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
@@ -6455,7 +6459,14 @@ ${cardFeedbackBarHtml()}`;
         row.dataset.available = view.available ? "true" : "false";
         row.dataset.formKind = view.form.kind;
         if (summary) summary.textContent = view.summary;
-        if (value) value.value = view.value;
+        if (value) {
+          value.value = view.value;
+          // The masked box used to sit inside a collapsed <details>; on the card
+          // it is always in view, so an empty preview — or one that just repeats
+          // the summary line above it — is noise rather than information.
+          const redundant = !view.value.trim() || view.value.trim() === view.summary.trim();
+          value.hidden = redundant;
+        }
       });
       // Not a display branch over the access enum: every other paste box gets
       // its "已保存/未保存" placeholder from the config snapshot in
@@ -6472,6 +6483,136 @@ ${cardFeedbackBarHtml()}`;
       state.sourceCredentials = data;
       renderSourceCredentialRows(data);
     }
+
+    // ---- 平台源卡片：展开/折叠、停用态、占比双向同步 ----------------------
+    const SOURCE_SHARE_INPUT_IDS = {
+      bilibili: "shareBilibili",
+      xiaohongshu: "shareXhs",
+      douyin: "shareDouyin",
+      youtube: "shareYoutube",
+      twitter: "shareTwitter",
+      zhihu: "shareZhihu",
+      reddit: "shareReddit",
+      bangumi: "shareBangumi"
+    };
+    const SOURCE_CARD_LABELS = {
+      bilibili: "Bilibili",
+      xiaohongshu: "小红书",
+      douyin: "抖音",
+      youtube: "YouTube",
+      twitter: "X (Twitter)",
+      zhihu: "知乎",
+      reddit: "Reddit",
+      bangumi: "Bangumi"
+    };
+
+    function sourceCardFor(key) {
+      return $("#sourceStatusList")?.querySelector(`[data-source-status="${key}"]`) || null;
+    }
+
+    function setSourceCardOpen(card, open) {
+      if (!card) return;
+      card.dataset.open = open ? "1" : "0";
+      card.querySelector(".source-card-face")?.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    // A card whose source is switched off keeps its inputs in the DOM (the save
+    // payload still reads them) but stops advertising them as actionable.
+    function syncSourceCardEnabledState() {
+      SOURCE_STATUS_KEYS.forEach((key) => {
+        const card = sourceCardFor(key);
+        if (!card) return;
+        const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
+        const on = select ? select.value === "on" : true;
+        card.dataset.sourceOff = on ? "false" : "true";
+        if (!on) setSourceCardOpen(card, false);
+      });
+    }
+
+    function renderShareOverview() {
+      const bar = $("#shareOverviewBar");
+      const legend = $("#shareOverviewLegend");
+      if (!bar || !legend) return;
+      const entries = SOURCE_STATUS_KEYS.map((key) => {
+        const input = document.getElementById(SOURCE_SHARE_INPUT_IDS[key]);
+        const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
+        return {
+          key,
+          label: SOURCE_CARD_LABELS[key] || key,
+          weight: Math.max(0, Number(input?.value) || 0),
+          enabled: select ? select.value === "on" : true
+        };
+      });
+      const active = entries.filter((item) => item.enabled && item.weight > 0);
+      const total = active.reduce((sum, item) => sum + item.weight, 0);
+      bar.textContent = "";
+      active.forEach((item) => {
+        const seg = document.createElement("i");
+        seg.dataset.sourceKey = item.key;
+        seg.style.width = `${(item.weight / total * 100).toFixed(2)}%`;
+        seg.title = `${item.label}：${item.weight} 份`;
+        bar.appendChild(seg);
+      });
+      bar.dataset.empty = active.length ? "false" : "true";
+      legend.textContent = "";
+      entries.forEach((item) => {
+        const cell = document.createElement("span");
+        cell.className = "share-overview-cell";
+        cell.dataset.sourceKey = item.key;
+        cell.dataset.off = item.enabled ? "false" : "true";
+        const swatch = document.createElement("em");
+        swatch.dataset.sourceKey = item.key;
+        const name = document.createElement("span");
+        name.textContent = item.label;
+        const value = document.createElement("b");
+        value.textContent = item.enabled
+          ? total > 0 && item.weight > 0 ? `${item.weight} · ${(item.weight / total * 100).toFixed(0)}%` : `${item.weight}`
+          : "停用";
+        cell.append(swatch, name, value);
+        legend.appendChild(cell);
+      });
+    }
+
+    function initSourceCards() {
+      const list = $("#sourceStatusList");
+      if (!list) return;
+
+      list.addEventListener("click", (event) => {
+        // Verify buttons keep their own handler; everything interactive inside
+        // the body must not toggle the card.
+        if (event.target.closest(".source-card-body, .source-card-right, .source-verify-btn")) return;
+        const face = event.target.closest(".source-card-face");
+        const card = face?.closest(".source-card");
+        if (!card || card.dataset.sourceOff === "true") return;
+        setSourceCardOpen(card, card.dataset.open !== "1");
+      });
+
+      list.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const face = event.target.closest(".source-card-face");
+        if (!face || event.target !== face) return;
+        event.preventDefault();
+        const card = face.closest(".source-card");
+        if (!card || card.dataset.sourceOff === "true") return;
+        setSourceCardOpen(card, card.dataset.open !== "1");
+      });
+
+      list.addEventListener("change", (event) => {
+        if (event.target.matches(".source-card-enable select")) {
+          syncSourceCardEnabledState();
+          renderShareOverview();
+          renderSourcesStatusRows(state.sourceStatus);
+        }
+      });
+
+      list.addEventListener("input", (event) => {
+        if (event.target.closest(".source-card-share")) renderShareOverview();
+      });
+
+      syncSourceCardEnabledState();
+      renderShareOverview();
+    }
+    initSourceCards();
 
     // Login happens outside this page (user signs into a platform in another
     // tab), so a one-shot render on settings open goes stale — re-poll while
@@ -7357,6 +7498,11 @@ ${cardFeedbackBarHtml()}`;
         // empty field omits the username to keep the configured value.
         state.initBangumiUsernamePrefilled = true;
       }
+      // The enable selects and share weights were just repopulated from the
+      // snapshot, so the cards' collapsed/disabled state and the share bar have
+      // to be recomputed from the new values rather than the pre-apply ones.
+      syncSourceCardEnabledState();
+      renderShareOverview();
       if (!state.degraded) {
         void renderSourcesStatus();
         void renderSourceCredentials();
@@ -7374,6 +7520,9 @@ ${cardFeedbackBarHtml()}`;
       if ($("#configStatus")) $("#configStatus").value = "配置已从后端加载。";
       if (state.runtimeStatus) applyRuntimeStatus(state.runtimeStatus);
       restoreFrontendSettings();
+      // The form now mirrors the backend snapshot, so whatever was pending
+      // before this apply is no longer pending.
+      clearSettingsDirty();
     }
 
     function normalizeDelight(item) {
@@ -9182,11 +9331,58 @@ ${cardFeedbackBarHtml()}`;
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
+        renderShareOverview();
+        markSettingsDirty();
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");
       }
     });
+    // ---- 设置页吸底保存栏：未保存修改计数 --------------------------------
+    // Counts distinct touched fields, not events, so holding a key down or
+    // retyping the same input does not inflate the number.
+    const settingsDirtyFields = new Set();
+
+    function renderSettingsDirty() {
+      const bar = $("#settingsSaveBar");
+      const msg = $("#settingsSaveMsg");
+      const discard = $("#settingsDiscardBtn");
+      const count = settingsDirtyFields.size;
+      if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
+      if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+      if (discard) discard.disabled = count === 0;
+    }
+
+    function markSettingsDirty(target) {
+      const el = target instanceof Element ? target : null;
+      settingsDirtyFields.add(el?.id || el?.name || `anon:${settingsDirtyFields.size}`);
+      renderSettingsDirty();
+    }
+
+    function clearSettingsDirty() {
+      settingsDirtyFields.clear();
+      renderSettingsDirty();
+    }
+
+    ["input", "change"].forEach((type) => {
+      $("#settingsForm")?.addEventListener(type, (event) => {
+        const el = event.target;
+        if (!(el instanceof Element)) return;
+        // Read-only status mirrors (配置状态 / 凭据脱敏预览) are written by the
+        // page itself and must never look like a user edit.
+        if (el.hasAttribute("readonly") || el.classList.contains("source-credential-value")) return;
+        markSettingsDirty(el);
+      });
+    });
+
+    safeBind("#settingsDiscardBtn", "click", () => {
+      if (!state.config) { clearSettingsDirty(); return; }
+      applyConfig(state.config);
+      restoreFrontendSettings(state.config);
+      clearSettingsDirty();
+      showToast("已放弃未保存的修改");
+    });
+
     safeBind("#settingsForm", "submit", async (event) => {
       event.preventDefault();
       const submitBtn = $("#settingsForm button[type='submit']");

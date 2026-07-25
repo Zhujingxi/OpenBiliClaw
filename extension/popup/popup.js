@@ -8303,6 +8303,11 @@ function bindSettings() {
 
     renderIssues(cfg.issues);
     renderDegradedBanner(cfg);
+    // The enable checkboxes were just repopulated, so the cards' collapsed /
+    // disabled state has to be recomputed from the new values, and the form now
+    // mirrors the backend snapshot — nothing is pending.
+    syncSourceCardEnabledState();
+    clearSettingsDirty();
   }
 
   function collectForm() {
@@ -8550,6 +8555,112 @@ function bindSettings() {
     const view = SourceStatus.describeVerifyResult(result);
     setProbeStatus(statusEl, view.tone, view.text);
   }
+
+  // ---- 平台源卡片：展开/折叠、停用态 --------------------------------------
+  const SOURCE_CARD_ENABLE_IDS = {
+    bilibili: "cfgBilibiliEnabled",
+    xiaohongshu: "cfgXhsEnabled",
+    douyin: "cfgDouyinEnabled",
+    youtube: "cfgYoutubeEnabled",
+    twitter: "cfgTwitterEnabled",
+    zhihu: "cfgZhihuEnabled",
+    reddit: "cfgRedditEnabled",
+    bangumi: "cfgBangumiEnabled"
+  };
+
+  function setSourceCardOpen(card, open) {
+    if (!card) return;
+    card.dataset.open = open ? "1" : "0";
+    card.querySelector(".source-card-face")?.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  // A card whose source is switched off keeps its inputs in the DOM (the save
+  // payload still reads them) but stops advertising them as actionable.
+  function syncSourceCardEnabledState() {
+    Object.entries(SOURCE_CARD_ENABLE_IDS).forEach(([key, inputId]) => {
+      const card = document.querySelector(`[data-source-card="${key}"]`);
+      if (!card) return;
+      const input = document.getElementById(inputId);
+      const on = input ? input.checked : true;
+      card.dataset.sourceOff = on ? "false" : "true";
+      if (!on) setSourceCardOpen(card, false);
+    });
+  }
+
+  function initSourceCards() {
+    const panel = document.getElementById("settingsPanelSources");
+    if (!panel) return;
+
+    panel.addEventListener("click", (event) => {
+      // The enable checkbox and the verify button live on/inside the card but
+      // must not double as a toggle for the body.
+      if (event.target.closest(".source-card-body, input, label, button, select, textarea")) return;
+      const face = event.target.closest(".source-card-face");
+      const card = face?.closest("[data-source-card]");
+      if (!card || card.dataset.sourceOff === "true") return;
+      setSourceCardOpen(card, card.dataset.open !== "1");
+    });
+
+    panel.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const face = event.target.closest(".source-card-face");
+      if (!face || event.target !== face) return;
+      event.preventDefault();
+      const card = face.closest("[data-source-card]");
+      if (!card || card.dataset.sourceOff === "true") return;
+      setSourceCardOpen(card, card.dataset.open !== "1");
+    });
+
+    panel.addEventListener("change", (event) => {
+      const id = event.target?.id;
+      if (id && Object.values(SOURCE_CARD_ENABLE_IDS).includes(id)) syncSourceCardEnabledState();
+    });
+
+    syncSourceCardEnabledState();
+  }
+
+  // ---- 设置页吸底保存栏：未保存修改计数 ------------------------------------
+  // Counts distinct touched fields, not events, so retyping one input does not
+  // inflate the number.
+  const settingsDirtyFields = new Set();
+
+  function renderSettingsDirty() {
+    const bar = document.getElementById("settingsSaveBar");
+    const msg = document.getElementById("settingsSaveMsg");
+    const count = settingsDirtyFields.size;
+    if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
+    if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+  }
+
+  function markSettingsDirty(target) {
+    const el = target instanceof Element ? target : null;
+    settingsDirtyFields.add(el?.id || el?.name || `anon:${settingsDirtyFields.size}`);
+    renderSettingsDirty();
+  }
+
+  function clearSettingsDirty() {
+    settingsDirtyFields.clear();
+    renderSettingsDirty();
+  }
+
+  function initSettingsDirtyTracking() {
+    const root = document.getElementById("settingsOverlay") || document;
+    ["input", "change"].forEach((type) => {
+      root.addEventListener(type, (event) => {
+        const el = event.target;
+        if (!(el instanceof Element)) return;
+        if (!el.closest(".settings-panel")) return;
+        if (el.hasAttribute("readonly")) return;
+        markSettingsDirty(el);
+      });
+    });
+    renderSettingsDirty();
+  }
+
+  // popup.js is a deferred module script, so the settings markup is already
+  // parsed by the time this runs.
+  initSourceCards();
+  initSettingsDirtyTracking();
 
   const sourceVerifyInFlight = new Set();
 
