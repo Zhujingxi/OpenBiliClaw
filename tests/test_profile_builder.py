@@ -632,3 +632,122 @@ def test_profile_builder_requires_core_memory_task_service() -> None:
 
     with pytest.raises(TypeError, match="complete_structured_task"):
         ProfileBuilder(FakeRegistry("{}"))
+
+
+class TestHistorySamplingIsRepresentative:
+    """Init used to feed the model whatever history arrived first.
+
+    `_summarize_history` sliced `titles[:100]` / `contexts[:100]` /
+    `recent|older[:50]` off the fetch order, which on a real account is the
+    newest tail. With 1000 rows the profile was built from ~100 of them and any
+    long-standing interest older than that window was invisible no matter how
+    strongly the user had engaged with it. Selection now mirrors the incremental
+    path: weight by the same satisfaction semantics, spread across time.
+    """
+
+    @staticmethod
+    def _row(index: int, *, day: int, event_type: str = "view", ratio: float = 0.5) -> dict:
+        return {
+            "title": f"标题-{index}",
+            "event_type": event_type,
+            "view_at": 1_700_000_000 + day * 86_400,
+            "duration": 1000,
+            "progress": int(1000 * ratio),
+            "metadata": {},
+        }
+
+    def test_sample_covers_the_whole_span_not_just_the_newest_tail(self) -> None:
+        from openbiliclaw.soul.profile_builder import _sample_representative
+
+        # 600 rows over 300 days, arriving newest-first like the real fetch does
+        items = [self._row(i, day=300 - i // 2) for i in range(600)]
+        picked = _sample_representative(items, 100)
+
+        assert len(picked) == 100
+        days = [item["view_at"] for item in picked]
+        oldest, newest = min(days), max(days)
+        span = newest - oldest
+        full_span = max(i["view_at"] for i in items) - min(i["view_at"] for i in items)
+        assert span > full_span * 0.8, "样本必须铺开整个时间跨度，而不是只取最近一段"
+        # every sixth of the timeline contributes something
+        buckets = {int((d - oldest) / max(1, span) * 5.999) for d in days}
+        assert len(buckets) == 6, f"每个时间段都应有代表，实际覆盖 {sorted(buckets)}"
+
+    def test_explicit_interactions_outrank_bounced_views(self) -> None:
+        from openbiliclaw.soul.profile_builder import _sample_representative
+
+        # Same day so time bucketing cannot be what decides it
+        bounced = [self._row(i, day=10, ratio=0.05) for i in range(90)]
+        collected = [self._row(900 + i, day=10, event_type="favorite") for i in range(10)]
+        picked = _sample_representative(bounced + collected, 20)
+
+        kept_titles = {item["title"] for item in picked}
+        assert all(f"标题-{900 + i}" in kept_titles for i in range(10)), (
+            "收藏这类明确互动必须全部入选，不能被大量划走行为挤掉"
+        )
+
+    def test_finished_watches_outrank_bounces(self) -> None:
+        from openbiliclaw.soul.profile_builder import _history_weight
+
+        finished = self._row(1, day=1, ratio=0.95)
+        partial = self._row(2, day=1, ratio=0.5)
+        bounced = self._row(3, day=1, ratio=0.05)
+        favorite = self._row(4, day=1, event_type="favorite")
+
+        assert _history_weight(favorite) > _history_weight(finished)
+        assert _history_weight(finished) > _history_weight(partial)
+        assert _history_weight(partial) > _history_weight(bounced)
+        assert _history_weight(bounced) > 0, "划走也是信号，不该被完全归零"
+
+    def test_rows_without_timestamps_degrade_to_arrival_order(self) -> None:
+        from openbiliclaw.soul.profile_builder import _sample_representative
+
+        items = [{"title": f"无时间-{i}"} for i in range(300)]
+        picked = _sample_representative(items, 50)
+
+        assert len(picked) == 50
+        assert [i["title"] for i in picked] == [f"无时间-{i}" for i in range(50)]
+
+    def test_small_history_is_passed_through_untouched(self) -> None:
+        from openbiliclaw.soul.profile_builder import _sample_representative
+
+        items = [self._row(i, day=i) for i in range(20)]
+        assert _sample_representative(items, 100) == items
+
+    def test_summary_reports_true_total_and_explains_the_sample(self) -> None:
+        from openbiliclaw.soul.profile_builder import ProfileBuilder
+
+        items = [self._row(i, day=300 - i // 2) for i in range(400)]
+        summary = ProfileBuilder._summarize_history(items)
+
+        assert summary["count"] == 400, "count 必须是真实总量，不是样本量"
+        assert len(summary["titles"]) <= 100
+        assert "sampling_hint" in summary, "必须告诉模型这是抽样而非全量"
+        assert "400" in str(summary["sampling_hint"])
+
+    def test_summarized_titles_span_the_history_not_its_newest_prefix(self) -> None:
+        """Guards the wiring, not just the sampler.
+
+        A mutation that put `regular_items[:100]` back survived every other test
+        here, because they exercise `_sample_representative` directly. This one
+        asserts the summary the LLM actually receives is time-spread.
+        """
+        from openbiliclaw.soul.profile_builder import ProfileBuilder
+
+        # 400 rows arriving newest-first, spanning ~200 days
+        items = [self._row(i, day=300 - i // 2) for i in range(400)]
+        summary = ProfileBuilder._summarize_history(items)
+
+        indexes = sorted(int(t.split("-")[1]) for t in summary["titles"])
+        assert len(indexes) <= 100
+        # Arrival-order slicing can only ever reach index 99; real sampling has
+        # to reach deep into the older tail.
+        assert max(indexes) > 300, (
+            f"标题只覆盖到 index {max(indexes)}，说明仍在按到达顺序取前 100 条"
+        )
+        assert min(indexes) < 100, "最近的行为也应有代表"
+        # and the spread should not clump into one end
+        midpoint = sum(1 for i in indexes if i > 200)
+        assert midpoint >= len(indexes) // 4, (
+            f"较早的一半只贡献了 {midpoint}/{len(indexes)} 条，分布不均"
+        )
