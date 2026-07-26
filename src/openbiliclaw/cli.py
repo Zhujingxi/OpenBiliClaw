@@ -4270,6 +4270,33 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+def _favorites_to_history_rows(favorites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn fetched favourites into individual profile-history rows.
+
+    ``event_type`` is the load-bearing field: it earns these rows the
+    strong-signal weight and the reserved share of ProfileBuilder's sample, and
+    makes their context line read "收藏了" instead of "看了".
+    """
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI
+
+    rows: list[dict[str, Any]] = []
+    for fav in favorites:
+        title = str(fav.get("title", "")).strip()
+        if not title:
+            continue
+        rows.append(
+            {
+                "title": title,
+                "author_name": str(fav.get("upper", "")).strip(),
+                "event_type": "favorite",
+                "source_platform": SOURCE_BILIBILI,
+                "fav_time": fav.get("fav_time"),
+                "duration": fav.get("duration"),
+            }
+        )
+    return rows
+
+
 def _build_bilibili_init_events(
     *,
     history: list[dict[str, Any]],
@@ -7586,18 +7613,23 @@ async def run_guided_init(
     )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
-        # Ledger-only fields (bvid / fav_time / duration / pubtime /
-        # play_count) are dropped here: the profile builder reads this payload
-        # as prompt text, and ids and counters would cost tokens on every init
-        # without telling the model anything.
-        prompt_favorites = [
-            {key: value for key, value in fav.items() if key in {"title", "upper", "folder"}}
-            for fav in favorites_data
-        ]
+        # One favourite is one signal, so each becomes its own history row
+        # alongside the views. They used to be collapsed into a single
+        # "[收藏夹汇总]" item whose ``_favorites`` list nothing ever read — the
+        # portrait saw the sentence "共 200 个收藏，涵盖: 默认收藏夹" and not a
+        # single title. Deliberately choosing to save something is the
+        # strongest signal a user emits, and the whole of it was invisible.
+        #
+        # ``event_type`` is what earns them the strong-signal weight and the
+        # reserved share of the sample in ProfileBuilder, and what makes their
+        # context line read "收藏了" rather than "看了".
+        combined_history.extend(_favorites_to_history_rows(favorites_data))
+        # The folder names stay as one aggregate line: they are the user's own
+        # labels for what they save ("AI Agent", "学习"), which no per-item
+        # field carries.
         combined_history.append(
             {
                 "title": "[收藏夹汇总]",
-                "_favorites": prompt_favorites,
                 "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
                 + "涵盖: "
                 + ", ".join(

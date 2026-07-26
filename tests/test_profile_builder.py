@@ -686,6 +686,43 @@ class TestHistorySamplingIsRepresentative:
             "收藏这类明确互动必须全部入选，不能被大量划走行为挤掉"
         )
 
+    def test_favorites_reach_the_portrait_as_individual_rows(self) -> None:
+        """收藏此前整体塌成一句「共 N 个收藏」，一个标题都进不了画像。
+
+        `_favorites` 那份列表写进了 combined_history 但没有任何人读它——
+        `_summarize_history` 只取 `_favorites_summary`。用户主动存下来的内容是最强的
+        意图信号，却是画像里唯一看不见的那部分。
+        """
+        from openbiliclaw.soul.profile_builder import ProfileBuilder
+
+        views = [self._row(i, day=200 - i // 3, ratio=0.1) for i in range(300)]
+        favorites = [
+            {
+                "title": f"收藏-{i}",
+                "author_name": "UP",
+                "event_type": "favorite",
+                "source_platform": "bilibili",
+                "fav_time": 1_700_000_000 + i * 86_400,
+            }
+            for i in range(40)
+        ]
+        summary_row = {"title": "[收藏夹汇总]", "_favorites_summary": "共 40 个收藏，涵盖: AI"}
+
+        result = ProfileBuilder._summarize_history([*views, *favorites, summary_row])
+
+        titles = [*result["recent_titles"], *result["older_titles"]]
+        contexts = [*result["recent_contexts"], *result["older_contexts"]]
+        assert any(title.startswith("收藏-") for title in titles), "收藏必须作为独立行进画像"
+        assert any("收藏了" in line for line in contexts), "语境要说明这是收藏而不是观看"
+        assert result["favorites_summary"] == "共 40 个收藏，涵盖: AI", "收藏夹名仍作为汇总保留"
+
+    def test_favorites_are_dated_by_fav_time(self) -> None:
+        """收藏没有 view_at；读不到 fav_time 就等于没时间戳，会掉出时间分层。"""
+        from openbiliclaw.soul.profile_builder import _history_timestamp
+
+        assert _history_timestamp({"fav_time": 1_700_000_000}) == 1_700_000_000
+        assert _history_timestamp({"metadata": {"fav_time": 1_700_000_000}}) == 1_700_000_000
+
     def test_finished_watches_outrank_bounces(self) -> None:
         from openbiliclaw.soul.profile_builder import _history_weight
 

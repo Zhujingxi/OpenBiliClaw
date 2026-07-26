@@ -79,9 +79,14 @@ def _history_timestamp(item: dict[str, Any]) -> float:
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     for value in (
         item.get("view_at"),
+        # Favourites timestamp themselves with fav_time; without it every
+        # favourite would look undated and fall out of the time bucketing that
+        # keeps early behaviour represented.
+        item.get("fav_time"),
         item.get("timestamp"),
         metadata.get("timestamp"),
         metadata.get("view_at"),
+        metadata.get("fav_time"),
     ):
         if isinstance(value, bool) or value is None:
             continue

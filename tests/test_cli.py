@@ -3457,9 +3457,13 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
     assert len([event for event in analyzed if event["event_type"] == "follow"]) == 100
     assert len(fake_memory.events) == 601
     built_history = fake_soul.built_history[0]
-    assert len(built_history) == 3
-    assert str(built_history[1]["_favorites_summary"]).startswith("共 500 个收藏")
-    assert str(built_history[2]["_following_summary"]).startswith("共关注 100 人")
+    # 1 条历史 + 500 条收藏各自成行 + 收藏夹/关注两条汇总。收藏曾经整体塌成
+    # 那一条汇总，于是 500 个用户主动存下的信号在画像里一个都看不见。
+    favorite_rows = [row for row in built_history if row.get("event_type") == "favorite"]
+    assert len(favorite_rows) == 500, "一个收藏就是一个信号，不能塌成汇总里的一个数字"
+    assert len(built_history) == 503
+    assert str(built_history[-2]["_favorites_summary"]).startswith("共 500 个收藏")
+    assert str(built_history[-1]["_following_summary"]).startswith("共关注 100 人")
 
 
 def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
@@ -8585,6 +8589,22 @@ class TestInitSignalsAreDeduplicable:
         assert not (set(favorites[0]) & {"intro"}) <= prompt_keys, (
             "intro 不在画像 prompt 的白名单里"
         )
+
+    def test_favorites_become_individual_history_rows(self) -> None:
+        """一个收藏就是一个信号，不是汇总行里的一个数字。"""
+        from openbiliclaw.cli import _favorites_to_history_rows
+
+        rows = _favorites_to_history_rows(
+            [
+                {"title": "收藏的视频", "upper": "UP", "folder": "AI", "fav_time": 1_785_000_000},
+                {"title": "   ", "upper": "UP"},
+            ]
+        )
+
+        assert len(rows) == 1, "没有标题的行进画像只会变成噪声"
+        assert rows[0]["event_type"] == "favorite", "event_type 决定强信号权重和「收藏了」语境"
+        assert rows[0]["author_name"] == "UP"
+        assert rows[0]["fav_time"] == 1_785_000_000
 
     def test_a_favorited_video_lands_in_the_seen_ledger(self, tmp_path: Path) -> None:
         """端到端：收藏事件写库后必须出现在 seen_items 里。"""
