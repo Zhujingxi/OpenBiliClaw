@@ -1762,3 +1762,88 @@ async def test_engine_analyze_events_forwards_progress_callback() -> None:
     await engine.analyze_events([{"event_type": "view", "title": "x"}], progress_callback=_cb)
     kwargs = engine._preference_analyzer.analyze_events.await_args.kwargs
     assert kwargs["progress_callback"] is _cb
+
+
+class TestInitCognitionCandidatesSpreadAcrossChunks:
+    """Init's awareness/insight drafts must not be monopolised by recent chunks.
+
+    `_merge_init_cognition_contexts` walked chunk results in order and broke on
+    the cap (12 awareness / 8 insights). Chunks are `events[i:i+200]` and the
+    fetch returns newest first, so the newest one or two chunks filled the quota
+    and every older period contributed nothing — the same "first arrival wins"
+    failure the history summary had.
+    """
+
+    @staticmethod
+    def _raw(era: str, count: int = 6) -> dict[str, object]:
+        return {
+            "awareness_candidates": [
+                {"observation": f"{era}观察{i}", "trend": "t", "emotion_guess": "e"}
+                for i in range(count)
+            ],
+            "insight_candidates": [
+                {"hypothesis": f"{era}假设{i}", "confidence": 0.7, "evidence": ["x"]}
+                for i in range(count)
+            ],
+        }
+
+    def _analyzer(self):
+        from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+        class _Stub:
+            async def complete_structured_task(self, **_kwargs: object) -> object:
+                raise AssertionError("merging must not call the LLM")
+
+        return PreferenceAnalyzer(registry=_Stub())
+
+    def test_every_chunk_contributes_awareness(self) -> None:
+        analyzer = self._analyzer()
+        chunks = [self._raw("最近"), self._raw("中期"), self._raw("早期")]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        eras = {str(item["observation"])[:2] for item in merged["awareness"]}
+
+        assert eras == {"最近", "中期", "早期"}, f"每个时期都应有觉察代表，实际只有 {sorted(eras)}"
+
+    def test_every_chunk_contributes_insights(self) -> None:
+        analyzer = self._analyzer()
+        chunks = [self._raw("最近"), self._raw("中期"), self._raw("早期")]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        eras = {str(item["hypothesis"])[:2] for item in merged["insights"]}
+
+        assert eras == {"最近", "中期", "早期"}, f"每个时期都应有洞察代表，实际只有 {sorted(eras)}"
+
+    def test_caps_are_still_respected(self) -> None:
+        from openbiliclaw.soul.preference_analyzer import (
+            _INIT_AWARENESS_CANDIDATES_CAP,
+            _INIT_INSIGHT_CANDIDATES_CAP,
+        )
+
+        analyzer = self._analyzer()
+        chunks = [self._raw(f"期{i}", count=20) for i in range(8)]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+
+        assert len(merged["awareness"]) == _INIT_AWARENESS_CANDIDATES_CAP
+        assert len(merged["insights"]) == _INIT_INSIGHT_CANDIDATES_CAP
+
+    def test_a_thin_chunk_does_not_waste_the_budget(self) -> None:
+        """分片产出不均时，空出的名额要回流，而不是浪费。"""
+        from openbiliclaw.soul.preference_analyzer import _INIT_AWARENESS_CANDIDATES_CAP
+
+        analyzer = self._analyzer()
+        chunks = [self._raw("多", count=10), self._raw("少", count=1)]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+
+        assert len(merged["awareness"]) == min(11, _INIT_AWARENESS_CANDIDATES_CAP)
+        assert any(str(i["observation"]).startswith("少") for i in merged["awareness"])
+
+    def test_duplicates_across_chunks_are_still_collapsed(self) -> None:
+        analyzer = self._analyzer()
+        same = self._raw("同", count=3)
+        merged = analyzer._merge_init_cognition_contexts([same, dict(same), dict(same)])
+
+        observations = [str(i["observation"]) for i in merged["awareness"]]
+        assert len(observations) == len(set(observations)) == 3

@@ -779,37 +779,65 @@ class PreferenceAnalyzer:
         self,
         raw_preferences: Iterable[dict[str, object]],
     ) -> dict[str, object]:
-        awareness: list[dict[str, object]] = []
-        insights: list[dict[str, object]] = []
-        seen_awareness: set[str] = set()
-        seen_insights: set[str] = set()
+        """Merge per-chunk cognition drafts, giving every chunk a turn.
+
+        Chunks are ``events[i:i+N]`` over a newest-first fetch, so walking them
+        in order and stopping at the cap handed the whole quota to the most
+        recent one or two chunks — an account's earlier periods contributed
+        nothing at all. Round-robin instead: take one candidate from each chunk
+        per pass, so a 90-day history is represented across its span, and a
+        chunk that produced little simply drops out of later passes rather than
+        wasting its share.
+        """
+        per_chunk_awareness: list[list[dict[str, object]]] = []
+        per_chunk_insights: list[list[dict[str, object]]] = []
         for raw in raw_preferences:
             context = self._extract_init_cognition_context(raw)
-            for item in self._as_list(context.get("awareness")):
-                if not isinstance(item, dict):
-                    continue
-                key = self._normalize_context_text(str(item.get("observation", "")))
-                if not key or key in seen_awareness:
-                    continue
-                seen_awareness.add(key)
-                awareness.append(item)
-                if len(awareness) >= _INIT_AWARENESS_CANDIDATES_CAP:
+            per_chunk_awareness.append(
+                [item for item in self._as_list(context.get("awareness")) if isinstance(item, dict)]
+            )
+            per_chunk_insights.append(
+                [item for item in self._as_list(context.get("insights")) if isinstance(item, dict)]
+            )
+
+        def _round_robin(
+            groups: list[list[dict[str, object]]],
+            *,
+            key_field: str,
+            cap: int,
+        ) -> list[dict[str, object]]:
+            picked: list[dict[str, object]] = []
+            seen: set[str] = set()
+            cursors = [0] * len(groups)
+            while len(picked) < cap:
+                progressed = False
+                for index, group in enumerate(groups):
+                    if len(picked) >= cap:
+                        break
+                    while cursors[index] < len(group):
+                        item = group[cursors[index]]
+                        cursors[index] += 1
+                        key = self._normalize_context_text(str(item.get(key_field, "")))
+                        if not key or key in seen:
+                            continue
+                        seen.add(key)
+                        picked.append(item)
+                        progressed = True
+                        break
+                if not progressed:
                     break
-            for item in self._as_list(context.get("insights")):
-                if not isinstance(item, dict):
-                    continue
-                key = self._normalize_context_text(str(item.get("hypothesis", "")))
-                if not key or key in seen_insights:
-                    continue
-                seen_insights.add(key)
-                insights.append(item)
-                if len(insights) >= _INIT_INSIGHT_CANDIDATES_CAP:
-                    break
-            if (
-                len(awareness) >= _INIT_AWARENESS_CANDIDATES_CAP
-                and len(insights) >= _INIT_INSIGHT_CANDIDATES_CAP
-            ):
-                break
+            return picked
+
+        awareness = _round_robin(
+            per_chunk_awareness,
+            key_field="observation",
+            cap=_INIT_AWARENESS_CANDIDATES_CAP,
+        )
+        insights = _round_robin(
+            per_chunk_insights,
+            key_field="hypothesis",
+            cap=_INIT_INSIGHT_CANDIDATES_CAP,
+        )
         result: dict[str, object] = {}
         if awareness:
             result["awareness"] = awareness
