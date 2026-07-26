@@ -38,7 +38,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
 | `db-repair` | 检查、备份并修复本地 SQLite 数据库 | ✅ |
 | `serve-api` | 启动容器友好的 API 服务 | ✅ |
-| `init` | 首次初始化 | ✅ |
+| `init` | 首次初始化 | ✅ | stage 1 拉到的 B 站历史/收藏会按 `view`/`favorite` 写入事件账本（2026-07-26+）：`seen_items` 由 view 事件派生，因此**用户已看过的内容立即参与去重**，不会被当新内容推回；按 canonical item key 幂等，重跑/续跑只跳过不重复。`progress`/`duration`/`view_at` 一并入 metadata，供画像抽样的完播权重与时间分层使用 |
 | `fetch-douyin` | 单独触发抖音 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-xhs` | 单独触发小红书 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-youtube` | 单独触发 YouTube bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |

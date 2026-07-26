@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -248,7 +248,7 @@ async def test_build_initial_profile_reads_preference_and_saves_soul(
 
 
 @pytest.mark.asyncio
-async def test_init_cognition_context_is_ephemeral_and_feeds_profile_build(
+async def test_init_cognition_context_leaves_preference_and_feeds_profile_build(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     memory = MemoryManager(tmp_path)
@@ -325,25 +325,33 @@ async def test_init_cognition_context_is_ephemeral_and_feeds_profile_build(
 
     await engine.build_initial_profile(history=[{"title": "AI 工具链实战"}])
 
-    assert captured["awareness_notes"] == [
-        {
-            "date": "init",
-            "observation": "初始化 chunk 观察到用户持续停留在工具链内容。",
-            "trend": "从泛泛探索转向工作流验证。",
-            "emotion_guess": "对掌控感有需求。",
-        }
+    # Exactly one of each: the draft is persisted *and* still carried in the
+    # in-memory context, so the profile builder must dedup rather than weigh the
+    # same observation twice.
+    notes = cast("list[dict[str, object]]", captured["awareness_notes"])
+    insights = cast("list[dict[str, object]]", captured["active_insights"])
+    assert [note["observation"] for note in notes] == [
+        "初始化 chunk 观察到用户持续停留在工具链内容。"
     ]
-    assert captured["active_insights"] == [
-        {
-            "hypothesis": "用户可能在寻找可支撑长期产出的工具化路径。",
-            "evidence": ["多个初始化 chunk 都指向工具链和长期项目。"],
-            "confidence": 0.73,
-            "validated": False,
-            "created_at": "init",
-        }
+    assert notes[0]["trend"] == "从泛泛探索转向工作流验证。"
+    assert notes[0]["emotion_guess"] == "对掌控感有需求。"
+    assert [item["hypothesis"] for item in insights] == [
+        "用户可能在寻找可支撑长期产出的工具化路径。"
     ]
-    assert memory.get_layer("awareness").data.get("notes", []) == []
-    assert memory.get_layer("insight").data.get("hypotheses", []) == []
+    assert insights[0]["evidence"] == ["多个初始化 chunk 都指向工具链和长期项目。"]
+    assert insights[0]["confidence"] == 0.73
+    assert insights[0]["validated"] is False
+    # The context key must not survive inside the preference layer, but the
+    # drafts themselves now reach the long-term layers — see
+    # TestInitCognitionDraftsArePersisted for that contract. They used to be
+    # dropped after shaping the first portrait, which left a fresh install with
+    # nothing to ask the user about.
+    assert [note["observation"] for note in memory.get_layer("awareness").data["notes"]] == [
+        "初始化 chunk 观察到用户持续停留在工具链内容。"
+    ]
+    assert [item["hypothesis"] for item in memory.get_layer("insight").data["hypotheses"]] == [
+        "用户可能在寻找可支撑长期产出的工具化路径。"
+    ]
 
 
 @pytest.mark.asyncio
@@ -4733,3 +4741,116 @@ async def test_new_migration_reopens_pending_and_resets_retry(tmp_path: Path) ->
     assert reopened["retry_count"] == 0
     assert reopened["set_at"] != "2026-01-01T00:00:00"
     assert "ref:a" in reopened["trigger_refs"]
+
+
+class TestInitCognitionDraftsArePersisted:
+    """init 的觉察/洞察草稿必须落库，而不是影响完画像就丢掉。
+
+    此前 `_init_cognition_context` 只活在内存里：它塑造了首份画像，然后消失。
+    加上 init 拉的历史当时也不入 events 表，认知循环连重新提炼的素材都没有。
+    实际后果是全新装机跑完 init 后「待聊确认」是空的——系统刚刚形成了具体
+    猜测，却一条都不问。
+    """
+
+    def _engine(self, tmp_path: Path):
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.engine import SoulEngine
+
+        class _Registry:
+            async def complete(self, *_a: object, **_k: object) -> object:
+                from openbiliclaw.llm.base import LLMResponse
+
+                return LLMResponse(content="[]", provider="fake")
+
+            async def complete_structured_task(self, **_k: object) -> object:
+                from openbiliclaw.llm.base import LLMResponse
+
+                return LLMResponse(content="[]", provider="fake")
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        return SoulEngine(llm=_Registry(), memory=memory), memory
+
+    def test_drafts_land_in_the_long_term_layers(self, tmp_path: Path) -> None:
+        engine, memory = self._engine(tmp_path)
+        engine._persist_init_cognition_drafts(
+            {
+                "awareness": [
+                    {
+                        "observation": "连续多日完整看完木工系列",
+                        "trend": "系统学习",
+                        "emotion_guess": "专注",
+                    },
+                    {
+                        "observation": "短暂浏览财经内容即离开",
+                        "trend": "浅尝",
+                        "emotion_guess": "中性",
+                    },
+                ],
+                "insights": [
+                    {
+                        "hypothesis": "用户可能正在系统学习木工",
+                        "confidence": 0.72,
+                        "evidence": ["完播率高", "收藏配套教程"],
+                    },
+                ],
+            }
+        )
+
+        notes = memory.get_layer("awareness").data.get("notes", [])
+        hyps = memory.get_layer("insight").data.get("hypotheses", [])
+        assert len(notes) == 2, "觉察草稿必须落进 awareness 层"
+        assert len(hyps) == 1, "洞察草稿必须落进 insight 层"
+        assert hyps[0]["hypothesis"] == "用户可能正在系统学习木工"
+        assert hyps[0]["confidence"] == 0.72
+        assert hyps[0]["validated"] is False, "草稿是待确认的假设，不能自称已验证"
+        assert hyps[0].get("user_verdict", "") == "", "用户还没表过态"
+
+    def test_notes_cite_recorded_events_and_admit_approximation(self, tmp_path: Path) -> None:
+        """挂的是 init 刚记进账本的真实事件；归属是按轮的，必须标近似。"""
+        engine, memory = self._engine(tmp_path)
+        for index in range(3):
+            memory._database.insert_event("view", title=f"木工{index}", url=f"https://b.tv/{index}")
+
+        engine._persist_init_cognition_drafts(
+            {"awareness": [{"observation": "看了木工内容", "trend": "t", "emotion_guess": "e"}]}
+        )
+
+        note = memory.get_layer("awareness").data["notes"][0]
+        real_ids = {
+            int(row["id"]) for row in memory._database.conn.execute("SELECT id FROM events")
+        }
+        assert note["source_event_ids"], "应当挂上刚记录的事件"
+        assert set(note["source_event_ids"]) <= real_ids, "不得引用不存在的事件"
+        assert note["source_event_ids_approximate"] is True, (
+            "init 的归属是按轮而非按条，必须诚实标注"
+        )
+        assert note["note_id"], "落库的觉察需要可追溯的 note_id"
+
+    def test_persisting_drafts_is_ledgered(self, tmp_path: Path) -> None:
+        engine, memory = self._engine(tmp_path)
+        engine._persist_init_cognition_drafts(
+            {"insights": [{"hypothesis": "假设一", "confidence": 0.6}]}
+        )
+        rows = [
+            row
+            for row in (memory._database.query_profile_ledger(days=1, limit=50) or [])
+            if row.get("write_point") == "init_cognition_persist"
+        ]
+        assert rows, "落库动作必须进台账"
+
+    def test_empty_context_is_a_noop(self, tmp_path: Path) -> None:
+        engine, memory = self._engine(tmp_path)
+        engine._persist_init_cognition_drafts({})
+        assert memory.get_layer("awareness").data.get("notes", []) == []
+        assert memory.get_layer("insight").data.get("hypotheses", []) == []
+
+    def test_drafts_merge_rather_than_overwrite(self, tmp_path: Path) -> None:
+        """重跑 init 不该冲掉既有认知，也不该重复同一条。"""
+        engine, memory = self._engine(tmp_path)
+        draft = {"awareness": [{"observation": "同一条观察", "trend": "t", "emotion_guess": "e"}]}
+        engine._persist_init_cognition_drafts(draft)
+        engine._persist_init_cognition_drafts(dict(draft))
+
+        observations = [n["observation"] for n in memory.get_layer("awareness").data["notes"]]
+        assert observations.count("同一条观察") == 1, "重复草稿应被合并去重"

@@ -8450,3 +8450,92 @@ def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch)
     assert "BV号" in out
     assert "BV1LEGACY" in out
     assert "内容 ID" not in out
+
+
+class TestInitHistoryReachesTheEventLedger:
+    """init 拉到的历史必须进 events 表，否则去重无从谈起。
+
+    stage 1 的数据此前只存在局部变量里：喂完 analyze_events / build_initial_profile
+    就丢。于是 seen_items（由 view 事件派生）对用户已看过的内容一无所知——
+    刚装好的实例可以把用户自己的观看历史当新内容推回去。
+    """
+
+    def _db(self, tmp_path: Path):
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        return db
+
+    @staticmethod
+    def _item(bvid: str, *, title: str = "标题", progress: int = 100) -> dict:
+        return {
+            "title": title,
+            "history": {"bvid": bvid},
+            "author_name": "UP",
+            "view_at": 1_785_000_000,
+            "progress": progress,
+            "duration": 200,
+            "tag_name": "科技",
+        }
+
+    def test_history_becomes_view_events_and_marks_items_seen(self, tmp_path: Path) -> None:
+        from openbiliclaw.cli import _persist_init_history_to_events
+
+        db = self._db(tmp_path)
+        counts = _persist_init_history_to_events(
+            db,
+            history=[self._item("BV1"), self._item("BV2")],
+            favorites=[self._item("BV3")],
+        )
+
+        assert counts["history"] == 2
+        assert counts["favorites"] == 1
+        types = [r[0] for r in db.conn.execute("SELECT event_type FROM events ORDER BY id")]
+        assert types == ["view", "view", "favorite"]
+        seen = {r[0] for r in db.conn.execute("SELECT content_id FROM seen_items")}
+        assert {"BV1", "BV2"} <= seen, "看过的内容必须进 seen_items，才能不再被推荐"
+
+    def test_rerunning_init_does_not_duplicate_the_ledger(self, tmp_path: Path) -> None:
+        from openbiliclaw.cli import _persist_init_history_to_events
+
+        db = self._db(tmp_path)
+        first = _persist_init_history_to_events(db, history=[self._item("BV1")], favorites=[])
+        second = _persist_init_history_to_events(db, history=[self._item("BV1")], favorites=[])
+
+        assert first["history"] == 1
+        assert second["history"] == 0 and second["skipped"] == 1, "重跑 init 必须幂等"
+        total = db.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        assert total == 1
+
+    def test_watch_metrics_survive_for_downstream_weighting(self, tmp_path: Path) -> None:
+        """完播率与时间戳要带进 metadata，否则画像抽样退化成到达顺序。"""
+        import json
+
+        from openbiliclaw.cli import _persist_init_history_to_events
+
+        db = self._db(tmp_path)
+        _persist_init_history_to_events(db, history=[self._item("BV9", progress=180)], favorites=[])
+        raw = db.conn.execute("SELECT metadata FROM events").fetchone()[0]
+        metadata = json.loads(raw) if isinstance(raw, str) else raw
+        assert metadata["watch_seconds"] == 180
+        assert metadata["video_duration_seconds"] == 200
+        assert metadata["timestamp"] == 1_785_000_000 * 1000, "毫秒时间戳供时间分层使用"
+
+    def test_rows_without_an_id_are_skipped_not_crashed(self, tmp_path: Path) -> None:
+        from openbiliclaw.cli import _persist_init_history_to_events
+
+        db = self._db(tmp_path)
+        counts = _persist_init_history_to_events(
+            db,
+            history=[{"title": "没有 bvid"}, {"history": {"bvid": "BV1"}}, self._item("BV2")],
+            favorites=[],
+        )
+        assert counts["history"] == 1
+        assert counts["skipped"] == 2
+
+    def test_missing_database_is_tolerated(self) -> None:
+        from openbiliclaw.cli import _persist_init_history_to_events
+
+        counts = _persist_init_history_to_events(None, history=[{"title": "x"}], favorites=[])
+        assert counts == {"history": 0, "favorites": 0, "skipped": 0}

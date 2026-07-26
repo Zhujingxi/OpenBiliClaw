@@ -102,6 +102,29 @@ _REBUILD_WRITE_POINT: dict[str, str] = {
 # (spec invariant 3 / r3/F1). Rejected or unvalidated hypotheses are invisible
 # to every rebuild, so a reject's next rebuild squeezes an old conclusion out.
 _REBUILD_MIN_CONFIDENCE = 0.75
+# How many of the events init just recorded may be cited by a persisted draft.
+# Attribution here is per-round (the model was never asked which note came from
+# which event), so the notes are flagged approximate; the cap only keeps the
+# citation list from growing with the whole history.
+_INIT_DRAFT_EVIDENCE_CAP = 300
+
+
+def _init_draft_evidence(value: object) -> list[str]:
+    """Normalise a draft's evidence list, dropping blanks and non-strings."""
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _clamp_init_draft_confidence(value: object) -> float:
+    """Coerce a draft confidence into [0, 1], defaulting to 0.5."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(1.0, round(number, 4)))
+
+
 # Debounce between a confirm/reject migration and the gated rebuild it schedules
 # (spec r3/F3). 6h sits between conversational cadence and the 12h cognition
 # loop — first-round calibration, re-tune after the first production month
@@ -496,6 +519,7 @@ class SoulEngine:
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
+        self._persist_init_cognition_drafts(self._init_cognition_context)
         # Ledger write point D5 #7: full-preference (re)build from raw events —
         # the init bootstrap and any full-events re-analysis both land here.
         existing_preference = dict(preference_layer.data)
@@ -538,8 +562,15 @@ class SoulEngine:
         preference_layer = self._memory.get_layer("preference").data
         awareness_notes = [awareness_note_to_dict(item) for item in self._load_awareness_notes()]
         active_insights = [insight_hypothesis_to_dict(item) for item in self._load_insights()]
-        awareness_notes.extend(self._init_awareness_context())
-        active_insights.extend(self._init_insight_context())
+        # Init drafts are persisted by ``_persist_init_cognition_drafts``, so the
+        # two loads above normally already contain them. The in-memory context is
+        # still appended because that persistence is best-effort — but dedup by
+        # normalized text, or the profile builder would weigh every init draft
+        # twice and read it as two independent observations.
+        self._extend_without_duplicates(
+            awareness_notes, self._init_awareness_context(), "observation"
+        )
+        self._extend_without_duplicates(active_insights, self._init_insight_context(), "hypothesis")
         legacy_profile = await self._profile_builder.build(
             history=history,
             preference=preference_layer,
@@ -581,6 +612,26 @@ class SoulEngine:
         # load-bearing profile stage.
 
         return profile
+
+    def _extend_without_duplicates(
+        self,
+        existing: list[dict[str, object]],
+        extra: list[dict[str, object]],
+        field: str,
+    ) -> None:
+        """Append ``extra`` to ``existing``, skipping entries already present."""
+        seen = {
+            key
+            for key in (self._normalize_context_text(str(item.get(field, ""))) for item in existing)
+            if key
+        }
+        for item in extra:
+            key = self._normalize_context_text(str(item.get(field, "")))
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            existing.append(item)
 
     def _init_awareness_context(self) -> list[dict[str, object]]:
         raw_items = self._init_cognition_context.get("awareness")
@@ -2851,6 +2902,86 @@ class SoulEngine:
         layer_data = self._memory.get_layer("awareness").data
         notes = layer_data.get("notes", [])
         return [awareness_note_from_dict(item) for item in notes if isinstance(item, dict)]
+
+    def _persist_init_cognition_drafts(self, context: dict[str, Any]) -> None:
+        """Write init's awareness/insight drafts into the long-term layers.
+
+        These drafts used to live only in ``_init_cognition_context``: they
+        shaped the first portrait and were then discarded, and because init's
+        history never reached the event table the cognition cycle could not
+        re-derive them either. The practical cost was a brand-new install whose
+        待聊 list was empty — the system had just formed concrete hypotheses
+        about the user and asked none of them.
+
+        Drafts are merged through the same paths a regular cognition pass uses,
+        so dedup, lifecycle and user verdicts behave identically. Awareness
+        notes cite the events init recorded this run when available, and are
+        flagged approximate because the model attributed per round, not per
+        note. Best-effort: a failure here must not fail init.
+        """
+        if not isinstance(context, dict) or not context:
+            return
+        try:
+            source_event_ids: list[int] = []
+            database = self._ledger_database
+            if database is not None:
+                try:
+                    source_event_ids = [
+                        int(row["id"])
+                        for row in database.conn.execute(
+                            "SELECT id FROM events ORDER BY id DESC LIMIT ?",
+                            (_INIT_DRAFT_EVIDENCE_CAP,),
+                        )
+                    ]
+                except Exception:
+                    logger.debug("init draft evidence lookup failed", exc_info=True)
+            raw_awareness = [
+                item for item in _as_dict_list(context.get("awareness")) if item.get("observation")
+            ]
+            if raw_awareness:
+                notes = [
+                    AwarenessNote(
+                        date=str(item.get("date", "") or "init"),
+                        observation=str(item.get("observation", "")).strip(),
+                        trend=str(item.get("trend", "")).strip(),
+                        emotion_guess=str(item.get("emotion_guess", "")).strip(),
+                        note_id=uuid4().hex[:12],
+                        source_event_ids=list(source_event_ids),
+                        source_event_ids_approximate=bool(source_event_ids),
+                    )
+                    for item in raw_awareness
+                ]
+                merged_notes = self._awareness_analyzer.merge_notes(
+                    self._load_awareness_notes(), notes
+                )
+                self._save_awareness_notes(merged_notes)
+            raw_insights = [
+                item for item in _as_dict_list(context.get("insights")) if item.get("hypothesis")
+            ]
+            if raw_insights:
+                hypotheses = [
+                    InsightHypothesis(
+                        hypothesis=str(item.get("hypothesis", "")).strip(),
+                        evidence=_init_draft_evidence(item.get("evidence")),
+                        confidence=_clamp_init_draft_confidence(item.get("confidence")),
+                        validated=False,
+                        created_at=datetime.now().date().isoformat(),
+                    )
+                    for item in raw_insights
+                ]
+                merged_insights = self._insight_analyzer.merge_insights(
+                    self._load_insights(), hypotheses
+                )
+                self._save_insights(merged_insights)
+            self._ledger.record(
+                write_point="init_cognition_persist",
+                source="init",
+                before={},
+                after={"awareness": len(raw_awareness), "insights": len(raw_insights)},
+                source_refs=[f"events:{len(source_event_ids)}"],
+            )
+        except Exception:
+            logger.warning("init cognition drafts were not persisted", exc_info=True)
 
     def _save_awareness_notes(self, notes: list[AwarenessNote]) -> None:
         layer = self._memory.get_layer("awareness")

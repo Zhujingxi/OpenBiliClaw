@@ -4253,6 +4253,111 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+def _persist_init_history_to_events(
+    database: Any,
+    *,
+    history: list[dict[str, Any]],
+    favorites: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Record init's fetched Bilibili history in the durable event ledger.
+
+    Init used to keep stage-1 data in local variables only: it fed
+    ``analyze_events`` / ``build_initial_profile`` and was then dropped. Two
+    things fell out of that:
+
+    * **No dedup.** ``seen_items`` is derived from ``view`` events, so nothing
+      the user had already watched was known to the recommender — a brand-new
+      install could immediately recommend videos from the user's own history.
+    * **Nothing to re-derive from.** The cognition cycle reads the event table,
+      so init's material was invisible to it, and awareness notes built during
+      init had no real event ids to cite.
+
+    Writes are idempotent by canonical item key: re-running init (or resuming a
+    failed one) skips rows already present in ``seen_items`` rather than
+    duplicating the ledger. Returns per-kind counts for progress reporting.
+    """
+    import logging
+
+    from openbiliclaw.saved_sync.identity import make_item_key
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
+
+    logger = logging.getLogger("openbiliclaw.cli")
+    if database is None:
+        return {"history": 0, "favorites": 0, "skipped": 0}
+
+    try:
+        existing_keys = {
+            str(row["item_key"]) for row in database.conn.execute("SELECT item_key FROM seen_items")
+        }
+    except Exception:
+        logger.debug("seen_items lookup failed; init ledger import proceeds", exc_info=True)
+        existing_keys = set()
+
+    counts = {"history": 0, "favorites": 0, "skipped": 0}
+
+    def _bvid(item: dict[str, Any]) -> str:
+        raw = item.get("history")
+        if isinstance(raw, dict):
+            candidate = str(raw.get("bvid", "") or "").strip()
+            if candidate:
+                return candidate
+        return str(item.get("bvid", "") or "").strip()
+
+    def _record(item: dict[str, Any], *, event_type: str, bucket: str) -> None:
+        bvid = _bvid(item)
+        title = str(item.get("title", "") or "").strip()
+        if not bvid or not title:
+            counts["skipped"] += 1
+            return
+        try:
+            item_key = make_item_key(SOURCE_BILIBILI, bvid)
+        except ValueError:
+            counts["skipped"] += 1
+            return
+        if item_key in existing_keys:
+            counts["skipped"] += 1
+            return
+        metadata: dict[str, Any] = {"content_id": bvid, "bvid": bvid}
+        view_at = item.get("view_at")
+        if isinstance(view_at, (int, float)) and view_at > 0:
+            # Event metadata carries epoch milliseconds; history reports seconds.
+            metadata["timestamp"] = int(view_at) * 1000
+        for source_field, target in (
+            ("progress", "watch_seconds"),
+            ("duration", "video_duration_seconds"),
+        ):
+            value = item.get(source_field)
+            if isinstance(value, (int, float)) and value > 0:
+                metadata[target] = float(value)
+        tag = str(item.get("tag_name", "") or "").strip()
+        if tag:
+            metadata["category"] = tag
+        event = build_event(
+            event_type=event_type,
+            source_platform=SOURCE_BILIBILI,
+            title=title,
+            url=f"https://www.bilibili.com/video/{bvid}",
+            author=str(item.get("author_name", "") or "").strip(),
+            metadata=metadata,
+        )
+        try:
+            database.insert_event(**event)
+        except Exception:
+            logger.debug("init ledger insert failed for %s", bvid, exc_info=True)
+            counts["skipped"] += 1
+            return
+        existing_keys.add(item_key)
+        counts[bucket] += 1
+
+    for item in history:
+        if isinstance(item, dict):
+            _record(item, event_type="view", bucket="history")
+    for item in favorites:
+        if isinstance(item, dict):
+            _record(item, event_type="favorite", bucket="favorites")
+    return counts
+
+
 def _xhs_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert XHS bootstrap events into profile-builder history rows.
 
@@ -6935,6 +7040,22 @@ async def run_guided_init(
                 f" / 收藏 [green]{len(favorites_data)}[/green] 个"
                 f" / 关注 [green]{len(following_data)}[/green] 人"
             )
+            # Record what we just fetched in the durable event ledger, so
+            # seen_items knows this content is already watched (dedup) and the
+            # cognition cycle has real events to re-derive from later.
+            ledger_counts = _persist_init_history_to_events(
+                getattr(memory, "_database", None),
+                history=history,
+                favorites=favorites_data,
+            )
+            recorded = ledger_counts["history"] + ledger_counts["favorites"]
+            if recorded or ledger_counts["skipped"]:
+                console.print(
+                    f"  [dim]已记入事件账本 [green]{recorded}[/green] 条"
+                    f"（历史 {ledger_counts['history']} / 收藏 {ledger_counts['favorites']}"
+                    f"，跳过已存在 {ledger_counts['skipped']} 条）"
+                    f"——这些内容不会再被推荐给你[/dim]"
+                )
         _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
