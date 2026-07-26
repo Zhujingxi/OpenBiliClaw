@@ -39,6 +39,11 @@ from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_TWITTER as _PLATFORM_TWITTER
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 
 if TYPE_CHECKING:
     from openbiliclaw.discovery.engine import DiscoveredContent
@@ -165,7 +170,7 @@ class XDiscoveryProducer:
         # ``used`` (admission is downstream; yield backfill is P1.8).
         if claimed_search and self.keyword_fetch is not None:
             self.keyword_fetch.mark_used(claimed_search)
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(len(items))
         return {"enqueued": enqueued, "discovered": len(items), "reason": "ok"}
 
     # ── strategy execution ───────────────────────────────────────────
@@ -314,9 +319,23 @@ class XDiscoveryProducer:
         )
         self.database.conn.commit()
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "twitter", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "twitter", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)

@@ -20,6 +20,11 @@ from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_ZHIHU
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 from openbiliclaw.sources.zhihu_tasks import (
     ZhihuTaskQueue,
     recent_zhihu_creator_urls,
@@ -162,7 +167,7 @@ class ZhihuDiscoveryProducer:
             if source == "search" and coordinator is not None and claimed:
                 self._mark_search_keywords(coordinator, claimed, items)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(enqueued_task_count)
         if enqueued_task_count == 0:
             return self._skip(skipped_reasons[0] if skipped_reasons else "no_sources")
 
@@ -319,9 +324,23 @@ class ZhihuDiscoveryProducer:
         except Exception:
             logger.debug("zhihu producer: task dispatcher kick failed", exc_info=True)
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "zhihu", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "zhihu", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)

@@ -18,6 +18,11 @@ from typing import Any
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinBudgetExhausted as _DouyinBudgetExhausted,
 )
@@ -71,6 +76,9 @@ class DouyinDiscoveryProducer:
     # and walks them through the inline-admit lifecycle (used / failed /
     # budget-rollback). ``None`` (default / tests / flag off) → legacy path.
     keyword_fetch: Any | None = None
+    # Only used for the restart-surviving cadence floor; None falls back to
+    # the in-process stamp.
+    database: Any | None = None
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
 
@@ -161,7 +169,7 @@ class DouyinDiscoveryProducer:
             else:
                 coordinator.mark_failed(claimed)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(len(result.items))
         payload: dict[str, object] = {
             "discovered": len(result.items),
             "source_counts": dict(result.source_counts),
@@ -187,9 +195,23 @@ class DouyinDiscoveryProducer:
             payload.update(drain_result)
         return payload
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "douyin", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "douyin", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
@@ -311,6 +333,7 @@ def build_douyin_discovery_producer(
         discover=_discover,
         enabled=bool(getattr(scheduler, "enabled", True)),
         min_interval_minutes=int(getattr(dy_cfg, "min_interval_minutes", 3)),
+        database=database,
         sources=("search", "hot", "feed"),
         candidate_pipeline=candidate_pipeline,
         per_source_limit=20,

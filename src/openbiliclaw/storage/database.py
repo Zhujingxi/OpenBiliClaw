@@ -945,6 +945,21 @@ CREATE TABLE IF NOT EXISTS bangumi_discovery_state (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Shared producer cadence ledger. Douyin / YouTube / X / Zhihu / Reddit used to
+-- keep "when did I last run" in a Python attribute, so a backend restart wiped
+-- the floor and the next tick fired immediately — measured on real data, 5 of
+-- 55 Reddit rounds landed 8-40 minutes apart under a 60-minute setting. Rows
+-- are written only for runs that actually produced candidates, which also stops
+-- an empty run from burning a whole interval it should have retried inside.
+CREATE TABLE IF NOT EXISTS source_producer_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT NOT NULL,
+    discovered  INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_source_producer_runs_platform_created
+    ON source_producer_runs(platform, created_at);
+
 -- Recommendation history
 CREATE TABLE IF NOT EXISTS recommendations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8151,6 +8166,45 @@ class Database:
             rows,
         )
         return self.conn.total_changes - before
+
+    def record_source_producer_run(self, platform: str, discovered: int) -> None:
+        """Stamp one producer round on the shared cadence ledger.
+
+        Only productive rounds are worth recording: a round that came back
+        empty should be retried on the next tick, not blocked for a whole
+        ``min_interval_minutes``.
+        """
+        if int(discovered) <= 0:
+            return
+        key = str(platform or "").strip().lower()
+        if not key:
+            return
+        self.conn.execute(
+            "INSERT INTO source_producer_runs(platform, discovered) VALUES (?, ?)",
+            (key, max(0, int(discovered))),
+        )
+        self.conn.commit()
+
+    def source_producer_ran_within(self, platform: str, minutes: int) -> bool:
+        """True when this source produced candidates inside the last N minutes.
+
+        Survives a restart, unlike the in-process timestamp this replaced.
+        """
+        window = int(minutes)
+        if window <= 0:
+            return False
+        key = str(platform or "").strip().lower()
+        if not key:
+            return False
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM source_producer_runs
+            WHERE platform = ? AND created_at >= datetime('now', ?)
+            LIMIT 1
+            """,
+            (key, f"-{window} minutes"),
+        ).fetchone()
+        return row is not None
 
     def count_pending_keywords(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -273,12 +273,51 @@ async def test_youtube_producer_throttles_recent_run(db: Database) -> None:
         discover=discover,
         min_interval_minutes=60,
     )
-    producer._last_run_at = datetime.now(UTC) - timedelta(minutes=5)
+    # The floor is keyed on the shared ledger, not an in-process attribute, so
+    # that a restart cannot wipe it. Stamping the attribute alone must NOT
+    # throttle once a database is attached.
+    db.record_source_producer_run("youtube", 4)
 
     result = await producer.produce_if_due(limit=5)
 
     assert result == {"discovered": 0, "reason": "throttled"}
     assert discover.calls == []
+
+
+async def test_youtube_producer_floor_survives_restart(db: Database) -> None:
+    """A fresh producer instance (i.e. a restarted backend) stays throttled.
+
+    The in-process stamp used to reset to None here, so the very next tick
+    fired regardless of min_interval_minutes.
+    """
+    db.record_source_producer_run("youtube", 4)
+    discover = _Discover([])
+    restarted = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        min_interval_minutes=60,
+    )
+
+    assert restarted._last_run_at is None
+    assert await restarted.produce_if_due(limit=5) == {
+        "discovered": 0,
+        "reason": "throttled",
+    }
+    assert discover.calls == []
+
+
+async def test_youtube_producer_empty_round_does_not_burn_the_interval(
+    db: Database,
+) -> None:
+    """A round that produced nothing is retried, not blocked for a full window.
+
+    Recording every completed round — empty ones included — meant a source
+    whose credential had just been fixed still sat out the whole interval.
+    """
+    db.record_source_producer_run("youtube", 0)
+
+    assert db.source_producer_ran_within("youtube", 60) is False
 
 
 async def test_youtube_producer_skips_when_daily_budget_exhausted(db: Database) -> None:

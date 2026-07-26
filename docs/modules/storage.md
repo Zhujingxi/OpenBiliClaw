@@ -262,6 +262,8 @@ known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
 
 `bangumi_discovery_runs` 按 mode 记录每轮消费 units、发现数、reason 与稳定 error code，用于 UTC 日预算、本地状态和最小调度间隔；`partial` 行表示本轮后续请求失败但此前候选仍被保留，和 `ok/empty` 一样按最终实际保留数扣预算。`bangumi_discovery_state` 保存 `ranked/latest` 按 subject type 的 cursor/total、每个 mode 的持久化类型轮转起点，以及 `cooldown_until`。两张表属于正常 schema 初始化，不由只读状态接口临时建表。`GET /api/sources/status` 只读这些本地行，打开设置页不会访问 Bangumi。
 
+`source_producer_runs` 是八个来源共用的**节流地板账本**（`platform` / `discovered` / `created_at`），取代抖音 / YouTube / X / 知乎 / Reddit 原先记在进程内的 `_last_run_at`。只写入 `discovered > 0` 的轮次，因此同时解决两个反向缺陷：落库让地板在后端重启后依然有效（实测 Reddit 曾有 5/55 轮穿透 60 分钟地板），只记产出让零产出的轮次不再白白锁死一个完整 `min_interval_minutes`。读写收口在 `runtime/producer_cadence.py`；未接数据库构造的 producer 回落到进程内时间戳。
+
 ### Discovery Keywords
 
 ```python
