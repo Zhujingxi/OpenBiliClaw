@@ -1264,6 +1264,7 @@ class Database:
         self._ensure_content_cache_topic_columns()
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
+        self._ensure_content_cache_keyframe_columns()
         self._ensure_content_cache_multisource_columns()
         self._ensure_content_identity_columns()
         self._ensure_seen_items_ledger()
@@ -7390,6 +7391,64 @@ class Database:
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+
+    def _ensure_content_cache_keyframe_columns(self) -> None:
+        """Add video-keyframe prewarm bookkeeping for existing databases.
+
+        Only a timestamp is stored: the frame vectors live in the embedding
+        cache under ``keyframe_embedding_cache_key`` keys. The timestamp is
+        written even when a video yields no frames, so videos without
+        videoshot data are not re-fetched every prewarm cycle.
+        """
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        required_columns = {
+            "keyframes_fetched_at": "TIMESTAMP",
+            "keyframe_count": "INTEGER DEFAULT 0",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+
+    def get_candidates_needing_keyframes(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Bilibili pool rows whose keyframes have never been fetched.
+
+        Videoshot data only exists for Bilibili videos, so non-Bilibili and
+        text-shaped rows are excluded rather than retried forever.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT bvid, title, cover_url
+            FROM content_cache
+            WHERE keyframes_fetched_at IS NULL
+              AND COALESCE(bvid, '') != ''
+              AND COALESCE(source_platform, 'bilibili') = 'bilibili'
+              AND COALESCE(content_type, 'video') = 'video'
+            ORDER BY COALESCE(relevance_score, 0) DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def mark_keyframes_fetched(self, bvid: str, *, keyframe_count: int = 0) -> None:
+        """Stamp a row as keyframe-processed (also on a zero-frame result)."""
+        key = (bvid or "").strip()
+        if not key:
+            return
+        self.conn.execute(
+            """
+            UPDATE content_cache
+            SET keyframes_fetched_at = CURRENT_TIMESTAMP,
+                keyframe_count = ?
+            WHERE bvid = ?
+            """,
+            (max(0, int(keyframe_count)), key),
+        )
+        self.conn.commit()
 
     def _ensure_content_cache_multisource_columns(self) -> None:
         """Add multi-source content identity fields for existing databases."""

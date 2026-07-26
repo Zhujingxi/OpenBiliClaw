@@ -477,6 +477,15 @@ multimodal_evaluation_enabled = false
 # 需 [llm.embedding].multimodal_enabled + 多模态嵌入模型；与上面的图文评估互相独立。
 # 默认关闭；关闭或无反馈数据时排序与原路径字节一致。
 visual_profile_enabled = false
+# 视频关键帧加成（P3）：封面是 UP 主手选的营销图、常常标题党，不代表视频内容。
+# B 站已为每个视频预生成关键帧雪碧图（进度条悬停预览），一次请求即可取到，
+# 无需下载视频、无需 ffmpeg。用 P1 建好的口味质心去匹配真实画面而非封面。
+# 需 [llm.embedding].multimodal_enabled + 多模态嵌入模型；仅对 B 站视频有效。
+keyframe_enabled = false
+# 每个视频采样的关键帧数（合法范围 1..12）。相邻关键帧高度冗余，4 帧已能覆盖正片。
+keyframe_max_frames = 4
+# 每轮预热处理的视频数上限（合法范围 1..200）。
+keyframe_fetch_limit = 50
 # 图文评估每轮 batch 上限。图像输入成本更高，合法范围 1..12。
 multimodal_batch_size = 8
 # 封面图压缩参数：最大边、JPEG 质量、单图抓取/压缩超时秒数。

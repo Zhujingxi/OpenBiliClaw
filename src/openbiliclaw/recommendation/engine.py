@@ -94,6 +94,28 @@ _VISUAL_PROFILE_SIM_CEIL = 0.80  # same-modal image cosine at/above → full
 _VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
 
 
+# Video keyframe bonus (P3) — INDEPENDENT of both bonuses above. Compares a
+# candidate's actual video frames (Bilibili's pre-generated videoshot sprites)
+# against the SAME user visual centroids P1 built, so the taste profile matches
+# what the video really looks like instead of an UP-chosen marketing cover.
+# Frame vectors are max-pooled: "does any sampled frame look like the user's
+# taste" is the right question for recall, and max is more sensitive to that
+# than a mean that washes out a single strong match.
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Same-modal image↔image like
+# _VISUAL_PROFILE_*, but keyframes are 160x90/480x270 downscaled video stills
+# whose vector distribution differs from full-size covers — so they get their
+# own floor/ceil rather than reusing P1's. Kept small + additive +
+# one-directional (the negative penalty only zeroes this signal, never demotes
+# below base relevance). Reopen after choosing a real multimodal model: read the
+# frame max_sim distribution, then move floor/ceil so the bonus spreads (rule 3).
+_KEYFRAME_BONUS_MAX = 0.05  # hard cap on the additive nudge
+_KEYFRAME_SIM_FLOOR = 0.55  # same-modal image cosine at/below → zero
+_KEYFRAME_SIM_CEIL = 0.80  # same-modal image cosine at/above → full
+_KEYFRAME_PENALTY_MAX = 0.05  # hard cap on the disliked-style penalty
+_KEYFRAME_DEFAULT_MAX_FRAMES = 4  # frames sampled per video
+
+
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
     """A successful provider response omitted or malformed batch members."""
@@ -324,13 +346,16 @@ class RecommendationEngine:
         pool_inventory_commit_callback: Callable[..., object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
         visual_profile_enabled: bool = False,
-        bilibili_client: Any | None = None,
+        keyframe_enabled: bool = False,
+        keyframe_max_frames: int = _KEYFRAME_DEFAULT_MAX_FRAMES,
     ) -> None:
         self._llm = llm
         self._database = database
         self._curator = curator
         self._embedding_service = embedding_service
         self._visual_profile_enabled = bool(visual_profile_enabled)
+        self._keyframe_enabled = bool(keyframe_enabled)
+        self._keyframe_max_frames = max(1, min(12, int(keyframe_max_frames)))
         # In-memory cache of the user's visual-profile centroids (pos/neg),
         # rebuilt in the background by rebuild_visual_profile(). serve() reads
         # this only — never triggers a rebuild or a cover fetch on the hot path.
@@ -716,8 +741,12 @@ class RecommendationEngine:
         # above and added on top; empty map when the feature is off or no
         # centroids are loaded, so the default feed ranking is unchanged.
         visual_profile_bonus = await self._visual_profile_bonus_map(candidates)
+        # Video keyframe bonus (P3, opt-in): the user's visual centroids matched
+        # against actual video frames rather than an UP-chosen cover. Third
+        # independent signal, stacked the same way; empty map when off.
+        keyframe_bonus = await self._keyframe_bonus_map(candidates)
         combined_bonus: dict[str, float] = dict(visual_bonus)
-        for extra in (visual_profile_bonus,):
+        for extra in (visual_profile_bonus, keyframe_bonus):
             for bvid, bonus in extra.items():
                 combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
 
@@ -1217,6 +1246,14 @@ class RecommendationEngine:
                 await self._prewarm_pool_covers(candidates)
             except Exception:
                 logger.debug("Pool cover prewarm raised (ignored)", exc_info=True)
+        # P3: fetch + embed video keyframes for pool rows that lack them. Same
+        # best-effort contract as the cover prewarm — it must never affect the
+        # MMR return value above. No-op when the flag or multimodal is off.
+        if self._keyframe_active():
+            try:
+                await self.prewarm_pool_keyframes()
+            except Exception:
+                logger.debug("Pool keyframe prewarm raised (ignored)", exc_info=True)
         return warmed
 
     async def precompute_pool_copy(
@@ -2308,6 +2345,164 @@ class RecommendationEngine:
         if with_cover == 0 or warmed / with_cover < _VISUAL_COVER_MIN_COVERAGE:
             return {}
         return bonuses
+
+    def _keyframe_active(self) -> bool:
+        """True only when the flag is on AND image embedding is active."""
+        return self._keyframe_enabled and self._cover_embedding_active()
+
+    def _keyframe_bonus_from_vecs(
+        self,
+        frame_vecs: list[list[float]],
+        pos_centroids: list[list[float]],
+        neg_centroids: list[list[float]],
+    ) -> float:
+        """Max-pool frame↔centroid cosine into a bounded bonus minus penalty.
+
+        Max-pool (not mean): the question is "does ANY sampled frame look like
+        the user's taste", and a mean would wash out one strong match among
+        several unremarkable frames. Mirrors
+        :meth:`_visual_profile_bonus_from_vec` but on its own ``_KEYFRAME_*``
+        range — keyframes are downscaled stills whose distribution differs
+        from full-size covers.
+        """
+        if not frame_vecs:
+            return 0.0
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        def _best(centroids: list[list[float]]) -> float:
+            best = 0.0
+            for frame_vec in frame_vecs:
+                if not frame_vec:
+                    continue
+                for centroid in centroids:
+                    sim = cosine_similarity(frame_vec, centroid)
+                    if sim > best:
+                        best = sim
+            return best
+
+        def _map(sim: float, floor: float, ceil: float, cap: float) -> float:
+            span = ceil - floor
+            if span <= 0:
+                return 0.0
+            norm = max(0.0, min(1.0, (sim - floor) / span))
+            return cap * norm
+
+        positive = _map(
+            _best(pos_centroids),
+            _KEYFRAME_SIM_FLOOR, _KEYFRAME_SIM_CEIL, _KEYFRAME_BONUS_MAX,
+        )
+        penalty = _map(
+            _best(neg_centroids),
+            _KEYFRAME_SIM_FLOOR, _KEYFRAME_SIM_CEIL, _KEYFRAME_PENALTY_MAX,
+        )
+        return max(0.0, positive - penalty)
+
+    async def _keyframe_bonus_map(
+        self,
+        candidates: list[DiscoveredContent],
+    ) -> dict[str, float]:
+        """Per-candidate keyframe bonus for serve() (lookup-only, parallel).
+
+        Reuses the P1 visual centroids: the same taste profile, now matched
+        against what the video actually looks like rather than its cover.
+        Returns ``{}`` — leaving the ranking byte-identical — when the feature
+        is off, image embedding is inactive, or no centroids exist yet. Never
+        fetches on this hot path; ``prewarm_pool_keyframes`` fills the cache.
+        """
+        if not self._keyframe_active():
+            return {}
+        embedding = self._embedding_service
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if not callable(lookup):
+            return {}
+
+        from openbiliclaw.llm.embedding import keyframe_embedding_cache_key
+
+        cache = self._load_visual_profile_cache()
+        if not cache:
+            return {}
+        pos_centroids = [r["centroid"] for r in cache if r.get("polarity") == "pos"]
+        neg_centroids = [r["centroid"] for r in cache if r.get("polarity") == "neg"]
+        if not pos_centroids and not neg_centroids:
+            return {}
+
+        bonuses: dict[str, float] = {}
+        for candidate in candidates:
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            if not bvid:
+                continue
+            frame_vecs: list[list[float]] = []
+            for frame_index in range(self._keyframe_max_frames):
+                vec = lookup(keyframe_embedding_cache_key(bvid, frame_index)) or []
+                if vec:
+                    frame_vecs.append(vec)
+            if not frame_vecs:
+                continue
+            bonus = self._keyframe_bonus_from_vecs(frame_vecs, pos_centroids, neg_centroids)
+            if bonus > 0.0:
+                bonuses[bvid] = bonus
+        return bonuses
+
+    async def prewarm_pool_keyframes(self, *, limit: int = 50) -> int:
+        """Fetch + embed video keyframes for pool rows that lack them.
+
+        Bilibili pre-generates keyframe sprite sheets, so this costs one small
+        JPEG per video rather than a video download. Best-effort: every failure
+        path still stamps ``keyframes_fetched_at`` so a video without videoshot
+        data is not retried every cycle. Returns the number of videos processed.
+        """
+        if not self._keyframe_active():
+            return 0
+        embedding = self._embedding_service
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0
+
+        needing = getattr(self._database, "get_candidates_needing_keyframes", None)
+        mark = getattr(self._database, "mark_keyframes_fetched", None)
+        if not callable(needing) or not callable(mark):
+            return 0
+        try:
+            rows = needing(limit=limit)
+        except Exception:
+            logger.debug("get_candidates_needing_keyframes failed", exc_info=True)
+            return 0
+        if not rows:
+            return 0
+
+        from openbiliclaw.discovery.keyframes import fetch_keyframes
+        from openbiliclaw.llm.embedding import keyframe_embedding_cache_key
+
+        processed = 0
+        # Serial, like _prewarm_pool_covers: Bilibili rate-limits far more
+        # aggressively than the embedding backend, so fan-out is the wrong
+        # trade here even though each item is cheap.
+        for row in rows:
+            bvid = str(row.get("bvid") or "").strip()
+            if not bvid:
+                continue
+            embedded = 0
+            try:
+                frames = await fetch_keyframes(bvid, max_frames=self._keyframe_max_frames)
+                for frame_index, frame_bytes in enumerate(frames):
+                    cache_key = keyframe_embedding_cache_key(bvid, frame_index)
+                    vector = await embed_image(
+                        frame_bytes, mime_type="image/jpeg", cache_key=cache_key
+                    )
+                    if vector:
+                        embedded += 1
+            except Exception:
+                logger.debug("keyframe prewarm failed for %s", bvid, exc_info=True)
+            try:
+                # Stamp even on zero frames — otherwise videos without
+                # videoshot data are re-fetched on every prewarm cycle.
+                mark(bvid, keyframe_count=embedded)
+            except Exception:
+                logger.debug("mark_keyframes_fetched failed for %s", bvid, exc_info=True)
+            processed += 1
+        if processed:
+            logger.info("Keyframe prewarm processed %d video(s)", processed)
+        return processed
 
     async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:
         """Backfill cover embeddings for content already in the pool (URL-keyed).

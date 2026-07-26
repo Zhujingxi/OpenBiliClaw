@@ -730,7 +730,12 @@ class RuntimeContext:
             visual_profile_enabled=bool(
                 getattr(getattr(new_config, "discovery", None), "visual_profile_enabled", False)
             ),
-            bilibili_client=new_bilibili_client,
+            keyframe_enabled=bool(
+                getattr(getattr(new_config, "discovery", None), "keyframe_enabled", False)
+            ),
+            keyframe_max_frames=int(
+                getattr(getattr(new_config, "discovery", None), "keyframe_max_frames", 4)
+            ),
         )
 
         discovery_cfg = getattr(new_config, "discovery", None)

@@ -11472,6 +11472,9 @@ def create_app(
                 candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 visual_profile_enabled=cfg.discovery.visual_profile_enabled,
+                keyframe_enabled=cfg.discovery.keyframe_enabled,
+                keyframe_max_frames=cfg.discovery.keyframe_max_frames,
+                keyframe_fetch_limit=cfg.discovery.keyframe_fetch_limit,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
                 multimodal_image_quality=cfg.discovery.multimodal_image_quality,
@@ -13132,6 +13135,8 @@ def create_app(
                     cfg.discovery.visual_profile_enabled = _as_bool(
                         ddata["visual_profile_enabled"]
                     )
+                if "keyframe_enabled" in ddata:
+                    cfg.discovery.keyframe_enabled = _as_bool(ddata["keyframe_enabled"])
                 if "admission_min_score" in ddata:
                     cfg.discovery.admission_min_score = _normalize_probability(
                         ddata["admission_min_score"],

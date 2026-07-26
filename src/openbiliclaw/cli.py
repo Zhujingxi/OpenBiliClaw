@@ -974,6 +974,12 @@ def _build_recommendation_engine() -> Any:
         visual_profile_enabled=bool(
             getattr(getattr(cfg, "discovery", None), "visual_profile_enabled", False)
         ),
+        keyframe_enabled=bool(
+            getattr(getattr(cfg, "discovery", None), "keyframe_enabled", False)
+        ),
+        keyframe_max_frames=int(
+            getattr(getattr(cfg, "discovery", None), "keyframe_max_frames", 4)
+        ),
     )
 
 
