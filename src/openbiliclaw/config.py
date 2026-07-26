@@ -134,6 +134,8 @@ _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
 _DEFAULT_MULTIMODAL_IMAGE_TIMEOUT_SECONDS = 6
 _DEFAULT_KEYFRAME_MAX_FRAMES = 4
 _DEFAULT_KEYFRAME_FETCH_LIMIT = 50
+_DEFAULT_DANMAKU_FETCH_LIMIT = 50
+_DEFAULT_DANMAKU_MAX_CHARS = 500
 DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
@@ -1011,6 +1013,12 @@ class DiscoveryConfig:
     keyframe_enabled: bool = False
     keyframe_max_frames: int = _DEFAULT_KEYFRAME_MAX_FRAMES
     keyframe_fetch_limit: int = _DEFAULT_KEYFRAME_FETCH_LIMIT
+    # Danmaku text enrichment (P2): condense a video's danmaku into a semantic
+    # summary and nudge ranking by summary↔interest similarity. Text-only, so
+    # unlike the visual signals it needs no multimodal embedding model.
+    danmaku_enabled: bool = False
+    danmaku_fetch_limit: int = _DEFAULT_DANMAKU_FETCH_LIMIT
+    danmaku_max_chars: int = _DEFAULT_DANMAKU_MAX_CHARS
     # Smaller batch for image-bearing evaluation calls.
     multimodal_batch_size: int = _DEFAULT_MULTIMODAL_BATCH_SIZE
     # Cover-image preprocessing bounds before sending to the evaluator.
@@ -2172,6 +2180,22 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             default=_DEFAULT_KEYFRAME_FETCH_LIMIT,
             min_value=1,
             max_value=200,
+        ),
+        danmaku_enabled=_coerce_bool(
+            discovery_raw.get("danmaku_enabled"),
+            default=False,
+        ),
+        danmaku_fetch_limit=_normalize_scheduler_int(
+            discovery_raw.get("danmaku_fetch_limit"),
+            default=_DEFAULT_DANMAKU_FETCH_LIMIT,
+            min_value=1,
+            max_value=200,
+        ),
+        danmaku_max_chars=_normalize_scheduler_int(
+            discovery_raw.get("danmaku_max_chars"),
+            default=_DEFAULT_DANMAKU_MAX_CHARS,
+            min_value=100,
+            max_value=2000,
         ),
         multimodal_batch_size=_normalize_scheduler_int(
             discovery_raw.get("multimodal_batch_size"),
@@ -3812,6 +3836,9 @@ def _render_config_toml(
             f"keyframe_enabled = {_toml_bool(config.discovery.keyframe_enabled)}",
             f"keyframe_max_frames = {config.discovery.keyframe_max_frames}",
             f"keyframe_fetch_limit = {config.discovery.keyframe_fetch_limit}",
+            f"danmaku_enabled = {_toml_bool(config.discovery.danmaku_enabled)}",
+            f"danmaku_fetch_limit = {config.discovery.danmaku_fetch_limit}",
+            f"danmaku_max_chars = {config.discovery.danmaku_max_chars}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",
             f"multimodal_image_max_px = {config.discovery.multimodal_image_max_px}",
             f"multimodal_image_quality = {config.discovery.multimodal_image_quality}",

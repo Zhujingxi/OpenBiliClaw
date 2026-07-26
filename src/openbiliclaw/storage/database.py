@@ -1265,6 +1265,7 @@ class Database:
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_keyframe_columns()
+        self._ensure_content_cache_danmaku_columns()
         self._ensure_content_cache_multisource_columns()
         self._ensure_content_identity_columns()
         self._ensure_seen_items_ledger()
@@ -7449,6 +7450,85 @@ class Database:
             (max(0, int(keyframe_count)), key),
         )
         self.conn.commit()
+
+    def _ensure_content_cache_danmaku_columns(self) -> None:
+        """Add danmaku-text enrichment fields for existing databases.
+
+        Deliberately NOT reusing ``body_text``: that column renders into the
+        card body on all three surfaces (extension / desktop / mobile web) and
+        feeds five LLM prompts, so danmaku there would turn card bodies into
+        walls of "已取餐". The timestamp is written even when a video yields no
+        danmaku, so such videos are not re-fetched every prewarm cycle.
+        """
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        required_columns = {
+            "danmaku_text": "TEXT DEFAULT ''",
+            "danmaku_fetched_at": "TIMESTAMP",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+
+    def get_candidates_needing_danmaku(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Bilibili pool rows whose danmaku have never been fetched."""
+        cursor = self.conn.execute(
+            """
+            SELECT bvid, title
+            FROM content_cache
+            WHERE danmaku_fetched_at IS NULL
+              AND COALESCE(bvid, '') != ''
+              AND COALESCE(source_platform, 'bilibili') = 'bilibili'
+              AND COALESCE(content_type, 'video') = 'video'
+            ORDER BY COALESCE(relevance_score, 0) DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_danmaku_text(self, bvid: str, *, danmaku_text: str = "") -> None:
+        """Store condensed danmaku and stamp the row (also on an empty result)."""
+        key = (bvid or "").strip()
+        if not key:
+            return
+        self.conn.execute(
+            """
+            UPDATE content_cache
+            SET danmaku_text = ?,
+                danmaku_fetched_at = CURRENT_TIMESTAMP
+            WHERE bvid = ?
+            """,
+            (danmaku_text or "", key),
+        )
+        self.conn.commit()
+
+    def get_danmaku_texts_for(self, bvids: list[str]) -> dict[str, str]:
+        """Map bvid → stored danmaku text for the given ids (empty ones omitted)."""
+        keys = [b.strip() for b in bvids if (b or "").strip()]
+        if not keys:
+            return {}
+        out: dict[str, str] = {}
+        # Chunk to stay clear of SQLite's variable limit on large pool windows.
+        for start in range(0, len(keys), 400):
+            chunk = keys[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"""
+                SELECT bvid, COALESCE(danmaku_text, '') AS danmaku_text
+                FROM content_cache
+                WHERE bvid IN ({placeholders})
+                """,
+                tuple(chunk),
+            )
+            for row in cursor.fetchall():
+                text = str(row["danmaku_text"] or "").strip()
+                if text:
+                    out[str(row["bvid"])] = text
+        return out
 
     def _ensure_content_cache_multisource_columns(self) -> None:
         """Add multi-source content identity fields for existing databases."""

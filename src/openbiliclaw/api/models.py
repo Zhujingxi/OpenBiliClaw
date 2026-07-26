@@ -2040,6 +2040,9 @@ class DiscoveryConfigOut(BaseModel):
     keyframe_enabled: bool = False
     keyframe_max_frames: int = 4
     keyframe_fetch_limit: int = 50
+    danmaku_enabled: bool = False
+    danmaku_fetch_limit: int = 50
+    danmaku_max_chars: int = 500
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384
     multimodal_image_quality: int = 72

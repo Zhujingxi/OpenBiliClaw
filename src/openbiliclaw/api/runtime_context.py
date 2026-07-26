@@ -736,6 +736,13 @@ class RuntimeContext:
             keyframe_max_frames=int(
                 getattr(getattr(new_config, "discovery", None), "keyframe_max_frames", 4)
             ),
+            danmaku_enabled=bool(
+                getattr(getattr(new_config, "discovery", None), "danmaku_enabled", False)
+            ),
+            danmaku_max_chars=int(
+                getattr(getattr(new_config, "discovery", None), "danmaku_max_chars", 500)
+            ),
+            bilibili_client=new_bilibili_client,
         )
 
         discovery_cfg = getattr(new_config, "discovery", None)

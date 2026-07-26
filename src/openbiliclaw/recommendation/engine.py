@@ -116,6 +116,23 @@ _KEYFRAME_PENALTY_MAX = 0.05  # hard cap on the disliked-style penalty
 _KEYFRAME_DEFAULT_MAX_FRAMES = 4  # frames sampled per video
 
 
+# Danmaku bonus (P2) — the only NON-visual member of this family. Bilibili
+# candidates reach ranking with just title + description as semantics, and the
+# description is frequently "求三连" boilerplate (body_text is empty on the
+# Bilibili path). Condensed danmaku carry what the audience actually discusses.
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. This is text↔text cosine
+# against the same interest anchors the cover bonus uses, so it sits in a
+# different numeric range from both the cross-modal cover↔text bonus and the
+# same-modal image bonuses — hence its own floor/ceil rather than reusing
+# either. Kept small + additive + one-directional. Reopen after running
+# against a real embedding model: read the max_sim distribution, then move
+# floor/ceil so the bonus spreads across the observed range (rule 3).
+_DANMAKU_BONUS_MAX = 0.05  # hard cap on the additive nudge
+_DANMAKU_SIM_FLOOR = 0.30  # text↔text cosine at/below → zero bonus
+_DANMAKU_SIM_CEIL = 0.65  # text↔text cosine at/above → full bonus
+
+
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
     """A successful provider response omitted or malformed batch members."""
@@ -348,6 +365,9 @@ class RecommendationEngine:
         visual_profile_enabled: bool = False,
         keyframe_enabled: bool = False,
         keyframe_max_frames: int = _KEYFRAME_DEFAULT_MAX_FRAMES,
+        danmaku_enabled: bool = False,
+        danmaku_max_chars: int = 500,
+        bilibili_client: Any | None = None,
     ) -> None:
         self._llm = llm
         self._database = database
@@ -356,6 +376,11 @@ class RecommendationEngine:
         self._visual_profile_enabled = bool(visual_profile_enabled)
         self._keyframe_enabled = bool(keyframe_enabled)
         self._keyframe_max_frames = max(1, min(12, int(keyframe_max_frames)))
+        self._danmaku_enabled = bool(danmaku_enabled)
+        self._danmaku_max_chars = max(100, min(2000, int(danmaku_max_chars)))
+        # Optional Bilibili client for the danmaku prewarm. None = the danmaku
+        # prewarm no-ops (the bonus path still works off already-stored text).
+        self._bilibili_client = bilibili_client
         # In-memory cache of the user's visual-profile centroids (pos/neg),
         # rebuilt in the background by rebuild_visual_profile(). serve() reads
         # this only — never triggers a rebuild or a cover fetch on the hot path.
@@ -745,8 +770,12 @@ class RecommendationEngine:
         # against actual video frames rather than an UP-chosen cover. Third
         # independent signal, stacked the same way; empty map when off.
         keyframe_bonus = await self._keyframe_bonus_map(candidates)
+        # Danmaku bonus (P2, opt-in): the only non-visual signal here — what
+        # the audience discusses, which title+description miss entirely on the
+        # Bilibili path. Empty map when off.
+        danmaku_bonus = await self._danmaku_bonus_map(candidates, profile)
         combined_bonus: dict[str, float] = dict(visual_bonus)
-        for extra in (visual_profile_bonus, keyframe_bonus):
+        for extra in (visual_profile_bonus, keyframe_bonus, danmaku_bonus):
             for bvid, bonus in extra.items():
                 combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
 
@@ -1254,6 +1283,14 @@ class RecommendationEngine:
                 await self.prewarm_pool_keyframes()
             except Exception:
                 logger.debug("Pool keyframe prewarm raised (ignored)", exc_info=True)
+        # P2: fetch + condense + embed danmaku for pool rows that lack them.
+        # Same best-effort contract; no-op when the flag is off or no Bilibili
+        # client was injected.
+        if self._danmaku_active():
+            try:
+                await self.prewarm_pool_danmaku()
+            except Exception:
+                logger.debug("Pool danmaku prewarm raised (ignored)", exc_info=True)
         return warmed
 
     async def precompute_pool_copy(
@@ -2502,6 +2539,167 @@ class RecommendationEngine:
             processed += 1
         if processed:
             logger.info("Keyframe prewarm processed %d video(s)", processed)
+        return processed
+
+    def _danmaku_active(self) -> bool:
+        """True when the flag is on and an embedding service exists.
+
+        Unlike the visual signals this needs no multimodal model — danmaku are
+        text, so any embedding provider works.
+        """
+        return self._danmaku_enabled and self._embedding_service is not None
+
+    async def _danmaku_bonus_map(
+        self,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> dict[str, float]:
+        """Per-candidate danmaku bonus for serve() (lookup-only).
+
+        Compares each candidate's stored danmaku summary against the profile's
+        interest anchors (text↔text, same anchors the cover bonus embeds).
+        Returns ``{}`` — leaving the ranking byte-identical — when the feature
+        is off or nothing is stored yet. Never embeds on this hot path: a cache
+        miss simply contributes no bonus and the prewarm fills it.
+        """
+        if not self._danmaku_active():
+            return {}
+        embedding = self._embedding_service
+        if embedding is None:
+            return {}
+        lookup = getattr(embedding, "lookup_cached", None)
+        if not callable(lookup):
+            return {}
+
+        fetch = getattr(self._database, "get_danmaku_texts_for", None)
+        if not callable(fetch):
+            return {}
+        bvids = [str(getattr(c, "bvid", "") or "") for c in candidates]
+        try:
+            stored = fetch([b for b in bvids if b])
+        except Exception:
+            logger.debug("danmaku text lookup failed", exc_info=True)
+            return {}
+        if not stored:
+            return {}
+
+        anchor_vecs = await self._danmaku_anchor_vectors(profile)
+        if not anchor_vecs:
+            return {}
+
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        bonuses: dict[str, float] = {}
+        for candidate in candidates:
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            text = stored.get(bvid, "")
+            if not bvid or not text:
+                continue
+            vec = lookup(text) or []
+            if not vec:
+                continue
+            max_sim = 0.0
+            for anchor_vec in anchor_vecs:
+                sim = cosine_similarity(vec, anchor_vec)
+                if sim > max_sim:
+                    max_sim = sim
+            span = _DANMAKU_SIM_CEIL - _DANMAKU_SIM_FLOOR
+            if span <= 0:
+                continue
+            norm = max(0.0, min(1.0, (max_sim - _DANMAKU_SIM_FLOOR) / span))
+            bonus = _DANMAKU_BONUS_MAX * norm
+            if bonus > 0.0:
+                bonuses[bvid] = bonus
+        return bonuses
+
+    async def _danmaku_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
+        """Embed the profile's top interest names once for danmaku alignment.
+
+        Same anchors as ``_visual_anchor_vectors`` but without the
+        image-embedding gate — danmaku matching is text↔text, so it works on
+        any embedding provider.
+        """
+        embedding = self._embedding_service
+        if embedding is None:
+            return []
+        anchors: list[str] = []
+        seen: set[str] = set()
+        for interest in _interests_by_weight(profile)[:_VISUAL_COVER_MAX_ANCHORS]:
+            name = str(getattr(interest, "name", "") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                anchors.append(name)
+        if not anchors:
+            return []
+        vectors: list[list[float]] = []
+        for anchor in anchors:
+            try:
+                vec = await embedding.embed(anchor)
+            except Exception:
+                logger.debug("danmaku anchor embed failed for %r", anchor, exc_info=True)
+                continue
+            if vec:
+                vectors.append(vec)
+        return vectors
+
+    async def prewarm_pool_danmaku(self, *, limit: int = 50) -> int:
+        """Fetch, condense, store and embed danmaku for pool rows lacking them.
+
+        Best-effort: every path still stamps ``danmaku_fetched_at`` so a video
+        with no danmaku is not retried each cycle. Returns rows processed.
+        """
+        if not self._danmaku_active():
+            return 0
+        client = self._bilibili_client
+        if client is None:
+            return 0
+        embedding = self._embedding_service
+        if embedding is None:
+            return 0
+
+        needing = getattr(self._database, "get_candidates_needing_danmaku", None)
+        update = getattr(self._database, "update_danmaku_text", None)
+        if not callable(needing) or not callable(update):
+            return 0
+        try:
+            rows = needing(limit=limit)
+        except Exception:
+            logger.debug("get_candidates_needing_danmaku failed", exc_info=True)
+            return 0
+        if not rows:
+            return 0
+
+        from openbiliclaw.discovery.danmaku import condense_danmaku
+
+        processed = 0
+        # Serial: Bilibili rate-limits far more aggressively than the embedding
+        # backend, and the client's own _respect_rate_limit already paces us.
+        for row in rows:
+            bvid = str(row.get("bvid") or "").strip()
+            if not bvid:
+                continue
+            condensed = ""
+            try:
+                info = await client.get_video_info(bvid)
+                cid = int(getattr(info, "cid", 0) or 0)
+                if cid > 0:
+                    raw = await client.get_danmaku_texts(cid)
+                    condensed = condense_danmaku(raw, max_chars=self._danmaku_max_chars)
+                    if condensed:
+                        # Text embeddings are keyed by the text itself, so the
+                        # serve() lookup uses the very same stored string.
+                        await embedding.embed(condensed)
+            except Exception:
+                logger.debug("danmaku prewarm failed for %s", bvid, exc_info=True)
+            try:
+                # Stamp even when empty — otherwise videos without danmaku are
+                # re-fetched on every prewarm cycle.
+                update(bvid, danmaku_text=condensed)
+            except Exception:
+                logger.debug("update_danmaku_text failed for %s", bvid, exc_info=True)
+            processed += 1
+        if processed:
+            logger.info("Danmaku prewarm processed %d video(s)", processed)
         return processed
 
     async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:

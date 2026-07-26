@@ -11475,6 +11475,9 @@ def create_app(
                 keyframe_enabled=cfg.discovery.keyframe_enabled,
                 keyframe_max_frames=cfg.discovery.keyframe_max_frames,
                 keyframe_fetch_limit=cfg.discovery.keyframe_fetch_limit,
+                danmaku_enabled=cfg.discovery.danmaku_enabled,
+                danmaku_fetch_limit=cfg.discovery.danmaku_fetch_limit,
+                danmaku_max_chars=cfg.discovery.danmaku_max_chars,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
                 multimodal_image_quality=cfg.discovery.multimodal_image_quality,
@@ -13137,6 +13140,8 @@ def create_app(
                     )
                 if "keyframe_enabled" in ddata:
                     cfg.discovery.keyframe_enabled = _as_bool(ddata["keyframe_enabled"])
+                if "danmaku_enabled" in ddata:
+                    cfg.discovery.danmaku_enabled = _as_bool(ddata["danmaku_enabled"])
                 if "admission_min_score" in ddata:
                     cfg.discovery.admission_min_score = _normalize_probability(
                         ddata["admission_min_score"],
