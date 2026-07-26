@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1440" viewBox="0 0 1080 1440">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F8E9EF"/><stop offset="0.52" stop-color="#F6F2E9"/><stop offset="1" stop-color="#E8EEFA"/></linearGradient>
+    <linearGradient id="tape" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FF6E9A"/><stop offset="1" stop-color="#7AA7FF"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#6A5A5A" flood-opacity="0.16"/></filter>
+  </defs>
+  <rect width="1080" height="1440" fill="url(#bg)"/>
+  <circle cx="87" cy="92" r="8" fill="#FF6E9A"/>
+  <text x="116" y="108" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="38" font-weight="700" fill="#24304A">OPENBILICLAW · PRODUCT</text>
+  <text x="854" y="108" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#667189">07 / 10</text>
+  <g filter="url(#shadow)"><rect x="58" y="166" width="964" height="1134" rx="52" fill="#FFFDFC"/></g>
+  <rect x="402" y="138" width="276" height="58" rx="12" fill="url(#tape)" opacity="0.86" transform="rotate(-2 540 167)"/>
+
+  <text x="120" y="310" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="61" font-weight="650" fill="#171A22">对未知兴趣</text>
+  <rect x="103" y="335" width="790" height="88" rx="20" fill="#FFE56F" opacity="0.92" transform="rotate(-1 498 379)"/>
+  <text x="120" y="406" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="58" font-weight="700" fill="#171A22">它会先问，而不是直接塞给你</text>
+
+  <rect x="170" y="468" width="740" height="610" rx="30" fill="#F2EFEA" stroke="#E6DEDA" stroke-width="2"/>
+  <text x="540" y="782" text-anchor="middle" font-family="Arial, sans-serif" font-size="26" fill="#A0A7B2">REAL PRODUCT UI</text>
+
+  <g font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="23" font-weight="650">
+    <rect x="112" y="1124" width="260" height="64" rx="32" fill="#E4F5E8"/><text x="148" y="1165" fill="#267C4A">喜欢 → 继续探索</text>
+    <rect x="400" y="1124" width="280" height="64" rx="32" fill="#F3EEE6"/><text x="432" y="1165" fill="#6E655D">不喜欢 → 安静退出</text>
+    <rect x="708" y="1124" width="260" height="64" rx="32" fill="#E5F0FF"/><text x="742" y="1165" fill="#356FB7">多聊聊 → 补充理解</text>
+  </g>
+  <text x="540" y="1372" text-anchor="middle" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="23" fill="#7D8494">SPECULATE · ASK · CONFIRM · LEARN</text>
+</svg>

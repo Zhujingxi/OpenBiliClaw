@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1440" viewBox="0 0 1080 1440">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF4F6"/>
+      <stop offset="0.55" stop-color="#FFFAF4"/>
+      <stop offset="1" stop-color="#EEF4FF"/>
+    </linearGradient>
+    <filter id="shadow3" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#625A70" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1080" height="1440" fill="url(#bg3)"/>
+  <rect x="68" y="62" width="64" height="64" rx="18" fill="#24304A"/>
+  <text x="100" y="108" text-anchor="middle" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#FFFFFF">B</text>
+  <text x="158" y="103" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="33" font-weight="700" fill="#24304A">OpenBiliClaw</text>
+  <text x="948" y="103" text-anchor="end" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#69758E">03 / 03</text>
+
+  <text x="68" y="232" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="57" font-weight="700" fill="#202635">我把这个答案，做成了</text>
+  <text x="68" y="314" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="66" font-weight="800" fill="#D94870">OpenBiliClaw</text>
+  <text x="68" y="380" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="29" fill="#59657A">一个本地、私有、开源，只为一个人工作的内容发现 Agent。</text>
+
+  <g filter="url(#shadow3)" font-family="Hiragino Sans GB, Heiti SC, sans-serif">
+    <rect x="68" y="458" width="446" height="210" rx="40" fill="#FFF0F4"/>
+    <text x="108" y="516" font-size="24" font-weight="700" fill="#C64E70">01 · 理解</text>
+    <text x="108" y="572" font-size="37" font-weight="700" fill="#263047">看见完整的你</text>
+    <text x="108" y="616" font-size="23" fill="#675B64">跨平台信号、反馈与对话</text>
+
+    <rect x="566" y="458" width="446" height="210" rx="40" fill="#FFF7E7"/>
+    <text x="606" y="516" font-size="24" font-weight="700" fill="#C18B28">02 · 画像</text>
+    <text x="606" y="572" font-size="37" font-weight="700" fill="#263047">持续更新理解</text>
+    <text x="606" y="616" font-size="23" fill="#6E6552">不是一次打标签就结束</text>
+
+    <rect x="68" y="716" width="446" height="210" rx="40" fill="#EEF4FF"/>
+    <text x="108" y="774" font-size="24" font-weight="700" fill="#4F78BD">03 · 寻找</text>
+    <text x="108" y="830" font-size="37" font-weight="700" fill="#263047">主动跨平台发现</text>
+    <text x="108" y="874" font-size="23" fill="#58677F">不等某个平台继续喂给你</text>
+
+    <rect x="566" y="716" width="446" height="210" rx="40" fill="#F1F0FF"/>
+    <text x="606" y="774" font-size="24" font-weight="700" fill="#6B64BC">04 · 进化</text>
+    <text x="606" y="830" font-size="37" font-weight="700" fill="#263047">接受纠正继续学</text>
+    <text x="606" y="874" font-size="23" fill="#625F7A">推荐有理由，也允许你反驳</text>
+  </g>
+
+  <rect x="68" y="984" width="944" height="126" rx="34" fill="#FFFFFF" stroke="#E9E3E5" stroke-width="2"/>
+  <text x="540" y="1035" text-anchor="middle" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="27" font-weight="700" fill="#2D3850">既满足已知，也探索未知。</text>
+  <text x="540" y="1076" text-anchor="middle" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="23" fill="#68758B">打破信息茧房，是主动探索未知可能带来的结果之一。</text>
+
+  <text x="540" y="1170" text-anchor="middle" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="22" font-weight="600" fill="#69758E">BILIBILI · 小红书 · 抖音 · YOUTUBE · X · 知乎 · REDDIT · BANGUMI · WEB</text>
+
+  <rect x="68" y="1210" width="944" height="166" rx="42" fill="#24304A"/>
+  <text x="108" y="1263" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="23" font-weight="600" fill="#BFC9DC">在 GitHub 搜索</text>
+  <text x="108" y="1327" font-family="Arial, sans-serif" font-size="49" font-weight="800" fill="#FFFFFF">OpenBiliClaw</text>
+  <rect x="748" y="1248" width="220" height="76" rx="38" fill="#FFD86E"/>
+  <text x="858" y="1297" text-anchor="middle" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="28" font-weight="800" fill="#293247">1400+ STAR</text>
+
+  <text x="540" y="1410" text-anchor="middle" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="21" fill="#7B8699">github.com/whiteguo233/OpenBiliClaw</text>
+</svg>

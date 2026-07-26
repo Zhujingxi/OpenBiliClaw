@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1440" viewBox="0 0 1080 1440">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F8E9EF"/><stop offset="0.52" stop-color="#F6F2E9"/><stop offset="1" stop-color="#E8EEFA"/></linearGradient>
+    <linearGradient id="tape" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FF6E9A"/><stop offset="1" stop-color="#7AA7FF"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#6A5A5A" flood-opacity="0.16"/></filter>
+  </defs>
+  <rect width="1080" height="1440" fill="url(#bg)"/>
+  <circle cx="87" cy="92" r="8" fill="#FF6E9A"/>
+  <text x="116" y="108" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="42" font-weight="600" fill="#24304A">OPENBILICLAW NOTES</text>
+  <text x="830" y="108" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#667189" letter-spacing="1">JUL 2026</text>
+  <g filter="url(#shadow)"><rect x="58" y="166" width="964" height="1134" rx="52" fill="#FFFDFC"/></g>
+  <rect x="402" y="138" width="276" height="58" rx="12" fill="url(#tape)" opacity="0.86" transform="rotate(-2 540 167)"/>
+  <text x="132" y="344" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="70" font-weight="600" fill="#171A22">所以我手搓了一个</text>
+  <text x="132" y="438" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="64" font-weight="700" fill="#171A22">只为你工作的推荐 Agent</text>
+  <rect x="120" y="474" width="706" height="14" rx="7" fill="#FFE56F"/>
+  <rect x="120" y="530" width="840" height="544" rx="34" fill="#F3F1EC" stroke="#E9E2DF" stroke-width="2"/>
+  <text x="540" y="812" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" fill="#A0A7B2">PRODUCT SCREENSHOT</text>
+  <rect x="132" y="1124" width="330" height="78" rx="39" fill="#171A22"/>
+  <text x="176" y="1176" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="31" font-weight="700" fill="#FFFFFF">OpenBiliClaw</text>
+  <text x="500" y="1176" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="27" font-weight="600" fill="#667189">本地 · 私有 · 开源 · 跨平台</text>
+  <text x="540" y="1260" text-anchor="middle" font-family="Hiragino Sans GB, Heiti SC, sans-serif" font-size="27" fill="#687188">本地运行，画像和数据留在自己的电脑上。</text>
+  <text x="540" y="1372" text-anchor="middle" font-family="Arial, Hiragino Sans GB, sans-serif" font-size="22" fill="#7D8494">BILIBILI · 小红书 · 抖音 · YOUTUBE · X · 知乎 · REDDIT · WEB</text>
+</svg>

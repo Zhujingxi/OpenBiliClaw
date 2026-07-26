@@ -71,6 +71,11 @@ class ZhihuDiscoveryProducer:
     creator_seed_loader: Any | None = None
     related_seed_loader: Any | None = None
     kick: Any | None = None
+    # Only used for the restart-surviving cadence floor. Zhihu reaches the
+    # database through ZhihuTaskQueue, so this field was easy to miss — and
+    # missing it silently downgraded the floor back to the in-process stamp
+    # this was meant to replace.
+    database: Any | None = None
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
 
@@ -380,6 +385,7 @@ def build_zhihu_discovery_producer(
     wait_seconds = float(getattr(zh_cfg, "wait_seconds", 0) or 180.0)
     return ZhihuDiscoveryProducer(
         task_queue=ZhihuTaskQueue(database),
+        database=database,
         soul_engine=soul_engine,
         enabled=True,
         sources=_normalize_sources(getattr(zh_cfg, "source_modes", ZHIHU_SOURCE_ORDER)),
