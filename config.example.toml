@@ -223,6 +223,9 @@ headed = false
 # pool_source_shares 中的 bilibili 配额会被丢弃。
 [sources.bilibili]
 enabled = true
+# 仅作用于「B 站 API 搜索被风控冷却」时接管的扩展搜索兜底 producer；
+# 主发现路径（search / trending / explore / related）的节奏在 [scheduler]。
+min_interval_minutes = 5                 # producer 两次入队之间的最小间隔
 
 # ── 小红书（xhs）专用配置 ──
 # 内容发现和元数据提取完全由浏览器扩展在真实登录态下完成：
@@ -240,6 +243,7 @@ daily_search_budget = 0
 daily_creator_budget = 0
 # 扩展分发器两次任务之间的最小间隔（秒），进一步降低风控风险
 task_interval_seconds = 45
+min_interval_minutes = 5                 # producer 两次入队之间的最小间隔
 
 # ── 抖音（Douyin）direct-cookie discovery 专用配置 ──
 # 初始化画像仍走浏览器扩展；这里仅控制可选的后台内容发现。
@@ -255,6 +259,7 @@ daily_search_budget = 0
 daily_hot_budget = 0
 daily_feed_budget = 0
 request_interval_seconds = 2
+min_interval_minutes = 5                 # producer 两次执行最小间隔
 
 # ── YouTube 专用配置 ──
 # enabled=false 时 pool_source_shares 中的 youtube 配额会被丢弃（避免池子卡在低于目标）。
@@ -269,7 +274,7 @@ daily_trending_budget = 0
 daily_channel_budget = 0
 request_interval_seconds = 2
 # YouTube producer 两次执行之间的最小间隔；0 表示每个 refresh tick 都允许检查执行。
-min_interval_minutes = 60
+min_interval_minutes = 5
 
 # ── X (Twitter) 专用配置 ──
 # 设为 false 后：后端不再生成 X 搜索/推荐流/账号订阅任务，
@@ -285,7 +290,7 @@ daily_search_budget = 0                 # 0 = 不设每日上限
 daily_feed_budget = 0                   # 推荐流(For You)每日拉取上限（高曝光，建议压低）
 daily_creator_budget = 0                # 账号订阅每日抓取上限
 request_interval_seconds = 3            # 两次请求最小间隔（抗检测）
-min_interval_minutes = 60               # producer 两次执行最小间隔
+min_interval_minutes = 5               # producer 两次执行最小间隔
 
 # ── 知乎（Zhihu）专用配置 ──
 # 事件拉取和 discovery 都走浏览器插件登录态任务：后端只入队 zhihu_tasks，
@@ -300,7 +305,7 @@ daily_feed_budget = 0                   # 首页推荐 discovery 每日任务上
 daily_creator_budget = 0                # 作者页 discovery 每日任务上限，0 = 不设每日上限
 daily_related_budget = 0                # 相关扩展 discovery 每日任务上限，0 = 不设每日上限
 request_interval_seconds = 3            # 后端等待任务时的轮询间隔 / 插件搜索节奏提示
-min_interval_minutes = 60               # ZhihuDiscoveryProducer 两次执行最小间隔
+min_interval_minutes = 5               # ZhihuDiscoveryProducer 两次执行最小间隔
 
 # ── Reddit 专用配置 ──
 # Reddit 当前没有稳定免登录 API；日常 discovery 默认走随 OpenBiliClaw 安装的 rdt-cli 登录态命令后端。
@@ -319,7 +324,7 @@ daily_hot_budget = 300                  # 热门 discovery 每日条目上限
 daily_subreddit_budget = 300            # subreddit discovery 每日条目上限
 daily_related_budget = 300              # 相关扩展 discovery 每日条目上限
 request_interval_seconds = 3            # 插件任务轮询间隔 / 命令 fallback 超时估算
-min_interval_minutes = 60               # RedditDiscoveryProducer 两次执行最小间隔
+min_interval_minutes = 5               # RedditDiscoveryProducer 两次执行最小间隔
 
 # ── Bangumi 官方公开 API（只读）──
 # 无需 Cookie 或 OAuth。username 留空时只参与后续内容发现；填写后，首次初始化可读取
@@ -340,7 +345,7 @@ daily_search_budget = 300
 daily_ranked_budget = 100
 daily_latest_budget = 100
 request_interval_seconds = 1
-min_interval_minutes = 60
+min_interval_minutes = 5
 bootstrap_limit = 300
 
 [scheduler]

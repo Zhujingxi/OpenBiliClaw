@@ -71,7 +71,7 @@ class XDiscoveryProducer:
     creator_store: XCreatorStore
     health_store: XSourceHealthStore
     enabled: bool = True
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
     daily_search_budget: int = 0
     daily_feed_budget: int = 0
     daily_creator_budget: int = 0
@@ -402,7 +402,7 @@ def build_x_discovery_producer(
         creator_store=XCreatorStore(database),
         health_store=XSourceHealthStore(database, credential_fingerprint=x_credential),
         enabled=True,
-        min_interval_minutes=int(getattr(x_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(x_cfg, "min_interval_minutes", 5)),
         daily_search_budget=int(getattr(x_cfg, "daily_search_budget", 0)),
         daily_feed_budget=int(getattr(x_cfg, "daily_feed_budget", 0)),
         daily_creator_budget=int(getattr(x_cfg, "daily_creator_budget", 0)),

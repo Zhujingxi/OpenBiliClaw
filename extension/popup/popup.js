@@ -8139,6 +8139,7 @@ function bindSettings() {
     if (biliBrowserHeaded) biliBrowserHeaded.checked = cfg.bilibili?.browser_headed === true;
     const bilibiliEnabled = document.getElementById("cfgBilibiliEnabled");
     if (bilibiliEnabled) bilibiliEnabled.checked = cfg.sources?.bilibili?.enabled !== false;
+    setVal("cfgBilibiliMinInterval", cfg.sources?.bilibili?.min_interval_minutes);
 
     // Sources
     setVal("cfgSourcesBrowserCdp", cfg.sources?.browser?.cdp_url);
@@ -8151,6 +8152,7 @@ function bindSettings() {
     setVal("cfgXhsDailySearchBudget", cfg.sources?.xiaohongshu?.daily_search_budget);
     setVal("cfgXhsDailyCreatorBudget", cfg.sources?.xiaohongshu?.daily_creator_budget);
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
+    setVal("cfgXhsMinInterval", cfg.sources?.xiaohongshu?.min_interval_minutes);
     const douyinEnabled = document.getElementById("cfgDouyinEnabled");
     if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
     setVal("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
@@ -8159,6 +8161,7 @@ function bindSettings() {
     setVal("cfgDouyinDailyHotBudget", cfg.sources?.douyin?.daily_hot_budget);
     setVal("cfgDouyinDailyFeedBudget", cfg.sources?.douyin?.daily_feed_budget);
     setVal("cfgDouyinRequestInterval", cfg.sources?.douyin?.request_interval_seconds);
+    setVal("cfgDouyinMinInterval", cfg.sources?.douyin?.min_interval_minutes);
     const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
     if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
@@ -8360,6 +8363,7 @@ function bindSettings() {
         },
         bilibili: {
           enabled: checked("cfgBilibiliEnabled", true),
+          min_interval_minutes: getInt("cfgBilibiliMinInterval", 5),
         },
         // Empty-field fallbacks mirror the backend dataclass defaults
         // (budgets: 0 = uncapped) so the popup and the web settings page
@@ -8369,6 +8373,7 @@ function bindSettings() {
           daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
           task_interval_seconds: getInt("cfgXhsTaskInterval", 45),
+          min_interval_minutes: getInt("cfgXhsMinInterval", 5),
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
@@ -8379,6 +8384,7 @@ function bindSettings() {
           daily_hot_budget: getInt("cfgDouyinDailyHotBudget", 0),
           daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 0),
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
+          min_interval_minutes: getInt("cfgDouyinMinInterval", 5),
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
@@ -8386,7 +8392,7 @@ function bindSettings() {
           daily_trending_budget: getInt("cfgYoutubeDailyTrendingBudget", 0),
           daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 0),
           request_interval_seconds: getInt("cfgYoutubeRequestInterval", 2),
-          min_interval_minutes: getInt("cfgYoutubeMinInterval", 60),
+          min_interval_minutes: getInt("cfgYoutubeMinInterval", 5),
         },
         twitter: {
           enabled: checked("cfgTwitterEnabled"),
@@ -8397,7 +8403,7 @@ function bindSettings() {
           daily_feed_budget: getInt("cfgTwitterDailyFeedBudget", 0),
           daily_creator_budget: getInt("cfgTwitterDailyCreatorBudget", 0),
           request_interval_seconds: getInt("cfgTwitterRequestInterval", 3),
-          min_interval_minutes: getInt("cfgTwitterMinInterval", 60),
+          min_interval_minutes: getInt("cfgTwitterMinInterval", 5),
         },
         zhihu: {
           enabled: checked("cfgZhihuEnabled"),
@@ -8408,7 +8414,7 @@ function bindSettings() {
           daily_creator_budget: getInt("cfgZhihuDailyCreatorBudget", 0),
           daily_related_budget: getInt("cfgZhihuDailyRelatedBudget", 0),
           request_interval_seconds: getInt("cfgZhihuRequestInterval", 3),
-          min_interval_minutes: getInt("cfgZhihuMinInterval", 60),
+          min_interval_minutes: getInt("cfgZhihuMinInterval", 5),
         },
         reddit: {
           enabled: checked("cfgRedditEnabled"),
@@ -8420,7 +8426,7 @@ function bindSettings() {
           daily_subreddit_budget: getInt("cfgRedditDailySubredditBudget", 300),
           daily_related_budget: getInt("cfgRedditDailyRelatedBudget", 300),
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
-          min_interval_minutes: getInt("cfgRedditMinInterval", 60),
+          min_interval_minutes: getInt("cfgRedditMinInterval", 5),
         },
         bangumi: {
           enabled: checked("cfgBangumiEnabled"),
@@ -8441,7 +8447,7 @@ function bindSettings() {
           daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
           daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
           request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
-          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 5),
           bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
         },
       },

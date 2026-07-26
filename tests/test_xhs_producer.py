@@ -98,7 +98,7 @@ async def test_producer_enqueues_keywords_up_to_budget(
         enabled=True,
         daily_budget=3,
         keywords_per_cycle=5,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due()
     assert result["reason"] == "ok"
@@ -129,7 +129,7 @@ async def test_producer_limits_keyword_generation_to_requested_gap(
         enabled=True,
         daily_budget=30,
         keywords_per_cycle=5,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due(limit=2)
 
@@ -160,7 +160,7 @@ async def test_producer_throttled_when_recent_task_exists(
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=4,
+        min_interval_minutes=240,
     )
     result = await producer.produce_if_due()
     assert result["reason"] == "throttled"
@@ -184,7 +184,7 @@ async def test_producer_handles_empty_keywords(
         task_queue=queue,
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due()
     assert result["reason"] == "no_keywords"
@@ -196,7 +196,7 @@ async def test_producer_handles_missing_profile(queue: XhsTaskQueue) -> None:
         task_queue=queue,
         soul_engine=_FakeSoulEngine(None),
         llm_service=_FakeLLMService(),
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due()
     assert result["reason"] == "no_profile"
@@ -239,7 +239,7 @@ async def test_producer_injected_keywords_skip_generation(
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due(keywords=["客制化键盘", "手冲咖啡"])
 
@@ -268,7 +268,7 @@ async def test_producer_injected_keywords_dedupe_and_cap(
         llm_service=_FakeLLMService(),
         enabled=True,
         keywords_per_cycle=2,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     # 4 distinct after strip/dedupe, but keywords_per_cycle caps to 2 — so
     # only the first two survivors ("a", "b") are enqueued ("c" dropped).
@@ -293,7 +293,7 @@ async def test_producer_injected_keywords_work_without_profile(
         soul_engine=_FakeSoulEngine(None),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due(keywords=["客制化键盘"])
 
@@ -310,7 +310,7 @@ async def test_producer_empty_injected_keywords_is_no_keywords(
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
     )
     result = await producer.produce_if_due(keywords=["", "   "])
 
@@ -358,7 +358,7 @@ async def test_flag_off_does_not_touch_keyword_store(
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
         keyword_fetch=KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(False)),
     )
     result = await producer.produce_if_due()
@@ -379,7 +379,7 @@ async def test_flag_on_claims_and_marks_executing_not_used(
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
         keyword_fetch=KeywordFetchCoordinator(
             database=db, discovery_config=_DiscoveryCfg(True, fetch_batch=5)
         ),
@@ -405,7 +405,7 @@ async def test_flag_on_empty_store_skips(db: Database, queue: XhsTaskQueue) -> N
         soul_engine=_FakeSoulEngine(_profile_with_interests()),
         llm_service=_FakeLLMService(),
         enabled=True,
-        min_interval_hours=0,
+        min_interval_minutes=0,
         keyword_fetch=KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(True)),
     )
     result = await producer.produce_if_due()
@@ -425,7 +425,7 @@ async def test_flag_on_budget_rejection_rolls_back(db: Database, queue: XhsTaskQ
         llm_service=_FakeLLMService(),
         enabled=True,
         daily_budget=1,  # already at cap → every claim enqueue is rejected
-        min_interval_hours=0,
+        min_interval_minutes=0,
         keyword_fetch=KeywordFetchCoordinator(
             database=db, discovery_config=_DiscoveryCfg(True, fetch_batch=3)
         ),

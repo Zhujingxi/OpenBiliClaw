@@ -1143,7 +1143,7 @@ def test_sources_youtube_defaults() -> None:
     assert config.sources.youtube.daily_trending_budget == 0
     assert config.sources.youtube.daily_channel_budget == 0
     assert config.sources.youtube.request_interval_seconds == 2
-    assert config.sources.youtube.min_interval_minutes == 60
+    assert config.sources.youtube.min_interval_minutes == 5
 
 
 def test_sources_reddit_defaults() -> None:
@@ -1157,7 +1157,7 @@ def test_sources_reddit_defaults() -> None:
     assert config.sources.reddit.daily_subreddit_budget == 300
     assert config.sources.reddit.daily_related_budget == 300
     assert config.sources.reddit.request_interval_seconds == 3
-    assert config.sources.reddit.min_interval_minutes == 60
+    assert config.sources.reddit.min_interval_minutes == 5
 
 
 def test_sources_bangumi_defaults() -> None:
@@ -1172,7 +1172,7 @@ def test_sources_bangumi_defaults() -> None:
     assert config.sources.bangumi.daily_ranked_budget == 100
     assert config.sources.bangumi.daily_latest_budget == 100
     assert config.sources.bangumi.request_interval_seconds == 1
-    assert config.sources.bangumi.min_interval_minutes == 60
+    assert config.sources.bangumi.min_interval_minutes == 5
     assert config.sources.bangumi.bootstrap_limit == 300
 
 
@@ -2120,7 +2120,7 @@ def test_twitter_source_defaults() -> None:
     assert config.sources.twitter.daily_feed_budget == 0
     assert config.sources.twitter.daily_creator_budget == 0
     assert config.sources.twitter.request_interval_seconds == 3
-    assert config.sources.twitter.min_interval_minutes == 60
+    assert config.sources.twitter.min_interval_minutes == 5
 
 
 def test_twitter_source_parsed_from_toml(tmp_path: Path) -> None:

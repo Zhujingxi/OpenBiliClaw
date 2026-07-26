@@ -35,7 +35,7 @@ class XhsTaskProducer:
     The producer respects two limits:
     - ``daily_budget`` — enforced by ``XhsTaskQueue.enqueue`` per type;
       ``0`` disables the daily cap
-    - ``min_interval_hours`` — enforced here by inspecting the newest
+    - ``min_interval_minutes`` — enforced here by inspecting the newest
       task's ``created_at`` before running
     """
 
@@ -52,13 +52,15 @@ class XhsTaskProducer:
     # (``ok=False``) rolls the word back to ``pending``. ``None`` (default / flag
     # off) → legacy self-generated, lifecycle-free enqueue.
     keyword_fetch: Any | None = None
-    # v0.3.53+: lowered 4 → 1. Production logs (2026-05-05) showed
-    # the producer firing only once per 43-minute session because the
-    # 4-hour throttle is way too long for pool freshness — XHS pool
-    # was effectively static while user kept reshuffling. 1-hour
-    # cadence with daily_budget=30 caps at 24/30 enqueues per day,
-    # leaves 6 head room for manual / refresh-tick triggers.
-    min_interval_hours: int = 1
+    # Calibration history: 4h → 1h in v0.3.53+ after production logs
+    # (2026-05-05) showed the producer firing once per 43-minute session —
+    # the 4-hour throttle left the XHS pool effectively static while the user
+    # kept reshuffling. 2026-07-26: the unit changed from hours to minutes and
+    # the value to 5, aligning every source on one replenishment cadence; the
+    # hour granularity could not express anything between "1 hour" and "off".
+    # Per-run size is still bounded by ``[scheduler].discovery_limit`` and
+    # ``daily_budget``, so a shorter gap widens cadence, not batch size.
+    min_interval_minutes: int = 5
     keywords_per_cycle: int = 5
     _last_skip_reason: str = field(default="", init=False)
 
@@ -207,7 +209,7 @@ class XhsTaskProducer:
 
     def _is_due(self) -> bool:
         """Return False if the newest search task was enqueued recently."""
-        if self.min_interval_hours <= 0:
+        if self.min_interval_minutes <= 0:
             return True
         row = self.task_queue._db.conn.execute(
             "SELECT created_at FROM xhs_tasks "
@@ -219,14 +221,14 @@ class XhsTaskProducer:
         last = _parse_sqlite_timestamp(created_at_str)
         if last is None:
             return True
-        return datetime.now(UTC) - last >= timedelta(hours=self.min_interval_hours)
+        return datetime.now(UTC) - last >= timedelta(minutes=self.min_interval_minutes)
 
     def _skip(self, reason: str) -> dict[str, object]:
         # v0.3.53+: log skip reason on transition (not every minute) so
         # operators can grep for why the producer isn't firing without
         # drowning the log in identical-reason WARNINGs. Reasons:
         #   disabled       — explicitly turned off in config
-        #   throttled      — last enqueue within ``min_interval_hours``
+        #   throttled      — last enqueue within ``min_interval_minutes``
         #   no_profile     — soul profile not built yet (init window)
         #   no_keywords    — LLM keyword generation returned 0 items
         if reason != self._last_skip_reason:

@@ -11339,12 +11339,14 @@ def create_app(
                 ),
                 bilibili=BilibiliSourceConfigOut(
                     enabled=cfg.sources.bilibili.enabled,
+                    min_interval_minutes=cfg.sources.bilibili.min_interval_minutes,
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
                     enabled=cfg.sources.xiaohongshu.enabled,
                     daily_search_budget=cfg.sources.xiaohongshu.daily_search_budget,
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
+                    min_interval_minutes=cfg.sources.xiaohongshu.min_interval_minutes,
                 ),
                 douyin=DouyinSourceConfigOut(
                     enabled=cfg.sources.douyin.enabled,
@@ -11355,6 +11357,7 @@ def create_app(
                     daily_hot_budget=cfg.sources.douyin.daily_hot_budget,
                     daily_feed_budget=cfg.sources.douyin.daily_feed_budget,
                     request_interval_seconds=cfg.sources.douyin.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.douyin.min_interval_minutes,
                 ),
                 youtube=YoutubeSourceConfigOut(
                     enabled=cfg.sources.youtube.enabled,
@@ -12592,8 +12595,13 @@ def create_app(
                         cfg.sources.browser_headed = _as_bool(browser_data["headed"])
 
                 bilibili_data = sources_data.get("bilibili")
-                if isinstance(bilibili_data, dict) and "enabled" in bilibili_data:
-                    cfg.sources.bilibili.enabled = _as_bool(bilibili_data["enabled"])
+                if isinstance(bilibili_data, dict):
+                    if "enabled" in bilibili_data:
+                        cfg.sources.bilibili.enabled = _as_bool(bilibili_data["enabled"])
+                    if "min_interval_minutes" in bilibili_data:
+                        cfg.sources.bilibili.min_interval_minutes = max(
+                            0, int(bilibili_data["min_interval_minutes"])
+                        )
 
                 xhs_data = sources_data.get("xiaohongshu")
                 if isinstance(xhs_data, dict):
@@ -12603,6 +12611,7 @@ def create_app(
                         "daily_search_budget",
                         "daily_creator_budget",
                         "task_interval_seconds",
+                        "min_interval_minutes",
                     ):
                         if key in xhs_data:
                             setattr(cfg.sources.xiaohongshu, key, int(xhs_data[key]))
@@ -12659,6 +12668,7 @@ def create_app(
                         "daily_hot_budget",
                         "daily_feed_budget",
                         "request_interval_seconds",
+                        "min_interval_minutes",
                     ):
                         if key in dy_data:
                             setattr(cfg.sources.douyin, key, int(dy_data[key]))

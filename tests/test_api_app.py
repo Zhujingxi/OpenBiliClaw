@@ -11543,7 +11543,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "daily_ranked_budget": 100,
             "daily_latest_budget": 100,
             "request_interval_seconds": 1,
-            "min_interval_minutes": 60,
+            "min_interval_minutes": 5,
             "bootstrap_limit": 300,
             "access_token_set": False,
         }

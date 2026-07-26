@@ -47,7 +47,7 @@ class ZhihuDiscoveryProducer:
     soul_engine: Any
     enabled: bool = True
     sources: tuple[str, ...] = ("search",)
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
@@ -364,7 +364,7 @@ def build_zhihu_discovery_producer(
         soul_engine=soul_engine,
         enabled=True,
         sources=_normalize_sources(getattr(zh_cfg, "source_modes", ZHIHU_SOURCE_ORDER)),
-        min_interval_minutes=int(getattr(zh_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(zh_cfg, "min_interval_minutes", 5)),
         daily_search_budget=int(getattr(zh_cfg, "daily_search_budget", 0)),
         daily_hot_budget=int(getattr(zh_cfg, "daily_hot_budget", 0)),
         daily_feed_budget=int(getattr(zh_cfg, "daily_feed_budget", 0)),

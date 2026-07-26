@@ -426,6 +426,13 @@
                   <p class="seg-note">B 站的搜索 / 热门 / 探索 / 相关链四个策略由全局调度统一编排，目前没有独立的分支开关和每日预算。调度节奏见「调度」页。</p>
                 </section>
                 <section class="source-seg">
+                  <h4>节流</h4>
+                  <p class="seg-note">只作用于 B 站 API 搜索被风控冷却时接管的扩展搜索兜底路径；主发现路径的节奏在「调度」页。</p>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="bilibiliMinInterval" inputmode="numeric" placeholder="5"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
                   <h4>Bilibili 专属</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>agent-browser 路径</span><input id="biliBrowserExecutable" placeholder="留空使用全局安装"></label>
@@ -479,6 +486,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>任务间隔秒数</span><input id="xhsTaskInterval" inputmode="numeric" placeholder="45"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="xhsMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -533,6 +541,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>请求间隔秒数</span><input id="douyinRequestInterval" inputmode="numeric" placeholder="2"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="douyinMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -583,7 +592,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>请求间隔秒数</span><input id="youtubeRequestInterval" inputmode="numeric" placeholder="2"></label>
-                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="youtubeMinInterval" inputmode="numeric" placeholder="60"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="youtubeMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -638,7 +647,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>请求间隔秒数</span><input id="twitterRequestInterval" inputmode="numeric" placeholder="3"></label>
-                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="twitterMinInterval" inputmode="numeric" placeholder="60"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="twitterMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -691,7 +700,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>请求间隔秒数</span><input id="zhihuRequestInterval" inputmode="numeric" placeholder="3"></label>
-                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="zhihuMinInterval" inputmode="numeric" placeholder="60"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="zhihuMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -744,7 +753,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>命令间隔秒数</span><input id="redditRequestInterval" inputmode="numeric" placeholder="3"></label>
-                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="redditMinInterval" inputmode="numeric" placeholder="60"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="redditMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">
@@ -806,7 +815,7 @@
                   <h4>节流</h4>
                   <div class="inline-row">
                     <label class="settings-field"><span>请求间隔秒数</span><input id="bangumiRequestInterval" inputmode="numeric" placeholder="1"></label>
-                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="bangumiMinInterval" inputmode="numeric" placeholder="60"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="bangumiMinInterval" inputmode="numeric" placeholder="5"></label>
                   </div>
                 </section>
                 <section class="source-seg">

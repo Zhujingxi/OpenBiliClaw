@@ -51,7 +51,7 @@ class DouyinDiscoveryProducer:
     soul_engine: Any
     discover: DouyinDiscoverCallable
     enabled: bool = True
-    min_interval_minutes: int = 15
+    min_interval_minutes: int = 5
     sources: tuple[str, ...] = ("search", "hot", "feed")
     # How many pending keywords to claim AND search per run. Must equal the
     # strategy's effective search count: the strategy truncates seed keywords to
@@ -305,11 +305,12 @@ def build_douyin_discovery_producer(
             return await service.discover(profile, options)
 
     scheduler = getattr(config, "scheduler", None)
+    dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
     return DouyinDiscoveryProducer(
         soul_engine=soul_engine,
         discover=_discover,
         enabled=bool(getattr(scheduler, "enabled", True)),
-        min_interval_minutes=15,
+        min_interval_minutes=int(getattr(dy_cfg, "min_interval_minutes", 5)),
         sources=("search", "hot", "feed"),
         candidate_pipeline=candidate_pipeline,
         per_source_limit=20,

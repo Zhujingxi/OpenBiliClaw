@@ -47,7 +47,7 @@ class RedditDiscoveryProducer:
     backend: str = "opencli"
     enabled: bool = True
     sources: tuple[str, ...] = ("search",)
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
     daily_search_budget: int = 300
     daily_hot_budget: int = 300
     daily_subreddit_budget: int = 300
@@ -689,7 +689,7 @@ def build_reddit_discovery_producer(
         task_queue=task_queue,
         backend=backend,
         sources=_normalize_sources(getattr(rd_cfg, "source_modes", REDDIT_SOURCE_ORDER)),
-        min_interval_minutes=int(getattr(rd_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(rd_cfg, "min_interval_minutes", 5)),
         daily_search_budget=int(getattr(rd_cfg, "daily_search_budget", 300)),
         daily_hot_budget=int(getattr(rd_cfg, "daily_hot_budget", 300)),
         daily_subreddit_budget=int(getattr(rd_cfg, "daily_subreddit_budget", 300)),

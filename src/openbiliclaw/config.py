@@ -1032,6 +1032,11 @@ class XiaohongshuSourceConfig:
     daily_creator_budget: int = 0
     # Seconds the extension dispatcher waits between tasks.
     task_interval_seconds: int = 45
+    # Minimum gap between two producer runs for this source. Aligned to 5
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1050,6 +1055,11 @@ class DouyinSourceConfig:
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
     request_interval_seconds: int = 2
+    # Minimum gap between two producer runs for this source. Aligned to 5
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1066,7 +1076,7 @@ class YoutubeSourceConfig:
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
     request_interval_seconds: int = 2
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1088,7 +1098,7 @@ class TwitterSourceConfig:
     daily_feed_budget: int = 0
     daily_creator_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1108,7 +1118,7 @@ class ZhihuSourceConfig:
     daily_creator_budget: int = 0
     daily_related_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1130,7 +1140,7 @@ class RedditSourceConfig:
     daily_subreddit_budget: int = 300
     daily_related_budget: int = 300
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1150,7 +1160,7 @@ class BangumiSourceConfig:
     daily_ranked_budget: int = 100
     daily_latest_budget: int = 100
     request_interval_seconds: int = 1
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
     bootstrap_limit: int = 300
 
 
@@ -1159,6 +1169,11 @@ class BilibiliSourceConfig:
     """Bilibili discovery source switch."""
 
     enabled: bool = True
+    # Minimum gap between two producer runs for this source. Aligned to 5
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1786,12 +1801,14 @@ def _build_config(raw: dict[str, Any]) -> Config:
         browser_headed=sources_browser_raw.get("headed", False),
         bilibili=BilibiliSourceConfig(
             enabled=bool(bilibili_source_raw.get("enabled", True)),
+            min_interval_minutes=max(0, int(bilibili_source_raw.get("min_interval_minutes", 5))),
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
             task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),
+            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 5))),
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
@@ -1801,6 +1818,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_hot_budget=int(douyin_raw.get("daily_hot_budget", 0)),
             daily_feed_budget=int(douyin_raw.get("daily_feed_budget", 0)),
             request_interval_seconds=int(douyin_raw.get("request_interval_seconds", 2)),
+            min_interval_minutes=max(0, int(douyin_raw.get("min_interval_minutes", 5))),
         ),
         youtube=YoutubeSourceConfig(
             enabled=bool(youtube_raw.get("enabled", False)),
@@ -1808,7 +1826,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 0)),
             daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 0)),
             request_interval_seconds=int(youtube_raw.get("request_interval_seconds", 2)),
-            min_interval_minutes=max(0, int(youtube_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(youtube_raw.get("min_interval_minutes", 5))),
         ),
         twitter=TwitterSourceConfig(
             enabled=bool(twitter_raw.get("enabled", False)),
@@ -1818,7 +1836,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_feed_budget=int(twitter_raw.get("daily_feed_budget", 0)),
             daily_creator_budget=int(twitter_raw.get("daily_creator_budget", 0)),
             request_interval_seconds=int(twitter_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(twitter_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(twitter_raw.get("min_interval_minutes", 5))),
         ),
         zhihu=ZhihuSourceConfig(
             enabled=bool(zhihu_raw.get("enabled", False)),
@@ -1836,7 +1854,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_creator_budget=int(zhihu_raw.get("daily_creator_budget", 0)),
             daily_related_budget=int(zhihu_raw.get("daily_related_budget", 0)),
             request_interval_seconds=int(zhihu_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(zhihu_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(zhihu_raw.get("min_interval_minutes", 5))),
         ),
         reddit=RedditSourceConfig(
             enabled=bool(reddit_raw.get("enabled", False)),
@@ -1854,7 +1872,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_subreddit_budget=int(reddit_raw.get("daily_subreddit_budget", 300)),
             daily_related_budget=int(reddit_raw.get("daily_related_budget", 300)),
             request_interval_seconds=int(reddit_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 5))),
         ),
         bangumi=BangumiSourceConfig(
             enabled=bool(bangumi_raw.get("enabled", False)),
@@ -1880,7 +1898,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_ranked_budget=max(0, int(bangumi_raw.get("daily_ranked_budget", 100))),
             daily_latest_budget=max(0, int(bangumi_raw.get("daily_latest_budget", 100))),
             request_interval_seconds=max(0, int(bangumi_raw.get("request_interval_seconds", 1))),
-            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 5))),
             bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
         ),
     )
@@ -3628,12 +3646,14 @@ def _render_config_toml(
             "",
             "[sources.bilibili]",
             f"enabled = {_toml_bool(config.sources.bilibili.enabled)}",
+            f"min_interval_minutes = {config.sources.bilibili.min_interval_minutes}",
             "",
             "[sources.xiaohongshu]",
             f"enabled = {_toml_bool(config.sources.xiaohongshu.enabled)}",
             f"daily_search_budget = {config.sources.xiaohongshu.daily_search_budget}",
             f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
             f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
+            f"min_interval_minutes = {config.sources.xiaohongshu.min_interval_minutes}",
             "",
             "[sources.douyin]",
             f"enabled = {_toml_bool(config.sources.douyin.enabled)}",
@@ -3643,6 +3663,7 @@ def _render_config_toml(
             f"daily_hot_budget = {config.sources.douyin.daily_hot_budget}",
             f"daily_feed_budget = {config.sources.douyin.daily_feed_budget}",
             f"request_interval_seconds = {config.sources.douyin.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.douyin.min_interval_minutes}",
             "",
             "[sources.youtube]",
             f"enabled = {_toml_bool(config.sources.youtube.enabled)}",
