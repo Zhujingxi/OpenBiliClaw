@@ -800,12 +800,34 @@ class PreferenceAnalyzer:
                 [item for item in self._as_list(context.get("insights")) if isinstance(item, dict)]
             )
 
+        def _alternate_ends(
+            groups: list[list[dict[str, object]]],
+        ) -> list[list[dict[str, object]]]:
+            """Newest, oldest, next-newest, next-oldest, ...
+
+            Plain round-robin still favours recent behaviour when the chunks
+            themselves are lopsided: a binge of 400 short videos owns most of
+            the chunks, so the first ``cap`` chunks visited are all binge and
+            the early periods never get a turn. Walking in from both ends of the
+            timeline guarantees the oldest chunks are reached within the budget.
+            """
+            ordered: list[list[dict[str, object]]] = []
+            low, high = 0, len(groups) - 1
+            while low <= high:
+                ordered.append(groups[low])
+                if low != high:
+                    ordered.append(groups[high])
+                low += 1
+                high -= 1
+            return ordered
+
         def _round_robin(
             groups: list[list[dict[str, object]]],
             *,
             key_field: str,
             cap: int,
         ) -> list[dict[str, object]]:
+            groups = _alternate_ends(groups)
             picked: list[dict[str, object]] = []
             seen: set[str] = set()
             cursors = [0] * len(groups)

@@ -1847,3 +1847,23 @@ class TestInitCognitionCandidatesSpreadAcrossChunks:
 
         observations = [str(i["observation"]) for i in merged["awareness"]]
         assert len(observations) == len(set(observations)) == 3
+
+    def test_lopsided_chunk_counts_still_reach_the_earliest_period(self) -> None:
+        """真实历史的分片数量并不均衡——一次刷屏就能占掉大部分分片。
+
+        纯轮转在这种形状下仍然偏向最近：洞察只有 8 个名额，而最近的刷屏
+        占了十几个分片中的前八个，最早期照样一条都进不去。真机 A/B 就是
+        这么暴露出来的（修复前洞察里木工/摄影各 1 条，纯轮转后变成 0 条）。
+        """
+        analyzer = self._analyzer()
+        # 10 个"最近刷屏"分片 + 1 个中期 + 1 个最早期，模拟真实的倾斜。
+        # 每片内容必须各不相同——若各片重复，去重会替纯轮转把名额腾出来，
+        # 测试就守不住了（这个坑第一版踩过，突变能存活）。
+        chunks = [self._raw(f"刷屏{i}", count=6) for i in range(10)]
+        chunks.append(self._raw("中期", count=6))
+        chunks.append(self._raw("早期", count=6))
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        insight_eras = {str(i["hypothesis"])[:2] for i in merged["insights"]}
+
+        assert "早期" in insight_eras, f"最早期必须进入洞察草稿，实际只有 {sorted(insight_eras)}"
