@@ -472,6 +472,11 @@ candidate_eval_concurrency = 3
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false
+# 用户视觉画像（P1）：把点赞/踩过的视频封面聚成口味质心，按候选封面↔质心相似度
+# 给排序加一个独立的小幅 bonus（正向加分、负向即"标题党封面"降权）。
+# 需 [llm.embedding].multimodal_enabled + 多模态嵌入模型；与上面的图文评估互相独立。
+# 默认关闭；关闭或无反馈数据时排序与原路径字节一致。
+visual_profile_enabled = false
 # 图文评估每轮 batch 上限。图像输入成本更高，合法范围 1..12。
 multimodal_batch_size = 8
 # 封面图压缩参数：最大边、JPEG 质量、单图抓取/压缩超时秒数。

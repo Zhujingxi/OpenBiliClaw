@@ -242,6 +242,7 @@ X 是第六个内容源，分两条独立通路：
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；`embedding.provider="ollama"` 且 embedding 凭据为空时直接使用本地 Ollama 默认地址，不再产生向后兼容 warning
 - `DashScopeEmbeddingProvider`（`provider="dashscope"`，阿里百炼原生 multimodal-embedding API，仅 embedding）加入 embedding provider 家族，其 `embed()` 文本向量与 openai/gemini/ollama 一样接入既有文本 embedding 消费方；出站走 `network.httpx_kwargs_for_endpoint(base_url)`——dashscope.aliyuncs.com 属国内 endpoint，即使 `[network].mode` 切到 system/custom 也强制直连（对齐 v0.3.167）。可选 `[llm.embedding].multimodal_enabled` + 多模态模型（`gemini-embedding-2` / `qwen3-vl-embedding`）时启用**封面视觉链路**：discovery 入池预热封面向量（按 URL 派生键），Recommendation 两条路径一致消费「封面↔兴趣锚点」跨模态余弦的有界正向加成——惊喜 `precompute_delight_scores`(加到 delight_score) 与正常 `serve()` 排序(并入 relevance 项;热路径只读缓存、不现抓)。默认关闭、纯文本零成本、只加不减、默认路径逐字节一致
+- 用户视觉画像（P1，`[discovery].visual_profile_enabled` 叠加 `multimodal_enabled`）：在上述跨模态加成之外新增**独立并行**信号——`rebuild_visual_profile()` 从 `recommendations` 反馈（like/dislike/save）取封面、复用 URL-keyed 缓存嵌入、`recommendation/visual_profile.py` 贪心凝聚成 k 个**均值质心**（多峰口味）存入主库新表 `user_visual_clusters`（profile-scoped，非 `embedding_cache.db`），在 `precompute_delight_scores` 同 tick 按 `feedback_at` vs `updated_at` 节流重建；`serve()` 热路径 `_visual_profile_bonus_map` 只读内存质心 + URL-keyed 封面缓存、零 API 零聚类，候选封面↔质心同模态余弦映射为有界加成（正向）− 有界惩罚（负向即"标题党封面"降权，仅扣本信号不跌破 0），独立常量 `_VISUAL_PROFILE_*`（floor/ceil 0.55/0.80，未标定），与跨模态加成并行叠加进 `relevance_bonus`。默认关闭/无反馈时加成恒 0、排序逐字节一致
 
 ### Storage (`storage/`)
 - SQLite 数据库管理

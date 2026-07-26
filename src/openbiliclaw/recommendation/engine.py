@@ -75,6 +75,25 @@ _VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
 _VISUAL_COVER_MIN_COVERAGE = 0.6
 
 
+# User visual-profile bonus (P1) — INDEPENDENT of the cover↔text-anchor bonus
+# above. Compares a candidate cover against the user's OWN liked/disliked cover
+# centroids (same-modal image↔image cosine), not text interest anchors. Runs in
+# parallel and is added on top of the cover↔text bonus in serve().
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Same-modal image↔image
+# cosine runs higher than the cross-modal 0.15-0.45 above, so this has its own
+# floor/ceil — do NOT reuse _VISUAL_COVER_SIM_*. Kept small + additive +
+# one-directional (the negative penalty only subtracts from this signal's own
+# positive, never below zero, never demotes below the base relevance) so a
+# mis-guess can only slightly re-rank already-qualifying candidates. Reopen
+# after choosing a real multimodal model: read the pos/neg max_sim distribution
+# from the A/B harness, then move floor/ceil so the bonus spreads (rule 3).
+_VISUAL_PROFILE_BONUS_MAX = 0.05  # hard cap on the additive nudge
+_VISUAL_PROFILE_SIM_FLOOR = 0.55  # same-modal image cosine at/below → zero
+_VISUAL_PROFILE_SIM_CEIL = 0.80  # same-modal image cosine at/above → full
+_VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
+
+
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
     """A successful provider response omitted or malformed batch members."""
@@ -304,11 +323,20 @@ class RecommendationEngine:
         xhs_self_info_provider: Callable[[], dict[str, object] | None] | None = None,
         pool_inventory_commit_callback: Callable[..., object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
+        visual_profile_enabled: bool = False,
+        bilibili_client: Any | None = None,
     ) -> None:
         self._llm = llm
         self._database = database
         self._curator = curator
         self._embedding_service = embedding_service
+        self._visual_profile_enabled = bool(visual_profile_enabled)
+        # In-memory cache of the user's visual-profile centroids (pos/neg),
+        # rebuilt in the background by rebuild_visual_profile(). serve() reads
+        # this only — never triggers a rebuild or a cover fetch on the hot path.
+        # None = "not loaded yet / disabled"; an empty list = loaded but no
+        # clusters (too little feedback). See _visual_profile_bonus_map.
+        self._visual_profile_cache: list[dict[str, Any]] | None = None
         self._xhs_self_info_provider = xhs_self_info_provider
         self._pool_inventory_commit_callback = pool_inventory_commit_callback
         self._copy_pending_callback: Callable[[str], None] | None = None
@@ -683,6 +711,15 @@ class RecommendationEngine:
         # Hot-path-safe — lookup-only (never fetches a cover on serve()); empty
         # map when multimodal is off, so the default feed ranking is unchanged.
         visual_bonus = await self._visual_bonus_map(candidates, profile)
+        # User visual-profile bonus (P1, opt-in): cover vs the user's own
+        # liked/disliked cover centroids. Independent of the cover↔text bonus
+        # above and added on top; empty map when the feature is off or no
+        # centroids are loaded, so the default feed ranking is unchanged.
+        visual_profile_bonus = await self._visual_profile_bonus_map(candidates)
+        combined_bonus: dict[str, float] = dict(visual_bonus)
+        for extra in (visual_profile_bonus,):
+            for bvid, bonus in extra.items():
+                combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
 
         (
             ranked,
@@ -694,7 +731,7 @@ class RecommendationEngine:
             score_override=score_override,
             embeddings=embeddings,
             amplification_guard=amplification_guard,
-            relevance_bonus=visual_bonus,
+            relevance_bonus=combined_bonus,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -1833,7 +1870,67 @@ class RecommendationEngine:
                 hook,
             )
 
+        # P1: opportunistically rebuild the user visual profile in the same
+        # background tick. Throttled — only when feedback is newer than the
+        # last centroid rebuild — so an idle feedback state doesn't re-embed
+        # covers every cycle. Best-effort; never raises into the caller.
+        if self._visual_profile_active():
+            try:
+                self._maybe_rebuild_visual_profile()
+            except Exception:
+                logger.debug("visual profile rebuild dispatch failed", exc_info=True)
+
         return scored_count
+
+    def _maybe_rebuild_visual_profile(self) -> None:
+        """Dispatch a throttled visual-profile rebuild if feedback is fresh.
+
+        Compares the newest ``recommendations.feedback_at`` against the newest
+        ``user_visual_clusters.updated_at``; only rebuilds when feedback is
+        newer (or no centroids exist yet). Fire-and-forget on the task registry
+        when present, else a bare create_task — same pattern as the delight
+        detached tasks.
+        """
+        try:
+            latest_feedback = self._database.latest_feedback_at()
+        except Exception:
+            logger.debug("latest_feedback_at query failed", exc_info=True)
+            return
+        if not latest_feedback:
+            return
+        try:
+            existing = self._database.get_user_visual_clusters()
+        except Exception:
+            logger.debug("get_user_visual_clusters query failed", exc_info=True)
+            return
+        if existing:
+            latest_rebuild = max(
+                (str(r.get("updated_at") or "") for r in existing),
+                default="",
+            )
+            if latest_rebuild and latest_feedback <= latest_rebuild:
+                return  # feedback not newer than the last rebuild
+
+        async def _run() -> None:
+            try:
+                await self.rebuild_visual_profile()
+            except Exception:
+                logger.debug("rebuild_visual_profile failed", exc_info=True)
+
+        # BackgroundTaskRegistry's method is ``track`` (runtime/task_registry.py),
+        # not ``create_task``. Probing for the wrong name silently fell through
+        # to a bare create_task, leaving the rebuild untracked and surviving
+        # hot reload — the registry exists precisely so RuntimeContext can
+        # cancel detached work before swapping runtimes.
+        registry = self.task_registry
+        if registry is not None and hasattr(registry, "track"):
+            try:
+                registry.track("rebuild_visual_profile_detached", _run())
+                return
+            except Exception:
+                logger.debug("task_registry dispatch failed; falling back", exc_info=True)
+        loop = asyncio.get_event_loop()
+        loop.create_task(_run())
 
     async def _visual_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
         """Embed the profile's top interest names once for cover alignment.
@@ -1997,6 +2094,220 @@ class RecommendationEngine:
     def _cover_embedding_active(self) -> bool:
         active = getattr(self._embedding_service, "image_embedding_active", None)
         return bool(callable(active) and active())
+
+    def _visual_profile_active(self) -> bool:
+        """True only when the flag is on AND image embedding is active."""
+        return self._visual_profile_enabled and self._cover_embedding_active()
+
+    def _load_visual_profile_cache(self) -> list[dict[str, Any]]:
+        """Lazily load centroids from the DB into ``_visual_profile_cache``.
+
+        Returns the cached list (possibly empty). Idempotent — once loaded, the
+        hot path reads memory only. ``rebuild_visual_profile`` refreshes it.
+        """
+        if self._visual_profile_cache is None:
+            try:
+                self._visual_profile_cache = self._database.get_user_visual_clusters()
+            except Exception:
+                logger.debug("visual profile load failed", exc_info=True)
+                self._visual_profile_cache = []
+        return self._visual_profile_cache
+
+    async def rebuild_visual_profile(self) -> int:
+        """Rebuild liked/disliked cover centroids from recommendation feedback.
+
+        Queries feedback rows (like/dislike/save) → embeds each cover (URL-keyed
+        L2 hit when discovery already warmed it; cold-fetch+embed otherwise) →
+        greedy agglomerative clustering into mean centroids → atomically
+        replaces ``user_visual_clusters`` → refreshes the in-memory cache.
+
+        Best-effort: never raises. Returns the number of centroids stored.
+        Skipped (returns 0) when the feature is off, image embedding is
+        inactive, or there is no feedback yet. Throttled by the caller
+        (only fires when feedback is newer than the last rebuild).
+        """
+        if not self._visual_profile_active():
+            return 0
+        embedding = self._embedding_service
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0
+
+        from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+        from openbiliclaw.recommendation.visual_profile import build_centroids
+
+        # feedback rows: {bvid, cover_url, feedback_type, ...}
+        rows = self._database.get_recommendations(
+            limit=200, exclude_processed=False
+        )
+        pos_urls: list[str] = []
+        neg_urls: list[str] = []
+        for row in rows:
+            ftype = str(row.get("feedback_type", "") or "").strip()
+            cover_url = str(row.get("cover_url", "") or "").strip()
+            if not cover_url:
+                continue
+            if ftype == "dislike":
+                neg_urls.append(cover_url)
+            elif ftype in ("like", "save"):
+                pos_urls.append(cover_url)
+
+        async def _vecs_for(urls: list[str]) -> list[list[float]]:
+            lookup = getattr(embedding, "lookup_cached_image", None)
+            out: list[list[float]] = []
+            for url in urls:
+                key = image_embedding_cache_key_for_url(url)
+                vec: list[float] = []
+                if callable(lookup):
+                    vec = lookup(key) or []
+                if not vec:
+                    try:
+                        prepared = await prepare_cover_bytes_for_embedding(
+                            url, max_px=384, quality=72, timeout_seconds=6
+                        )
+                    except Exception:
+                        logger.debug(
+                            "visual profile cover prepare failed: %s",
+                            url[:80], exc_info=True,
+                        )
+                        continue
+                    if prepared is None:
+                        continue
+                    image_bytes, mime_type = prepared
+                    try:
+                        vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=key)
+                    except Exception:
+                        logger.debug(
+                            "visual profile embed_image failed: %s",
+                            url[:80], exc_info=True,
+                        )
+                        continue
+                if vec:
+                    out.append(vec)
+            return out
+
+        pos_vecs = await _vecs_for(pos_urls)
+        neg_vecs = await _vecs_for(neg_urls)
+        pos_clusters = build_centroids(pos_vecs)
+        neg_clusters = build_centroids(neg_vecs)
+
+        stored: list[dict[str, Any]] = []
+        for c in pos_clusters:
+            stored.append(
+                {"polarity": "pos", "centroid": list(c.centroid), "member_count": c.member_count}
+            )
+        for c in neg_clusters:
+            stored.append(
+                {"polarity": "neg", "centroid": list(c.centroid), "member_count": c.member_count}
+            )
+
+        try:
+            self._database.replace_user_visual_clusters(stored)
+            self._visual_profile_cache = self._database.get_user_visual_clusters()
+        except Exception:
+            logger.debug("visual profile persist failed", exc_info=True)
+            return 0
+        logger.info(
+            "Visual profile rebuilt: %d pos / %d neg centroids (from %d/%d feedback covers)",
+            len(pos_clusters), len(neg_clusters), len(pos_vecs), len(neg_vecs),
+        )
+        return len(stored)
+
+    @staticmethod
+    def _visual_profile_bonus_from_vec(
+        cover_vec: list[float],
+        pos_centroids: list[list[float]],
+        neg_centroids: list[list[float]],
+    ) -> float:
+        """Map cover↔centroid cosine to a bounded bonus (pos) minus penalty (neg).
+
+        Same-modal image↔image cosine uses the ``_VISUAL_PROFILE_SIM_*`` range
+        (independent of the cross-modal cover↔text range). The negative penalty
+        only subtracts from this signal's own positive — never below 0, so a
+        disliked-cover match can at most zero out the visual-profile nudge, not
+        demote the candidate below its base relevance.
+        """
+        if not cover_vec:
+            return 0.0
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        def _best(centroids: list[list[float]]) -> float:
+            best = 0.0
+            for c in centroids:
+                sim = cosine_similarity(cover_vec, c)
+                if sim > best:
+                    best = sim
+            return best
+
+        def _map(sim: float, floor: float, ceil: float, cap: float) -> float:
+            span = ceil - floor
+            if span <= 0:
+                return 0.0
+            norm = max(0.0, min(1.0, (sim - floor) / span))
+            return cap * norm
+
+        positive = _map(
+            _best(pos_centroids),
+            _VISUAL_PROFILE_SIM_FLOOR, _VISUAL_PROFILE_SIM_CEIL, _VISUAL_PROFILE_BONUS_MAX,
+        )
+        penalty = _map(
+            _best(neg_centroids),
+            _VISUAL_PROFILE_SIM_FLOOR, _VISUAL_PROFILE_SIM_CEIL, _VISUAL_PROFILE_PENALTY_MAX,
+        )
+        return max(0.0, positive - penalty)
+
+    async def _visual_profile_bonus_map(
+        self,
+        candidates: list[DiscoveredContent],
+    ) -> dict[str, float]:
+        """Per-candidate visual-profile bonus for serve() (lookup-only, parallel).
+
+        Returns ``{}`` — a no-op that leaves the ranking byte-identical — when
+        the feature is off, image embedding is inactive, no centroids are
+        loaded yet, or the fairness coverage guard trips. Never fetches a cover
+        on this hot path: a warm miss contributes no bonus and the background
+        rebuild + pool-cover prewarm backfill it.
+        """
+        if not self._visual_profile_active():
+            return {}
+        embedding = self._embedding_service
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if not callable(lookup):
+            return {}
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        cache = self._load_visual_profile_cache()
+        if not cache:
+            return {}
+        pos_centroids = [r["centroid"] for r in cache if r.get("polarity") == "pos"]
+        neg_centroids = [r["centroid"] for r in cache if r.get("polarity") == "neg"]
+        if not pos_centroids and not neg_centroids:
+            return {}
+
+        with_cover = 0
+        warmed = 0
+        bonuses: dict[str, float] = {}
+        for candidate in candidates:
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not bvid or not cover_url:
+                continue
+            with_cover += 1
+            cover_vec = lookup(image_embedding_cache_key_for_url(cover_url)) or []
+            if not cover_vec:
+                continue
+            warmed += 1
+            bonus = self._visual_profile_bonus_from_vec(cover_vec, pos_centroids, neg_centroids)
+            if bonus > 0.0:
+                bonuses[bvid] = bonus
+        # Fairness guard (same rationale as _visual_bonus_map): withhold the
+        # bonus for the whole batch until enough cover-bearing candidates are
+        # warmed, so a half-backfilled pool doesn't tilt toward fresh items.
+        if with_cover == 0 or warmed / with_cover < _VISUAL_COVER_MIN_COVERAGE:
+            return {}
+        return bonuses
 
     async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:
         """Backfill cover embeddings for content already in the pool (URL-keyed).

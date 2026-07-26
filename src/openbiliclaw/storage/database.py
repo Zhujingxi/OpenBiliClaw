@@ -1278,6 +1278,7 @@ class Database:
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
         self._ensure_saved_sync_tables()
+        self._ensure_user_visual_clusters_table()
         self._ensure_auth_state_table()
         self._ensure_init_runs_table()
         self.reset_stale_discovery_candidate_evaluations()
@@ -10067,6 +10068,106 @@ class Database:
             self.conn.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
             )
+
+    def _ensure_user_visual_clusters_table(self) -> None:
+        """Create the user visual-profile centroids table.
+
+        Stores k mean centroids per polarity (pos/neg) built from the user's
+        liked/disliked cover embeddings (see
+        ``recommendation.visual_profile.build_centroids``). Single-user model:
+        the table is implicitly scoped to the one user, like ``events`` /
+        ``recommendations``. Centroids live in the main DB (not
+        ``embedding_cache.db``) because they are profile-scoped, not
+        content-scoped, and the embedding cache exposes only get/put/count.
+        """
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS user_visual_clusters (
+                cluster_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                polarity     TEXT NOT NULL,        -- 'pos' | 'neg'
+                centroid     TEXT NOT NULL,        -- JSON list[float]
+                member_count INTEGER NOT NULL DEFAULT 0,
+                updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_visual_clusters_polarity
+                ON user_visual_clusters(polarity);
+        """)
+
+    def get_user_visual_clusters(self) -> list[dict[str, Any]]:
+        """Return all stored visual centroids, newest-rebuilt ordering irrelevant.
+
+        Each row: ``{cluster_id, polarity, centroid (list[float]), member_count,
+        updated_at}``. ``centroid`` is parsed from JSON; a corrupt row is
+        skipped (never feed a bad vector into scoring — pitfall rule 2).
+        """
+        import json
+
+        rows = self.conn.execute(
+            "SELECT cluster_id, polarity, centroid, member_count, updated_at "
+            "FROM user_visual_clusters"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                vec = json.loads(row["centroid"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(vec, list):
+                continue
+            out.append(
+                {
+                    "cluster_id": row["cluster_id"],
+                    "polarity": row["polarity"],
+                    "centroid": [float(x) for x in vec],
+                    "member_count": row["member_count"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+
+    def replace_user_visual_clusters(
+        self,
+        clusters: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace all visual centroids.
+
+        ``clusters`` items: ``{polarity, centroid (list[float]), member_count}``.
+        Clears the table and re-inserts in one transaction so a rebuild never
+        leaves a half-written profile for the hot path to read.
+        """
+        import json
+
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM user_visual_clusters")
+        for c in clusters:
+            polarity = str(c.get("polarity", "")).strip()
+            if polarity not in {"pos", "neg"}:
+                continue
+            vec = c.get("centroid")
+            if not isinstance(vec, list) or not vec:
+                continue
+            cur.execute(
+                "INSERT INTO user_visual_clusters (polarity, centroid, member_count) "
+                "VALUES (?, ?, ?)",
+                (
+                    polarity,
+                    json.dumps([float(x) for x in vec]),
+                    int(c.get("member_count", 0) or 0),
+                ),
+            )
+        self.conn.commit()
+
+    def latest_feedback_at(self) -> str:
+        """Newest ``feedback_at`` across recommendations, or '' if none.
+
+        Used to throttle visual-profile rebuilds: only rebuild when feedback
+        is newer than the last centroid ``updated_at``.
+        """
+        row = self.conn.execute(
+            "SELECT MAX(feedback_at) AS latest FROM recommendations "
+            "WHERE feedback_at IS NOT NULL"
+        ).fetchone()
+        latest = row["latest"] if row is not None else None
+        return str(latest) if latest is not None else ""
 
     def _ensure_saved_sync_tables(self) -> None:
         """Create normalized saved-content tables and import legacy saved rows once."""

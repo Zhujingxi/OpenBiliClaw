@@ -965,11 +965,15 @@ def _build_recommendation_engine() -> Any:
         info = state.get("xhs_self_info")
         return info if isinstance(info, dict) else None
 
+
     return RecommendationEngine(
         llm=llm_service,
         database=database,
         embedding_service=embedding_service,
         xhs_self_info_provider=_xhs_self_info_provider,
+        visual_profile_enabled=bool(
+            getattr(getattr(cfg, "discovery", None), "visual_profile_enabled", False)
+        ),
     )
 
 

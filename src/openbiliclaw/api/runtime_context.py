@@ -727,6 +727,10 @@ class RuntimeContext:
             embedding_service=new_embedding_service,
             task_registry=self.task_registry,
             xhs_self_info_provider=_xhs_self_info_provider,
+            visual_profile_enabled=bool(
+                getattr(getattr(new_config, "discovery", None), "visual_profile_enabled", False)
+            ),
+            bilibili_client=new_bilibili_client,
         )
 
         discovery_cfg = getattr(new_config, "discovery", None)

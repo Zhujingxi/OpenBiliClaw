@@ -998,6 +998,11 @@ class DiscoveryConfig:
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
+    # User visual-profile bonus (P1): cluster liked/disliked cover embeddings
+    # into taste centroids and nudge ranking by cover↔centroid similarity.
+    # Requires [llm.embedding].multimodal_enabled + a multimodal embedding
+    # model; independent of multimodal_evaluation_enabled (vision LLM eval).
+    visual_profile_enabled: bool = False
     # Smaller batch for image-bearing evaluation calls.
     multimodal_batch_size: int = _DEFAULT_MULTIMODAL_BATCH_SIZE
     # Cover-image preprocessing bounds before sending to the evaluator.
@@ -2138,6 +2143,10 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
+            default=False,
+        ),
+        visual_profile_enabled=_coerce_bool(
+            discovery_raw.get("visual_profile_enabled"),
             default=False,
         ),
         multimodal_batch_size=_normalize_scheduler_int(
@@ -3775,6 +3784,7 @@ def _render_config_toml(
             f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
+            f"visual_profile_enabled = {_toml_bool(config.discovery.visual_profile_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",
             f"multimodal_image_max_px = {config.discovery.multimodal_image_max_px}",
             f"multimodal_image_quality = {config.discovery.multimodal_image_quality}",

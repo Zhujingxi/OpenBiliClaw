@@ -2036,6 +2036,7 @@ class DiscoveryConfigOut(BaseModel):
     admission_min_score: float = 0.60
     candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
+    visual_profile_enabled: bool = False
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384
     multimodal_image_quality: int = 72
