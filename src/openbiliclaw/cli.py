@@ -4270,6 +4270,103 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+_INIT_IMPORT_IDENTITY_KEYS = (
+    "content_id",
+    "bvid",
+    "note_id",
+    "aweme_id",
+    "video_id",
+    "yt_video_id",
+    "post_id",
+    "up_name",
+)
+_INIT_IMPORT_TIMESTAMP_KEYS = ("timestamp", "view_at", "fav_time")
+
+
+def _init_import_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Identify one imported account row: (event type, item, when it happened).
+
+    Returns ``None`` when the row carries no usable identity, which means it
+    cannot be recognised on a later import and must be kept.
+    """
+    event_type = str(event.get("event_type") or event.get("type") or "").strip()
+    raw_metadata = event.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    identity = ""
+    for key in _INIT_IMPORT_IDENTITY_KEYS:
+        candidate = str(metadata.get(key, "") or "").strip()
+        if candidate:
+            identity = candidate
+            break
+    if not identity:
+        identity = str(event.get("url", "") or "").strip()
+    if not identity:
+        return None
+    stamp = ""
+    for key in _INIT_IMPORT_TIMESTAMP_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            stamp = str(int(value))
+            break
+    return (event_type, identity, stamp)
+
+
+def _drop_events_already_imported(
+    database: Any,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter init's import down to rows the ledger has not already recorded.
+
+    Re-running ``init`` re-fetches the same account snapshot and used to persist
+    all of it again: on a real re-run 56% of the ledger became duplicate rows,
+    699 of them keyed to the identical watch timestamp. That is not a second
+    view — it is the same behaviour counted twice, inflating every weight
+    derived from event counts.
+
+    The key includes the timestamp precisely so a genuine repeat still lands: a
+    rewatch has a different ``view_at``, a re-added favourite a different
+    ``fav_time``. Rows with no identity at all are kept — unrecognisable is not
+    the same as duplicate. Best-effort: if the ledger cannot be read, nothing is
+    dropped.
+    """
+    import logging
+
+    if database is None or not events:
+        return events, 0
+    logger = logging.getLogger("openbiliclaw.cli")
+    seen: set[tuple[str, str, str]] = set()
+    try:
+        for row in database.conn.execute("SELECT event_type, url, metadata FROM events"):
+            metadata = row["metadata"]
+            if isinstance(metadata, str):
+                with suppress(Exception):
+                    metadata = json.loads(metadata)
+            key = _init_import_key(
+                {
+                    "event_type": row["event_type"],
+                    "url": row["url"],
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                }
+            )
+            if key is not None:
+                seen.add(key)
+    except Exception:
+        logger.debug("init import dedup lookup failed; importing everything", exc_info=True)
+        return events, 0
+
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for event in events:
+        key = _init_import_key(event)
+        if key is not None and key in seen:
+            skipped += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        kept.append(event)
+    return kept, skipped
+
+
 def _favorites_to_history_rows(favorites: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Turn fetched favourites into individual profile-history rows.
 
@@ -7460,6 +7557,17 @@ async def run_guided_init(
                 "reddit": len(reddit_events),
                 "bangumi": len(bangumi_events),
             }
+        )
+    # Re-running init re-fetches the same snapshot; without this the ledger
+    # counts every one of those rows a second time (measured: 56% duplicates).
+    events_to_persist, already_imported = _drop_events_already_imported(
+        getattr(memory, "_database", None),
+        events_to_persist,
+    )
+    if already_imported:
+        console.print(
+            f"  [dim]跳过账本里已有的 {already_imported} 条信号"
+            f"（重跑 init 不会把同一次行为记两遍）[/dim]"
         )
     propagate_events = getattr(memory, "propagate_events", None)
     if callable(propagate_events):

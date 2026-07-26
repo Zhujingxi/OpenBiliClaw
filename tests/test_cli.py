@@ -8590,6 +8590,76 @@ class TestInitSignalsAreDeduplicable:
             "intro 不在画像 prompt 的白名单里"
         )
 
+    def test_reimporting_the_same_snapshot_does_not_double_count(self, tmp_path: Path) -> None:
+        """重跑 init 会重新拉同一份账号快照。
+
+        实测：重跑一次后账本 56% 是重复行，699 个键连观看时间戳都一模一样——
+        那不是二次观看，是同一次行为被记了两遍，凭事件条数算出来的权重全部虚高。
+        """
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+
+        def _event(event_type: str, bvid: str, stamp: int) -> dict:
+            return {
+                "event_type": event_type,
+                "url": f"https://www.bilibili.com/video/{bvid}",
+                "title": "标题",
+                "metadata": {"bvid": bvid, "content_id": bvid, "view_at": stamp},
+            }
+
+        snapshot = [_event("view", "BV1", 100), _event("favorite", "BV1", 300)]
+        kept, skipped = _drop_events_already_imported(db, snapshot)
+        assert (len(kept), skipped) == (2, 0), "第一次导入不该跳过任何东西"
+        for event in kept:
+            payload = dict(event)
+            db.insert_event(payload.pop("event_type"), **payload)
+
+        kept, skipped = _drop_events_already_imported(db, snapshot)
+        assert (len(kept), skipped) == (0, 2), "同一份快照第二次导入应全部跳过"
+
+    def test_a_genuine_rewatch_still_lands(self, tmp_path: Path) -> None:
+        """键里带时间戳正是为了这个：重看是新行为，不能被去重吃掉。"""
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        first = {
+            "event_type": "view",
+            "url": "https://www.bilibili.com/video/BV1",
+            "title": "标题",
+            "metadata": {"bvid": "BV1", "content_id": "BV1", "view_at": 100},
+        }
+        db.insert_event("view", url=first["url"], title="标题", metadata=first["metadata"])
+
+        rewatch = {**first, "metadata": {**first["metadata"], "view_at": 999}}
+        kept, skipped = _drop_events_already_imported(db, [first, rewatch])
+
+        assert skipped == 1
+        assert [e["metadata"]["view_at"] for e in kept] == [999]
+
+    def test_rows_without_identity_are_kept(self, tmp_path: Path) -> None:
+        """认不出来 ≠ 重复。没有身份的行宁可留着，也不能默默丢信号。"""
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        faceless = {"event_type": "search", "url": "", "title": "搜索了什么", "metadata": {}}
+
+        kept, skipped = _drop_events_already_imported(db, [faceless, faceless])
+
+        assert (len(kept), skipped) == (2, 0)
+
+    def test_missing_database_imports_everything(self) -> None:
+        from openbiliclaw.cli import _drop_events_already_imported
+
+        events = [{"event_type": "view", "metadata": {"bvid": "BV1"}}]
+        assert _drop_events_already_imported(None, events) == (events, 0)
+
     def test_favorites_become_individual_history_rows(self) -> None:
         """一个收藏就是一个信号，不是汇总行里的一个数字。"""
         from openbiliclaw.cli import _favorites_to_history_rows
