@@ -104,7 +104,7 @@ seen_bvids = db.get_seen_bvids()        # B 站兼容集合
 不等于看过某条内容）。这个集合每次扩大都要同步抬 `_SEEN_ITEM_EVENT_TYPES_VERSION`：
 老库的回填游标停在最新事件上，不倒回就永远扫不到新纳入的类型；`initialize()` 比对
 `seen_items_backfill_state.scanned_event_types_version` 后会自动倒回重扫一次。
-注意倒回只能救回**带身份**的旧事件：2026-07-26 之前 init 写下的 `favorite` 行没有 `bvid` / url，回填扫到也认不出是哪条内容（实测老库倒回后 `seen_items` 数量不变）。这些收藏要等下一次 init 或收藏同步重新拉取、带上身份后才进去重账本。
+注意倒回只能救回**带身份**的旧事件：2026-07-26 之前 init 写下的 `favorite` 行没有 `bvid` / url，回填扫到也认不出是哪条内容（实测老库倒回后 `seen_items` 数量不变）。这些收藏由 `mark_items_seen(source_platform, content_ids)` 补：account sync 每 6 小时拿到完整收藏快照后直接把 bvid upsert 进账本（不产生事件，因此不会重复计入偏好信号）。快照行 `first_event_id = 0`（没有单一事件产生它），冲突时保留既有真实事件的溯源与时间；由于 seen 状态缓存键是 `MAX(last_event_id)`，快照写入必须显式失效缓存，否则新身份要等下一条真实事件才可见。
 
 旧的
 `get_recent_viewed_content_keys()` / `get_recent_viewed_bvids()` 保留为兼容 API，

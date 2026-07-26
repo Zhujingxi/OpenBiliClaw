@@ -3232,6 +3232,35 @@ class TestDatabase:
             assert [row["bvid"] for row in migrated.get_pool_candidates(limit=10)] == ["BVFRESH"]
             migrated.close()
 
+    def test_snapshot_marks_are_seen_immediately_and_keep_event_provenance(self) -> None:
+        """快照标记没有事件 id，缓存键又是 MAX(last_event_id)——不显式失效就查不到。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.insert_event(
+                "view",
+                url="https://www.bilibili.com/video/BVWATCHED",
+                metadata={"bvid": "BVWATCHED"},
+            )
+            before = db.get_seen_bvids()
+            watched_row = db.conn.execute(
+                "SELECT first_event_id FROM seen_items WHERE content_id = 'BVWATCHED'"
+            ).fetchone()
+
+            added = db.mark_items_seen("bilibili", ["BVSNAP1", "BVSNAP2", "BVWATCHED", ""])
+
+            assert added == 2, "已在账本里的与空 id 都不该重复计数"
+            assert "BVSNAP1" in db.get_seen_bvids(), "快照标记必须立刻对去重可见"
+            assert "BVWATCHED" in before
+            after_row = db.conn.execute(
+                "SELECT first_event_id FROM seen_items WHERE content_id = 'BVWATCHED'"
+            ).fetchone()
+            assert after_row["first_event_id"] == watched_row["first_event_id"], (
+                "真实事件的溯源不该被快照覆盖"
+            )
+            assert db.mark_items_seen("bilibili", ["BVSNAP1"]) == 0, "重复标记要幂等"
+            db.close()
+
     def test_explicit_positive_events_join_the_seen_ledger(self) -> None:
         """收藏 / 点赞 / 投币都证明用户消费过这条内容，必须参与硬去重。"""
         with tempfile.TemporaryDirectory() as tmpdir:

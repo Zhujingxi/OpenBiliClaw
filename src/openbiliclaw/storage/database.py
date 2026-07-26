@@ -20,7 +20,7 @@ import threading
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -7566,6 +7566,61 @@ class Database:
                 ),
             )
         return bool(canonical_rows)
+
+    def mark_items_seen(self, source_platform: str, content_ids: Iterable[str]) -> int:
+        """Record an account-snapshot's contents as already consumed.
+
+        Some evidence that the user has seen a piece of content arrives as a
+        *list*, not an event: the favourites folder account sync fetches every
+        6 hours is the whole set, and only newly-added entries ever become
+        events. Everything the user favourited before OpenBiliClaw existed
+        therefore had no event to derive from, and stayed recommendable forever.
+
+        Snapshot rows carry ``first_event_id = 0`` because no single event
+        produced them, and existing rows are left untouched — a real event's
+        provenance and timestamps outrank a snapshot's. Returns the number of
+        identities newly added.
+        """
+        platform = canonical_source_platform(source_platform)
+        if not platform:
+            return 0
+        rows: set[tuple[str, str]] = set()
+        for raw in content_ids:
+            content_id = str(raw or "").strip()
+            if not content_id:
+                continue
+            try:
+                rows.add((make_item_key(platform, content_id), content_id))
+            except ValueError:
+                continue
+        if not rows:
+            return 0
+        added = 0
+        for item_key, content_id in sorted(rows):
+            cursor = self.conn.execute(
+                """
+                INSERT INTO seen_items (
+                    item_key,
+                    source_platform,
+                    content_id,
+                    first_event_id,
+                    last_event_id,
+                    first_seen_at,
+                    last_seen_at
+                )
+                VALUES (?, ?, ?, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(item_key) DO NOTHING
+                """,
+                (item_key, platform, content_id),
+            )
+            added += int(cursor.rowcount or 0)
+        self.conn.commit()
+        if added:
+            # The seen-state cache is keyed on MAX(last_event_id), which
+            # snapshot rows deliberately leave at 0 — without this the new
+            # identities would stay invisible until the next real event.
+            self._invalidate_seen_state_cache()
+        return added
 
     def get_seen_bvids(self) -> set[str]:
         """Return every Bilibili identity recorded in the durable seen ledger."""

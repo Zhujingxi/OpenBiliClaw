@@ -35,7 +35,7 @@ from openbiliclaw.sources.x_client import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,8 @@ class SupportsRecentEventUrls(Protocol):
         limit: int = ...,
     ) -> set[str]: ...
 
+    def mark_items_seen(self, source_platform: str, content_ids: Iterable[str]) -> int: ...
+
 
 class SupportsXClient(Protocol):
     async def likes(self, *, limit: int) -> list[dict[str, Any]]: ...
@@ -200,7 +202,12 @@ class AccountSyncService:
     # and follows 101+ used to silently never sync. ``max_total_items`` bounds
     # the worst case at ~1 + ceil(500/20) requests instead of 200×3.
     max_folders: int = 200
-    max_items_per_folder: int = 50
+    # Per-folder cap matches the total budget, as init's does. At 50 a user
+    # whose 默认收藏夹 holds 800 videos had 750 of them invisible to the seen
+    # ledger no matter how often sync ran — the comment above claimed parity
+    # with init while the numbers said otherwise. ``max_total_items`` still
+    # bounds the worst case (~1 + 500/20 requests), so depth costs nothing.
+    max_items_per_folder: int = 500
     max_total_items: int = 500
     following_page_size: int = 100
     following_max_pages: int = 5
@@ -378,6 +385,14 @@ class AccountSyncService:
             current_signature = self._favorite_signature(favorites)
             previous_signature = str(state.get("favorite_signature", ""))
             previous_bvids = self._favorite_bvids_from_state(state)
+            # Everything in the folder is content the user has seen, whether or
+            # not this sync turns it into an event. Only *newly added*
+            # favourites become events, so without this the entire back
+            # catalogue — favourited before install, or before favourites
+            # carried an identity — would stay recommendable forever. Marking
+            # from the snapshot is idempotent and adds no preference signal, so
+            # it can't double-count what the events already recorded.
+            self._mark_favorites_seen(self._favorite_bvids(favorites))
             if current_signature and current_signature != previous_signature:
                 new_favorites = self._filter_favorite_folders(favorites, previous_bvids)
                 events.extend(self._favorite_events(new_favorites))
@@ -1539,6 +1554,25 @@ class AccountSyncService:
             if isinstance(item, dict) and str(item.get("bvid", "")).strip()
         }
         return sorted(bvids)
+
+    def _mark_favorites_seen(self, bvids: list[str]) -> None:
+        """Best-effort: record the favourites snapshot in the seen ledger."""
+        database = self.database
+        if database is None or not bvids:
+            return
+        mark = getattr(database, "mark_items_seen", None)
+        if not callable(mark):
+            return
+        try:
+            added = int(mark("bilibili", bvids) or 0)
+        except Exception:
+            logger.debug("marking favourites as seen failed", exc_info=True)
+            return
+        if added:
+            logger.info(
+                "account sync: %d favourited video(s) joined the seen ledger",
+                added,
+            )
 
     def _favorite_bvids_from_state(self, state: dict[str, object]) -> set[str]:
         stored = self._string_set(state.get("favorite_bvids", []))
