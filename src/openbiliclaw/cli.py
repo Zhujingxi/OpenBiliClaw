@@ -10674,7 +10674,12 @@ def _run_xhs_discovery(*, force: bool) -> None:
                 ("入队关键词数", str(enqueued)),
                 ("尝试关键词数", str(attempted)),
                 ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 0)))),
-                ("节流开关", "已跳过（--force）" if force else "4 小时节流"),
+                (
+                    "节流开关",
+                    "已跳过（--force）"
+                    if force
+                    else f"{int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟节流",
+                ),
             ],
         )
         return
@@ -10687,7 +10692,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         ),
         "throttled": (
             "info",
-            "距离上次关键词生产不足 4 小时",
+            f"距离上次关键词生产不足 {int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟",
             "可使用 `--force` 忽略节流重新触发。",
         ),
         "no_profile": (
