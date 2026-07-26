@@ -8452,25 +8452,18 @@ def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch)
     assert "内容 ID" not in out
 
 
-class TestInitHistoryReachesTheEventLedger:
-    """init 拉到的历史必须进 events 表，否则去重无从谈起。
+class TestInitSignalsAreDeduplicable:
+    """init 拉到的内容必须能被去重链路认出来，否则会被当新内容推回去。
 
-    stage 1 的数据此前只存在局部变量里：喂完 analyze_events / build_initial_profile
-    就丢。于是 seen_items（由 view 事件派生）对用户已看过的内容一无所知——
-    刚装好的实例可以把用户自己的观看历史当新内容推回去。
+    历史事件一直是入库的（stage 1 结尾 propagate_events），但收藏事件既不带 bvid
+    也不带 url——没有身份就进不了 seen_items，用户明确收藏过的视频照样能被推荐。
+    历史事件也缺完播元数据，于是每条观看在账本里都是"满意度未知"。
     """
 
-    def _db(self, tmp_path: Path):
-        from openbiliclaw.storage.database import Database
-
-        db = Database(tmp_path / "t.db")
-        db.initialize()
-        return db
-
     @staticmethod
-    def _item(bvid: str, *, title: str = "标题", progress: int = 100) -> dict:
+    def _history_item(bvid: str = "BV1", *, progress: int = 100) -> dict:
         return {
-            "title": title,
+            "title": "标题",
             "history": {"bvid": bvid},
             "author_name": "UP",
             "view_at": 1_785_000_000,
@@ -8479,63 +8472,74 @@ class TestInitHistoryReachesTheEventLedger:
             "tag_name": "科技",
         }
 
-    def test_history_becomes_view_events_and_marks_items_seen(self, tmp_path: Path) -> None:
-        from openbiliclaw.cli import _persist_init_history_to_events
+    def test_history_events_carry_watch_metrics(self) -> None:
+        """完播信息决定 classify_event_satisfaction 怎么读这条事件。"""
+        from openbiliclaw.cli import _history_item_to_event
 
-        db = self._db(tmp_path)
-        counts = _persist_init_history_to_events(
-            db,
-            history=[self._item("BV1"), self._item("BV2")],
-            favorites=[self._item("BV3")],
-        )
+        event = _history_item_to_event(self._history_item(progress=180))
+        metadata = event["metadata"]
 
-        assert counts["history"] == 2
-        assert counts["favorites"] == 1
-        types = [r[0] for r in db.conn.execute("SELECT event_type FROM events ORDER BY id")]
-        assert types == ["view", "view", "favorite"]
-        seen = {r[0] for r in db.conn.execute("SELECT content_id FROM seen_items")}
-        assert {"BV1", "BV2"} <= seen, "看过的内容必须进 seen_items，才能不再被推荐"
-
-    def test_rerunning_init_does_not_duplicate_the_ledger(self, tmp_path: Path) -> None:
-        from openbiliclaw.cli import _persist_init_history_to_events
-
-        db = self._db(tmp_path)
-        first = _persist_init_history_to_events(db, history=[self._item("BV1")], favorites=[])
-        second = _persist_init_history_to_events(db, history=[self._item("BV1")], favorites=[])
-
-        assert first["history"] == 1
-        assert second["history"] == 0 and second["skipped"] == 1, "重跑 init 必须幂等"
-        total = db.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-        assert total == 1
-
-    def test_watch_metrics_survive_for_downstream_weighting(self, tmp_path: Path) -> None:
-        """完播率与时间戳要带进 metadata，否则画像抽样退化成到达顺序。"""
-        import json
-
-        from openbiliclaw.cli import _persist_init_history_to_events
-
-        db = self._db(tmp_path)
-        _persist_init_history_to_events(db, history=[self._item("BV9", progress=180)], favorites=[])
-        raw = db.conn.execute("SELECT metadata FROM events").fetchone()[0]
-        metadata = json.loads(raw) if isinstance(raw, str) else raw
+        assert metadata["content_id"] == "BV1"
         assert metadata["watch_seconds"] == 180
         assert metadata["video_duration_seconds"] == 200
-        assert metadata["timestamp"] == 1_785_000_000 * 1000, "毫秒时间戳供时间分层使用"
+        assert metadata["category"] == "科技"
 
-    def test_rows_without_an_id_are_skipped_not_crashed(self, tmp_path: Path) -> None:
-        from openbiliclaw.cli import _persist_init_history_to_events
+    def test_history_event_without_metrics_still_builds(self) -> None:
+        from openbiliclaw.cli import _history_item_to_event
 
-        db = self._db(tmp_path)
-        counts = _persist_init_history_to_events(
-            db,
-            history=[{"title": "没有 bvid"}, {"history": {"bvid": "BV1"}}, self._item("BV2")],
-            favorites=[],
+        event = _history_item_to_event({"title": "无进度", "history": {"bvid": "BV2"}})
+
+        assert event["metadata"]["content_id"] == "BV2"
+        assert "watch_seconds" not in event["metadata"]
+
+    def test_favorite_events_carry_identity(self) -> None:
+        """收藏没有身份就进不了 seen_items——收藏过的视频会被再推一遍。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {
+                    "title": "收藏的视频",
+                    "upper": "UP",
+                    "folder": "默认收藏夹",
+                    "bvid": "BV3",
+                    "fav_time": 1_785_000_001,
+                    "duration": 300,
+                }
+            ],
+            following_data=[],
         )
-        assert counts["history"] == 1
-        assert counts["skipped"] == 2
 
-    def test_missing_database_is_tolerated(self) -> None:
-        from openbiliclaw.cli import _persist_init_history_to_events
+        assert len(events) == 1
+        favorite = events[0]
+        assert favorite["url"] == "https://www.bilibili.com/video/BV3"
+        assert favorite["metadata"]["content_id"] == "BV3"
+        assert favorite["metadata"]["fav_time"] == 1_785_000_001
+        assert favorite["metadata"]["folder"] == "默认收藏夹"
 
-        counts = _persist_init_history_to_events(None, history=[{"title": "x"}], favorites=[])
-        assert counts == {"history": 0, "favorites": 0, "skipped": 0}
+    def test_favorite_without_bvid_degrades_quietly(self) -> None:
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[], favorites_data=[{"title": "老数据", "upper": "UP"}], following_data=[]
+        )
+
+        assert events[0].get("url", "") == ""
+        assert "content_id" not in events[0]["metadata"]
+
+    def test_a_favorited_video_lands_in_the_seen_ledger(self, tmp_path: Path) -> None:
+        """端到端：收藏事件写库后必须出现在 seen_items 里。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        for event in _build_bilibili_init_events(
+            history=[],
+            favorites_data=[{"title": "收藏的视频", "upper": "UP", "bvid": "BV4"}],
+            following_data=[],
+        ):
+            db.insert_event(**event)
+
+        assert "BV4" in db.get_seen_bvids(), "收藏过的内容不该再被推荐"

@@ -15,7 +15,7 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史 `view` 事件，不受旧版 2000 条窗口限制。 |
+| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史「已消费」事件（`view` / `favorite` / `like` / `coin`），不受旧版 2000 条窗口限制；类型集扩大时按 `scanned_event_types_version` 自动倒回重扫一次。 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
 | 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error, effect_key='')` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）；空 `effect_key` 保持普通 append，结算 worker 传入固定形状 `dialogue:<ref-sha256>:ledger` / `dialogue:<ref-sha256>:derived:<content-sha256>` 时由 partial unique index + `INSERT OR IGNORE` 保证 observer effect 至多一行。`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回（newest-first，`source_refs` 解码回列表，并带回 `effect_key`）。其余字段：`write_point`、`source`、before/after 摘要、`diff`（≤2000 字符）、`turn_id`、`gate_verdict`、`held_id`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 会幂等补列和索引。写点挂钩清单见 `docs/modules/soul.md`。 |
@@ -95,8 +95,18 @@ seen_bvids = db.get_seen_bvids()        # B 站兼容集合
 ```
 
 `seen_items` 是 discovery 与 recommendation 的已看硬去重来源。它记录首次/最近事件 ID
-与时间；再次观看只更新同一 canonical 行。升级旧库时会增量回填所有历史 `view` 事件，
-因此第 2001 条以前的已看内容也不会重新进入候选。旧的
+与时间；再次观看只更新同一 canonical 行。升级旧库时会增量回填所有历史事件，
+因此第 2001 条以前的已看内容也不会重新进入候选。
+
+派生它的事件类型由 `_SEEN_ITEM_EVENT_TYPES` 决定：2026-07-26 起为 `view` /
+`favorite` / `like` / `coin`——收藏、点赞、投币同样证明用户消费过这条内容，此前只认
+`view`，于是用户明确收藏过的视频照样能被当新内容推荐。`follow` 不在其中（关注 UP
+不等于看过某条内容）。这个集合每次扩大都要同步抬 `_SEEN_ITEM_EVENT_TYPES_VERSION`：
+老库的回填游标停在最新事件上，不倒回就永远扫不到新纳入的类型；`initialize()` 比对
+`seen_items_backfill_state.scanned_event_types_version` 后会自动倒回重扫一次。
+注意倒回只能救回**带身份**的旧事件：2026-07-26 之前 init 写下的 `favorite` 行没有 `bvid` / url，回填扫到也认不出是哪条内容（实测老库倒回后 `seen_items` 数量不变）。这些收藏要等下一次 init 或收藏同步重新拉取、带上身份后才进去重账本。
+
+旧的
 `get_recent_viewed_content_keys()` / `get_recent_viewed_bvids()` 保留为兼容 API，
 但返回同一个无界账本。
 

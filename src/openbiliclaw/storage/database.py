@@ -345,6 +345,16 @@ _VIEW_CONTENT_ID_METADATA_KEYS = (
     "yt_video_id",
     "post_id",
 )
+# Event types that prove the user already consumed a piece of content, and so
+# feed the durable seen ledger. ``view`` was the only member until 2026-07-26,
+# which meant a video the user had explicitly favourited (or liked, or coined)
+# but whose view event predated the history window could come back as a "new"
+# recommendation. You cannot favourite something you never saw.
+_SEEN_ITEM_EVENT_TYPES = frozenset({"view", "favorite", "like", "coin"})
+_SEEN_ITEM_EVENT_TYPES_ORDERED = tuple(sorted(_SEEN_ITEM_EVENT_TYPES))
+# Bump whenever _SEEN_ITEM_EVENT_TYPES grows, so existing installs rewind the
+# backfill cursor once and pick up the newly eligible history.
+_SEEN_ITEM_EVENT_TYPES_VERSION = 1
 _KEYWORD_KIND_REGULAR = "regular"
 _KEYWORD_KIND_EXPLORE = "explore"
 _KEYWORD_KINDS = {_KEYWORD_KIND_REGULAR, _KEYWORD_KIND_EXPLORE}
@@ -1862,7 +1872,7 @@ class Database:
                 )
                 event_id = int(cursor.lastrowid or 0)
                 seen_changed = False
-                if event_type == "view" and event_id > 0:
+                if event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
                     seen_changed = self._upsert_seen_items_from_view_event_on(
                         self.conn,
                         event_id=event_id,
@@ -1952,7 +1962,7 @@ class Database:
                     params,
                 )
                 last_event_id = int(cursor.lastrowid or last_event_id)
-                if params[0] == "view" and last_event_id > 0:
+                if params[0] in _SEEN_ITEM_EVENT_TYPES and last_event_id > 0:
                     seen_changed = (
                         self._upsert_seen_items_from_view_event_on(
                             conn,
@@ -8706,22 +8716,48 @@ class Database:
             ) VALUES (1, 0);
             """
         )
+        # The scan cursor is type-set aware. When _SEEN_ITEM_EVENT_TYPES grows
+        # (2026-07-26: favourites / likes / coins joined views), every existing
+        # install still has its cursor parked at the newest event, so the newly
+        # eligible history would never be scanned. Bumping the recorded version
+        # rewinds the cursor exactly once per widening.
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(seen_items_backfill_state)").fetchall()
+        }
+        if "scanned_event_types_version" not in existing_columns:
+            self.conn.execute(
+                "ALTER TABLE seen_items_backfill_state "
+                "ADD COLUMN scanned_event_types_version INTEGER NOT NULL DEFAULT 0"
+            )
         state = self.conn.execute(
             """
-            SELECT last_scanned_event_id
+            SELECT last_scanned_event_id, scanned_event_types_version
             FROM seen_items_backfill_state
             WHERE singleton = 1
             """
         ).fetchone()
         last_scanned_event_id = int(state["last_scanned_event_id"] if state else 0)
+        scanned_version = int(state["scanned_event_types_version"] if state else 0)
+        if scanned_version < _SEEN_ITEM_EVENT_TYPES_VERSION:
+            last_scanned_event_id = 0
+            self.conn.execute(
+                """
+                UPDATE seen_items_backfill_state
+                SET last_scanned_event_id = 0, scanned_event_types_version = ?
+                WHERE singleton = 1
+                """,
+                (_SEEN_ITEM_EVENT_TYPES_VERSION,),
+            )
+        placeholders = ", ".join("?" for _ in _SEEN_ITEM_EVENT_TYPES_ORDERED)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT id, url, metadata, created_at
             FROM events
-            WHERE event_type = 'view' AND id > ?
+            WHERE event_type IN ({placeholders}) AND id > ?
             ORDER BY id ASC
             """,
-            (last_scanned_event_id,),
+            (*_SEEN_ITEM_EVENT_TYPES_ORDERED, last_scanned_event_id),
         ).fetchall()
         backfilled = 0
         for row in rows:
@@ -8743,7 +8779,7 @@ class Database:
             self._invalidate_seen_state_cache()
         if backfilled:
             logger.info(
-                "Backfilled %d legacy view event(s) into the durable seen-item ledger",
+                "Backfilled %d legacy consumed-content event(s) into the seen-item ledger",
                 backfilled,
             )
 

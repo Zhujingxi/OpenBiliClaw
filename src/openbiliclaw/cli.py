@@ -1230,16 +1230,33 @@ def _history_item_to_event(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title", "")).strip()
     author = str(item.get("author_name", item.get("author", ""))).strip()
     view_at = history_meta.get("view_at", item.get("view_at", ""))
+    metadata: dict[str, Any] = {
+        "bvid": bvid,
+        "view_at": view_at,
+    }
+    if bvid:
+        metadata["content_id"] = bvid
+    # Watch metrics decide how ``classify_event_satisfaction`` reads this row.
+    # Without them every video the user ever watched lands in the ledger as
+    # "unknown satisfaction" — a 100%-watched video and a 3-second bounce look
+    # identical to everything downstream of init.
+    for source_field, target in (
+        ("progress", "watch_seconds"),
+        ("duration", "video_duration_seconds"),
+    ):
+        value = item.get(source_field)
+        if isinstance(value, (int, float)) and value > 0:
+            metadata[target] = float(value)
+    tag = str(item.get("tag_name", "") or "").strip()
+    if tag:
+        metadata["category"] = tag
     return build_event(
         event_type="view",
         source_platform=SOURCE_BILIBILI,
         title=title,
         url=f"https://www.bilibili.com/video/{bvid}" if bvid else "",
         author=author,
-        metadata={
-            "bvid": bvid,
-            "view_at": view_at,
-        },
+        metadata=metadata,
     )
 
 
@@ -4253,109 +4270,71 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
-def _persist_init_history_to_events(
-    database: Any,
+def _build_bilibili_init_events(
     *,
     history: list[dict[str, Any]],
-    favorites: list[dict[str, Any]],
-) -> dict[str, int]:
-    """Record init's fetched Bilibili history in the durable event ledger.
+    favorites_data: list[dict[str, Any]],
+    following_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn stage-1 Bilibili data into unified events for the ledger.
 
-    Init used to keep stage-1 data in local variables only: it fed
-    ``analyze_events`` / ``build_initial_profile`` and was then dropped. Two
-    things fell out of that:
-
-    * **No dedup.** ``seen_items`` is derived from ``view`` events, so nothing
-      the user had already watched was known to the recommender — a brand-new
-      install could immediately recommend videos from the user's own history.
-    * **Nothing to re-derive from.** The cognition cycle reads the event table,
-      so init's material was invisible to it, and awareness notes built during
-      init had no real event ids to cite.
-
-    Writes are idempotent by canonical item key: re-running init (or resuming a
-    failed one) skips rows already present in ``seen_items`` rather than
-    duplicating the ledger. Returns per-kind counts for progress reporting.
+    Extracted from ``run_guided_init`` so the identity and metadata each event
+    carries can be tested directly — that identity is what decides whether the
+    recommender knows the user already consumed this content.
     """
-    import logging
-
-    from openbiliclaw.saved_sync.identity import make_item_key
     from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
 
-    logger = logging.getLogger("openbiliclaw.cli")
-    if database is None:
-        return {"history": 0, "favorites": 0, "skipped": 0}
-
-    try:
-        existing_keys = {
-            str(row["item_key"]) for row in database.conn.execute("SELECT item_key FROM seen_items")
+    events = [_history_item_to_event(item) for item in history]
+    for fav in favorites_data:
+        folder = str(fav.get("folder", "")).strip()
+        upper = str(fav.get("upper", "")).strip()
+        # Identity is what makes a favourite deduplicable. Without a bvid these
+        # events carried no url and no content_id, so seen_items never learned
+        # about them and a video the user had explicitly saved could come back
+        # as a fresh recommendation.
+        fav_bvid = str(fav.get("bvid", "") or "").strip()
+        fav_metadata: dict[str, Any] = {
+            "folder": folder,
+            "upper": upper,
         }
-    except Exception:
-        logger.debug("seen_items lookup failed; init ledger import proceeds", exc_info=True)
-        existing_keys = set()
-
-    counts = {"history": 0, "favorites": 0, "skipped": 0}
-
-    def _bvid(item: dict[str, Any]) -> str:
-        raw = item.get("history")
-        if isinstance(raw, dict):
-            candidate = str(raw.get("bvid", "") or "").strip()
-            if candidate:
-                return candidate
-        return str(item.get("bvid", "") or "").strip()
-
-    def _record(item: dict[str, Any], *, event_type: str, bucket: str) -> None:
-        bvid = _bvid(item)
-        title = str(item.get("title", "") or "").strip()
-        if not bvid or not title:
-            counts["skipped"] += 1
-            return
-        try:
-            item_key = make_item_key(SOURCE_BILIBILI, bvid)
-        except ValueError:
-            counts["skipped"] += 1
-            return
-        if item_key in existing_keys:
-            counts["skipped"] += 1
-            return
-        metadata: dict[str, Any] = {"content_id": bvid, "bvid": bvid}
-        view_at = item.get("view_at")
-        if isinstance(view_at, (int, float)) and view_at > 0:
-            # Event metadata carries epoch milliseconds; history reports seconds.
-            metadata["timestamp"] = int(view_at) * 1000
-        for source_field, target in (
-            ("progress", "watch_seconds"),
-            ("duration", "video_duration_seconds"),
-        ):
-            value = item.get(source_field)
-            if isinstance(value, (int, float)) and value > 0:
-                metadata[target] = float(value)
-        tag = str(item.get("tag_name", "") or "").strip()
-        if tag:
-            metadata["category"] = tag
-        event = build_event(
-            event_type=event_type,
-            source_platform=SOURCE_BILIBILI,
-            title=title,
-            url=f"https://www.bilibili.com/video/{bvid}",
-            author=str(item.get("author_name", "") or "").strip(),
-            metadata=metadata,
+        if fav_bvid:
+            fav_metadata["bvid"] = fav_bvid
+            fav_metadata["content_id"] = fav_bvid
+        fav_time = fav.get("fav_time")
+        if isinstance(fav_time, (int, float)) and fav_time > 0:
+            fav_metadata["fav_time"] = int(fav_time)
+        duration = fav.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            fav_metadata["video_duration_seconds"] = float(duration)
+        events.append(
+            build_event(
+                event_type="favorite",
+                source_platform=SOURCE_BILIBILI,
+                title=str(fav.get("title", "")),
+                url=f"https://www.bilibili.com/video/{fav_bvid}" if fav_bvid else "",
+                author=upper,
+                metadata=fav_metadata,
+            )
         )
-        try:
-            database.insert_event(**event)
-        except Exception:
-            logger.debug("init ledger insert failed for %s", bvid, exc_info=True)
-            counts["skipped"] += 1
-            return
-        existing_keys.add(item_key)
-        counts[bucket] += 1
-
-    for item in history:
-        if isinstance(item, dict):
-            _record(item, event_type="view", bucket="history")
-    for item in favorites:
-        if isinstance(item, dict):
-            _record(item, event_type="favorite", bucket="favorites")
-    return counts
+    for user in following_data:
+        sign = str(user.get("sign", "")).strip()
+        name = str(user.get("name", ""))
+        events.append(
+            build_event(
+                event_type="follow",
+                source_platform=SOURCE_BILIBILI,
+                title=name,
+                author=name,
+                context=(
+                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
+                ),
+                metadata={
+                    "up_name": name,
+                    "sign": sign,
+                },
+            )
+        )
+    return events
 
 
 def _xhs_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6444,11 +6423,19 @@ async def _fetch_bilibili_init_data(
                 upper = item.get("upper", {}) if isinstance(item, dict) else {}
                 if not isinstance(upper, dict):
                     upper = {}
+                raw = item if isinstance(item, dict) else {}
                 favs.append(
                     {
-                        "title": item.get("title", "") if isinstance(item, dict) else str(item),
+                        "title": raw.get("title", "") if raw else str(item),
                         "upper": str(upper.get("name", "")).strip(),
                         "folder": folder_title,
+                        # Identity + time, carried for the event ledger: a
+                        # favorited video must never be recommended back, and
+                        # dedup needs a bvid to key on. Stripped again before
+                        # this list reaches any prompt (see _favorites below).
+                        "bvid": str(raw.get("bvid", "") or "").strip(),
+                        "fav_time": raw.get("fav_time"),
+                        "duration": raw.get("duration"),
                     }
                 )
             if len(favs) >= favorite_limit:
@@ -7040,22 +7027,6 @@ async def run_guided_init(
                 f" / 收藏 [green]{len(favorites_data)}[/green] 个"
                 f" / 关注 [green]{len(following_data)}[/green] 人"
             )
-            # Record what we just fetched in the durable event ledger, so
-            # seen_items knows this content is already watched (dedup) and the
-            # cognition cycle has real events to re-derive from later.
-            ledger_counts = _persist_init_history_to_events(
-                getattr(memory, "_database", None),
-                history=history,
-                favorites=favorites_data,
-            )
-            recorded = ledger_counts["history"] + ledger_counts["favorites"]
-            if recorded or ledger_counts["skipped"]:
-                console.print(
-                    f"  [dim]已记入事件账本 [green]{recorded}[/green] 条"
-                    f"（历史 {ledger_counts['history']} / 收藏 {ledger_counts['favorites']}"
-                    f"，跳过已存在 {ledger_counts['skipped']} 条）"
-                    f"——这些内容不会再被推荐给你[/dim]"
-                )
         _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
@@ -7357,42 +7328,11 @@ async def run_guided_init(
 
     # Build events from all data sources via the unified event_format
     # builder so B站 / 小红书 / future-source events share one shape.
-    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
-
-    events = [_history_item_to_event(item) for item in history]
-    for fav in favorites_data:
-        folder = str(fav.get("folder", "")).strip()
-        upper = str(fav.get("upper", "")).strip()
-        events.append(
-            build_event(
-                event_type="favorite",
-                source_platform=SOURCE_BILIBILI,
-                title=str(fav.get("title", "")),
-                author=upper,
-                metadata={
-                    "folder": folder,
-                    "upper": upper,
-                },
-            )
-        )
-    for user in following_data:
-        sign = str(user.get("sign", "")).strip()
-        name = str(user.get("name", ""))
-        events.append(
-            build_event(
-                event_type="follow",
-                source_platform=SOURCE_BILIBILI,
-                title=name,
-                author=name,
-                context=(
-                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
-                ),
-                metadata={
-                    "up_name": name,
-                    "sign": sign,
-                },
-            )
-        )
+    events = _build_bilibili_init_events(
+        history=history,
+        favorites_data=favorites_data,
+        following_data=following_data,
+    )
     bilibili_event_count = len(events)
     # X likes/bookmarks are direct-fetched here (no extension task handler to
     # propagate them), so — like B站 — they must be persisted in this run.
@@ -7617,10 +7557,17 @@ async def run_guided_init(
     )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
+        # Ledger-only fields (bvid / fav_time / duration) are dropped here: the
+        # profile builder reads this payload as prompt text, and ids would cost
+        # tokens on every init without telling the model anything.
+        prompt_favorites = [
+            {key: value for key, value in fav.items() if key in {"title", "upper", "folder"}}
+            for fav in favorites_data
+        ]
         combined_history.append(
             {
                 "title": "[收藏夹汇总]",
-                "_favorites": favorites_data,
+                "_favorites": prompt_favorites,
                 "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
                 + "涵盖: "
                 + ", ".join(

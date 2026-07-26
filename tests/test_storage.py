@@ -3232,6 +3232,60 @@ class TestDatabase:
             assert [row["bvid"] for row in migrated.get_pool_candidates(limit=10)] == ["BVFRESH"]
             migrated.close()
 
+    def test_explicit_positive_events_join_the_seen_ledger(self) -> None:
+        """收藏 / 点赞 / 投币都证明用户消费过这条内容，必须参与硬去重。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for event_type, bvid in (
+                ("favorite", "BVFAV1"),
+                ("like", "BVLIKE1"),
+                ("coin", "BVCOIN1"),
+                ("follow", "BVFOLLOW1"),
+            ):
+                db.insert_event(
+                    event_type,
+                    url=f"https://www.bilibili.com/video/{bvid}",
+                    metadata={"bvid": bvid},
+                )
+
+            seen = db.get_seen_bvids()
+            assert {"BVFAV1", "BVLIKE1", "BVCOIN1"} <= seen, "收藏过的内容不该再被推荐"
+            assert "BVFOLLOW1" not in seen, "关注 UP 不等于看过这条内容"
+            db.close()
+
+    def test_widening_the_seen_types_rewinds_the_backfill_cursor(self) -> None:
+        """老库的游标停在最新事件上，不倒回就永远扫不到新纳入的类型。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.db"
+            db = Database(path)
+            db.initialize()
+            db.conn.execute(
+                """
+                INSERT INTO events (event_type, url, metadata)
+                VALUES ('favorite', ?, ?)
+                """,
+                ("https://www.bilibili.com/video/BVLEGACYFAV", json.dumps({"bvid": "BVLEGACYFAV"})),
+            )
+            # 模拟旧版本：只认 view，游标已扫过这条收藏，且没有版本列。
+            db.conn.execute("DELETE FROM seen_items")
+            db.conn.execute(
+                "UPDATE seen_items_backfill_state SET last_scanned_event_id = "
+                "(SELECT MAX(id) FROM events)"
+            )
+            db.conn.execute(
+                "ALTER TABLE seen_items_backfill_state DROP COLUMN scanned_event_types_version"
+            )
+            db.conn.commit()
+            db.close()
+
+            migrated = Database(path)
+            migrated.initialize()
+
+            assert "BVLEGACYFAV" in migrated.get_seen_bvids(), "升级后老收藏必须补进去重账本"
+            migrated.close()
+
     def test_event_batch_updates_seen_items_in_the_same_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
