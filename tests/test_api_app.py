@@ -2051,8 +2051,8 @@ class TestBackendAPI:
                 account_sync_interval_hours=24,
                 refresh_check_interval_seconds=77,
                 signal_event_threshold=9,
-                trending_refresh_hours=5,
-                explore_refresh_hours=18,
+                trending_refresh_minutes=5,
+                explore_refresh_minutes=18,
                 discovery_limit=17,
                 proactive_push_interval_seconds=155,
                 speculation_interval_minutes=22,
@@ -2130,8 +2130,8 @@ class TestBackendAPI:
         assert captured["bilibili_producer_kwargs"]["bilibili_client"].cookie == ""
         assert captured["runtime_controller_kwargs"]["check_interval_seconds"] == 77
         assert captured["runtime_controller_kwargs"]["signal_event_threshold"] == 9
-        assert captured["runtime_controller_kwargs"]["trending_refresh_hours"] == 5
-        assert captured["runtime_controller_kwargs"]["explore_refresh_hours"] == 18
+        assert captured["runtime_controller_kwargs"]["trending_refresh_minutes"] == 5
+        assert captured["runtime_controller_kwargs"]["explore_refresh_minutes"] == 18
         assert captured["runtime_controller_kwargs"]["discovery_limit"] == 17
         assert captured["runtime_controller_kwargs"]["proactive_push_interval_seconds"] == 155
         assert captured["soul_engine_kwargs"]["speculation_interval_minutes"] == 22
@@ -11468,8 +11468,8 @@ class TestEmbeddingAndCompatProviderE2E:
         cfg.scheduler.account_sync_interval_hours = 9
         cfg.scheduler.refresh_check_interval_seconds = 75
         cfg.scheduler.signal_event_threshold = 9
-        cfg.scheduler.trending_refresh_hours = 5
-        cfg.scheduler.explore_refresh_hours = 18
+        cfg.scheduler.trending_refresh_minutes = 5
+        cfg.scheduler.explore_refresh_minutes = 18
         cfg.scheduler.discovery_limit = 17
         cfg.scheduler.delight_queue_limit = 37
         cfg.scheduler.proactive_push_interval_seconds = 155
@@ -11560,8 +11560,8 @@ class TestEmbeddingAndCompatProviderE2E:
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
         assert data["scheduler"]["signal_event_threshold"] == 9
-        assert data["scheduler"]["trending_refresh_hours"] == 5
-        assert data["scheduler"]["explore_refresh_hours"] == 18
+        assert data["scheduler"]["trending_refresh_minutes"] == 5
+        assert data["scheduler"]["explore_refresh_minutes"] == 18
         assert data["scheduler"]["discovery_limit"] == 17
         assert data["scheduler"]["delight_queue_limit"] == 37
         assert data["scheduler"]["proactive_push_interval_seconds"] == 155
@@ -11873,8 +11873,8 @@ class TestEmbeddingAndCompatProviderE2E:
                     },
                     "refresh_check_interval_seconds": 75,
                     "signal_event_threshold": 9,
-                    "trending_refresh_hours": 5,
-                    "explore_refresh_hours": 18,
+                    "trending_refresh_minutes": 5,
+                    "explore_refresh_minutes": 18,
                     "discovery_limit": 17,
                     "delight_queue_limit": 37,
                     "proactive_push_interval_seconds": 155,
@@ -11948,8 +11948,8 @@ class TestEmbeddingAndCompatProviderE2E:
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.signal_event_threshold == 9
-        assert cfg.scheduler.trending_refresh_hours == 5
-        assert cfg.scheduler.explore_refresh_hours == 18
+        assert cfg.scheduler.trending_refresh_minutes == 5
+        assert cfg.scheduler.explore_refresh_minutes == 18
         assert cfg.scheduler.discovery_limit == 17
         assert cfg.scheduler.delight_queue_limit == 37
         assert response.json()["config"]["scheduler"]["delight_queue_limit"] == 37
@@ -12011,8 +12011,8 @@ class TestEmbeddingAndCompatProviderE2E:
                 "scheduler": {
                     "refresh_check_interval_seconds": "abc",
                     "signal_event_threshold": -1,
-                    "trending_refresh_hours": 0,
-                    "explore_refresh_hours": 0,
+                    "trending_refresh_minutes": 0,
+                    "explore_refresh_minutes": 0,
                     "discovery_limit": 61,
                     "delight_queue_limit": 101,
                     "proactive_push_interval_seconds": 29,
@@ -12025,8 +12025,8 @@ class TestEmbeddingAndCompatProviderE2E:
         scheduler = response.json()["config"]["scheduler"]
         assert scheduler["refresh_check_interval_seconds"] == 60
         assert scheduler["signal_event_threshold"] == 6
-        assert scheduler["trending_refresh_hours"] == 3
-        assert scheduler["explore_refresh_hours"] == 12
+        assert scheduler["trending_refresh_minutes"] == 3
+        assert scheduler["explore_refresh_minutes"] == 3
         assert scheduler["discovery_limit"] == 30
         assert scheduler["delight_queue_limit"] == 20
         assert scheduler["proactive_push_interval_seconds"] == 120

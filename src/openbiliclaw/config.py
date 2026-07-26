@@ -84,8 +84,8 @@ _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
-_DEFAULT_TRENDING_REFRESH_HOURS = 3
-_DEFAULT_EXPLORE_REFRESH_HOURS = 12
+_DEFAULT_TRENDING_REFRESH_MINUTES = 3
+_DEFAULT_EXPLORE_REFRESH_MINUTES = 3
 _DEFAULT_DISCOVERY_LIMIT = 30
 _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
@@ -897,8 +897,13 @@ class SchedulerConfig:
     account_sync_interval_hours: int = 6
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
     signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
-    trending_refresh_hours: int = _DEFAULT_TRENDING_REFRESH_HOURS
-    explore_refresh_hours: int = _DEFAULT_EXPLORE_REFRESH_HOURS
+    # 2026-07-26: unit changed hours → minutes and both aligned to 3, so the
+    # Bilibili main-discovery cadence matches every source producer's
+    # ``min_interval_minutes``. A pool deficit is still the gate in front of
+    # these; the interval is a floor, not a schedule. Legacy
+    # ``*_refresh_hours`` keys are still read and converted on load.
+    trending_refresh_minutes: int = _DEFAULT_TRENDING_REFRESH_MINUTES
+    explore_refresh_minutes: int = _DEFAULT_EXPLORE_REFRESH_MINUTES
     discovery_limit: int = _DEFAULT_DISCOVERY_LIMIT
     delight_queue_limit: int = _DEFAULT_DELIGHT_QUEUE_LIMIT
     proactive_push_interval_seconds: int = _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS
@@ -1575,6 +1580,16 @@ def _build_config(raw: dict[str, Any]) -> Config:
     bili_raw = raw.get("bilibili", {})
     sources_raw = raw.get("sources", {})
     sched_raw = dict(raw.get("scheduler", {}))
+    # ``SchedulerConfig(**sched_raw)`` below splats the raw table, so a key the
+    # dataclass no longer declares is a hard TypeError at load time. The
+    # 2026-07-26 hours → minutes rename would therefore have bricked startup for
+    # every existing config.toml. Resolve the legacy keys first, then drop them.
+    _legacy_refresh_minutes = {
+        "trending_refresh": _legacy_hours_to_minutes(sched_raw, "trending_refresh"),
+        "explore_refresh": _legacy_hours_to_minutes(sched_raw, "explore_refresh"),
+    }
+    for _legacy_key in ("trending_refresh_hours", "explore_refresh_hours"):
+        sched_raw.pop(_legacy_key, None)
     discovery_raw = raw.get("discovery", {})
     if not isinstance(discovery_raw, dict):
         discovery_raw = {}
@@ -1963,14 +1978,14 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
                     min_value=1,
                 ),
-                "trending_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("trending_refresh_hours"),
-                    default=_DEFAULT_TRENDING_REFRESH_HOURS,
+                "trending_refresh_minutes": _normalize_scheduler_int(
+                    _legacy_refresh_minutes["trending_refresh"],
+                    default=_DEFAULT_TRENDING_REFRESH_MINUTES,
                     min_value=1,
                 ),
-                "explore_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("explore_refresh_hours"),
-                    default=_DEFAULT_EXPLORE_REFRESH_HOURS,
+                "explore_refresh_minutes": _normalize_scheduler_int(
+                    _legacy_refresh_minutes["explore_refresh"],
+                    default=_DEFAULT_EXPLORE_REFRESH_MINUTES,
                     min_value=1,
                 ),
                 "discovery_limit": _normalize_scheduler_int(
@@ -2549,6 +2564,27 @@ def _normalize_extension_disconnect_grace(value: object) -> int:
     if grace <= 0:
         return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
     return grace
+
+
+def _legacy_hours_to_minutes(raw: dict[str, Any], prefix: str) -> Any:
+    """Read ``<prefix>_minutes``, falling back to the pre-2026-07-26 hour key.
+
+    The unit changed from hours to minutes when the Bilibili main-discovery
+    cadence was aligned with every source producer's ``min_interval_minutes``.
+    An existing ``config.toml`` still spelling ``trending_refresh_hours = 3``
+    must keep meaning three *hours*, not three minutes — reinterpreting it in
+    place would silently multiply that user's Bilibili traffic by sixty.
+    """
+    minutes = raw.get(f"{prefix}_minutes")
+    if minutes is not None:
+        return minutes
+    hours = raw.get(f"{prefix}_hours")
+    if hours is None:
+        return None
+    try:
+        return max(1, int(hours) * 60)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_scheduler_int(
@@ -3729,8 +3765,8 @@ def _render_config_toml(
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
             f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
-            f"trending_refresh_hours = {config.scheduler.trending_refresh_hours}",
-            f"explore_refresh_hours = {config.scheduler.explore_refresh_hours}",
+            f"trending_refresh_minutes = {config.scheduler.trending_refresh_minutes}",
+            f"explore_refresh_minutes = {config.scheduler.explore_refresh_minutes}",
             f"discovery_limit = {config.scheduler.discovery_limit}",
             f"delight_queue_limit = {config.scheduler.delight_queue_limit}",
             f"proactive_push_interval_seconds = {config.scheduler.proactive_push_interval_seconds}",

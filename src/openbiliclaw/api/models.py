@@ -2001,8 +2001,8 @@ class SchedulerConfigOut(BaseModel):
     refresh_check_interval_seconds: int = 60
     signal_event_threshold: int = 6
     feedback_batch_threshold: int = 3
-    trending_refresh_hours: int = 3
-    explore_refresh_hours: int = 12
+    trending_refresh_minutes: int = 3
+    explore_refresh_minutes: int = 3
     discovery_limit: int = 30
     delight_queue_limit: int = 20
     proactive_push_interval_seconds: int = 120

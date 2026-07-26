@@ -7350,8 +7350,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("refreshCheckInterval", scheduler.refresh_check_interval_seconds);
       setInput("signalEventThreshold", scheduler.signal_event_threshold);
       setInput("feedbackBatchThreshold", scheduler.feedback_batch_threshold);
-      setInput("trendingRefreshHours", scheduler.trending_refresh_hours);
-      setInput("exploreRefreshHours", scheduler.explore_refresh_hours);
+      setInput("trendingRefreshMinutes", scheduler.trending_refresh_minutes);
+      setInput("exploreRefreshMinutes", scheduler.explore_refresh_minutes);
       setInput("discoveryLimit", scheduler.discovery_limit);
       setInput("proactivePushInterval", scheduler.proactive_push_interval_seconds);
       setInput("speculatorIdleInterval", scheduler.speculator_idle_interval_minutes);
@@ -8613,8 +8613,8 @@ ${cardFeedbackBarHtml()}`;
           refresh_check_interval_seconds: getIntInput("refreshCheckInterval", 60),
           signal_event_threshold: getIntInput("signalEventThreshold", 6),
           feedback_batch_threshold: getIntInput("feedbackBatchThreshold", 3),
-          trending_refresh_hours: getIntInput("trendingRefreshHours", 3),
-          explore_refresh_hours: getIntInput("exploreRefreshHours", 12),
+          trending_refresh_minutes: getIntInput("trendingRefreshMinutes", 3),
+          explore_refresh_minutes: getIntInput("exploreRefreshMinutes", 3),
           discovery_limit: getIntInput("discoveryLimit", 30),
           delight_queue_limit: getDelightQueueLimit(),
           proactive_push_interval_seconds: getIntInput("proactivePushInterval", 120),

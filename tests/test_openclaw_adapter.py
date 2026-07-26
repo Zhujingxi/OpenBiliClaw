@@ -897,8 +897,8 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             account_sync_interval_hours=6,
             refresh_check_interval_seconds=77,
             signal_event_threshold=9,
-            trending_refresh_hours=5,
-            explore_refresh_hours=18,
+            trending_refresh_minutes=5,
+            explore_refresh_minutes=18,
             discovery_limit=17,
             proactive_push_interval_seconds=155,
             speculation_interval_minutes=22,
@@ -1048,8 +1048,8 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert callable(getattr(pipeline, "on_candidates_admitted", None))
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
-    assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5
-    assert services.runtime_controller.kwargs["explore_refresh_hours"] == 18
+    assert services.runtime_controller.kwargs["trending_refresh_minutes"] == 5
+    assert services.runtime_controller.kwargs["explore_refresh_minutes"] == 18
     assert services.runtime_controller.kwargs["discovery_limit"] == 17
     assert services.runtime_controller.kwargs["proactive_push_interval_seconds"] == 155
     created_databases[0].pool_count = 7
@@ -1510,8 +1510,8 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
         account_sync_interval_hours=6,
         refresh_check_interval_seconds=60,
         signal_event_threshold=6,
-        trending_refresh_hours=3,
-        explore_refresh_hours=12,
+        trending_refresh_minutes=3,
+        explore_refresh_minutes=12,
         discovery_limit=30,
         proactive_push_interval_seconds=120,
         speculation_interval_minutes=15,

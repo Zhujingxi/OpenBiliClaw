@@ -370,8 +370,8 @@ account_sync_interval_hours = 6
 # --- Runtime refresh tuning ---
 refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
 signal_event_threshold = 6               # New behavior events before search+related refresh
-trending_refresh_hours = 3               # Minimum interval for trending strategy
-explore_refresh_hours = 12               # Minimum interval for explore strategy
+trending_refresh_minutes = 3               # Minimum interval for trending strategy
+explore_refresh_minutes = 3               # Minimum interval for explore strategy
 discovery_limit = 30                     # Per discovery wave limit; allowed range 1..60
 delight_queue_limit = 20                 # Surprise queue load size for desktop/mobile/extension; 1..100
 proactive_push_interval_seconds = 120    # Delight/probe push loop interval; values <30 fallback

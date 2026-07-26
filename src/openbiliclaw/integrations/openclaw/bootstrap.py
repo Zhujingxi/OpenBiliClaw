@@ -341,8 +341,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         pool_target_count=config.scheduler.pool_target_count,
         pool_source_shares=effective_pool_source_shares(config),
         signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
-        trending_refresh_hours=int(getattr(config.scheduler, "trending_refresh_hours", 3)),
-        explore_refresh_hours=int(getattr(config.scheduler, "explore_refresh_hours", 12)),
+        trending_refresh_minutes=int(getattr(config.scheduler, "trending_refresh_minutes", 3)),
+        explore_refresh_minutes=int(getattr(config.scheduler, "explore_refresh_minutes", 3)),
         check_interval_seconds=int(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
         proactive_push_interval_seconds=int(
             getattr(config.scheduler, "proactive_push_interval_seconds", 120)

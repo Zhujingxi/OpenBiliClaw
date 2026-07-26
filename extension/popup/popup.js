@@ -8258,8 +8258,8 @@ function bindSettings() {
     setVal("cfgRefreshCheckInterval", cfg.scheduler?.refresh_check_interval_seconds);
     setVal("cfgSignalEventThreshold", cfg.scheduler?.signal_event_threshold);
     setVal("cfgFeedbackBatchThreshold", cfg.scheduler?.feedback_batch_threshold);
-    setVal("cfgTrendingRefreshHours", cfg.scheduler?.trending_refresh_hours);
-    setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
+    setVal("cfgTrendingRefreshMinutes", cfg.scheduler?.trending_refresh_minutes);
+    setVal("cfgExploreRefreshMinutes", cfg.scheduler?.explore_refresh_minutes);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
     setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
@@ -8470,8 +8470,8 @@ function bindSettings() {
         refresh_check_interval_seconds: getInt("cfgRefreshCheckInterval", 60),
         signal_event_threshold: getInt("cfgSignalEventThreshold", 6),
         feedback_batch_threshold: getInt("cfgFeedbackBatchThreshold", 3),
-        trending_refresh_hours: getInt("cfgTrendingRefreshHours", 3),
-        explore_refresh_hours: getInt("cfgExploreRefreshHours", 12),
+        trending_refresh_minutes: getInt("cfgTrendingRefreshMinutes", 3),
+        explore_refresh_minutes: getInt("cfgExploreRefreshMinutes", 3),
         discovery_limit: getInt("cfgDiscoveryLimit", 30),
         proactive_push_interval_seconds: getInt("cfgProactivePushInterval", 120),
         speculator_idle_interval_minutes: getInt("cfgSpeculatorIdleInterval", 30),

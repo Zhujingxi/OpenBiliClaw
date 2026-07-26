@@ -193,8 +193,8 @@ OpenClaw integration 本身没有新增独立 `config.toml` 段落，直接复�
 - `[scheduler].account_sync_interval_hours`
 - `[scheduler].refresh_check_interval_seconds`
 - `[scheduler].signal_event_threshold`
-- `[scheduler].trending_refresh_hours`
-- `[scheduler].explore_refresh_hours`
+- `[scheduler].trending_refresh_minutes`
+- `[scheduler].explore_refresh_minutes`
 - `[scheduler].discovery_limit`
 - `[scheduler].proactive_push_interval_seconds`
 - `[scheduler].speculator_idle_interval_minutes`

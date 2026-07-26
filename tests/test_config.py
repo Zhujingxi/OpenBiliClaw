@@ -181,8 +181,8 @@ class TestConfigDefaults:
 
         assert config.scheduler.refresh_check_interval_seconds == 60
         assert config.scheduler.signal_event_threshold == 6
-        assert config.scheduler.trending_refresh_hours == 3
-        assert config.scheduler.explore_refresh_hours == 12
+        assert config.scheduler.trending_refresh_minutes == 3
+        assert config.scheduler.explore_refresh_minutes == 3
         assert config.scheduler.discovery_limit == 30
         assert config.scheduler.proactive_push_interval_seconds == 120
         assert config.scheduler.speculator_idle_interval_minutes == 30
@@ -931,8 +931,8 @@ def test_load_config_reads_scheduler_runtime_fields(tmp_path: Path) -> None:
 [scheduler]
 refresh_check_interval_seconds = 75
 signal_event_threshold = 9
-trending_refresh_hours = 5
-explore_refresh_hours = 18
+trending_refresh_minutes = 5
+explore_refresh_minutes = 18
 discovery_limit = 17
 proactive_push_interval_seconds = 155
 speculator_idle_interval_minutes = 11
@@ -949,8 +949,8 @@ avoidance_speculation_max_active = 5
 
     assert config.scheduler.refresh_check_interval_seconds == 75
     assert config.scheduler.signal_event_threshold == 9
-    assert config.scheduler.trending_refresh_hours == 5
-    assert config.scheduler.explore_refresh_hours == 18
+    assert config.scheduler.trending_refresh_minutes == 5
+    assert config.scheduler.explore_refresh_minutes == 18
     assert config.scheduler.discovery_limit == 17
     assert config.scheduler.proactive_push_interval_seconds == 155
     assert config.scheduler.speculator_idle_interval_minutes == 11
@@ -967,8 +967,8 @@ avoidance_speculation_max_active = 5
         ("refresh_check_interval_seconds", "0", 60),
         ("refresh_check_interval_seconds", '"abc"', 60),
         ("signal_event_threshold", "-1", 6),
-        ("trending_refresh_hours", "0", 3),
-        ("explore_refresh_hours", "0", 12),
+        ("trending_refresh_minutes", "0", 3),
+        ("explore_refresh_minutes", "0", 3),
         ("discovery_limit", "0", 30),
         ("discovery_limit", "61", 30),
         ("proactive_push_interval_seconds", "29", 120),
@@ -1016,8 +1016,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     config = Config()
     config.scheduler.refresh_check_interval_seconds = 75
     config.scheduler.signal_event_threshold = 9
-    config.scheduler.trending_refresh_hours = 5
-    config.scheduler.explore_refresh_hours = 18
+    config.scheduler.trending_refresh_minutes = 5
+    config.scheduler.explore_refresh_minutes = 18
     config.scheduler.discovery_limit = 17
     config.scheduler.proactive_push_interval_seconds = 155
     config.scheduler.speculator_idle_interval_minutes = 11
@@ -1032,8 +1032,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
 
     assert loaded.scheduler.refresh_check_interval_seconds == 75
     assert loaded.scheduler.signal_event_threshold == 9
-    assert loaded.scheduler.trending_refresh_hours == 5
-    assert loaded.scheduler.explore_refresh_hours == 18
+    assert loaded.scheduler.trending_refresh_minutes == 5
+    assert loaded.scheduler.explore_refresh_minutes == 18
     assert loaded.scheduler.discovery_limit == 17
     assert loaded.scheduler.proactive_push_interval_seconds == 155
     assert loaded.scheduler.speculator_idle_interval_minutes == 11
@@ -3123,3 +3123,28 @@ class TestNetworkProxyConfig:
         config_path = tmp_path / "config.toml"
         config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
         assert load_config(config_path).network.mode == "system"
+
+
+def test_legacy_refresh_hours_keys_convert_to_minutes_without_crashing() -> None:
+    """A pre-rename config.toml must keep its cadence, not be read as minutes.
+
+    ``SchedulerConfig(**sched_raw)`` splats the raw table, so leaving the retired
+    ``*_refresh_hours`` keys in place would raise TypeError at load and brick
+    startup for every existing install. Reinterpreting them in place would be
+    worse than a crash — silently multiplying that user's Bilibili traffic by 60.
+    """
+    config = _build_config(
+        {"scheduler": {"trending_refresh_hours": 3, "explore_refresh_hours": 12}}
+    )
+
+    assert config.scheduler.trending_refresh_minutes == 180
+    assert config.scheduler.explore_refresh_minutes == 720
+
+    # The new key wins when both are present.
+    mixed = _build_config(
+        {"scheduler": {"trending_refresh_hours": 3, "trending_refresh_minutes": 7}}
+    )
+    assert mixed.scheduler.trending_refresh_minutes == 7
+
+    # Absent keys land on the aligned 3-minute default.
+    assert _build_config({"scheduler": {}}).scheduler.trending_refresh_minutes == 3
