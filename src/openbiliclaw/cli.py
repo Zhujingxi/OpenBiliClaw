@@ -4300,9 +4300,17 @@ def _build_bilibili_init_events(
         if fav_bvid:
             fav_metadata["bvid"] = fav_bvid
             fav_metadata["content_id"] = fav_bvid
-        fav_time = fav.get("fav_time")
-        if isinstance(fav_time, (int, float)) and fav_time > 0:
-            fav_metadata["fav_time"] = int(fav_time)
+        for source_field, target in (
+            ("fav_time", "fav_time"),
+            ("pubtime", "pubtime"),
+            ("play_count", "play_count"),
+        ):
+            value = fav.get(source_field)
+            if isinstance(value, (int, float)) and value > 0:
+                fav_metadata[target] = int(value)
+        intro = str(fav.get("intro", "") or "").strip()
+        if intro and intro != "-":
+            fav_metadata["intro"] = intro[:200]
         duration = fav.get("duration")
         if isinstance(duration, (int, float)) and duration > 0:
             fav_metadata["video_duration_seconds"] = float(duration)
@@ -6402,6 +6410,8 @@ async def _fetch_bilibili_init_data(
     Favorites/following limits are resolved by the caller; history uses
     ``_INIT_BILIBILI_HISTORY_LIMIT`` unless a caller passes an override.
     """
+    from openbiliclaw.bilibili.api import favorite_item_is_dead
+
     hist = await client.get_user_history(max_items=history_limit)
 
     favs: list[dict[str, Any]] = []
@@ -6424,18 +6434,37 @@ async def _fetch_bilibili_init_data(
                 if not isinstance(upper, dict):
                     upper = {}
                 raw = item if isinstance(item, dict) else {}
+                if favorite_item_is_dead(raw):
+                    # Taken-down videos come back with the literal title
+                    # "已失效视频" (6% of a real 200-item sample). Keeping them
+                    # told the analyzer the user is into "已失效视频" and put
+                    # that string in the ledger as a favourite signal. We know
+                    # nothing about what the video was, so it is not a signal.
+                    continue
+                raw_cnt = raw.get("cnt_info")
+                cnt_info: dict[str, Any] = raw_cnt if isinstance(raw_cnt, dict) else {}
                 favs.append(
                     {
                         "title": raw.get("title", "") if raw else str(item),
                         "upper": str(upper.get("name", "")).strip(),
                         "folder": folder_title,
-                        # Identity + time, carried for the event ledger: a
-                        # favorited video must never be recommended back, and
-                        # dedup needs a bvid to key on. Stripped again before
-                        # this list reaches any prompt (see _favorites below).
+                        # Identity, time and reach: carried for the event
+                        # ledger, not for prompts (stripped before _favorites
+                        # below). A favourited video must never be recommended
+                        # back, dedup needs a bvid, and play count is what tells
+                        # a niche-digger apart from a trend-follower.
                         "bvid": str(raw.get("bvid", "") or "").strip(),
                         "fav_time": raw.get("fav_time"),
                         "duration": raw.get("duration"),
+                        "pubtime": raw.get("pubtime"),
+                        "play_count": cnt_info.get("play"),
+                        # Kept in the ledger, deliberately out of prompts: on a
+                        # real 200-item sample 154 entries had an intro, median
+                        # 105 chars, but a large share is 充电 / 大会员 promo
+                        # boilerplate. Storing it means a later pass can use it
+                        # without re-fetching; feeding it to the portrait now
+                        # would spend ~20k chars per init to dilute the signal.
+                        "intro": str(raw.get("intro", "") or "").strip()[:200],
                     }
                 )
             if len(favs) >= favorite_limit:
@@ -7557,9 +7586,10 @@ async def run_guided_init(
     )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
-        # Ledger-only fields (bvid / fav_time / duration) are dropped here: the
-        # profile builder reads this payload as prompt text, and ids would cost
-        # tokens on every init without telling the model anything.
+        # Ledger-only fields (bvid / fav_time / duration / pubtime /
+        # play_count) are dropped here: the profile builder reads this payload
+        # as prompt text, and ids and counters would cost tokens on every init
+        # without telling the model anything.
         prompt_favorites = [
             {key: value for key, value in fav.items() if key in {"title", "upper", "folder"}}
             for fav in favorites_data

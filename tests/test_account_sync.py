@@ -137,6 +137,27 @@ def _favorite_folder_with_items(folder_id: int, *bvids: str) -> FavoriteFolderWi
     )
 
 
+def test_account_sync_drops_dead_favorites_and_keeps_reach() -> None:
+    """失效视频不是信号；播放量 / 发布时间是判断冷门偏好的依据，别丢。"""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+    )
+    folder = _favorite_folder_with_items(1, "BVALIVE")
+    folder.items[0].update({"cnt_info": {"play": 812}, "pubtime": 1_780_000_000, "duration": 300})
+    folder.items.append({"bvid": "BVDEAD", "title": "已失效视频", "attr": 1, "upper": {}})
+
+    events = service._favorite_events([folder])
+
+    assert [event["metadata"]["bvid"] for event in events] == ["BVALIVE"]
+    assert events[0]["metadata"]["play_count"] == 812
+    assert events[0]["metadata"]["pubtime"] == 1_780_000_000
+    assert events[0]["metadata"]["video_duration_seconds"] == 300
+
+
 def test_account_sync_event_builders_include_signal_strength() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 

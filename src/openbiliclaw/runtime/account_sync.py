@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 import httpx
 
-from openbiliclaw.bilibili.api import BilibiliAPIError, BilibiliAuthExpiredError
+from openbiliclaw.bilibili.api import (
+    BilibiliAPIError,
+    BilibiliAuthExpiredError,
+    favorite_item_is_dead,
+)
 from openbiliclaw.llm.base import (
     classify_llm_failure_kind,
     classify_llm_unavailability,
@@ -1612,23 +1616,40 @@ class AccountSyncService:
             for item in getattr(folder, "items", []):
                 if not isinstance(item, dict):
                     continue
+                if favorite_item_is_dead(item):
+                    # Taken-down videos stay in the folder with the literal
+                    # title "已失效视频". Their content is gone, so they carry
+                    # no preference signal — only noise the analyzer would read
+                    # as an interest in "已失效视频".
+                    continue
                 bvid = str(item.get("bvid", "")).strip()
                 upper = item.get("upper", {})
                 if not isinstance(upper, dict):
                     upper = {}
+                metadata: dict[str, Any] = {
+                    "bvid": bvid,
+                    "folder_id": folder_id,
+                    "folder_title": folder_title,
+                    "up_name": str(upper.get("name", "")).strip(),
+                    "source": "account_sync",
+                    "signal_strength": 1.0,
+                }
+                raw_cnt = item.get("cnt_info")
+                cnt_info: dict[str, Any] = raw_cnt if isinstance(raw_cnt, dict) else {}
+                for value, key in (
+                    (item.get("fav_time"), "fav_time"),
+                    (item.get("pubtime"), "pubtime"),
+                    (cnt_info.get("play"), "play_count"),
+                    (item.get("duration"), "video_duration_seconds"),
+                ):
+                    if isinstance(value, (int, float)) and value > 0:
+                        metadata[key] = int(value)
                 events.append(
                     {
                         "event_type": "favorite",
                         "title": str(item.get("title", "")).strip(),
                         "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
-                        "metadata": {
-                            "bvid": bvid,
-                            "folder_id": folder_id,
-                            "folder_title": folder_title,
-                            "up_name": str(upper.get("name", "")).strip(),
-                            "source": "account_sync",
-                            "signal_strength": 1.0,
-                        },
+                        "metadata": metadata,
                     }
                 )
         return events

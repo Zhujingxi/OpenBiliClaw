@@ -123,6 +123,23 @@ class FavoriteFolderWithItems:
     truncated: bool = False
 
 
+def favorite_item_is_dead(item: dict[str, Any]) -> bool:
+    """Report whether a favourites entry points at a taken-down video.
+
+    Removed videos stay in the folder with ``attr`` set and their title replaced
+    by the literal string "已失效视频" — 6% of a real 200-item sample. The
+    content is gone, so there is nothing to learn from the entry, and both init
+    and account sync drop it rather than feed "已失效视频" to the analyzer as an
+    interest. The title check is a fallback for responses without ``attr``.
+    """
+    attr = item.get("attr")
+    if isinstance(attr, bool):
+        return attr
+    if isinstance(attr, (int, float)):
+        return int(attr) != 0
+    return str(item.get("title", "")).strip() == "已失效视频"
+
+
 @dataclass
 class FollowingUser:
     """Basic followed user info."""

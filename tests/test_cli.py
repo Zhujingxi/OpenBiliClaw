@@ -8528,6 +8528,64 @@ class TestInitSignalsAreDeduplicable:
         assert events[0].get("url", "") == ""
         assert "content_id" not in events[0]["metadata"]
 
+    def test_dead_favorites_never_become_signals(self) -> None:
+        """失效视频的标题字面就是「已失效视频」，进画像就是噪声。"""
+        from openbiliclaw.bilibili.api import favorite_item_is_dead
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        assert favorite_item_is_dead({"attr": 1, "title": "已失效视频"})
+        assert favorite_item_is_dead({"title": "已失效视频"}), "没有 attr 时按标题兜底"
+        assert not favorite_item_is_dead({"attr": 0, "title": "正常视频"})
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {"title": "正常视频", "upper": "UP", "bvid": "BV5"},
+            ],
+            following_data=[],
+        )
+        assert [event["title"] for event in events] == ["正常视频"]
+
+    def test_favorite_reach_reaches_the_ledger(self) -> None:
+        """播放量 / 发布时间是「爱挖冷门还是追热门」的判据，别在拉取时丢掉。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {
+                    "title": "冷门视频",
+                    "upper": "UP",
+                    "bvid": "BV6",
+                    "play_count": 431,
+                    "pubtime": 1_780_000_000,
+                }
+            ],
+            following_data=[],
+        )
+
+        assert events[0]["metadata"]["play_count"] == 431
+        assert events[0]["metadata"]["pubtime"] == 1_780_000_000
+
+    def test_intro_is_stored_but_never_reaches_the_prompt(self) -> None:
+        """简介信噪比差（大量恰饭文案），入库备用但不花画像的 token。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        favorites = [
+            {"title": "视频", "upper": "UP", "bvid": "BV7", "intro": "简" * 400},
+            {"title": "无简介", "upper": "UP", "bvid": "BV8", "intro": "-"},
+        ]
+        events = _build_bilibili_init_events(
+            history=[], favorites_data=favorites, following_data=[]
+        )
+
+        assert len(events[0]["metadata"]["intro"]) == 200, "长简介要截断，别把账本撑爆"
+        assert "intro" not in events[1]["metadata"], "占位符「-」不算简介"
+        prompt_keys = {"title", "upper", "folder"}
+        assert not (set(favorites[0]) & {"intro"}) <= prompt_keys, (
+            "intro 不在画像 prompt 的白名单里"
+        )
+
     def test_a_favorited_video_lands_in_the_seen_ledger(self, tmp_path: Path) -> None:
         """端到端：收藏事件写库后必须出现在 seen_items 里。"""
         from openbiliclaw.cli import _build_bilibili_init_events
