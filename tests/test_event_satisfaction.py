@@ -252,3 +252,56 @@ def test_twitter_engagement_scoring_v1() -> None:
             {"event_type": event_type, "metadata": {"source_platform": "twitter"}}
         )
         assert category != "positive"
+
+
+# --- History views: finishing counts, bouncing stays unknown ---
+
+
+def test_finished_history_view_is_positive() -> None:
+    """看完了就是证据。此前 view 根本不在规则表里，恒为 unknown/fallback，
+    于是相关链深挖时看完的视频和随手划走的排同一档（优先级 10 vs 60）。"""
+    category, reason = classify_event_satisfaction(
+        {
+            "event_type": "view",
+            "metadata": {"watch_seconds": 1750, "video_duration_seconds": 1800},
+        }
+    )
+    assert (category, reason) == ("positive", "finished_watch")
+
+
+def test_raw_history_field_names_are_understood() -> None:
+    """B 站原始历史行用 progress / duration，不是 watch_seconds。"""
+    category, reason = classify_event_satisfaction(
+        {"event_type": "view", "metadata": {"progress": 280, "duration": 300}}
+    )
+    assert (category, reason) == ("positive", "finished_watch")
+
+
+def test_bounced_history_view_stays_unknown_not_negative() -> None:
+    """低完播不等于不喜欢：自动播放、误点、看预告、进度被重置都长这样。
+
+    只判正向是这条规则的核心约束——划走的行绝不能变成负面样本去影响评估。
+    """
+    for watch_seconds in (2, 30, 900):
+        category, reason = classify_event_satisfaction(
+            {
+                "event_type": "view",
+                "metadata": {"watch_seconds": watch_seconds, "video_duration_seconds": 1800},
+            }
+        )
+        assert (category, reason) == ("unknown", "fallback"), watch_seconds
+
+
+def test_view_without_completion_data_stays_unknown() -> None:
+    category, reason = classify_event_satisfaction(
+        {"event_type": "view", "metadata": {"bvid": "BV1"}}
+    )
+    assert (category, reason) == ("unknown", "fallback")
+
+
+def test_finishing_a_tiny_clip_is_not_evidence() -> None:
+    """10 秒的片子看完说明不了什么，绝对时长下限挡住它。"""
+    category, reason = classify_event_satisfaction(
+        {"event_type": "view", "metadata": {"watch_seconds": 10, "video_duration_seconds": 10}}
+    )
+    assert (category, reason) == ("unknown", "fallback")
