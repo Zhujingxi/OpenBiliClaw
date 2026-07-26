@@ -60,7 +60,7 @@ class XhsTaskProducer:
     # hour granularity could not express anything between "1 hour" and "off".
     # Per-run size is still bounded by ``[scheduler].discovery_limit`` and
     # ``daily_budget``, so a shorter gap widens cadence, not batch size.
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
     keywords_per_cycle: int = 5
     _last_skip_reason: str = field(default="", init=False)
 

@@ -311,7 +311,7 @@ test("settings page round-trips YouTube source budgets", () => {
   assert.match(popupJs, /daily_trending_budget: getInt\("cfgYoutubeDailyTrendingBudget", 0\)/);
   assert.match(popupJs, /daily_channel_budget: getInt\("cfgYoutubeDailyChannelBudget", 0\)/);
   assert.match(popupJs, /request_interval_seconds: getInt\("cfgYoutubeRequestInterval", 2\)/);
-  assert.match(popupJs, /min_interval_minutes: getInt\("cfgYoutubeMinInterval", 60\)/);
+  assert.match(popupJs, /min_interval_minutes: getInt\("cfgYoutubeMinInterval", 3\)/);
 
   for (const id of [
     "cfgYoutubeDailySearchBudget",

@@ -8519,14 +8519,14 @@ ${cardFeedbackBarHtml()}`;
           },
           bilibili: {
             enabled: $("#bilibiliEnabled").value === "on",
-            min_interval_minutes: getIntInput("bilibiliMinInterval", 5)
+            min_interval_minutes: getIntInput("bilibiliMinInterval", 3)
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
             daily_search_budget: getIntInput("xhsDailySearchBudget", 0),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
             task_interval_seconds: getIntInput("xhsTaskInterval", 45),
-            min_interval_minutes: getIntInput("xhsMinInterval", 5)
+            min_interval_minutes: getIntInput("xhsMinInterval", 3)
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
@@ -8537,7 +8537,7 @@ ${cardFeedbackBarHtml()}`;
             daily_hot_budget: getIntInput("douyinDailyHotBudget", 0),
             daily_feed_budget: getIntInput("douyinDailyFeedBudget", 0),
             request_interval_seconds: getIntInput("douyinRequestInterval", 2),
-            min_interval_minutes: getIntInput("douyinMinInterval", 5)
+            min_interval_minutes: getIntInput("douyinMinInterval", 3)
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
@@ -8545,7 +8545,7 @@ ${cardFeedbackBarHtml()}`;
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
             request_interval_seconds: getIntInput("youtubeRequestInterval", 2),
-            min_interval_minutes: getIntInput("youtubeMinInterval", 5)
+            min_interval_minutes: getIntInput("youtubeMinInterval", 3)
           },
           twitter: {
             enabled: $("#twitterEnabled").value === "on",
@@ -8556,7 +8556,7 @@ ${cardFeedbackBarHtml()}`;
             daily_feed_budget: getIntInput("twitterDailyFeedBudget", 0),
             daily_creator_budget: getIntInput("twitterDailyCreatorBudget", 0),
             request_interval_seconds: getIntInput("twitterRequestInterval", 3),
-            min_interval_minutes: getIntInput("twitterMinInterval", 5)
+            min_interval_minutes: getIntInput("twitterMinInterval", 3)
           },
           zhihu: {
             enabled: $("#zhihuEnabled").value === "on",
@@ -8567,7 +8567,7 @@ ${cardFeedbackBarHtml()}`;
             daily_creator_budget: getIntInput("zhihuDailyCreatorBudget", 0),
             daily_related_budget: getIntInput("zhihuDailyRelatedBudget", 0),
             request_interval_seconds: getIntInput("zhihuRequestInterval", 3),
-            min_interval_minutes: getIntInput("zhihuMinInterval", 5)
+            min_interval_minutes: getIntInput("zhihuMinInterval", 3)
           },
           reddit: {
             enabled: $("#redditEnabled").value === "on",
@@ -8579,7 +8579,7 @@ ${cardFeedbackBarHtml()}`;
             daily_subreddit_budget: getIntInput("redditDailySubredditBudget", 300),
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
-            min_interval_minutes: getIntInput("redditMinInterval", 5)
+            min_interval_minutes: getIntInput("redditMinInterval", 3)
           },
           bangumi: {
             enabled: $("#bangumiEnabled").value === "on",
@@ -8600,7 +8600,7 @@ ${cardFeedbackBarHtml()}`;
             daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
             daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
             request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
-            min_interval_minutes: getIntInput("bangumiMinInterval", 5),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 3),
             bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },

@@ -10658,7 +10658,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         llm_service=llm_service,
         enabled=True,
         daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
-        min_interval_minutes=0 if force else int(getattr(xhs_cfg, "min_interval_minutes", 5)),
+        min_interval_minutes=0 if force else int(getattr(xhs_cfg, "min_interval_minutes", 3)),
     )
     result = asyncio.run(producer.produce_if_due())
 

@@ -538,10 +538,28 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 `[bilibili.auth]` 和 `[bilibili.browser]` 控制；本段只决定后台候选池是否继续调度 B 站 `search` / `related_chain` / `trending` / `explore` 策略。
 
+> **`min_interval_minutes` 的作用范围（2026-07-26 实测澄清）**：这道闸只拦 **producer loop** 这一条路径——
+> `ContinuousRefreshController` 每 `[scheduler].refresh_check_interval_seconds`（默认 60 秒）唤醒一次
+> `_loop_<source>_producer`，`_tick_<source>_producer` 先算该来源缺口，再由 producer 的 `_is_due()` 判定是否到点。
+> **非 B 站的 7 个来源，这是稳态补货的唯一路径**，所以配置真实生效。
+>
+> B 站不同：它有两条路径，而闸门只管其中较少走的那条。
+>
+> | B 站的触发路径 | 走哪套门控 | 过 `min_interval_minutes` 吗 |
+> |---|---|---|
+> | 主发现（`search` / `related_chain` / `trending` / `explore`） | `_build_refresh_plan` → `_run_refresh_plan`，由 `[scheduler]` 的 `signal_event_threshold` / `trending_refresh_hours` / `explore_refresh_hours` / `discovery_limit` 决定 | **否** |
+> | 手动「立即补货」 | `force_refresh` → `_build_source_replenishment_plan` → 同上 | **否** |
+> | 初始化回填 `run_init_backfill` | 直接调 `discovery_engine.discover()` | **否** |
+> | API 搜索被风控冷却时接管的扩展搜索兜底 | `BilibiliExtensionSearchProducer.produce_if_due()` | **是** |
+>
+> 换句话说，日常看到的 B 站补货绝大多数不受本字段影响；要调 B 站主发现的节奏请改 `[scheduler]`。
+> 另有两处显式绕过：`openbiliclaw discover-xhs --force` 把间隔置 0，`BangumiDiscoveryProducer.produce_if_due(force=True)`
+> 同理；这两条都只在手动 CLI 触发时出现，常驻流程不会走。
+
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `true` | 是否启用 Bilibili discovery。设为 `false` 后，B 站候选池占比会从运行时有效配比中剔除，已保存的 `scheduler.pool_source_shares.bilibili` 数值仍保留，重新开启后继续使用 |
-| `min_interval_minutes` | int | `5` | `BilibiliExtensionSearchProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。**只作用于「B 站 API 搜索被风控冷却」时接管的扩展搜索兜底路径**，主发现路径（`search` / `related_chain` / `trending` / `explore`）的节奏由 `[scheduler]` 的 `signal_event_threshold` / `trending_refresh_hours` / `explore_refresh_hours` / `discovery_limit` 决定 |
+| `min_interval_minutes` | int | `3` | `BilibiliExtensionSearchProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。**只作用于「B 站 API 搜索被风控冷却」时接管的扩展搜索兜底路径**，主发现路径（`search` / `related_chain` / `trending` / `explore`）的节奏由 `[scheduler]` 的 `signal_event_threshold` / `trending_refresh_hours` / `explore_refresh_hours` / `discovery_limit` 决定 |
 
 ### `[sources.xiaohongshu]`
 
@@ -553,7 +571,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | `daily_search_budget` | int | `0` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限，持续补池只受平台缺口、单轮 `discovery_limit` 和 producer 节流控制 |
 | `daily_creator_budget` | int | `0` | 每天订阅创作者抓取任务上限；`0` 表示不设每日上限 |
 | `task_interval_seconds` | int | `45` | 扩展分发器两次任务之间的最小间隔（秒） |
-| `min_interval_minutes` | int | `5` | `XhsTaskProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前该项名为 `min_interval_hours`（默认 `1`）且不可配置，单位改为分钟以与其余来源对齐 |
+| `min_interval_minutes` | int | `3` | `XhsTaskProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前该项名为 `min_interval_hours`（默认 `1`）且不可配置，单位改为分钟以与其余来源对齐 |
 
 > **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有"主动发现"（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。
 
@@ -570,7 +588,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | `daily_hot_budget` | int | `0` | 每日热点插件任务预算，限制 `dy_tasks(type="hot")` 入队次数；`0` 表示不设每日上限，正数时 runtime 抖音缺口较大时会把有效预算临时抬高到 `max(配置值, min(缺口, 60))` |
 | `daily_feed_budget` | int | `0` | 每日首页推荐流插件任务预算，限制 `dy_tasks(type="feed")` 入队次数；`0` 表示不设每日上限 |
 | `request_interval_seconds` | int | `2` | direct 诊断请求的建议最小间隔；当前默认 discovery 走插件 DOM-first 链路，主要由任务预算和 runtime producer 节流保护 |
-| `min_interval_minutes` | int | `5` | `DouyinDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前写死为 `15` 且不可配置 |
+| `min_interval_minutes` | int | `3` | `DouyinDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前写死为 `15` 且不可配置 |
 
 当前 `search` 子来源使用浏览器插件的登录会话，从抖音首页通过 DOM 搜索框输入 / 提交触发页面加载，并以 `dy-plugin-search` 进入 discovery；`hot` 子来源同样从首页点击热榜 / 热点入口和目标热词，并以 `dy-plugin-hot-related` 进入 discovery；`feed` 子来源在首页推荐流滚动触发加载，并以 `dy-plugin-feed` 进入 discovery。插件只被动监听页面自己发出的响应和已渲染 DOM，不主动跳 `/search/...`、`/hot/...` 快捷 URL，也不主动调用 search / related / feed API bridge。插件任务空 / 失败时默认返回 0 条；direct-cookie fallback 仅保留给显式 `allow_direct_fallback=True` 的诊断代码。因 daemon 重启或插件未及时消费而被清理的 `failed/stale_pending` 任务不消耗正数每日预算。runtime 大缺口补池会优先 search / hot，feed 只用于小缺口补零散名额。`msToken` 如果存在会随 Cookie 一起使用，但扩展同步不再硬依赖它。若 Cookie 过期、页面布局变化或插件未在线，命令可能返回 0 条并提示检查登录态。
 
@@ -585,7 +603,7 @@ YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 /
 | `daily_trending_budget` | int | `0` | `yt_trending` 每天最多拉取的热门候选数；`0` 表示不设每日上限，本轮拉取规模由平台缺口 / `discovery_limit` 决定 |
 | `daily_channel_budget` | int | `0` | `yt_channel` 每天最多选择的订阅频道数；`0` 表示不设每日上限，本轮频道数由平台缺口 / `discovery_limit` 决定 |
 | `request_interval_seconds` | int | `2` | 预留的 YouTube 请求间隔配置；当前策略主要由单轮预算和 runtime 补池节奏控制 |
-| `min_interval_minutes` | int | `5` | `YoutubeDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
+| `min_interval_minutes` | int | `3` | `YoutubeDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
 ### `[sources.twitter]`
 
@@ -600,7 +618,7 @@ X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 co
 | `daily_feed_budget` | int | `0` | `feed`（推荐流 For-You）每日拉取预算；`0` 表示不设每日上限。For-You 抓首页 home timeline 最易被注意，建议压低；producer 还会把 For-You 节流到很低的每日频次，并在连续失败后自动暂停 |
 | `daily_creator_budget` | int | `0` | `creator`（账号订阅）每日抓取预算；`0` 表示不设每日上限 |
 | `request_interval_seconds` | int | `3` | 两次 X 请求之间的最小间隔（抗检测）；TLS 指纹由 `twitter-cli`（`curl_cffi`）负责 |
-| `min_interval_minutes` | int | `5` | `XDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
+| `min_interval_minutes` | int | `3` | `XDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
 X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` / `blocked`）由 `storage/x_health.py` 持久化，按 401 / 403 / 429 分别退避，连续 For-You 失败会自动暂停 For-You 拉取，状态经 `GET /api/sources/x/status` 暴露到插件 / 桌面 Web 设置页。账号订阅用 `x_creator_subscriptions` 表持久化，经 `GET/POST/DELETE /api/sources/x/creators` 管理。
 
@@ -618,7 +636,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 | `daily_creator_budget` | int | `0` | 知乎作者 discovery 每日任务预算；`0` 表示不设每日上限 |
 | `daily_related_budget` | int | `0` | 知乎相关扩展 discovery 每日任务预算；`0` 表示不设每日上限 |
 | `request_interval_seconds` | int | `3` | 后端等待任务时的轮询间隔 / 插件搜索节奏提示；真实平台请求仍发生在用户已登录浏览器内 |
-| `min_interval_minutes` | int | `5` | `ZhihuDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
+| `min_interval_minutes` | int | `3` | `ZhihuDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
 ### `[sources.reddit]`
 
@@ -634,7 +652,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `daily_subreddit_budget` | int | `300` | Reddit subreddit discovery 每日条目预算 |
 | `daily_related_budget` | int | `300` | Reddit related discovery 每日条目预算 |
 | `request_interval_seconds` | int | `3` | 后端等待任务时的轮询间隔 / 插件任务节奏提示；真实平台请求发生在用户已登录浏览器内 |
-| `min_interval_minutes` | int | `5` | `RedditDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
+| `min_interval_minutes` | int | `3` | `RedditDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
 ### `[sources.bangumi]`
 
@@ -651,7 +669,7 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 | `daily_ranked_budget` | int | `100` | 每 UTC 日最多抓取的排名条目数；`0` 表示不设每日上限 |
 | `daily_latest_budget` | int | `100` | 每 UTC 日最多抓取的日期浏览条目数；`0` 表示不设每日上限 |
 | `request_interval_seconds` | int | `1` | 同一 client 两次官方 API 请求间的本地最小间隔；`0` 仅适合显式诊断/测试 |
-| `min_interval_minutes` | int | `5` | producer 两次执行之间的最小间隔；`--force` 可跳过本次检查，但不能绕过上游 `429` cooldown |
+| `min_interval_minutes` | int | `3` | producer 两次执行之间的最小间隔；`--force` 可跳过本次检查，但不能绕过上游 `429` cooldown |
 | `bootstrap_limit` | int | `300` | guided init / `fetch-bangumi` 默认公开收藏上限，保存范围 `1..1000` |
 
 用户名不是登录凭据。guided init 的账号解析按三级优先取值：个人令牌 `/v0/me` > 显式/已配置公开用户名 > 浏览器扩展在已登录 bgm.tv 页面自动识别并上报的用户名（`discovery_runtime_state["bangumi_self_info"]`，见 extension 文档）；Bangumi-only guided init 三者至少满足一个，混合初始化全部缺失时只跳过 Bangumi 画像分支并提示“仍可用于 discovery”。init 请求显式发送空 username 时会覆盖并清除旧配置值；只有 username 字段缺失的旧客户端才回退已保存值。令牌存在时以 `/v0/me` 解析出的用户名为准（与显式用户名不一致会 WARNING 并覆盖）；同步期令牌被拒绝（401）时记 WARNING 并降级到匿名公开路径，不静默失败。完整边界见 [Bangumi 来源文档](bangumi.md)。

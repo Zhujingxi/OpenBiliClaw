@@ -1883,7 +1883,7 @@ class SourcesBrowserConfigOut(BaseModel):
 
 class BilibiliSourceConfigOut(BaseModel):
     enabled: bool = True
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class XiaohongshuSourceConfigOut(BaseModel):
@@ -1891,7 +1891,7 @@ class XiaohongshuSourceConfigOut(BaseModel):
     daily_search_budget: int = 0
     daily_creator_budget: int = 0
     task_interval_seconds: int = 45
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class DouyinSourceConfigOut(BaseModel):
@@ -1906,7 +1906,7 @@ class DouyinSourceConfigOut(BaseModel):
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
     request_interval_seconds: int = 2
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class YoutubeSourceConfigOut(BaseModel):
@@ -1915,7 +1915,7 @@ class YoutubeSourceConfigOut(BaseModel):
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
     request_interval_seconds: int = 2
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class TwitterSourceConfigOut(BaseModel):
@@ -1930,7 +1930,7 @@ class TwitterSourceConfigOut(BaseModel):
     daily_feed_budget: int = 0
     daily_creator_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class ZhihuSourceConfigOut(BaseModel):
@@ -1944,7 +1944,7 @@ class ZhihuSourceConfigOut(BaseModel):
     daily_creator_budget: int = 0
     daily_related_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class RedditSourceConfigOut(BaseModel):
@@ -1958,7 +1958,7 @@ class RedditSourceConfigOut(BaseModel):
     daily_subreddit_budget: int = 300
     daily_related_budget: int = 300
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
 
 
 class BangumiSourceConfigOut(BaseModel):
@@ -1974,7 +1974,7 @@ class BangumiSourceConfigOut(BaseModel):
     daily_ranked_budget: int = 100
     daily_latest_budget: int = 100
     request_interval_seconds: int = 1
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
     bootstrap_limit: int = 300
 
 

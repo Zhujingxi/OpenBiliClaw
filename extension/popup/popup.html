@@ -6045,7 +6045,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgBilibiliMinInterval">B 站兜底搜索最小间隔分钟</label>
-          <input id="cfgBilibiliMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgBilibiliMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <div class="settings-field">
           <label for="cfgBiliBrowserExecutable">agent-browser 路径</label>
@@ -6088,7 +6088,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgXhsMinInterval">小红书最小调度间隔分钟</label>
-          <input id="cfgXhsMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgXhsMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
       </div>
       </div>
@@ -6135,7 +6135,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgDouyinMinInterval">抖音最小调度间隔分钟</label>
-          <input id="cfgDouyinMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgDouyinMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
       </div>
       </div>
@@ -6174,7 +6174,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgYoutubeMinInterval">YouTube 最小调度间隔分钟数</label>
-          <input id="cfgYoutubeMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgYoutubeMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">YouTube 通过后端 producer 独立调度；预算按天限制 yt_search / yt_trending / yt_channel 的执行规模。</p>
       </div>
@@ -6222,7 +6222,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgTwitterMinInterval">X 最小调度间隔分钟数</label>
-          <input id="cfgTwitterMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgTwitterMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">X 通过后端 cookie 回放独立调度；登录 x.com 后扩展会自动同步 auth_token / ct0。</p>
       </div>
@@ -6293,7 +6293,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgZhihuMinInterval">知乎最小调度间隔分钟数</label>
-          <input id="cfgZhihuMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgZhihuMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">知乎通过已登录浏览器插件执行搜索 / 热榜 / 首页 / 作者 / 相关任务；后端只入队任务并接收结果。</p>
       </div>
@@ -6369,7 +6369,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgRedditMinInterval">Reddit 最小调度间隔分钟数</label>
-          <input id="cfgRedditMinInterval" type="number" min="0" step="1" placeholder="5">
+          <input id="cfgRedditMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。默认每个分支每日 300 条。</p>
       </div>
@@ -6429,7 +6429,7 @@
         <div class="settings-field"><label for="cfgBangumiDailyRankedBudget">每日排名条目</label><input id="cfgBangumiDailyRankedBudget" type="number" min="0" step="1" placeholder="100"></div>
         <div class="settings-field"><label for="cfgBangumiDailyLatestBudget">每日日期条目</label><input id="cfgBangumiDailyLatestBudget" type="number" min="0" step="1" placeholder="100"></div>
         <div class="settings-field"><label for="cfgBangumiRequestInterval">请求间隔秒数</label><input id="cfgBangumiRequestInterval" type="number" min="0" step="1" placeholder="1"></div>
-        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="5"></div>
+        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="3"></div>
         <div class="settings-field"><label for="cfgBangumiBootstrapLimit">初始化公开收藏上限</label><input id="cfgBangumiBootstrapLimit" type="number" min="1" step="1" placeholder="300"></div>
         <p class="settings-hint">官方公开只读 API，无需 Cookie。用户名只用于导入主动公开的收藏；留空仍可使用内容发现。</p>
       </div>

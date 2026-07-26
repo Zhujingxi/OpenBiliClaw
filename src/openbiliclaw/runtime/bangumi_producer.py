@@ -69,7 +69,7 @@ class BangumiDiscoveryProducer:
     daily_search_budget: int = 300
     daily_ranked_budget: int = 100
     daily_latest_budget: int = 100
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
     candidate_pipeline: Any | None = None
     candidate_evaluation_owned_by_coordinator: bool = False
     keyword_fetch: Any | None = None

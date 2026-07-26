@@ -273,7 +273,7 @@ def build_youtube_discovery_producer(
         soul_engine=soul_engine,
         discover=_discover,
         enabled=True,
-        min_interval_minutes=int(getattr(yt_cfg, "min_interval_minutes", 5)),
+        min_interval_minutes=int(getattr(yt_cfg, "min_interval_minutes", 3)),
         daily_search_budget=int(getattr(yt_cfg, "daily_search_budget", 0)),
         daily_trending_budget=int(getattr(yt_cfg, "daily_trending_budget", 0)),
         daily_channel_budget=int(getattr(yt_cfg, "daily_channel_budget", 0)),
@@ -912,7 +912,7 @@ class RuntimeContext:
                 presence=self.presence,
                 enabled=bili_enabled,
                 daily_budget=int(getattr(bili_cfg, "daily_search_budget", 0)),
-                min_interval_minutes=int(getattr(bili_cfg, "min_interval_minutes", 5)),
+                min_interval_minutes=int(getattr(bili_cfg, "min_interval_minutes", 3)),
                 keywords_per_cycle=int(getattr(bili_cfg, "keywords_per_cycle", 3)),
                 page_size=int(getattr(bili_cfg, "page_size", 20)),
                 presence_grace_seconds=int(
@@ -928,7 +928,7 @@ class RuntimeContext:
                 llm_service=new_llm_service,
                 enabled=xhs_enabled,
                 daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
-                min_interval_minutes=int(getattr(xhs_cfg, "min_interval_minutes", 5)),
+                min_interval_minutes=int(getattr(xhs_cfg, "min_interval_minutes", 3)),
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
@@ -1009,7 +1009,7 @@ class RuntimeContext:
                     daily_search_budget=int(getattr(bangumi_cfg, "daily_search_budget", 300)),
                     daily_ranked_budget=int(getattr(bangumi_cfg, "daily_ranked_budget", 100)),
                     daily_latest_budget=int(getattr(bangumi_cfg, "daily_latest_budget", 100)),
-                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 5)),
+                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 3)),
                     candidate_pipeline=new_candidate_pipeline,
                     keyword_fetch=new_keyword_fetch,
                 )

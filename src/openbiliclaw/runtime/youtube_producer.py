@@ -48,7 +48,7 @@ class YoutubeDiscoveryProducer:
     soul_engine: Any
     discover: YoutubeDiscoverCallable
     enabled: bool = True
-    min_interval_minutes: int = 5
+    min_interval_minutes: int = 3
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
