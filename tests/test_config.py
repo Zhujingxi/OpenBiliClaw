@@ -3169,3 +3169,60 @@ trending_refresh_hours = 5
         assert config.scheduler.enabled is False
         assert config.scheduler.refresh_check_interval_seconds == 75
         assert config.scheduler.trending_refresh_hours == 5
+
+
+class TestUnifiedInterestLineFlag:
+    """统一兴趣更新线 Wave A 回退开关（scheduler.unified_interest_line）。
+
+    Wave A 默认 false：反馈仍只走旧批线。打开会让 /api/feedback 同时喂
+    pipeline，与仍在跑的旧批线双计——所以合入时必须默认关。
+    """
+
+    def test_defaults_off(self) -> None:
+        assert Config().scheduler.unified_interest_line is False
+
+    def test_toml_true_survives_the_dataclass_filter(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            "[scheduler]\nunified_interest_line = true\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING", logger="openbiliclaw.config"):
+            config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is True
+        assert "unified_interest_line" not in caplog.text, (
+            "开关必须是 SchedulerConfig 的已知字段，否则 _filter_dataclass_kwargs 会静默丢掉它"
+        )
+
+    def test_non_bool_value_is_coerced(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[scheduler]\nunified_interest_line = "false"\n',
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is False
+        assert type(config.scheduler.unified_interest_line) is bool
+
+    def test_switch_survives_a_save_round_trip(self, tmp_path: Path) -> None:
+        """回退开关必须能落盘：任何一次设置保存都会整份重写 config.toml。"""
+        config = Config()
+        config.scheduler.unified_interest_line = True
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        assert load_config(config_path).scheduler.unified_interest_line is True
+
+    def test_example_config_ships_the_switch_off(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["scheduler"]["unified_interest_line"] is False

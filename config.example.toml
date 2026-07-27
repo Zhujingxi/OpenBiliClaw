@@ -464,6 +464,11 @@ discovery_limit = 30                     # Per discovery wave limit; allowed ran
 delight_queue_limit = 20                 # Surprise queue load size for desktop/mobile/extension; 1..100
 proactive_push_interval_seconds = 120    # Delight/probe push loop interval; values <30 fallback
 speculator_idle_interval_minutes = 30    # Idle interval before checking speculation lifecycle
+# --- 统一兴趣更新线（回退开关）---
+# true 时推荐反馈直接进认知流水线快线：反馈信号攒够 feedback_batch_threshold
+# （默认 3）就立即重算兴趣，不等 INTEREST 缓冲的最短间隔。
+# 默认 false —— 旧的反馈批线仍在跑，两条线同时开会把同一条反馈算两次。
+unified_interest_line = false
 # --- 画像整理（ProfileConsolidator）库存水位 ---
 profile_consolidation_enabled = true
 profile_consolidation_interval_hours = 12

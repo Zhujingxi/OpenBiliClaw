@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -18737,3 +18737,127 @@ class TestRootRedirectLanding:
         response = client.get("/", follow_redirects=False)
         assert response.status_code == 302
         assert response.headers["location"] == "/web"
+
+
+class TestUnifiedInterestLineFeedbackIngestion:
+    """统一兴趣更新线 Wave A：/api/feedback 是否喂 pipeline 由开关决定。
+
+    Wave A 默认关——开着会让同一条反馈被新快线和仍在跑的旧批线双计。
+    """
+
+    class _FakeDatabase:
+        def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+            return {
+                "id": recommendation_id,
+                "bvid": "BV1REC",
+                "title": "讲透城市与建筑",
+                "topic_label": "建筑",
+                "up_name": "建筑师",
+            }
+
+        def update_recommendation_feedback(
+            self,
+            recommendation_id: int,
+            *,
+            feedback_type: str,
+            feedback_note: str = "",
+        ) -> None:
+            return None
+
+    class _SpyPipeline:
+        def __init__(self) -> None:
+            self.signals: list[Any] = []
+
+        async def ingest(self, signal: Any) -> object:
+            self.signals.append(signal)
+            return object()
+
+    class _FakeSoulEngine:
+        def __init__(self, *, unified: bool) -> None:
+            self.unified_interest_line_enabled = unified
+            self.pipeline = TestUnifiedInterestLineFeedbackIngestion._SpyPipeline()
+            self.batch_calls = 0
+
+        def is_profile_ready(self) -> bool:
+            return True
+
+        def record_immediate_feedback_cognition(
+            self,
+            *,
+            feedback_type: str,
+            title: str,
+            note: str = "",
+        ) -> None:
+            return None
+
+        async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            self.batch_calls += 1
+            return {"triggered": False}
+
+    def _post_feedback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        unified: bool,
+    ) -> tuple[Any, int]:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.memory.manager import MemoryManager
+
+        schedules = 0
+
+        class FakeFeedbackBatchScheduler:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def schedule(self) -> None:
+                nonlocal schedules
+                schedules += 1
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(api_app, "FeedbackBatchScheduler", FakeFeedbackBatchScheduler)
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        soul = self._FakeSoulEngine(unified=unified)
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=self._FakeDatabase(),
+                soul_engine=soul,
+            )
+        )
+
+        response = client.post(
+            "/api/feedback",
+            json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+        )
+        assert response.status_code == 200
+        return soul, schedules
+
+    def test_flag_off_leaves_feedback_behaviour_byte_identical(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=False)
+
+        assert soul.pipeline.signals == [], "开关关闭时反馈绝不能进 pipeline（否则与旧批线双计）"
+        assert schedules == 1, "旧批线调度保持不变"
+
+    def test_flag_on_feeds_one_feedback_signal_into_the_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from openbiliclaw.soul.pipeline import OnionLayer, SignalType
+
+        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=True)
+
+        assert len(soul.pipeline.signals) == 1
+        signal = soul.pipeline.signals[0]
+        assert signal.signal_type is SignalType.FEEDBACK
+        assert signal.payload["feedback_type"] == "dislike"
+        assert signal.payload["title"] == "讲透城市与建筑"
+        assert signal.payload["note"] == "太浅了"
+        assert signal.target_layers == frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE})
+        assert schedules == 1, "Wave A 旧批线仍照常调度"

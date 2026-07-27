@@ -605,6 +605,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `avoidance_speculation_cooldown_days` | int | `7` | 不喜欢领域探针被否认或过期后的冷却天数 |
 | `avoidance_speculation_confirmation_threshold` | int | `3` | 自动确认不喜欢领域所需显式负向信号数；用户直接确认不受此阈值限制 |
 | `avoidance_speculation_max_active` | int | `5` | 最多同时活跃的不喜欢领域探针数，不占 `speculation_max_active` |
+| `feedback_batch_threshold` | int | `3` | 累计多少条推荐反馈后重算偏好。旧反馈批线用它做游标批的阈值；开启 `unified_interest_line` 后同一个值改在认知流水线里计数（INTEREST 缓冲里的 FEEDBACK 信号数达到它即立即消费） |
+| `unified_interest_line` | bool | `false` | 统一兴趣更新线开关（`docs/plans/2026-07-27-unified-interest-line-spec.md`）。`true` 时 `/api/feedback` 把反馈作为 FEEDBACK 信号喂进 `ProfileUpdatePipeline`，并让含反馈的 INTEREST 缓冲在达到 `feedback_batch_threshold` 时绕过最短间隔立即消费（消费侧继承 dislike 归档、接入点③门控重建、held-replay 与 `source=feedback` 台账）。**Wave A 默认关**：旧反馈批线仍在跑，两条线同时开会把同一条反馈算两次 |
 | `auto_update_enabled` | bool | `false` | 是否启用后端自动检查并应用新版本；默认关闭，只影响后端源码，不更新浏览器插件 |
 | `auto_update_check_interval_hours` | int | `6` | 后端自动更新检查间隔（小时），最小 `1`；TOML 中的 `0` / 负数 / 非整数字符串加载时回退安全默认值 `6`，`PUT /api/config` 与 `save_config()` 对非整数或 `<1` 的值直接拒绝且不落盘；手动检查不受该间隔限制 |
 | `auto_update_allow_prerelease` | bool | `false` | 是否允许 `backend-vX.Y.Z-rc/beta/dev` 预发布 tag 被后端自动更新选择；默认忽略 |

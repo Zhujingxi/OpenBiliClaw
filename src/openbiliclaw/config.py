@@ -474,6 +474,11 @@ class SchedulerConfig:
     avoidance_speculation_confirmation_threshold: int = 3
     avoidance_speculation_max_active: int = 5
     feedback_batch_threshold: int = _DEFAULT_FEEDBACK_BATCH_THRESHOLD
+    # 统一兴趣更新线（docs/plans/2026-07-27-unified-interest-line-spec.md）。
+    # true 时 /api/feedback 把反馈喂进认知流水线快线，并让含 FEEDBACK 信号的
+    # INTEREST 缓冲在达到 ``feedback_batch_threshold`` 时绕过最短间隔立即消费。
+    # Wave A 默认 false：旧反馈批线仍在跑，同时打开会让同一条反馈被双计。
+    unified_interest_line: bool = False
     # Default off. The auto-updater pulls from GitHub releases and
     # restarts the backend when a newer version is detected, but it has
     # historically caused restart loops when the local
@@ -1503,6 +1508,10 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     "profile_consolidation_archive_enabled": _coerce_bool(
                         sched_raw.get("profile_consolidation_archive_enabled"),
                         default=True,
+                    ),
+                    "unified_interest_line": _coerce_bool(
+                        sched_raw.get("unified_interest_line"),
+                        default=False,
                     ),
                     "auto_update_enabled": _coerce_bool(
                         sched_raw.get("auto_update_enabled"),
@@ -3029,6 +3038,7 @@ def _render_config_toml(
             f"{config.scheduler.avoidance_speculation_confirmation_threshold}",
             "avoidance_speculation_max_active = "
             f"{config.scheduler.avoidance_speculation_max_active}",
+            f"unified_interest_line = {_toml_bool(config.scheduler.unified_interest_line)}",
             f"auto_update_enabled = {_toml_bool(config.scheduler.auto_update_enabled)}",
             "auto_update_check_interval_hours = "
             f"{config.scheduler.auto_update_check_interval_hours}",

@@ -3325,3 +3325,411 @@ async def test_preference_chunks_keep_the_recent_cognition_context() -> None:
         assert "最近在深挖 Rust 底层" in call["user_input"]
         assert "<active_insights>" in call["user_input"]
         assert "可能是系统编程从业者" in call["user_input"]
+
+
+# ===========================================================================
+# 统一兴趣更新线 Phase 1 — 反馈优先级 flush（spec 不变量 1）
+#
+# 含 FEEDBACK 信号的 INTEREST 缓冲在信号数达 feedback_batch_threshold（默认 3，
+# 复用旧批线 config 键）时立即消费，绕过 min_interval_seconds；普通事件维持
+# 3 条 / 600s 不变。Wave A 默认关（scheduler.unified_interest_line=false）。
+# ===========================================================================
+
+
+def _feedback_buffer(count: int, *, now: datetime) -> LayerBuffer:
+    buf = LayerBuffer(layer=OnionLayer.INTEREST)
+    # 刚刚更新过 → min_interval 闸门是关着的
+    buf.last_updated_at = now.isoformat()
+    for index in range(count):
+        buf.signals.append(_serialize_signal(signal_from_feedback("dislike", f"卡片{index}", "")))
+    return buf
+
+
+def test_feedback_priority_bypasses_min_interval_without_clock_advance() -> None:
+    """3 条 FEEDBACK 信号在墙钟零推进下即 ready；关闭时维持今天的行为。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = _feedback_buffer(3, now=now)
+
+    assert buf.is_ready(threshold, now, has_strong_signal=True) is False
+    assert (
+        buf.is_ready(threshold, now, has_strong_signal=True, feedback_priority_threshold=3) is True
+    )
+
+
+def test_feedback_priority_needs_the_full_threshold() -> None:
+    """2 条反馈不够——优先级规则复用 feedback_batch_threshold 的计数语义。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = _feedback_buffer(2, now=now)
+
+    assert (
+        buf.is_ready(threshold, now, has_strong_signal=True, feedback_priority_threshold=3) is False
+    )
+
+
+def test_feedback_priority_does_not_speed_up_ordinary_events() -> None:
+    """普通浏览事件即使 3 条也不绕过 600s——只有 FEEDBACK 有优先级。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = LayerBuffer(layer=OnionLayer.INTEREST)
+    buf.last_updated_at = now.isoformat()
+    for index in range(3):
+        buf.signals.append(
+            _serialize_signal(
+                signals_from_events([{"event_type": "view", "title": f"v{index}"}])[0]
+            )
+        )
+
+    assert buf.is_ready(threshold, now, feedback_priority_threshold=3) is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_priority_flush_when_unified_line_on(tmp_path: Path) -> None:
+    """开关打开时，第 3 条反馈立刻触发 INTEREST 消费（不等 min_interval）。"""
+    svc = _RichFakeService()
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    thresholds = {
+        layer: LayerThreshold(min_signals=3, min_interval_seconds=3600, max_buffer_size=200)
+        for layer in _BUFFERED_LAYERS
+    }
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=svc),
+        profile_builder=ProfileBuilder(registry=svc),
+        thresholds=thresholds,
+        unified_interest_line=True,
+        feedback_batch_threshold=3,
+    )
+    # 模拟「刚刚消费过一次」，把 600s/3600s 最短间隔闸门关上。
+    pipeline._buffers[OnionLayer.INTEREST.value].last_updated_at = datetime.now().isoformat()
+
+    updated: list[OnionLayer] = []
+    for index in range(3):
+        result = await pipeline.ingest(signal_from_feedback("dislike", f"卡片{index}", ""))
+        updated.extend(r.layer for r in result.layers_updated)
+
+    assert OnionLayer.INTEREST in updated
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_priority_off_by_default(tmp_path: Path) -> None:
+    """Wave A 默认关：反馈仍受 min_interval 约束，行为与今天逐字节一致。"""
+    svc = _RichFakeService()
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    thresholds = {
+        layer: LayerThreshold(min_signals=3, min_interval_seconds=3600, max_buffer_size=200)
+        for layer in _BUFFERED_LAYERS
+    }
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=svc),
+        profile_builder=ProfileBuilder(registry=svc),
+        thresholds=thresholds,
+    )
+    pipeline._buffers[OnionLayer.INTEREST.value].last_updated_at = datetime.now().isoformat()
+
+    updated: list[OnionLayer] = []
+    for index in range(3):
+        result = await pipeline.ingest(signal_from_feedback("dislike", f"卡片{index}", ""))
+        updated.extend(r.layer for r in result.layers_updated)
+
+    assert OnionLayer.INTEREST not in updated
+    assert len(pipeline._buffers[OnionLayer.INTEREST.value].signals) == 3
+
+
+# ===========================================================================
+# 统一兴趣更新线 Phase 1 后半 — 消费侧继承批线特权（spec §Phase 1）
+#
+# 含 FEEDBACK 信号的那一批在 _update_interest 里额外获得：dislike 归档、显著
+# 变化 → 接入点③门控重建（trigger=feedback_batch）、批后 held-replay、台账
+# pipeline_layer_update(source="feedback")。不含反馈的批一律不受影响。
+# ===========================================================================
+
+
+class _StubGate:
+    """Deterministic posture-gate stand-in (mirrors tests/test_posture_gate.py)."""
+
+    def __init__(self, mode: str, decision: Any) -> None:
+        self._mode = mode
+        self._decision = decision
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self._mode != "off"
+
+    async def evaluate(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self._decision
+
+
+_SIGNIFICANT_PREFERENCE: dict[str, Any] = {
+    "interests": [
+        {"name": "标题党", "category": "内容", "weight": 0.7, "source": "feedback"},
+        {"name": "城市建筑", "category": "文化", "weight": 0.86, "source": "feedback"},
+        {"name": "结构力学", "category": "知识", "weight": 0.81, "source": "feedback"},
+    ],
+    "style": {},
+    "context": {},
+    "exploration_openness": 0.5,
+    "disliked_topics": ["标题党"],
+    "favorite_up_users": [],
+}
+
+
+def _unified_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, MemoryManager]:
+    """SoulEngine with the unified interest line ON and a stubbed analyzer."""
+    from openbiliclaw.soul.engine import SoulEngine
+
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    engine = SoulEngine(
+        llm=_RichFakeService(),
+        memory=memory,
+        unified_interest_line=True,
+        database=memory._database,
+    )
+
+    async def fake_analyze_events(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        import copy
+
+        return copy.deepcopy(_SIGNIFICANT_PREFERENCE)
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    return engine, memory
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_archives_new_dislikes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈的批必须继承批线的 dislike 归档（归档而非删除）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") == "archived"
+    assert by_name["城市建筑"].get("state") != "archived"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ordinary_batch_does_not_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不含反馈的普通批不走归档路径（避免把浏览误当避雷证据）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest_batch(
+        signals_from_events([{"event_type": "view", "title": f"视频{i}"} for i in range(3)])
+    )
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") != "archived"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_rebuild_goes_through_access_point_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈 + 显著变化 → 走接入点③（trigger=feedback_batch）；shadow 放行重建。"""
+    from openbiliclaw.soul.posture_gate import ACCEPT, GateDecision
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))
+    engine._posture_gate = gate
+
+    built: list[bool] = []
+
+    async def fake_build(**kwargs: Any) -> Any:
+        del kwargs
+        from openbiliclaw.soul.profile import SoulProfile
+
+        built.append(True)
+        return SoulProfile(
+            personality_portrait="重建后的画像。" * 20,
+            core_traits=["理性"],
+            cognitive_style=["结构化"],
+            motivational_drivers=["把事情讲透"],
+            current_phase="持续校准",
+            values=["深度"],
+            life_stage="稳定期",
+            deep_needs=["被理解"],
+        )
+
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert gate.calls, "含反馈的显著变化必须咨询接入点③"
+    assert gate.calls[0]["write_point"] == "feedback_soul_rebuild"
+    assert gate.calls[0]["change"]["trigger"] == "feedback_batch"
+    assert built, "shadow/accept 必须放行重建"
+    assert memory.get_layer("soul").data["core"]["core_traits"] == ["理性"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_enforce_downgrade_abandons_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enforce downgrade → 放弃重建，但偏好写入和缓冲消费不受影响。"""
+    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    engine._posture_gate = _StubGate("enforce", GateDecision(verdict=DOWNGRADE, enforced=True))
+
+    built: list[bool] = []
+
+    async def fake_build(**kwargs: Any) -> Any:
+        del kwargs
+        built.append(True)
+        raise AssertionError("enforce downgrade 必须在重建前拦下")
+
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert built == []
+    assert memory.get_layer("preference").data["disliked_topics"] == ["标题党"]
+    assert engine.pipeline._buffers[OnionLayer.INTEREST.value].signals == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_ledger_source_is_feedback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """台账连续性：反馈触发的消费记 pipeline_layer_update 且 source=feedback。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    sources = {str(row["source"]) for row in rows}
+    assert "feedback" in sources, f"反馈触发的兴趣消费必须记 source=feedback，实际 {sources}"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ordinary_batch_keeps_pipeline_ledger_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """普通批的台账 source 不变（pipeline:interest）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest_batch(
+        signals_from_events([{"event_type": "view", "title": f"视频{i}"} for i in range(3)])
+    )
+    await engine.wait_for_pending_edits()
+
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    sources = {str(row["source"]) for row in rows}
+    assert "feedback" not in sources
+    assert "pipeline:interest" in sources
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_consumes_held_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈的批后必须消费 replaying 的搁置更新（批线 held-replay 钩子）。"""
+    from openbiliclaw.soul.confusion import ConfusionManager, HeldUpdate
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    db = memory._database
+    manager = ConfusionManager(db)
+    confusion_id = db.insert_confusion(topic="桌游", observation="看不懂")
+    db.update_confusion(
+        confusion_id,
+        held_updates=[HeldUpdate(held_id="h1", topic="桌游", kind="upgrade", value=0.7).to_dict()],
+    )
+    manager.resolve(confusion_id, resolution="real_interest")
+    assert manager.get(confusion_id).held_updates[0].state == "replaying"
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert manager.get(confusion_id).held_updates[0].state == "applied"
+
+
+# ===========================================================================
+# 统一兴趣更新线 — Task 1 契约在统一线上的对照
+#
+# tests/test_soul_engine.py::TestFeedbackBatchContract 钉的是旧批线的 6 条语义。
+# 它们在统一线上的去向：
+#   ① 阈值 3          → LayerBuffer 的反馈优先级规则（test_feedback_priority_*）
+#   ② retraction 排除 → **有意变更**：改走 pipeline 既有折价（下面第一条）
+#   ③ dislike 归档    → test_pipeline_feedback_batch_archives_new_dislikes
+#   ④ 门控重建        → test_pipeline_feedback_batch_rebuild_goes_through_...
+#   ⑤ held-replay     → test_pipeline_feedback_batch_consumes_held_replay
+#   ⑥ 游标幂等        → 缓冲 drain 幂等（下面第二条；游标本身 Wave B 才退役）
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_unified_line_retraction_is_discounted_not_a_feedback_privilege(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约②有意变更：retraction 不再被整条排除，但也拿不到反馈特权。
+
+    它走 BEHAVIOR_EVENT 通道（折价而非删除），因此不触发 dislike 归档，也不会
+    把 pipeline_layer_update 的 source 改成 feedback。
+    """
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    signals = signals_from_events(
+        [
+            {
+                "event_type": "feedback",
+                "title": f"撤回 {index}",
+                "url": f"https://www.bilibili.com/video/BV{index}",
+                "metadata": {"feedback_type": "retraction", "retracted_action": "like"},
+            }
+            for index in range(3)
+        ]
+    )
+    assert all(sig.signal_type is SignalType.BEHAVIOR_EVENT for sig in signals)
+
+    await engine.pipeline.ingest_batch(signals)
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") != "archived", "撤回不是避雷证据"
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    assert "feedback" not in {str(row["source"]) for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_unified_line_consumed_batch_is_not_reconsumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约⑥的统一线对应物：消费过的信号被 drain，二次 tick 不重算。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    del memory
+
+    calls: list[int] = []
+    original = engine._preference_analyzer.analyze_events
+
+    async def counting_analyze(**kwargs: Any) -> dict[str, Any]:
+        calls.append(1)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", counting_analyze)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    assert engine.pipeline._buffers[OnionLayer.INTEREST.value].signals == []
+
+    await engine.pipeline.tick()
+    await engine.wait_for_pending_edits()
+
+    assert calls == [1], "已消费的反馈不得被第二轮重复分析"

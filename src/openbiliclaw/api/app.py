@@ -2098,6 +2098,44 @@ def create_app(
         with suppress(Exception):
             feedback_batch_scheduler.schedule()
 
+    async def _ingest_feedback_signal(
+        *,
+        feedback_type: str,
+        title: str,
+        note: str,
+    ) -> int:
+        """Feed one recommendation feedback into the profile-update pipeline.
+
+        Unified interest line, Wave A (spec 2026-07-27): the pipeline becomes
+        the single event-driven writer of the interest layer. Gated behind
+        ``scheduler.unified_interest_line`` because the legacy feedback batch
+        (``_schedule_post_feedback_tasks``) still runs — with both consumers
+        live the same feedback would be counted twice. Best-effort: a pipeline
+        failure never breaks the feedback response.
+        """
+        if ctx.soul_engine is None:
+            return 0
+        if not bool(getattr(ctx.soul_engine, "unified_interest_line_enabled", False)):
+            return 0
+        is_ready = getattr(ctx.soul_engine, "is_profile_ready", None)
+        if callable(is_ready):
+            with suppress(Exception):
+                if not bool(is_ready()):
+                    return 0
+        pipeline = getattr(ctx.soul_engine, "pipeline", None)
+        ingest = getattr(pipeline, "ingest", None)
+        if not callable(ingest):
+            return 0
+
+        from openbiliclaw.soul.pipeline import signal_from_feedback
+
+        try:
+            await ingest(signal_from_feedback(feedback_type, title, note))
+        except Exception:
+            logger.exception("Failed to ingest feedback into profile pipeline")
+            return 0
+        return 1
+
     async def _ingest_profile_update_events(events: list[dict[str, Any]]) -> int:
         """Feed events into the profile-update pipeline when ready.
 
@@ -9580,6 +9618,11 @@ def create_app(
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
+        await _ingest_feedback_signal(
+            feedback_type=feedback_type,
+            title=rec_title,
+            note=note,
+        )
         _schedule_post_feedback_tasks()
         return FeedbackResponse(
             ok=True,

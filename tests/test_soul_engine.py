@@ -5139,3 +5139,354 @@ class TestDialogueDeepFastLane:
             "interest 走快线，不该被落成深层假设"
         )
         assert result["profile_rebuilt"] is False, "偏好没显著变化、又无深层自述，不重建"
+
+
+# ===========================================================================
+# 统一兴趣更新线 Phase 0 — 反馈批线契约特征测试
+#
+# 这些测试钉死 ``_process_feedback_batch_if_needed_locked`` 今天的语义，作为
+# 「反馈批合并进 pipeline 快线」的验收契约。每条标注该语义在统一线上的去向：
+#   「统一线必须继承」    — 合并后行为必须逐条保留
+#   「统一线有意变更」    — 合并后按 spec 不变量 4 改为折价，需 A/B 门证明
+# 参见 docs/plans/2026-07-27-unified-interest-line-spec.md。
+# ===========================================================================
+
+
+class TestFeedbackBatchContract:
+    """Characterization contract for the legacy feedback batch (Phase 0)."""
+
+    @staticmethod
+    async def _seed_feedback(
+        memory: MemoryManager,
+        rows: list[tuple[str, str]],
+    ) -> None:
+        for feedback_type, title in rows:
+            await memory.propagate_event(
+                {
+                    "event_type": "feedback",
+                    "title": title,
+                    "metadata": {"feedback_type": feedback_type},
+                }
+            )
+
+    @staticmethod
+    def _stub_analyzer(
+        monkeypatch: pytest.MonkeyPatch,
+        engine: SoulEngine,
+        payload: dict[str, object],
+        captured: list[dict[str, object]] | None = None,
+    ) -> None:
+        async def fake_analyze_events(
+            *,
+            events: list[dict[str, object]],
+            existing_preference: dict[str, object],
+            event_chunk_size: int = 0,
+            awareness_notes: list[dict[str, object]] | None = None,
+            active_insights: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            del existing_preference, event_chunk_size, awareness_notes, active_insights
+            if captured is not None:
+                captured.extend(events)
+            return dict(payload)
+
+        monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    @pytest.mark.asyncio
+    async def test_threshold_fires_on_third_feedback_not_second(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约①「统一线必须继承」: 第 3 条反馈落地才消费，2 条按兵不动。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+        self._stub_analyzer(
+            monkeypatch,
+            engine,
+            {
+                "interests": [],
+                "style": {},
+                "context": {},
+                "exploration_openness": 0.4,
+                "disliked_topics": [],
+                "favorite_up_users": [],
+            },
+        )
+
+        await self._seed_feedback(memory, [("dislike", "第一条"), ("dislike", "第二条")])
+        below = await engine.process_feedback_batch_if_needed()
+        assert below["triggered"] is False
+        assert below["feedback_count"] == 2
+        assert below["preference_updated"] is False
+
+        await self._seed_feedback(memory, [("dislike", "第三条")])
+        fired = await engine.process_feedback_batch_if_needed()
+        assert fired["triggered"] is True
+        assert fired["feedback_count"] == 3
+        assert fired["preference_updated"] is True
+
+    @pytest.mark.asyncio
+    async def test_retraction_excluded_from_count_and_input_but_advances_cursor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约②「统一线有意变更（retraction 排除→折价）」。
+
+        旧批线把 retraction 从阈值计数和 LLM 输入里整条剔除，只推进游标。统一线
+        改走 pipeline 既有折价（signal_strength≤0.2 + retracted 标记），必须由
+        A/B 门 3 证明折价不产生新增 dislike / 权重上调。
+        """
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+        captured: list[dict[str, object]] = []
+        self._stub_analyzer(
+            monkeypatch,
+            engine,
+            {
+                "interests": [],
+                "style": {},
+                "context": {},
+                "exploration_openness": 0.4,
+                "disliked_topics": [],
+                "favorite_up_users": [],
+            },
+            captured,
+        )
+
+        await self._seed_feedback(
+            memory,
+            [
+                ("dislike", "真反馈 0"),
+                ("retraction", "撤回 0"),
+                ("dislike", "真反馈 1"),
+                ("retraction", "撤回 1"),
+                ("dislike", "真反馈 2"),
+            ],
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["triggered"] is True
+        # retraction 不计数
+        assert result["feedback_count"] == 3
+        # retraction 不进 LLM 输入
+        assert len(captured) == 3
+        assert all("撤回" not in str(event.get("title", "")) for event in captured)
+        # 但仍推进游标到扫描过的最大 id（含 retraction 行），避免每轮重扫
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 5
+
+    @pytest.mark.asyncio
+    async def test_new_dislike_archives_matching_interest(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约③「统一线必须继承」: 新增 dislike 把同名兴趣归档（不是删除）。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+        self._stub_analyzer(
+            monkeypatch,
+            engine,
+            {
+                "interests": [
+                    {"name": "标题党", "category": "内容", "weight": 0.7, "source": "feedback"},
+                    {"name": "纪录片", "category": "知识", "weight": 0.8, "source": "feedback"},
+                ],
+                "style": {},
+                "context": {},
+                "exploration_openness": 0.4,
+                "disliked_topics": ["标题党"],
+                "favorite_up_users": [],
+            },
+        )
+        await self._seed_feedback(
+            memory,
+            [("dislike", "反馈 0"), ("dislike", "反馈 1"), ("dislike", "反馈 2")],
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+        await engine.wait_for_pending_edits()
+
+        assert result["triggered"] is True
+        interests = memory.get_layer("preference").data["interests"]
+        by_name = {str(item["name"]): item for item in interests}
+        assert by_name["标题党"].get("state") == "archived"
+        assert by_name["纪录片"].get("state") != "archived"
+
+    @pytest.mark.asyncio
+    async def test_significant_change_rebuild_goes_through_access_point_three(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约④「统一线必须继承」: 显著变化的整份重建过接入点③门控。
+
+        shadow/accept 放行 → 重建；enforce downgrade → 放弃重建。
+        """
+        from openbiliclaw.soul.posture_gate import ACCEPT, DOWNGRADE, GateDecision
+
+        class _StubGate:
+            def __init__(self, mode: str, decision: GateDecision) -> None:
+                self._mode = mode
+                self._decision = decision
+                self.calls: list[dict[str, object]] = []
+
+            @property
+            def enabled(self) -> bool:
+                return self._mode != "off"
+
+            async def evaluate(self, **kwargs: object) -> GateDecision:
+                self.calls.append(kwargs)
+                return self._decision
+
+        async def fake_build(**kwargs: object) -> SoulProfile:
+            del kwargs
+            return SoulProfile(
+                personality_portrait="重建后的画像。" * 20,
+                core_traits=["理性"],
+                cognitive_style=["结构化"],
+                motivational_drivers=["把事情讲透"],
+                current_phase="持续校准",
+                values=["深度"],
+                life_stage="稳定期",
+                deep_needs=["被理解"],
+            )
+
+        significant = {
+            "interests": [
+                {"name": "城市建筑", "category": "文化", "weight": 0.86, "source": "feedback"},
+                {"name": "结构力学", "category": "知识", "weight": 0.81, "source": "feedback"},
+            ],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+
+        # shadow / accept → 重建发生，且门控被咨询
+        shadow_memory = MemoryManager(tmp_path / "shadow")
+        shadow_memory.initialize()
+        shadow_engine = SoulEngine(llm=FakeRegistry("{}"), memory=shadow_memory)
+        shadow_gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))
+        shadow_engine._posture_gate = shadow_gate  # type: ignore[assignment]
+        self._stub_analyzer(monkeypatch, shadow_engine, significant)
+        monkeypatch.setattr(shadow_engine._profile_builder, "build", fake_build)
+        await self._seed_feedback(
+            shadow_memory,
+            [("like", "反馈 0"), ("like", "反馈 1"), ("like", "反馈 2")],
+        )
+
+        shadow_result = await shadow_engine.process_feedback_batch_if_needed()
+        assert shadow_result["profile_rebuilt"] is True
+        assert shadow_gate.calls, "显著变化必须咨询接入点③"
+        assert shadow_gate.calls[0]["write_point"] == "feedback_soul_rebuild"
+        assert shadow_gate.calls[0]["change"]["trigger"] == "feedback_batch"  # type: ignore[index]
+
+        # enforce / downgrade → 放弃重建
+        enforce_memory = MemoryManager(tmp_path / "enforce")
+        enforce_memory.initialize()
+        enforce_engine = SoulEngine(llm=FakeRegistry("{}"), memory=enforce_memory)
+        enforce_gate = _StubGate("enforce", GateDecision(verdict=DOWNGRADE, enforced=True))
+        enforce_engine._posture_gate = enforce_gate  # type: ignore[assignment]
+        self._stub_analyzer(monkeypatch, enforce_engine, significant)
+        monkeypatch.setattr(enforce_engine._profile_builder, "build", fake_build)
+        await self._seed_feedback(
+            enforce_memory,
+            [("like", "反馈 0"), ("like", "反馈 1"), ("like", "反馈 2")],
+        )
+
+        enforce_result = await enforce_engine.process_feedback_batch_if_needed()
+        assert enforce_result["preference_updated"] is True
+        assert enforce_result["profile_rebuilt"] is False
+        assert enforce_gate.calls
+
+    @pytest.mark.asyncio
+    async def test_held_replay_is_consumed_after_the_batch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约⑤「统一线必须继承」: 批后消费 replaying 状态的搁置更新。"""
+        from openbiliclaw.soul.confusion import ConfusionManager, HeldUpdate
+        from openbiliclaw.storage.database import Database
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        db = Database(tmp_path / "confusion.db")
+        db.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, database=db)
+        self._stub_analyzer(
+            monkeypatch,
+            engine,
+            {
+                "interests": [{"name": "桌游", "category": "游戏", "weight": 0.7}],
+                "style": {},
+                "context": {},
+                "exploration_openness": 0.4,
+                "disliked_topics": [],
+                "favorite_up_users": [],
+            },
+        )
+
+        manager = ConfusionManager(db)
+        confusion_id = db.insert_confusion(topic="桌游", observation="看不懂")
+        db.update_confusion(
+            confusion_id,
+            held_updates=[
+                HeldUpdate(held_id="h1", topic="桌游", kind="upgrade", value=0.7).to_dict()
+            ],
+        )
+        manager.resolve(confusion_id, resolution="real_interest")
+        assert manager.get(confusion_id).held_updates[0].state == "replaying"
+
+        await self._seed_feedback(
+            memory,
+            [("dislike", "反馈 0"), ("dislike", "反馈 1"), ("dislike", "反馈 2")],
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["triggered"] is True
+        assert manager.get(confusion_id).held_updates[0].state == "applied"
+
+    @pytest.mark.asyncio
+    async def test_cursor_advance_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """契约⑥「统一线必须继承」: 游标推进后，同一批反馈不会被二次消费。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+        calls: list[int] = []
+
+        async def fake_analyze_events(
+            *,
+            events: list[dict[str, object]],
+            existing_preference: dict[str, object],
+            event_chunk_size: int = 0,
+            awareness_notes: list[dict[str, object]] | None = None,
+            active_insights: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            del existing_preference, event_chunk_size, awareness_notes, active_insights
+            calls.append(len(events))
+            return {
+                "interests": [],
+                "style": {},
+                "context": {},
+                "exploration_openness": 0.4,
+                "disliked_topics": [],
+                "favorite_up_users": [],
+            }
+
+        monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+        await self._seed_feedback(
+            memory,
+            [("dislike", "反馈 0"), ("dislike", "反馈 1"), ("dislike", "反馈 2")],
+        )
+
+        first = await engine.process_feedback_batch_if_needed()
+        cursor_after_first = memory.load_feedback_state()["last_processed_feedback_event_id"]
+        second = await engine.process_feedback_batch_if_needed()
+
+        assert first["triggered"] is True
+        assert second["triggered"] is False
+        assert second["feedback_count"] == 0
+        assert calls == [3]
+        assert (
+            memory.load_feedback_state()["last_processed_feedback_event_id"] == cursor_after_first
+        )

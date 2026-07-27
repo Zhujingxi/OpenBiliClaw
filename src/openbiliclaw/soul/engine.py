@@ -59,7 +59,11 @@ from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
-from .pipeline import ProfileUpdatePipeline, migrate_pipeline_deep_buffers
+from .pipeline import (
+    FeedbackConsumerHooks,
+    ProfileUpdatePipeline,
+    migrate_pipeline_deep_buffers,
+)
 from .posture_gate import ACCEPT, GateDecision, PostureGate
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
@@ -323,6 +327,7 @@ class SoulEngine:
         profile_consolidation_like_target_soft: int = 450,
         profile_consolidation_archive_enabled: bool = True,
         feedback_batch_threshold: int = 3,
+        unified_interest_line: bool = False,
         posture_gate_mode: str = "shadow",
         posture_gate_force_enforce: bool = False,
         database: Any | None = None,
@@ -331,6 +336,10 @@ class SoulEngine:
         self._memory = memory
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
+        # Unified interest line kill switch (spec 2026-07-27). False (Wave A
+        # default) keeps feedback on the legacy batch only — turning both on
+        # would let the same feedback be counted twice.
+        self._unified_interest_line = bool(unified_interest_line)
         self._feedback_batch_lock = asyncio.Lock()
         # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
         # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
@@ -426,6 +435,8 @@ class SoulEngine:
             cognition_cycle=self._cognition_cycle,
             speculator_idle_interval_minutes=speculator_idle_interval_minutes,
             profile_consolidator=self._profile_consolidator,
+            unified_interest_line=self._unified_interest_line,
+            feedback_batch_threshold=self._feedback_batch_threshold,
         )
         # Detached dislike writeback from manual edits, feedback batches, and
         # dialogue learning. The purge runs an LLM+embedding recall that must
@@ -479,6 +490,16 @@ class SoulEngine:
         set_gate = getattr(self._pipeline, "set_posture_gate", None)
         if callable(set_gate):
             set_gate(self._posture_gate)
+        # Unified interest line: hand the pipeline the retired feedback batch's
+        # privileges. Wired ONLY when the switch is on, so flipping it off
+        # returns the consuming side to today's behaviour too.
+        if self._unified_interest_line:
+            self._pipeline.set_feedback_hooks(
+                FeedbackConsumerHooks(
+                    archive_dislikes=self._archive_disliked_topics,
+                    after_update=self._after_pipeline_feedback_interest,
+                )
+            )
         # Held-replay crash recovery (Wave B, r5/R4-1): any held update left in
         # ``replaying`` at construction is a leftover from a previously crashed
         # session — reconcile it to ``applied_unverified`` (never resubmit;
@@ -505,6 +526,16 @@ class SoulEngine:
     def pipeline(self) -> Any:
         """Access the ProfileUpdatePipeline for direct signal ingestion."""
         return self._pipeline
+
+    @property
+    def unified_interest_line_enabled(self) -> bool:
+        """Whether feedback flows into the pipeline fast line (spec 2026-07-27).
+
+        False (Wave A default) means ``/api/feedback`` must NOT ingest a
+        FEEDBACK signal: the legacy feedback batch is still running and would
+        double-count the same user action.
+        """
+        return self._unified_interest_line
 
     async def analyze_events(
         self,
@@ -2636,50 +2667,13 @@ class SoulEngine:
             preference_layer.save()
             _entry.after = dict(updated_preference)
 
-        profile_rebuilt = False
-        # P2 (spec r3/F4): a feedback batch with a significant preference shift
-        # now passes access point ③ — previously this rebuild bypassed every
-        # gate. off/shadow proceed; enforce downgrade/reject abandons the rebuild.
-        feedback_rebuild_ok = (
-            self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=feedback_refs,
-                    context={"feedback_count": feedback_count, "feedback_refs": feedback_refs},
-                )
-            ).blocks
+        profile_rebuilt = await self._gated_feedback_soul_rebuild(
+            existing_preference=existing_preference,
+            updated_preference=updated_preference,
+            existing_profile=existing_profile,
+            source_refs=feedback_refs,
+            feedback_count=feedback_count,
         )
-        if feedback_rebuild_ok:
-            # Ledger write point D5 #4b: feedback-batch full soul rebuild.
-            try:
-                with self._ledger.action(
-                    write_point="feedback_soul_rebuild",
-                    source="feedback",
-                    before=existing_profile,
-                    source_refs=feedback_refs,
-                ) as _entry:
-                    legacy_profile = await self._profile_builder.build(
-                        history=[],
-                        preference=updated_preference,
-                        awareness_notes=[
-                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                        ],
-                        active_insights=self._rebuild_active_insights(),
-                    )
-                    profile = OnionProfile.from_legacy(legacy_profile)
-                    profile.populate_from_flat_preference(updated_preference)
-                    soul_layer = self._memory.get_layer("soul")
-                    soul_layer.data.clear()
-                    soul_layer.data.update(profile.to_dict())
-                    soul_layer.save()
-                    _entry.after = dict(soul_layer.data)
-                self._memory.sync_profile_files(profile)
-                profile_rebuilt = True
-            except Exception:
-                logger.exception("Failed to rebuild soul profile after feedback refresh.")
 
         if newly_added_dislikes:
             self._schedule_dislike_purge(
@@ -2716,6 +2710,101 @@ class SoulEngine:
             "preference_updated": True,
             "profile_rebuilt": profile_rebuilt,
         }
+
+    async def _gated_feedback_soul_rebuild(
+        self,
+        *,
+        existing_preference: dict[str, Any],
+        updated_preference: dict[str, Any],
+        existing_profile: dict[str, Any],
+        source_refs: list[str],
+        feedback_count: int,
+    ) -> bool:
+        """Rebuild the whole soul after feedback, if the gate lets it through.
+
+        P2 (spec r3/F4): a feedback-driven significant preference shift passes
+        access point ③ — previously this rebuild bypassed every gate. off/shadow
+        proceed; enforce downgrade/reject abandons the rebuild. Shared by the
+        legacy feedback batch and the unified interest line so both triggers
+        keep the exact same deep-write discipline. Returns whether the soul
+        profile was actually rebuilt.
+        """
+        rebuild_ok = (
+            self._preference_changed_significantly(existing_preference, updated_preference)
+            and not (
+                await self._gate_soul_rebuild(
+                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
+                    existing_preference=existing_preference,
+                    updated_preference=updated_preference,
+                    source_refs=source_refs,
+                    context={"feedback_count": feedback_count, "feedback_refs": source_refs},
+                )
+            ).blocks
+        )
+        if not rebuild_ok:
+            return False
+        # Ledger write point D5 #4b: feedback-batch full soul rebuild.
+        try:
+            with self._ledger.action(
+                write_point="feedback_soul_rebuild",
+                source="feedback",
+                before=existing_profile,
+                source_refs=source_refs,
+            ) as _entry:
+                legacy_profile = await self._profile_builder.build(
+                    history=[],
+                    preference=updated_preference,
+                    awareness_notes=[
+                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                    ],
+                    active_insights=self._rebuild_active_insights(),
+                )
+                profile = OnionProfile.from_legacy(legacy_profile)
+                profile.populate_from_flat_preference(updated_preference)
+                soul_layer = self._memory.get_layer("soul")
+                soul_layer.data.clear()
+                soul_layer.data.update(profile.to_dict())
+                soul_layer.save()
+                _entry.after = dict(soul_layer.data)
+            self._memory.sync_profile_files(profile)
+            return True
+        except Exception:
+            logger.exception("Failed to rebuild soul profile after feedback refresh.")
+            return False
+
+    async def _after_pipeline_feedback_interest(
+        self,
+        *,
+        existing_preference: dict[str, Any],
+        updated_preference: dict[str, Any],
+        source_refs: list[str],
+        feedback_count: int,
+    ) -> None:
+        """Unified interest line: the batch's post-write privileges.
+
+        Called by the pipeline right after a FEEDBACK-carrying INTEREST batch is
+        persisted. Mirrors what ``_process_feedback_batch_if_needed_locked``
+        does after its own preference write: the gated soul rebuild, then the
+        held-replay consumer. Both are best-effort — neither may break the
+        interest update.
+        """
+        existing_profile = dict(self._memory.get_layer("soul").data)
+        try:
+            await self._gated_feedback_soul_rebuild(
+                existing_preference=existing_preference,
+                updated_preference=updated_preference,
+                existing_profile=existing_profile,
+                source_refs=source_refs,
+                feedback_count=feedback_count,
+            )
+        except Exception:
+            logger.exception("Gated soul rebuild after a pipeline feedback batch failed")
+        # Consume any held updates left ``replaying`` by a resolved real-interest
+        # confusion — same best-effort contract the legacy batch had.
+        try:
+            await self.replay_held_updates()
+        except Exception:
+            logger.debug("held-replay consumer failed", exc_info=True)
 
     def _compact_feedback_event_for_analysis(
         self,

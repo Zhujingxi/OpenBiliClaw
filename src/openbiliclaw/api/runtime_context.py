@@ -866,6 +866,9 @@ class RuntimeContext:
             feedback_batch_threshold=int(
                 getattr(new_config.scheduler, "feedback_batch_threshold", 3)
             ),
+            unified_interest_line=bool(
+                getattr(new_config.scheduler, "unified_interest_line", False)
+            ),
             database=self.database,
         )
 

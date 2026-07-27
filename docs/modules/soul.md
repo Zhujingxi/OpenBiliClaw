@@ -313,9 +313,9 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 | 1a′ | 对话深层自述落库 | `dialogue_deep_selfstatement` | `engine._persist_confirmed_deep_candidates`（过门的 goal/value/state 候选落成 `validated=True / user_verdict="confirmed"` 假设——用户第一人称自述即确认；同轮强制门控重建，纯深层自述不动兴趣权重也当轮生效） |
 | 1b | 对话学习整份重建 | `dialogue_soul_rebuild` | `engine.learn_from_dialogue` |
 | 2 | dislike 清池 | `dislike_purge` | `engine.learn_from_dialogue`（调度时记录） |
-| 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（SURFACE/INTEREST/ROLE 快线层 changed 时，每层一行；VALUES/CORE 已封死不写） |
+| 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（SURFACE/INTEREST/ROLE 快线层 changed 时，每层一行；VALUES/CORE 已封死不写）。`source` 通常是 `pipeline:<层名>`；当本批含 FEEDBACK 信号（统一兴趣更新线）时改记 `source="feedback"`，保住反馈线在台账里的连续性 |
 | 4a | 反馈批偏好覆写 | `feedback_preference_overwrite` | `engine._process_feedback_batch_if_needed_locked` |
-| 4b | 反馈批整份重建（P2 已过门控③） | `feedback_soul_rebuild` | `engine._process_feedback_batch_if_needed_locked` |
+| 4b | 反馈批整份重建（P2 已过门控③） | `feedback_soul_rebuild` | `engine._gated_feedback_soul_rebuild`（旧反馈批与统一兴趣更新线共用，写点与 trigger=`feedback_batch` 不变） |
 | 1c | 确认假设攒批整份重建 | `hypotheses_soul_rebuild` | `engine._execute_pending_rebuild`（rebuild_pending 状态机） |
 | — | P1 退役深层缓冲迁移（一次性） | `pipeline_deep_migration` | `pipeline.migrate_pipeline_deep_buffers`（构造时幂等运行） |
 | 5 | 推测 promote/confirm/reject | `speculation_promote` / `speculation_confirm` / `speculation_reject` | `speculator`（引擎构造时 `attach_ledger`） |
