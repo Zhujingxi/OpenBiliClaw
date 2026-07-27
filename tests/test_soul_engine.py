@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -96,6 +96,40 @@ def test_soul_engine_wires_scheduler_speculation_config(tmp_path: Path) -> None:
     assert engine._avoidance_speculator._max_active == 5
     assert engine._pipeline._speculator_idle_min_interval == timedelta(minutes=11)
     assert engine._pipeline._avoidance_speculator is engine._avoidance_speculator
+
+
+@pytest.mark.asyncio
+async def test_replay_held_updates_applies_and_is_idempotent(tmp_path: Path) -> None:
+    from openbiliclaw.soul.confusion import ConfusionManager, HeldUpdate
+    from openbiliclaw.storage.database import Database
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    db = Database(tmp_path / "confusion.db")
+    db.initialize()
+    registry = FakeRegistry(
+        json.dumps(
+            {"interests": [{"name": "桌游", "category": "游戏", "weight": 0.7}]},
+            ensure_ascii=False,
+        )
+    )
+    engine = SoulEngine(llm=registry, memory=memory, database=db)
+
+    mgr = ConfusionManager(db)
+    cid = db.insert_confusion(topic="桌游", observation="x")
+    db.update_confusion(
+        cid,
+        held_updates=[HeldUpdate(held_id="h1", topic="桌游", kind="upgrade", value=0.7).to_dict()],
+    )
+    mgr.resolve(cid, resolution="real_interest")  # → replaying (with receipt)
+
+    result = await engine.replay_held_updates()
+    assert result["confusions"] == 1
+    assert mgr.get(cid).held_updates[0].state == "applied"
+
+    # Idempotent: nothing left replaying.
+    again = await engine.replay_held_updates()
+    assert again["replayed"] == 0
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1054,7 @@ async def test_learn_from_dialogue_persists_event_and_candidate_below_threshold(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         assert core_memory["soul_summary"]["personality_portrait"] == ""
         return [
@@ -1063,6 +1098,7 @@ async def test_learn_from_dialogue_updates_preference_for_single_high_confidence
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1130,6 +1166,7 @@ async def test_learn_from_dialogue_new_dislike_triggers_pool_purge(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         del assistant_reply, core_memory
         return [
@@ -1253,6 +1290,7 @@ async def test_learn_from_dialogue_updates_preference_for_repeated_lower_confide
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1314,6 +1352,7 @@ async def test_learn_from_dialogue_records_immediate_cognition_for_strong_single
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1362,6 +1401,7 @@ async def test_learn_from_dialogue_does_not_duplicate_same_immediate_cognition(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1402,6 +1442,7 @@ async def test_learn_from_dialogue_records_immediate_cognition_for_interest_cand
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1458,6 +1499,7 @@ async def test_learn_from_dialogue_rebuilds_profile_after_candidate_reaches_thre
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1629,6 +1671,88 @@ async def test_process_feedback_batch_rebuilds_profile_when_preference_changes_s
     assert profile_shift["context_line"] == "基于最近主题：纪录片 / 建筑 / 标题党"
     assert profile_shift["source_label"] == "聚合观察"
     assert profile_shift["expand_hint"] == "expandable"
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_rebuild_blocked_by_enforce_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P2: a feedback batch with a significant shift is now gated (access point ③).
+
+    An enforce reject abandons the rebuild — the soul profile is NOT rewritten,
+    even though preference changed significantly.
+    """
+    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.get_layer("preference").data.update(
+        {
+            "interests": [{"name": "科技", "category": "知识", "weight": 0.9}],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+    )
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "metadata": {"feedback_type": "dislike", "bvid": f"BV{index}"},
+            }
+        )
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "interests": [
+                {"name": "纪录片", "category": "知识", "weight": 0.95, "source": "feedback"},
+            ],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.7,
+            "disliked_topics": ["标题党"],
+            "favorite_up_users": [],
+        }
+
+    build_called = False
+
+    async def fake_build(**kwargs: object) -> object:
+        nonlocal build_called
+        build_called = True
+        raise AssertionError("rebuild must be abandoned by the enforce gate")
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    class _BlockingGate:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def evaluate(self, **kwargs: object) -> GateDecision:
+            self.calls.append(kwargs)
+            return GateDecision(verdict=DOWNGRADE, enforced=True)
+
+    gate = _BlockingGate()
+    engine._posture_gate = gate  # type: ignore[assignment]
+
+    result = await engine.process_feedback_batch_if_needed()
+
+    assert result["triggered"] is True
+    assert result["profile_rebuilt"] is False
+    assert build_called is False
+    assert gate.calls, "feedback-batch rebuild must consult access point ③"
+    assert gate.calls[0]["write_point"] == "feedback_soul_rebuild"
 
 
 def test_build_cognition_updates_falls_back_to_generic_context_when_signals_are_too_thin(
@@ -1949,3 +2073,377 @@ def test_effective_disliked_topics_honors_specific_removal(tmp_path: Path) -> No
     effective = engine.get_effective_disliked_topics()
     assert "标题党" not in effective  # specific removal must reach the hard filter
     assert "低质内容" in effective
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 settles (single ownership, whitelist, ledger turn_id, idempotency)
+# ---------------------------------------------------------------------------
+
+
+def _seed_active_speculation(engine: SoulEngine, tmp_path: Path, domain: str) -> None:
+    from openbiliclaw.soul.speculator import SpeculativeInterest, save_speculative_state
+
+    state = engine._speculator._load_state()
+    state.active.append(SpeculativeInterest(domain=domain, category="游戏", status="active"))
+    save_speculative_state(tmp_path, state)
+
+
+def _settles_extract(settles: list[dict[str, object]]):  # type: ignore[no-untyped-def]
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        del user_message, assistant_reply, core_memory, active_list
+        return {"candidates": [], "settles": settles}
+
+    return fake_extract
+
+
+def _ledger_rows(memory: MemoryManager, write_point: str) -> list[dict[str, object]]:
+    return memory._database.query_profile_ledger(days=30, write_point=write_point)
+
+
+@pytest.mark.asyncio
+async def test_settles_confirm_speculation_on_chat_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="最近确实在玩桌游",
+        assistant_reply="不错",
+        session="popup",
+        scope="chat",
+        turn_id="turn-42",
+    )
+
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" not in active  # confirmed → no longer active
+    rows = _ledger_rows(memory, "settle_speculation")
+    assert len(rows) == 1
+    assert rows[0]["turn_id"] == "turn-42"
+    assert rows[0]["outcome"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_settles_skipped_for_non_chat_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="关于桌游的探针回复",
+        assistant_reply="ok",
+        session="popup",
+        scope="probe",
+        turn_id="turn-probe",
+    )
+
+    # Non-chat scope → settles skipped (durable side-effect path owns it).
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" in active
+    assert _ledger_rows(memory, "settle_speculation") == []
+
+
+@pytest.mark.asyncio
+async def test_settles_unknown_ref_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "不存在的域", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="随便说说",
+        assistant_reply="ok",
+        session="popup",
+        scope="chat",
+        turn_id="turn-x",
+    )
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" in active  # untouched — ref not in injected list
+    assert _ledger_rows(memory, "settle_speculation") == []
+
+
+@pytest.mark.asyncio
+async def test_settles_confirm_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+    kwargs = dict(
+        user_message="确实在玩", assistant_reply="ok", session="popup", scope="chat", turn_id="t"
+    )
+    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    # Re-run same turn: state must not degrade (still confirmed, not resurrected).
+    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" not in active
+
+
+# ===========================================================================
+# Pending confirmed-hypotheses rebuild state machine (deep-line consolidation)
+# ===========================================================================
+
+
+def _seed_insight(
+    memory: MemoryManager, hypothesis: str, *, validated: bool, confidence: float
+) -> None:
+    layer = memory.get_layer("insight")
+    existing = layer.data.get("hypotheses", [])
+    existing = list(existing) if isinstance(existing, list) else []
+    existing.append(
+        {
+            "hypothesis": hypothesis,
+            "evidence": ["e"],
+            "confidence": confidence,
+            "validated": validated,
+            "created_at": "",
+        }
+    )
+    layer.data["hypotheses"] = existing
+    layer.save()
+
+
+def _seed_preference(memory: MemoryManager) -> None:
+    memory.get_layer("preference").data.update(
+        {
+            "interests": [{"name": "科技", "category": "知识", "weight": 0.9}],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+    )
+
+
+class _DecisionGate:
+    """Stub posture gate returning a fixed decision (records evaluate calls)."""
+
+    def __init__(self, decision: object, *, enabled: bool = True) -> None:
+        self._decision = decision
+        self.enabled = enabled
+        self.calls: list[dict[str, object]] = []
+
+    async def evaluate(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        return self._decision
+
+
+async def _fake_soul_build(**kwargs: object) -> SoulProfile:
+    return SoulProfile(
+        personality_portrait="重建后的画像。" * 6,
+        core_traits=["理性"],
+        cognitive_style=["结构化"],
+        motivational_drivers=["求真"],
+        current_phase="稳定期",
+        values=["真实"],
+        life_stage="在职",
+        deep_needs=["被理解"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_and_reject_both_mark_rebuild_pending(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "用户重视深度内容", validated=False, confidence=0.5)
+
+    await engine.update_from_feedback({"hypothesis": "用户重视深度内容", "signal": "confirm"})
+    state = engine._load_rebuild_state()
+    assert isinstance(state["pending"], dict)
+    assert state["pending"]["retry_count"] == 0
+    assert state["pending"]["trigger_refs"]
+
+    # A reject on another hypothesis also marks pending (single-point ownership).
+    _seed_insight(memory, "用户讨厌标题党", validated=True, confidence=0.9)
+    await engine.update_from_feedback({"hypothesis": "用户讨厌标题党", "signal": "reject"})
+    state2 = engine._load_rebuild_state()
+    assert isinstance(state2["pending"], dict)
+    assert len(state2["pending"]["trigger_refs"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_rebuild_input_filters_unvalidated_and_low_confidence(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "已确认高置信", validated=True, confidence=0.9)
+    _seed_insight(memory, "已确认但低置信", validated=True, confidence=0.6)
+    _seed_insight(memory, "未验证高置信", validated=False, confidence=0.95)
+
+    active = engine._rebuild_active_insights()
+    texts = {str(a["hypothesis"]) for a in active}
+    assert texts == {"已确认高置信"}
+
+
+@pytest.mark.asyncio
+async def test_pending_rebuild_debounced_within_window(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    await engine._mark_rebuild_pending(["ref:a"])
+
+    result = await engine.run_pending_rebuild_if_due(now=datetime.now())
+    assert result["ran"] is False
+    assert result["reason"] == "debounced"
+
+
+@pytest.mark.asyncio
+async def test_pending_rebuild_accept_runs_and_clears(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from openbiliclaw.soul.posture_gate import ACCEPT, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    _seed_preference(memory)
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
+    engine._posture_gate = _DecisionGate(GateDecision(verdict=ACCEPT, enforced=False))  # type: ignore[assignment]
+    monkeypatch.setattr(engine._profile_builder, "build", _fake_soul_build)
+
+    await engine._mark_rebuild_pending(["ref:a"])
+    result = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+
+    assert result["ran"] is True
+    assert result["outcome"] == "accept"
+    # Marker cleared.
+    assert engine._load_rebuild_state()["pending"] is None
+    # Soul rebuilt.
+    assert memory.get_layer("soul").data["core"]["core_traits"] == ["理性"]
+
+
+@pytest.mark.asyncio
+async def test_pending_rebuild_refusal_clears_and_records(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.soul.posture_gate import REJECT, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    _seed_preference(memory)
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
+    # Real downgrade/reject verdict — NOT an error.
+    engine._posture_gate = _DecisionGate(  # type: ignore[assignment]
+        GateDecision(verdict=REJECT, enforced=True, is_error=False)
+    )
+
+    await engine._mark_rebuild_pending(["ref:a"])
+    result = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+
+    assert result["outcome"] == "refusal"
+    state = engine._load_rebuild_state()
+    assert state["pending"] is None  # abandoned this batch
+    assert "last_gate_refusal" in state
+
+
+@pytest.mark.asyncio
+async def test_pending_rebuild_error_keeps_marker_then_bounded_clear(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    _seed_preference(memory)
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
+    # Enforce downgrade forced by an LLM/parse error → is_error=True.
+    engine._posture_gate = _DecisionGate(  # type: ignore[assignment]
+        GateDecision(verdict=DOWNGRADE, enforced=True, is_error=True)
+    )
+    await engine._mark_rebuild_pending(["ref:a"])
+
+    # First run: error → keep marker, retry_count=1.
+    r1 = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+    assert r1["outcome"] == "error"
+    state1 = engine._load_rebuild_state()
+    assert isinstance(state1["pending"], dict)
+    assert state1["pending"]["retry_count"] == 1
+
+    # Second run: retry_count reaches the bound → cleared with WARNING.
+    r2 = await engine.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+    assert r2["outcome"] == "error"
+    assert engine._load_rebuild_state()["pending"] is None
+
+
+@pytest.mark.asyncio
+async def test_pending_rebuild_restart_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The marker persists; a fresh engine instance picks it up and rebuilds."""
+    from openbiliclaw.soul.posture_gate import ACCEPT, GateDecision
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    _seed_preference(memory)
+    engine1 = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_insight(memory, "用户重视深度内容", validated=True, confidence=0.9)
+    await engine1._mark_rebuild_pending(["ref:a"])
+    del engine1
+
+    # Simulate restart: a new engine over the same data dir.
+    memory2 = MemoryManager(tmp_path)
+    memory2.initialize()
+    engine2 = SoulEngine(llm=FakeRegistry("{}"), memory=memory2)
+    assert engine2._rebuild_running is False
+    assert isinstance(engine2._load_rebuild_state()["pending"], dict)
+    engine2._posture_gate = _DecisionGate(GateDecision(verdict=ACCEPT, enforced=False))  # type: ignore[assignment]
+    monkeypatch.setattr(engine2._profile_builder, "build", _fake_soul_build)
+
+    result = await engine2.run_pending_rebuild_if_due(now=datetime.now() + timedelta(hours=7))
+    assert result["outcome"] == "accept"
+    assert engine2._load_rebuild_state()["pending"] is None
+
+
+@pytest.mark.asyncio
+async def test_new_migration_reopens_pending_and_resets_retry(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    await engine._mark_rebuild_pending(["ref:a"])
+    # Simulate a prior failed attempt leaving retry_count high.
+    state = engine._load_rebuild_state()
+    state["pending"]["retry_count"] = 1
+    engine._save_rebuild_state(state)
+
+    # A new confirm/reject migration re-stamps set_at and resets retry_count.
+    _seed_insight(memory, "新证据", validated=True, confidence=0.9)
+    await engine.update_from_feedback({"hypothesis": "新证据", "signal": "confirm"})
+    reopened = engine._load_rebuild_state()["pending"]
+    assert reopened["retry_count"] == 0
+    assert "ref:a" in reopened["trigger_refs"]

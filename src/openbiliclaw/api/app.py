@@ -658,6 +658,35 @@ def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
     return issues
 
 
+def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
+    """DB-backed save-time guard for ``soul.posture_gate_mode = enforce``.
+
+    Reads shadow-judgement statistics from the ledger and defers to the pure
+    :func:`posture_gate_enforce_readiness_issue` evaluator. A missing database
+    (or a stats read failure) is conservatively treated as "no shadow data" so
+    a premature enforce is rejected rather than silently accepted.
+    """
+    from openbiliclaw.config import posture_gate_enforce_readiness_issue
+
+    if str(getattr(cfg.soul, "posture_gate_mode", "")).strip().lower() != "enforce":
+        return None
+    stats: dict[str, Any] = {"earliest_valid_at": "", "valid_count_14d": 0, "valid_count_7d": 0}
+    getter = getattr(database, "posture_gate_shadow_stats", None) if database is not None else None
+    if callable(getter):
+        try:
+            fetched = getter()
+            if isinstance(fetched, dict):
+                stats = fetched
+        except Exception:
+            logger.warning("posture_gate_shadow_stats read failed; treating as no data")
+    return posture_gate_enforce_readiness_issue(
+        cfg,
+        earliest_valid_at=str(stats.get("earliest_valid_at", "")),
+        valid_count_14d=int(stats.get("valid_count_14d", 0)),
+        valid_count_7d=int(stats.get("valid_count_7d", 0)),
+    )
+
+
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
     """Count stored behavior events by normalized source platform."""
 
@@ -1351,6 +1380,17 @@ def create_app(
     set_outbound_proxy(
         getattr(network_config, "proxy", "") or "",
         mode=getattr(network_config, "mode", "system") or "system",
+    )
+
+    # Topic-lifecycle serialization switch (spec Phase 4). Off by default keeps
+    # the LLM-facing profile byte-identical; on excludes archived topics.
+    from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
+
+    set_topic_lifecycle_serialization(
+        str(getattr(getattr(config, "soul", None), "topic_lifecycle_serialization", "off"))
+        .strip()
+        .lower()
+        == "on"
     )
 
     # Auto-generate the session signing secret on first enable so login state
@@ -2229,7 +2269,7 @@ def create_app(
 
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
-        if normalized in {"chat", "delight", "probe", "avoidance_probe"}:
+        if normalized in {"chat", "delight", "probe", "avoidance_probe", "confusion"}:
             return normalized
         return "chat"
 
@@ -4388,6 +4428,13 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        # Phase 1: drain the dialogue learn queue so in-flight / queued learns
+        # complete before the process exits (self-owned worker; not covered by
+        # the background-task cancellation above).
+        learn_queue = getattr(ctx, "dialogue_learn_queue", None)
+        if learn_queue is not None:
+            with suppress(Exception):
+                await learn_queue.shutdown(timeout=30)
         bangumi_client = getattr(ctx, "bangumi_client", None)
         close_bangumi = getattr(bangumi_client, "aclose", None)
         if callable(close_bangumi):
@@ -6983,6 +7030,9 @@ def create_app(
         if turn.scope == "avoidance_probe":
             label = turn.subject_title or turn.subject_id or "这个避雷方向"
             return f"[关于避雷方向「{label}」的反馈] {turn.message}"
+        if turn.scope == "confusion":
+            label = turn.subject_title or turn.subject_id or "这个我没太看懂的地方"
+            return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
@@ -6995,7 +7045,11 @@ def create_app(
         try:
             async with chat_turn_lock:
                 reply = await asyncio.wait_for(
-                    ctx.dialogue.respond(_contextual_chat_message(turn)),
+                    ctx.dialogue.respond(
+                        _contextual_chat_message(turn),
+                        scope=turn.scope or "chat",
+                        turn_id=turn.turn_id,
+                    ),
                     timeout=120,
                 )
                 reply = str(reply)
@@ -7163,6 +7217,48 @@ def create_app(
                 detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
+        elif turn.scope == "confusion":
+            # Confusion ask resolution (single ownership — durable side effect,
+            # NOT learn_from_dialogue settles). The user's reply disambiguates a
+            # behaviour we could not read: positive → real interest (held
+            # updates replay); negative → proxy / misread (held discarded);
+            # neutral → defer (keep the 72h cooldown).
+            label = turn.subject_title or turn.subject_id or "这个方向"
+            manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+            try:
+                confusion_id = int(turn.subject_id)
+            except (TypeError, ValueError):
+                confusion_id = 0
+            sentiment, _classifier = await _classify_probe_sentiment(turn.message, reply, label)
+            if manager is not None and confusion_id:
+                if sentiment in {"strong_positive", "weak_positive"}:
+                    with suppress(Exception):
+                        manager.resolve(confusion_id, resolution="real_interest", note=turn.message)
+                    summary = f"你确认了对「{label}」确实有兴趣，之前搁置的信号会重新纳入。"
+                elif sentiment == "negative":
+                    with suppress(Exception):
+                        manager.resolve(
+                            confusion_id, resolution="proxy_behavior", note=turn.message
+                        )
+                    summary = f"明白了，「{label}」只是顺手，不算真的兴趣。"
+                elif sentiment == "neutral_deferred":
+                    with suppress(Exception):
+                        manager.defer(confusion_id)
+                    summary = f"关于「{label}」先放一放，过阵子再问。"
+                else:
+                    with suppress(Exception):
+                        manager.resolve(confusion_id, resolution="dismissed", note=turn.message)
+                    summary = f"关于「{label}」你说：{turn.message}"
+            else:
+                summary = f"关于「{label}」你说：{turn.message}"
+            _record_probe_cognition(
+                summary,
+                turn.subject_id or label,
+                "chat",
+                source="confusion",
+                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            )
+            await _publish_probe_event("confusion.chat", summary, turn.subject_id or label)
 
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:
@@ -13233,6 +13329,16 @@ def create_app(
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
+        # Apply soul posture-gate updates (Phase 3). Mode validity is checked by
+        # _collect_config_issues; enforce readiness is a DB-backed save-time
+        # guard applied just below.
+        if "soul" in update and isinstance(update["soul"], dict):
+            sdata = update["soul"]
+            if "posture_gate_mode" in sdata:
+                cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
+            if "posture_gate_force_enforce" in sdata:
+                cfg.soul.posture_gate_force_enforce = bool(sdata["posture_gate_force_enforce"])
+
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
             section = getattr(cfg, target[0])
@@ -13240,6 +13346,9 @@ def create_app(
             setattr(subsection, target[2], "")
 
         issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
+        posture_issue = _posture_gate_enforce_issue(cfg, getattr(ctx, "database", None))
+        if posture_issue is not None:
+            issues.append(posture_issue)
         if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
             response = ConfigUpdateResponse(
                 ok=False,

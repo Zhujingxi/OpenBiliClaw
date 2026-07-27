@@ -30,7 +30,10 @@ class FakeSoulEngine:
         user_message: str,
         assistant_reply: str,
         session: str,
+        scope: str = "chat",
+        turn_id: str = "",
     ) -> None:
+        del scope, turn_id
         self.learn_calls.append(f"{session}:{user_message}->{assistant_reply}")
 
 
@@ -283,6 +286,8 @@ async def test_concurrent_cancellation_does_not_orphan_successful_tool_turn() ->
         user_message="成功消息",
         assistant_reply="工具路径成功回复",
         session="cli",
+        scope="chat",
+        turn_id="",
     )
 
 

@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Cap the dialogue history folded into each prompt. Calibration (2026-07-17,
+# first-round — revisit after a provider swap): one exchange ≈ 2 short messages
+# ≈ 80 tokens; 20 exchanges ≈ 1.6k tokens of history, which keeps the socratic
+# prompt bounded without losing the near-term thread. Below the window the
+# prompt bytes are unchanged (baseline test), so provider prompt cache still
+# fires for short sessions.
+DIALOGUE_WINDOW_TURNS = 20
+
 
 @dataclass
 class DialogueTurn:
@@ -57,18 +65,38 @@ class SocraticDialogue:
         tools: list[dict[str, Any]] | None = None,
         tool_dispatcher: Any | None = None,
         module_overrides: Mapping[str, ModuleOverride] | None = None,
+        learn_queue: Any | None = None,
+        database: Any | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        # Phase 1 durable-history regurgitation: after a restart the in-process
+        # history is empty, but the durable popup ``chat_turns`` table holds the
+        # completed exchanges. Lazily reload them once so a popup session keeps
+        # its thread across restarts. Only popup + scope='chat' + completed rows
+        # qualify (CLI has no DB; probe/confusion scopes carry prefixed context).
+        self._database = database
+        self._history_loaded = False
         self._respond_lock = asyncio.Lock()
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
+        # Phase 1: when provided, background learning is serialized through this
+        # single-worker queue instead of a per-turn ``asyncio.create_task``. CLI
+        # / OpenClaw sessions inject no queue and keep the detached-task path
+        # (process-internal, not durable — no popup regurgitation).
+        self._learn_queue = learn_queue
 
-    async def respond(self, user_message: str) -> str:
+    async def respond(
+        self,
+        user_message: str,
+        *,
+        scope: str = "chat",
+        turn_id: str = "",
+    ) -> str:
         """Generate a Socratic response to a user message.
 
         The response should:
@@ -80,11 +108,16 @@ class SocraticDialogue:
 
         Args:
             user_message: The user's message.
+            scope: Chat scope threaded to ``learn_from_dialogue`` — only
+                ``"chat"`` runs settles; probe / confusion scopes are settled
+                by the durable side-effect path (single ownership).
+            turn_id: Durable chat-turn id (idempotency observation key).
 
         Returns:
             Agent's response.
         """
         async with self._respond_lock:
+            self._ensure_history_loaded()
             history_length = len(self._history)
             self._history.append(DialogueTurn(role="user", content=user_message))
 
@@ -109,28 +142,37 @@ class SocraticDialogue:
             self._history.append(DialogueTurn(role="agent", content=reply))
             learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
             if callable(learn_fn):
+                payload = {
+                    "user_message": user_message,
+                    "assistant_reply": reply,
+                    "session": self._session,
+                    "scope": scope,
+                    "turn_id": turn_id,
+                }
+                if self._learn_queue is not None:
+                    # Serialized path: append to the single-worker queue so
+                    # adjacent turns can't interleave read/merge/write.
+                    await self._learn_queue.submit(payload)
+                else:
 
-                async def _background_learn() -> None:
-                    try:
-                        # This chain was initiated by an interactive user turn.
-                        # It must keep running even when background admission is
-                        # parked because canonical inventory is empty; otherwise
-                        # the user's explicit correction cannot repair the very
-                        # recommendation state that triggered it. The bypass only
-                        # skips background admission — every provider call still
-                        # respects the runtime-wide total concurrency gate.
-                        from openbiliclaw.llm.service import _background_admission_bypass
+                    async def _background_learn() -> None:
+                        try:
+                            # This chain was initiated by an interactive user
+                            # turn. It must keep running even when background
+                            # admission is parked because canonical inventory is
+                            # empty; otherwise the user's explicit correction
+                            # cannot repair the very recommendation state that
+                            # triggered it. The bypass only skips background
+                            # admission — every provider call still respects the
+                            # runtime-wide total concurrency gate.
+                            from openbiliclaw.llm.service import _background_admission_bypass
 
-                        with _background_admission_bypass():
-                            await learn_fn(
-                                user_message=user_message,
-                                assistant_reply=reply,
-                                session=self._session,
-                            )
-                    except Exception:
-                        logger.exception("Failed to learn from dialogue turn.")
+                            with _background_admission_bypass():
+                                await learn_fn(**payload)
+                        except Exception:
+                            logger.exception("Failed to learn from dialogue turn.")
 
-                asyncio.create_task(_background_learn())
+                    asyncio.create_task(_background_learn())
             return reply
 
     async def _respond_with_tools(self, service: Any, user_message: str) -> str:
@@ -212,14 +254,54 @@ class SocraticDialogue:
         """Clear the dialogue history."""
         self._history.clear()
 
+    def _ensure_history_loaded(self) -> None:
+        """Regurgitate durable popup chat history once (spec Phase 1, r1 #3).
+
+        No-op unless this is a fresh popup session with a database and an empty
+        in-process history. Loads only completed ``scope='chat'`` turns, keeping
+        the last ``DIALOGUE_WINDOW_TURNS`` exchanges.
+        """
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        if self._session != "popup" or self._database is None or self._history:
+            return
+        lister = getattr(self._database, "list_chat_turns", None)
+        if not callable(lister):
+            return
+        try:
+            rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
+        except Exception:
+            logger.debug("Failed to regurgitate durable chat history", exc_info=True)
+            return
+        for row in rows:
+            if str(row.get("status", "")) != "completed":
+                continue
+            message = str(row.get("message", "")).strip()
+            reply = str(row.get("reply", "")).strip()
+            if not message or not reply:
+                continue
+            self._history.append(DialogueTurn(role="user", content=message))
+            self._history.append(DialogueTurn(role="agent", content=reply))
+
     def _history_to_messages(self) -> list[dict[str, str]]:
-        """Convert prior dialogue turns to chat messages for the LLM."""
+        """Convert prior dialogue turns to chat messages for the LLM.
+
+        Truncated to the last ``DIALOGUE_WINDOW_TURNS`` exchanges (each ≈ a
+        user+agent pair) so the prompt stays bounded. Sessions at or below the
+        window are unaffected — the returned bytes match the pre-window
+        baseline, keeping provider prompt cache warm for short chats.
+        """
+        prior = self._history[:-1]
+        window_messages = DIALOGUE_WINDOW_TURNS * 2
+        if len(prior) > window_messages:
+            prior = prior[-window_messages:]
         return [
             {
                 "role": "assistant" if turn.role == "agent" else turn.role,
                 "content": turn.content,
             }
-            for turn in self._history[:-1]
+            for turn in prior
         ]
 
     def _build_service(self) -> LLMService:

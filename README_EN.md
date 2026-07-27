@@ -611,6 +611,8 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
+│ Soul cognition discipline: 3 write lines · ledger audit · confusions · deep posture gate (shadow) │
+│   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
 │ Config draft → exact-instance /models → editable selection (no write) │
 │ Source-family registry: alias · strategy · URL host │

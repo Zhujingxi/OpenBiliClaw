@@ -700,6 +700,47 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_awareness_with_confusions_prompt",
+            dict(
+                events=[{"event_type": "view", "title": "A"}],
+                preference_summary={"a": 1},
+                soul_profile={"x": 1},
+            ),
+            dict(
+                events=[{"event_type": "like", "title": "B"}],
+                preference_summary={"a": 2},
+                soul_profile={"x": 2},
+            ),
+        ),
+        (
+            "build_posture_gate_prompt",
+            dict(
+                change={"kind": "value", "content": "追求效率"},
+                core_memory={"a": 1},
+                ledger_digest=[{"write_point": "values", "outcome": "success"}],
+            ),
+            dict(
+                change={"kind": "goal", "content": "想转行"},
+                core_memory={"a": 2},
+                ledger_digest=[{"write_point": "core", "outcome": "failed"}],
+            ),
+        ),
+        (
+            "build_dialogue_insight_prompt",
+            dict(
+                user_message="我最近在玩桌游",
+                assistant_reply="听起来不错",
+                core_memory={"a": 1},
+                active_list={"speculations": [{"domain": "桌游"}]},
+            ),
+            dict(
+                user_message="不想再看带货了",
+                assistant_reply="明白",
+                core_memory={"a": 2},
+                active_list={"insights": [{"hash": "abcd1234", "hypothesis": "H"}]},
+            ),
+        ),
+        (
             "build_batch_content_evaluation_prompt",
             dict(
                 profile_summary={"a": 1},

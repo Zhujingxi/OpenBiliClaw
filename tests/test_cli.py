@@ -137,6 +137,81 @@ def _registered_option_names(command_name: str) -> set[str]:
     return {option for param in command.params for option in getattr(param, "opts", [])}
 
 
+def _ledger_db(tmp_path: Path) -> Any:
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "ledger.db")
+    db.initialize()
+    return db
+
+
+def _patch_ledger_runtime(monkeypatch: pytest.MonkeyPatch, db: Any) -> None:
+    monkeypatch.setattr(cli_module, "_ensure_runtime_database_healthy", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: db, raising=False)
+
+
+def test_ledger_command_is_registered(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["ledger", "--help"])
+    assert result.exit_code == 0
+    options = _registered_option_names("ledger")
+    assert "--line" in options
+    assert "--days" in options
+    assert "--write-point" in options
+
+
+def test_ledger_empty_shows_no_data(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_ledger_runtime(monkeypatch, _ledger_db(tmp_path))
+    result = runner.invoke(app, ["ledger"])
+    assert result.exit_code == 0
+    assert "暂无数据" in result.output
+
+
+def test_ledger_aggregate_mode(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = _ledger_db(tmp_path)
+    db.insert_profile_ledger(write_point="dialogue_preference_overwrite", source="chat")
+    db.insert_profile_ledger(
+        write_point="dialogue_soul_rebuild", source="chat", outcome="failed", error="x"
+    )
+    _patch_ledger_runtime(monkeypatch, db)
+    result = runner.invoke(app, ["ledger"])
+    assert result.exit_code == 0
+    assert "dialogue_preference_overwrite" in result.output
+    assert "dialogue_soul_rebuild" in result.output
+
+
+def test_ledger_line_mode(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = _ledger_db(tmp_path)
+    db.insert_profile_ledger(
+        write_point="init_preference_build",
+        source="init",
+        source_refs=["events:5"],
+        turn_id="",
+    )
+    _patch_ledger_runtime(monkeypatch, db)
+    result = runner.invoke(app, ["ledger", "--line"])
+    assert result.exit_code == 0
+    assert "init_preference_build" in result.output
+
+
+def test_ledger_write_point_filter(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = _ledger_db(tmp_path)
+    db.insert_profile_ledger(write_point="dialogue_preference_overwrite", source="chat")
+    db.insert_profile_ledger(write_point="feedback_preference_overwrite", source="feedback")
+    _patch_ledger_runtime(monkeypatch, db)
+    result = runner.invoke(app, ["ledger", "--write-point", "feedback_preference_overwrite"])
+    assert result.exit_code == 0
+    assert "feedback_preference_overwrite" in result.output
+    assert "dialogue_preference_overwrite" not in result.output
+
+
 def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
     result = runner.invoke(app, ["keyword-inspiration-dry-run", "--help"])
 
@@ -1548,7 +1623,12 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
-        soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
+        soul=SimpleNamespace(
+            preference=SimpleNamespace(satisfaction_filter_enabled=True),
+            posture_gate_mode="shadow",
+            posture_gate_force_enforce=False,
+            topic_lifecycle_serialization="off",
+        ),
         scheduler=SimpleNamespace(
             speculation_interval_minutes=10,
             speculation_ttl_days=3,

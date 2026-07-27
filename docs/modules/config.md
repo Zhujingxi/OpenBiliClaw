@@ -856,6 +856,14 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 |----|------|--------|------|
 | `db_path` | string | `"data/openbiliclaw.db"` | SQLite 数据库路径 |
 
+### `[soul]` (v0.3.176+，态势门控)
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `posture_gate_mode` | string | `"shadow"` | 深层写入一致性门控（认知画像流水线 Phase 3）。`shadow`=判定异步旁路、**零延迟不阻塞原写入**，判定只落台账（`shadow_accept`/`shadow_downgrade`/`shadow_reject`，LLM 异常记 `shadow_error`）；`enforce`=写入前同步判定，reject/downgrade 拦截深层写入（downgrade 转为待验证假设），异常/解析失败保守 downgrade；`off`=完全旁路、与未接门控前逐字节一致。门控作用面仅三处：对话 goal/value/state 深层候选、管线 VALUES/CORE 层、soul 整份重建（interest 快线与 ROLE 层永不过门控） |
+| `posture_gate_force_enforce` | bool | `false` | 逃生门。切到 `enforce` 需满足 save-time 三条件（最早有效 shadow 判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条），否则保存被 blocking 拒绝。置 `true` 无条件放行——**有风险**：门控尚未校准即启用可能误拦或误放深层写入 |
+| `topic_lifecycle_serialization` | string | `"off"` | topic 状态机的 archived 序列化排除开关（认知画像流水线 Phase 4，本版**唯一最小消费**）。`off`（默认）时 `build_profile_summary` 与未接状态机前**逐字节一致**（回放门）；`on` 时把 `archived` 状态的 topic 排出 LLM 可见画像（domain/tag 两级）。进程启动时由 `create_app` / CLI 读入并设 `discovery.strategies._utils.set_topic_lifecycle_serialization`。仅 `off`/`on` 两值，其余落默认 `off` |
+
 ### `[soul.preference]`
 
 | 键 | 类型 | 默认值 | 说明 |
