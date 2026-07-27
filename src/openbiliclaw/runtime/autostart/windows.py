@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _VALUE_NAME = "OpenBiliClaw"
 _SCRIPT_NAME = "openbiliclaw-autostart.pyw"
+_PACKAGED_EXE_NAME = "openbiliclaw.exe"
 
 
 def _load_winreg() -> Any:
@@ -26,10 +29,14 @@ def _quote_windows_arg(value: Path | str) -> str:
     return f'"{value}"'
 
 
+def _quoted_paths(value: str) -> list[Path]:
+    return [Path(match) for match in re.findall(r'"([^"]+)"', value)]
+
+
 def _paths_from_run_value(value: str) -> tuple[Path, Path] | None:
-    matches = re.findall(r'"([^"]+)"', value)
-    if len(matches) >= 2:
-        return Path(matches[0]), Path(matches[1])
+    paths = _quoted_paths(value)
+    if len(paths) >= 2:
+        return paths[0], paths[1]
     return None
 
 
@@ -41,12 +48,27 @@ def _script_from_run_value(value: str) -> Path | None:
 
 
 class WindowsRunManager:
-    """Manage OpenBiliClaw in HKCU Run using a pythonw ``.pyw`` launcher."""
+    """Manage OpenBiliClaw in HKCU Run.
+
+    Source installs use a ``pythonw`` + ``.pyw`` launcher. Frozen desktop
+    installs register the packaged executable directly: passing the ``.pyw`` as
+    an argument to a PyInstaller executable never made it interpret the script,
+    and a missing script could therefore still launch the app while status
+    incorrectly reported ``registered=False``.
+    """
 
     mechanism = "windows_run"
 
-    def __init__(self, *, winreg_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        winreg_module: Any | None = None,
+        frozen: bool | None = None,
+        executable: str | Path | None = None,
+    ) -> None:
         self._winreg = winreg_module if winreg_module is not None else _load_winreg()
+        self._frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+        self._executable = Path(sys.executable if executable is None else executable)
 
     def _script_path(self, config: Config) -> Path:
         return config.data_path / "autostart" / _SCRIPT_NAME
@@ -81,6 +103,15 @@ class WindowsRunManager:
             return
 
     def register(self, config: Config) -> None:
+        previous_value = self._run_value()
+        if self._frozen:
+            self._write_run_value(_quote_windows_arg(self._executable))
+            legacy_script = _script_from_run_value(previous_value) if previous_value else None
+            if legacy_script is not None and legacy_script.exists():
+                with suppress(OSError):
+                    legacy_script.unlink()
+            return
+
         spec = build_launch_spec(config)
         script_path = self._script_path(config)
         script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +130,10 @@ class WindowsRunManager:
             ),
             encoding="utf-8",
         )
-        run_value = f"{_quote_windows_arg(resolve_pythonw())} {_quote_windows_arg(script_path)}"
+        run_value = (
+            f"{_quote_windows_arg(resolve_pythonw(self._executable))} "
+            f"{_quote_windows_arg(script_path)}"
+        )
         self._write_run_value(run_value)
 
     def unregister(self) -> None:
@@ -109,10 +143,31 @@ class WindowsRunManager:
         if script_path is not None and script_path.exists():
             script_path.unlink()
 
+    def refresh_if_needed(self, config: Config) -> bool:
+        """Migrate a frozen legacy Run value to the direct executable format."""
+        if not self._frozen:
+            return False
+        desired_value = _quote_windows_arg(self._executable)
+        if self._run_value() == desired_value:
+            return False
+        self.register(config)
+        return True
+
     def is_registered(self) -> bool:
         value = self._run_value()
         if not value:
             return False
+        quoted_paths = _quoted_paths(value)
+        if (
+            quoted_paths
+            and quoted_paths[0].name.casefold() == _PACKAGED_EXE_NAME
+            and quoted_paths[0].exists()
+        ):
+            # Legacy frozen registrations included a second .pyw argument.
+            # Windows still launches OpenBiliClaw.exe when that script is gone
+            # because the packaged entry ignores argv, so the executable alone
+            # is the effective registration.
+            return True
         paths = _paths_from_run_value(value)
         if paths is None:
             return False

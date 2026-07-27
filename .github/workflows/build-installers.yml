@@ -17,6 +17,11 @@ on:
         description: "Version label for artifact filenames (e.g. v0.3.101). Defaults to pyproject version."
         required: false
         default: ""
+      windows_only:
+        description: "Skip both macOS jobs and build/test only the Windows installer."
+        required: false
+        type: boolean
+        default: false
 
 # Read-only token: this workflow structurally cannot publish a Release.
 permissions:
@@ -25,6 +30,7 @@ permissions:
 jobs:
   macos:
     name: macOS installer (.dmg, ${{ matrix.arch }})
+    if: ${{ inputs.windows_only != true }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -98,7 +104,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # [packaging] pulls pyinstaller + pystray + Pillow (tray desktop mode).
-          pip install -e ".[packaging]"
+          pip install -e ".[packaging]" "pytest>=8"
+
+      - name: Run real Windows HKCU autostart E2E
+        run: python -m pytest -q tests/test_windows_autostart_e2e.py
 
       - name: Resolve version
         id: ver
@@ -117,6 +126,12 @@ jobs:
 
       - name: PyInstaller onedir build (ollama staged separately below)
         run: python packaging/build.py --clean --no-bundle-ollama --archive-version "${{ steps.ver.outputs.version }}"
+
+      - name: Run real frozen-bundle autostart lifecycle E2E
+        shell: pwsh
+        run: |
+          $env:OPENBILICLAW_FROZEN_EXE = (Resolve-Path "dist\OpenBiliClaw\OpenBiliClaw.exe").Path
+          python -m pytest -q tests/test_windows_autostart_e2e.py -k real_frozen_bundle
 
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh

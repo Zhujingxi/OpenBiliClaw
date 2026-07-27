@@ -302,6 +302,7 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 - 如果当前 LLM / embedding 配置需要本机 Ollama、`[autostart].manage_ollama=true` 且 endpoint 是默认 `localhost:11434`，会探测 `/api/version`；未运行时尝试后台执行 `ollama serve`。远端或自定义 loopback 端口只探测，不强行拉起。
 - 如果 `[autostart].enabled=true` 但系统登录项缺失，会在没有环境变量管理风险时重新注册当前用户登录项；发现 `OPENBILICLAW_*` / provider API key 等环境变量覆盖时只告警并跳过，避免注册一个下次登录拿不到配置的启动项。
 - 如果 `[autostart].enabled=false` 但系统登录项仍残留，会尝试移除该当前用户登录项，让手动编辑配置后的下一次启动也能回到关闭状态。
+- 上述对账由 `runtime.autostart.reconcile()` 提供，冻结桌面包入口也调用同一实现；Windows 安装包不再因绕过 `openbiliclaw start` 而漏掉残留清理。
 
 如果引导初始化从未完成（soul 层为空的 best-effort 检查，检查失败时保持沉默），`start` 会在 uvicorn 启动前打印一个 WARN 面板，给出 `/setup/` 引导地址和无浏览器环境的 `openbiliclaw init` 替代命令；`serve-api` 打印容器版变体（`/setup/` 只做配置与前置检查 + `docker exec -it openbiliclaw-backend openbiliclaw init`）。
 

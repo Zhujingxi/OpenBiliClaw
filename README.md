@@ -708,7 +708,7 @@ OpenBiliClaw/
 │   │   └── web_adapter        # 通用 Web (Playwright + LLM)
 │   ├── youtube/               # YouTube Takeout 离线导入解析
 │   ├── api/                   # 本地 FastAPI (配置回滚 / 降级模式 / popup API)
-│   ├── runtime/               # 后台刷新、feedback 合并、presence gate、autostart/Ollama、降级 RuntimeContext
+│   ├── runtime/               # 后台刷新、feedback 合并、presence gate、CLI/桌面共享 autostart 对账、Ollama、降级 RuntimeContext
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
 │   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
 │   └── storage/               # 数据存储层

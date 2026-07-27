@@ -272,6 +272,102 @@ def test_windows_run_unregister_cleans_registry_and_pyw(
     assert manager.is_registered() is False
 
 
+def test_windows_frozen_registers_executable_directly_and_removes_legacy_script(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.runtime.autostart.windows import WindowsRunManager
+
+    fake_winreg = _FakeWinreg()
+    executable = tmp_path / "OpenBiliClaw.exe"
+    executable.write_text("", encoding="utf-8")
+    legacy_script = tmp_path / "legacy" / "openbiliclaw-autostart.pyw"
+    legacy_script.parent.mkdir()
+    legacy_script.write_text("", encoding="utf-8")
+    fake_winreg.values["OpenBiliClaw"] = f'"{executable}" "{legacy_script}"'
+    cfg = Config()
+    cfg.data_dir = str(tmp_path / "data")
+    manager = WindowsRunManager(
+        winreg_module=fake_winreg,
+        frozen=True,
+        executable=executable,
+    )
+
+    manager.register(cfg)
+
+    assert fake_winreg.values["OpenBiliClaw"] == f'"{executable}"'
+    assert manager.is_registered() is True
+    assert legacy_script.exists() is False
+    assert not (tmp_path / "data" / "autostart" / "openbiliclaw-autostart.pyw").exists()
+
+
+def test_windows_legacy_frozen_registration_stays_visible_when_script_is_missing(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.runtime.autostart.windows import WindowsRunManager
+
+    fake_winreg = _FakeWinreg()
+    executable = tmp_path / "OpenBiliClaw.exe"
+    executable.write_text("", encoding="utf-8")
+    missing_script = tmp_path / "missing" / "openbiliclaw-autostart.pyw"
+    fake_winreg.values["OpenBiliClaw"] = f'"{executable}" "{missing_script}"'
+    manager = WindowsRunManager(
+        winreg_module=fake_winreg,
+        frozen=True,
+        executable=executable,
+    )
+
+    assert manager.is_registered() is True
+
+    manager.unregister()
+
+    assert "OpenBiliClaw" not in fake_winreg.values
+
+
+def test_windows_frozen_refresh_migrates_legacy_registration(tmp_path: Path) -> None:
+    from openbiliclaw.runtime.autostart.windows import WindowsRunManager
+
+    fake_winreg = _FakeWinreg()
+    executable = tmp_path / "OpenBiliClaw.exe"
+    executable.write_text("", encoding="utf-8")
+    legacy_script = tmp_path / "openbiliclaw-autostart.pyw"
+    legacy_script.write_text("", encoding="utf-8")
+    fake_winreg.values["OpenBiliClaw"] = f'"{executable}" "{legacy_script}"'
+    manager = WindowsRunManager(
+        winreg_module=fake_winreg,
+        frozen=True,
+        executable=executable,
+    )
+
+    changed = manager.refresh_if_needed(Config())
+
+    assert changed is True
+    assert fake_winreg.values["OpenBiliClaw"] == f'"{executable}"'
+    assert legacy_script.exists() is False
+    assert manager.refresh_if_needed(Config()) is False
+
+
+def test_reconcile_disabled_removes_even_unreported_legacy_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import autostart
+    from openbiliclaw.runtime.autostart.base import AutostartStatus
+
+    cfg = Config()
+    cfg.autostart.enabled = False
+    unregister_calls: list[str] = []
+    monkeypatch.setattr(
+        autostart,
+        "status",
+        lambda: AutostartStatus(True, False, "win32", "windows_run"),
+    )
+    monkeypatch.setattr(autostart, "unregister", lambda: unregister_calls.append("unregister"))
+
+    warning = autostart.reconcile(cfg)
+
+    assert warning is None
+    assert unregister_calls == ["unregister"]
+
+
 def test_linux_xdg_register_writes_desktop_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -26,6 +26,27 @@ def _load_entry_module():
 
 
 entry = _load_entry_module()
+_real_reconcile_packaged_autostart = entry._reconcile_packaged_autostart
+
+
+@pytest.fixture(autouse=True)
+def _prevent_real_login_item_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entry-point tests must never mutate the developer's real login items."""
+    monkeypatch.setattr(entry, "_reconcile_packaged_autostart", lambda _config: None)
+
+
+def test_reconcile_packaged_autostart_uses_shared_runtime_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import autostart
+
+    config = SimpleNamespace()
+    calls: list[object] = []
+    monkeypatch.setattr(autostart, "reconcile", lambda loaded: calls.append(loaded) or None)
+
+    _real_reconcile_packaged_autostart(config)
+
+    assert calls == [config]
 
 
 # --------------------------------------------------------------------------- #

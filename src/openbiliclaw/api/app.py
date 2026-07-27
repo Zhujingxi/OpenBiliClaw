@@ -10974,6 +10974,8 @@ def create_app(
             detail = "开机自启动配置已开启，但系统自启动项缺失。"
         elif cfg.autostart.enabled:
             detail = "开机自启动已开启。"
+        elif state.registered:
+            detail = "配置已关闭，但检测到系统自启动残留项；关闭开关可清理。"
         else:
             detail = "尚未开启开机自启动。"
         if detail_override is not None:

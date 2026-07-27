@@ -596,34 +596,9 @@ def _preflight_loopback_ollama(cfg: Any) -> None:
 def _self_heal_autostart_registration(cfg: Any) -> None:
     from openbiliclaw.runtime import autostart
 
-    state = autostart.status()
-    if not state.supported:
-        return
-
-    if not cfg.autostart.enabled:
-        if state.registered:
-            try:
-                autostart.unregister()
-            except Exception as exc:
-                console.print(f"[yellow]开机自启动残留项移除失败：{exc}[/yellow]")
-        return
-
-    if state.registered:
-        return
-
-    from openbiliclaw.runtime.autostart.guards import active_env_managed_inputs
-
-    managed = active_env_managed_inputs(cfg)
-    if managed:
-        console.print(
-            "[yellow]已开启开机自启动，但检测到环境变量配置，跳过自动补注册："
-            f"{', '.join(managed)}。请先写入 config.toml。[/yellow]"
-        )
-        return
-    try:
-        autostart.register(cfg)
-    except Exception as exc:
-        console.print(f"[yellow]开机自启动补注册失败：{exc}[/yellow]")
+    warning = autostart.reconcile(cfg)
+    if warning:
+        console.print(f"[yellow]{warning}[/yellow]")
 
 
 def _print_section_title(title: str) -> None:

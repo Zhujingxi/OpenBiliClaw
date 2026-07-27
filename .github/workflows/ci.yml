@@ -7,6 +7,25 @@ on:
   pull_request:
 
 jobs:
+  windows-autostart-e2e:
+    name: Windows HKCU autostart E2E
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install project and pytest
+        run: python -m pip install -e . "pytest>=8"
+
+      - name: Exercise real HKCU Run and process launch
+        run: python -m pytest -q tests/test_windows_autostart_e2e.py
+
   test:
     runs-on: ubuntu-latest
 

@@ -66,7 +66,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 避雷探针投递与仲裁 | ✅ | `avoidance.probe` 与 `interest.probe` 共用 proactive push 循环；每轮最多投递一个 probe，并用 `last_probe_kind` 在正向/负向都有候选时轮流选择，避免探针频率翻倍。 |
 | 图片代理 API | ✅ | `/api/image-proxy` 为移动 Web 和浏览器插件代理白名单 CDN 封面图，逐跳校验 redirect，并在返回前完成类型和 10MB 大小校验；成功封面写入 `data/image-cache/`（小红书 token 归一化），并按「已消费且未保存」定期清理、保护无法重抓的封面；多模态 discovery 评估也复用同一缓存，命中时不再重新请求 CDN。 |
 | 自动更新 | ✅ | `AutoUpdateService` 检查 backend git tag，支持 `/api/update-status`、`/api/runtime-status` 更新摘要、手动 check/apply、跨配置热重载存活的进程级 apply 锁、可信 remote / dirty worktree / fast-forward guard，并通过 runtime stream 推送后端更新事件。dirty worktree guard 把 staged 修改 / 新增视为脏，同时继续豁免 `uv.lock`、未跟踪文件和本地 `ollama-models/`；apply 前会重置 `uv.lock` 再快进。git 命令通过 `asyncio.create_subprocess_exec` 执行，避免 Windows 长时间运行后线程池 `subprocess.run` 卡死或异常返回；tag fetch 使用 `git fetch --force --tags origin`，避免本地旧 tag 被远端重打后卡在 `would clobber existing tag`。`[network].mode=custom` 时 git 显式使用 `-c http.proxy=<url>`，uv/pip 显式叠加 `HTTP_PROXY/HTTPS_PROXY`；`direct/system` 的继承行为保持不变。**依赖同步按 daemon 的真实工具能力选择**：`uv.lock` 存在且 PATH 可解析 `uv` 时运行 `uv sync --no-install-project --inexact`；没有 `uv` 的官方 pip/venv 安装从 `pyproject.toml` 读取 runtime requirements，交给当前 `sys.executable -m pip`。两条路径都只同步依赖、保留 editable 项目与用户 extras，避免 Windows 后端运行时重装/替换被锁定的 console entry；完成后统一用 `python -m openbiliclaw.cli <原参数>` 跨平台重启。依赖工具缺失、300 秒超时和非零退出会把完整诊断写入本地日志，并在 `last_error` 留下工具/退出码/真实错误摘要。GitHub tags API 的 403/429 或传输异常会尝试 GitHub tags Atom feed 兜底；TLS 校验失败绝不以 `verify=False` 降级，直接上报 `tls_verification_failed` 并提示配置可信 CA。`detect_install_mode()` 上报 `frozen / docker / git / unsupported` 安装形态，桌面 Web 与扩展 popup 据此禁用非 git 安装的自动应用控件。**可信 remote 校验 git 实际使用的全部地址**：同时读取 `git ls-remote --get-url origin` 与 `git remote get-url --all origin`，任一地址不在 allowlist 即拒绝；`url.insteadOf` 改写后的非可信主机不能借原配置地址放行，也绝不自动改写用户 git 配置。规范化大小写与可选 `.git` 后缀，并把 GitHub 官方 `ssh.github.com[:443]` / scp 形态等价为 `github.com`；镜像/代理包装 URL 不会自动折算成官方地址。**守卫拒绝不再静默**：每条 guard 拒绝都 `logger.warning` 写明细，并把真实原因写入 `last_error`；修复命令中的仓库路径始终带双引号，含空格的 Windows / POSIX 路径可直接复制。apply 在任何 git 变更前验证 backend tag 通道与 prerelease 策略，`extension-v*` / `desktop-v*` / 畸形 tag 一律拒绝；候选排序按 SemVer §11 处理 prerelease：同号 stable 胜过任何 prerelease、`rc.10 > rc.9 > rc1`，且 UI 展示保留 prerelease 后缀（不再把 `0.4.0-rc1` 显示为 `0.4.0`）。**展示面范围**：桌面 Web 支持检查 / 应用并在 error 状态优先显示 `last_error`，扩展 popup 展示状态且禁用非 git 自动应用；移动 Web 更新面板与 CLI update 命令明确不在当前功能范围。**冻结守卫**：冻结包与 Docker 只运行 check-only 提醒循环，分别引导下载新版安装包或执行 `docker compose pull && docker compose up -d`。降级模式（LLM 注册表不可用）仍放行 update-status / check / apply，便于拉取修复版本恢复。 |
-| 开机自启动管理 | ✅ | `runtime.autostart` 提供 macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart 三套当前用户作用域 manager；`/api/autostart-status`、`/api/autostart/apply`、`openbiliclaw autostart` 和插件设置页共用 env / shadow guard 与方向化 enable/disable 事务。 |
+| 开机自启动管理 | ✅ | `runtime.autostart` 提供 macOS LaunchAgent、Windows HKCU Run、Linux XDG autostart 三套当前用户作用域 manager；Windows 源码安装使用 `pythonw + .pyw`，冻结桌面包直接注册 `OpenBiliClaw.exe` 并兼容识别旧双路径项。`reconcile()` 由 CLI 与桌面包入口共用，`/api/autostart-status`、`/api/autostart/apply`、`openbiliclaw autostart` 和设置页共用 env / shadow guard 与方向化 enable/disable 事务。 |
 | Ollama 启动预检与生命周期 | ✅ | `runtime.ollama_supervisor` 统一提供 `ollama_required()`、endpoint 归一化、loopback 判定和 `_ollama_is_running()` / `_ollama_start_serve_background()`；`start` 仅在默认 `localhost:11434` 需要本机 Ollama 时尝试后台拉起，远端 / 自定义端口不强行 `serve`。托管启动会给子进程默认传入 `OLLAMA_KEEP_ALIVE=24h`（若用户已设置则保留用户值），减少 `bge-m3` / `llama-server` 在 UI 请求间隔中卸载再冷启动。Windows 模型路径编码故障自愈使用 `ollama_models_relocation_candidate()` 选 `%PROGRAMDATA%\OpenBiliClaw\ollama-models`（路径含非 ASCII 时放弃自动迁移），目录存在即视作 `managed_models_dir()` 持久迁移标记；后续托管启动用 `env.setdefault("OLLAMA_MODELS", managed_models_dir)`，显式用户环境变量优先。`restart_managed_ollama_with_models_dir()` 只重启本进程管理的 Ollama；若检测到外部启动的 daemon（运行中但没有 `_managed_proc`）则返回 `external_ollama`，避免杀掉用户自己开的官方 App / 服务。`_ollama_start_serve_background()` 现在记录**亲手拉起**的 `Popen` 句柄（复用外部已运行实例时句柄留空），`stop_managed_ollama()` 据此在退出时停掉整棵进程树（Windows `taskkill /T`、类 Unix 进程组 `SIGTERM`），对外部托管的 Ollama 一律不动 —— 桌面托盘「退出」经此调用，clean quit 不再遗留孤儿 `ollama serve` / `llama-server` runner。macOS 桌面包构建必须使用官方 `Ollama.app/Contents/Resources/ollama`，并同时打入同目录 `llama-server`、`llama-*`、`lib*.dylib`、`lib*.so` 和 `mlx_metal_*`；如果只发现 Homebrew 风格单独主程序或缺关键动态库，打包会失败，避免随包 daemon `/api/version` 正常但真实 embedding 500。 |
 | Embedding 初始化进度单例 | ✅ | `runtime.embedding_progress` 是进程全局、线程安全的无依赖状态源，供桌面包首启自动拉取、guided init 自动拉取、API 一键修复和 Ollama supervisor 共享。各生产路径调用 `mark_pull_running()` / `report_pull()` / `mark_pull_done()`，`/api/init-status` 再把它合并到 `embedding_check="repairing"`、`embedding_repair_*` 和 `embedding_pull_status`；`_ollama_start_serve_background()` 同步报告 `ollama_phase` 为 `starting` / `ready` / `down`。`reset()` 仅供测试隔离进程级状态。 |
 | 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。新增事件先经 48h 跨源去重（扩展已上报的同一行为不再双计，`exclude_source="account_sync"` 防自压制），画像就绪后走 `ProfileUpdatePipeline` 增量管线而非整层重算；画像分析（管线及回退路径）默认受 360 秒墙钟上限保护，超时会取消并记录可见原因，不会把账号同步循环永久占住，文案明确模型服务 6 分钟未返回、Base URL / 模型名 / 网络 / 代理 / 响应过慢等常见原因，并经 `/api/init-status.detail` 同步给三端。每轮失败会持久化有界的 `last_sync_issues=[{stage,kind}]`，按 B 站历史 / 收藏 / 关注、X 点赞 / 书签和画像分析精确定位，并由 runtime-status 统一生成安全中文文案与严重度供桌面 Web 展示。X 来源启用且 Cookie 存在时同周期增量拉取 likes/bookmarks（tweet ID 集合去重，首轮从 events 表播种），并与 discovery producer 共用 `XSourceHealthStore`：冷却/登录失效/403 时不出网，首个 429 后不再紧接第二个请求。 |
@@ -307,6 +307,7 @@ from openbiliclaw.runtime import autostart
 state = autostart.status()
 autostart.register(config)
 autostart.unregister()
+warning = autostart.reconcile(config)
 ```
 
 核心对象：
@@ -315,17 +316,25 @@ autostart.unregister()
 - `build_launch_spec(config)`：生成登录项执行命令，固定为当前 Python 解释器执行 `-m openbiliclaw.cli start`，并注入 `OPENBILICLAW_PROJECT_ROOT`；如果能找到 `ollama`，会把其目录加入登录项 `PATH`。
 - `active_env_managed_inputs(config)`：检测会在桌面登录会话里丢失的环境变量来源（`OPENBILICLAW_*`、provider API key env、抖音 Cookie env），用于拒绝开启自启动。
 - `autostart_shadowed(intended)`：写后 reload effective config，检测 `config.local.toml` 或环境变量是否覆盖了 `[autostart].enabled`。
+- `reconcile(config)`：让配置 intent 与当前用户 OS 登录项对账；`enabled=false` 时移除残留项，`enabled=true` 且登录项缺失时在 env guard 通过后补注册。CLI daemon 与冻结桌面入口使用同一实现，失败返回可记录的警告而不阻断启动。
 
 公开接口：
 
-- `GET /api/autostart-status`：远程可读、降级模式可读，返回固定字段集；只展示 `enabled`、`registered`、`supported`、`can_manage`、`reason` 等状态，不包含 Cookie / API Key 等敏感配置。
+- `GET /api/autostart-status`：远程可读、降级模式可读，返回固定字段集；只展示 `enabled`、`registered`、`supported`、`can_manage`、`reason` 等状态，不包含 Cookie / API Key 等敏感配置。`enabled=false + registered=true` 会明确返回“系统自启动残留项”，供设置页提供一键关闭清理。
 - `POST /api/autostart/apply {"enabled": bool}`：本机 trusted-local 可写；非本机返回 `403 local_only`，不支持平台返回 `409 unsupported_*`，env / shadow 命中返回 `409`。开启时先写 config 后注册 OS，关闭时先注销 OS 后写 config，并在失败时尽量回滚 OS 与 config 到操作前状态。
 
 平台实现都只写当前用户作用域：
 
 - macOS：`~/Library/LaunchAgents/com.openbiliclaw.daemon.plist`，不执行 `launchctl bootstrap`，下次登录由 launchd 读取。
-- Windows：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` + `data/autostart/openbiliclaw-autostart.pyw`，优先用 `pythonw.exe`。
+- Windows：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。源码安装写 `pythonw.exe + data/autostart/openbiliclaw-autostart.pyw`；PyInstaller 冻结桌面包只写 `OpenBiliClaw.exe`。旧版 `"OpenBiliClaw.exe" "...autostart.pyw"` 即使脚本已丢失仍按有效启动项识别，保证状态与清理不会假阴性。
 - Linux：`~/.config/autostart/openbiliclaw.desktop`，使用 XDG autostart。
+
+Windows 回归不是只 mock `winreg`：`tests/test_windows_autostart_e2e.py` 在
+`windows-latest` 使用真实 `HKCU\...\Run`，编译并启动一个真实 PE 来证明缺失
+`.pyw` 时首个 exe 仍会运行，并覆盖直注册 / 注销、旧双路径迁移、关闭状态无条件
+清理损坏项。安装包流水线还会把 `OPENBILICLAW_FROZEN_EXE` 指向刚构建的真实
+`dist\OpenBiliClaw\OpenBiliClaw.exe`，以 self-test 模式执行“开启注册 → 旧项升级
+→ 关闭清理”完整生命周期；fixture 会备份并恢复 runner 原有同名 Run 值。
 
 #### 封面磁盘缓存与清理
 
