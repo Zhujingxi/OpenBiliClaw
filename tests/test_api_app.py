@@ -6855,6 +6855,41 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json()["can_manage"] is False
 
+    def test_autostart_status_surfaces_residual_os_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime import autostart
+        from openbiliclaw.runtime.autostart import guards
+        from openbiliclaw.runtime.autostart.base import AutostartStatus
+
+        cfg = Config()
+        cfg.autostart.enabled = False
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        monkeypatch.setattr(
+            autostart,
+            "status",
+            lambda: AutostartStatus(True, True, "win32", "windows_run"),
+        )
+        monkeypatch.setattr(guards, "active_env_managed_inputs", lambda loaded_cfg: [])
+        monkeypatch.setattr(guards, "autostart_shadowed", lambda intended: False)
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_required",
+            lambda loaded_cfg: False,
+        )
+        app = create_app()
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        client = TestClient(app)
+
+        response = client.get("/api/autostart-status")
+
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+        assert response.json()["registered"] is True
+        assert "残留项" in response.json()["detail"]
+
     def test_autostart_status_remote_hides_env_managed_keys(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

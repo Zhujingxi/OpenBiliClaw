@@ -38,7 +38,7 @@ import urllib.request
 import webbrowser
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -929,6 +929,18 @@ def _open_landing_page_when_ready(base_url: str, *, seeded: bool, repaired: bool
         webbrowser.open(base_url + landing)
 
 
+def _reconcile_packaged_autostart(runtime_config: Any) -> None:
+    """Best-effort login-item reconciliation for the frozen desktop entry."""
+    try:
+        from openbiliclaw.runtime import autostart
+
+        warning = autostart.reconcile(runtime_config)
+    except Exception as exc:  # noqa: BLE001 - desktop startup must continue
+        warning = f"开机自启动对账失败：{exc}"
+    if warning:
+        print(f"[OpenBiliClaw] {warning}")
+
+
 def main() -> None:
     project_root, bundled_resources = _resolve_runtime_paths()
     # Windowed (no-console) build: route output to a log file FIRST, before any
@@ -988,6 +1000,7 @@ def main() -> None:
 
         runtime_config = load_config()
         configure_logging(runtime_config, sweep_unmanaged=False)
+        _reconcile_packaged_autostart(runtime_config)
 
     default_host = "127.0.0.1"
     default_port = 8420

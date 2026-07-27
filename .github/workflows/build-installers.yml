@@ -17,6 +17,11 @@ on:
         description: "Version label for artifact filenames (e.g. v0.3.101). Defaults to pyproject version."
         required: false
         default: ""
+      windows_only:
+        description: "Skip both macOS jobs and build/test only the Windows installer."
+        required: false
+        type: boolean
+        default: false
 
 # Read-only token: this workflow structurally cannot publish a Release.
 permissions:
@@ -25,6 +30,7 @@ permissions:
 jobs:
   macos:
     name: macOS installer (.dmg, ${{ matrix.arch }})
+    if: ${{ inputs.windows_only != true }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -98,7 +104,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # [packaging] pulls pyinstaller + pystray + Pillow (tray desktop mode).
-          pip install -e ".[packaging]"
+          pip install -e ".[packaging]" "pytest>=8"
+
+      - name: Run real Windows HKCU autostart E2E
+        run: python -m pytest -q tests/test_windows_autostart_e2e.py
 
       - name: Resolve version
         id: ver
@@ -117,6 +126,12 @@ jobs:
 
       - name: PyInstaller onedir build (ollama staged separately below)
         run: python packaging/build.py --clean --no-bundle-ollama --archive-version "${{ steps.ver.outputs.version }}"
+
+      - name: Run real frozen-bundle autostart lifecycle E2E
+        shell: pwsh
+        run: |
+          $env:OPENBILICLAW_FROZEN_EXE = (Resolve-Path "dist\OpenBiliClaw\OpenBiliClaw.exe").Path
+          python -m pytest -q tests/test_windows_autostart_e2e.py -k real_frozen_bundle
 
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh
@@ -160,6 +175,22 @@ jobs:
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.bare }} /DMyAppVersionInfoVersion=${{ steps.ver.outputs.version_info }} packaging\openbiliclaw.iss
+
+      - name: Install and test the actual Windows installer
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem "dist\release\*.exe" | Select-Object -First 1).FullName
+          $installDir = Join-Path $env:RUNNER_TEMP "OpenBiliClaw-installed"
+          $env:OPENBILICLAW_PROJECT_ROOT = Join-Path $env:RUNNER_TEMP "OpenBiliClaw-installer-bootstrap"
+          $env:OPENBILICLAW_SELFTEST = "1"
+          $process = Start-Process -FilePath $setup -ArgumentList @(
+            "/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir"
+          ) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+          Get-Process -Name OpenBiliClaw -ErrorAction SilentlyContinue |
+            Wait-Process -Timeout 180 -ErrorAction Stop
+          $env:OPENBILICLAW_FROZEN_EXE = (Resolve-Path "$installDir\OpenBiliClaw.exe").Path
+          python -m pytest -q tests/test_windows_autostart_e2e.py -k real_frozen_bundle
 
       - uses: actions/upload-artifact@v7
         with:

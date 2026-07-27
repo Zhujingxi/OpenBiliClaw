@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from openbiliclaw.config import Config
 
 _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
+_INTERNAL_RUNTIME_ENVS = {_PROJECT_ROOT_ENV, "OPENBILICLAW_SELFTEST"}
 _PROVIDER_CREDENTIAL_ENVS = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
 
 
@@ -22,7 +23,11 @@ def active_env_managed_inputs(config: Config) -> list[str]:
     """Return active env keys that a login-session autostart entry would lose."""
     managed: set[str] = set()
     for key in os.environ:
-        if key.startswith("OPENBILICLAW_") and key != _PROJECT_ROOT_ENV and _env_is_set(key):
+        if (
+            key.startswith("OPENBILICLAW_")
+            and key not in _INTERNAL_RUNTIME_ENVS
+            and _env_is_set(key)
+        ):
             managed.add(key)
 
     for key in _PROVIDER_CREDENTIAL_ENVS:
