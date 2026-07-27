@@ -314,25 +314,50 @@ def build_preference_analysis_prompt(
     *,
     events: list[dict[str, object]],
     existing_preference: dict[str, object],
+    awareness_notes: list[dict[str, object]] | None = None,
+    active_insights: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for extracting user preferences from events."""
+    """Build a structured prompt for extracting user preferences from events.
+
+    ``awareness_notes`` / ``active_insights`` are optional cognition context —
+    the incremental interest line passes its recent tail so a batch of events
+    is interpreted against what the system already believes about the user,
+    not in a vacuum. ``None`` keeps the prompt byte-identical to the
+    pre-context builder, which is what every other caller (init chunks,
+    feedback batch) still sends: their replay invariance is preserved by
+    construction. Sections are ordered stable → variable so the provider-side
+    prompt cache keeps its prefix.
+    """
     from openbiliclaw.sources.event_format import render_retraction_marked_events
 
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
-    user_prompt = "\n\n".join(
-        [
-            "<existing_preference>",
-            json.dumps(existing_preference, ensure_ascii=False, indent=2),
-            "</existing_preference>",
-            "<event_batch>",
-            json.dumps(
-                render_retraction_marked_events(events),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            "</event_batch>",
+    sections = [
+        "<existing_preference>",
+        json.dumps(existing_preference, ensure_ascii=False, indent=2),
+        "</existing_preference>",
+    ]
+    if awareness_notes:
+        sections += [
+            "<recent_awareness>",
+            json.dumps(awareness_notes, ensure_ascii=False, indent=2, sort_keys=True),
+            "</recent_awareness>",
         ]
-    )
+    if active_insights:
+        sections += [
+            "<active_insights>",
+            json.dumps(active_insights, ensure_ascii=False, indent=2, sort_keys=True),
+            "</active_insights>",
+        ]
+    sections += [
+        "<event_batch>",
+        json.dumps(
+            render_retraction_marked_events(events),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "</event_batch>",
+    ]
+    user_prompt = "\n\n".join(sections)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -756,7 +781,9 @@ _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
 
 <rules>
 1. 输出必须是严格 JSON 对象：{"notes": [...], "confusions": [...]}，不要附带解释。
-2. notes 的每条字段与老版本一致：date / observation / trend / emotion_guess；措辞保守，不下人格定论。
+2. notes 的每条字段：date / observation / trend / emotion_guess / source_event_ids；措辞保守，不下人格定论。
+   - source_event_ids：**这条观察实际依据的事件 id 数组**，只能从 recent_events 里各事件的 `id` 中选，
+     不要编造、不要把整批都塞进去；确实说不清是哪几条时给空数组（系统会退回整批归属并标记为近似）。
 3. confusions 只在你「真的不确定该怎么解读」时才产出，宁缺毋滥，最多 2 条。每条包含：
    - topic：这个疑惑关联的话题/领域（简短，可为空）。
    - observation：看到的、说不清的行为现象。
@@ -775,7 +802,8 @@ _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
       "date": "2026-03-08",
       "observation": "最近连续浏览高信息密度内容。",
       "trend": "更偏向深度解释而非轻量消遣。",
-      "emotion_guess": "可能处于主动吸收和整理信息的阶段。"
+      "emotion_guess": "可能处于主动吸收和整理信息的阶段。",
+      "source_event_ids": [12, 15, 17]
     }
   ],
   "confusions": [
@@ -1062,12 +1090,40 @@ core_memory、这轮对话、以及 active_list 都在 user 消息里给出。
 """.strip()
 
 
+_DIALOGUE_ANCHOR_USER_CONTRACT = """
+<anchor_contract>
+这轮处于单一话题锚中。除原有 candidates / settles 外，还要返回 anchor 判断：
+- relation 只允许 support / contradict / revise / answer / ambiguous / unrelated；
+- hypothesis 锚只允许 support / contradict / revise / ambiguous / unrelated；
+- confusion 锚只允许 answer / ambiguous / unrelated；
+- confusion 的 answer 必须把 interpretation 写成 real_interest / proxy_behavior / dismissed 之一；
+- revise 可在 derived 中给出修正后的假设；其他 relation 的 derived 返回空数组；
+- 归锚内容禁止重复写进 candidates，也不要再用 settles 结算锚对象；
+- 不确定归属时返回 ambiguous，明确岔题才返回 unrelated。
+
+anchor 字段格式：
+{
+  "relation": "support",
+  "interpretation": "",
+  "derived": [
+    {
+      "content": "修正后的假设",
+      "confidence": 0.82,
+      "evidence": "用户本轮的明确修正"
+    }
+  ]
+}
+</anchor_contract>
+""".strip()
+
+
 def build_dialogue_insight_prompt(
     *,
     user_message: str,
     assistant_reply: str,
     core_memory: dict[str, object],
     active_list: dict[str, object] | None = None,
+    anchor: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
     """Build a structured prompt for extracting candidate insights from dialogue.
 
@@ -1076,14 +1132,25 @@ def build_dialogue_insight_prompt(
     ``id``). The system prompt is a module-level constant; all per-call data is
     ordered most-stable-first in the user message (prompt-cache convention).
     """
-    user_prompt = "\n\n".join(
+    user_sections = [
+        "<core_memory>",
+        json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
+        "</core_memory>",
+        "<active_list>",
+        json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
+        "</active_list>",
+    ]
+    if anchor:
+        user_sections.extend(
+            [
+                "<current_anchor>",
+                json.dumps(anchor, ensure_ascii=False, indent=2, sort_keys=True),
+                "</current_anchor>",
+                _DIALOGUE_ANCHOR_USER_CONTRACT,
+            ]
+        )
+    user_sections.extend(
         [
-            "<core_memory>",
-            json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
-            "</core_memory>",
-            "<active_list>",
-            json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
-            "</active_list>",
             "<dialogue_turn>",
             json.dumps(
                 {
@@ -1097,6 +1164,7 @@ def build_dialogue_insight_prompt(
             "</dialogue_turn>",
         ]
     )
+    user_prompt = "\n\n".join(user_sections)
     return [
         {"role": "system", "content": _DIALOGUE_INSIGHT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

@@ -360,7 +360,39 @@ def test_feedback_state_defaults_when_missing(tmp_path: Path) -> None:
     assert state == {
         "last_processed_feedback_event_id": 0,
         "last_feedback_reanalyzed_at": "",
+        # Unified interest line one-shot migration marker; empty = never ran.
+        # Shares this file with the cursor so one write persists both.
+        "unified_interest_line_migrated_at": "",
     }
+
+
+def test_feedback_state_save_preserves_the_unified_migration_marker(tmp_path: Path) -> None:
+    """A cursor-only save (the legacy batch) must not clear the migration marker.
+
+    Without the read-back, a single legacy-batch write after a rollback would
+    erase the marker and let the one-shot migration replay — double-ingesting
+    every feedback row past the cursor.
+    """
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.save_feedback_state(
+        {
+            "last_processed_feedback_event_id": 5,
+            "last_feedback_reanalyzed_at": "",
+            "unified_interest_line_migrated_at": "2026-07-28T00:00:00",
+        }
+    )
+
+    memory.save_feedback_state(
+        {
+            "last_processed_feedback_event_id": 9,
+            "last_feedback_reanalyzed_at": "2026-07-28T01:00:00",
+        }
+    )
+
+    state = memory.load_feedback_state()
+    assert state["last_processed_feedback_event_id"] == 9
+    assert state["unified_interest_line_migrated_at"] == "2026-07-28T00:00:00"
 
 
 def test_feedback_state_round_trips_to_json(tmp_path: Path) -> None:

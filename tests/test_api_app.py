@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
+import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -19,6 +22,135 @@ if TYPE_CHECKING:
 from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
+
+
+def _dialogue_entry_source(symbol: str, branch_predicate: str = "") -> str:
+    """Return one current entry function without matching unrelated branches."""
+    if symbol.startswith("SoulEngine."):
+        from openbiliclaw.soul.engine import SoulEngine
+
+        selected = inspect.getsource(getattr(SoulEngine, symbol.removeprefix("SoulEngine.")))
+    elif symbol.startswith("SocraticDialogue."):
+        from openbiliclaw.soul.dialogue import SocraticDialogue
+
+        selected = inspect.getsource(
+            getattr(SocraticDialogue, symbol.removeprefix("SocraticDialogue."))
+        )
+    else:
+        source = inspect.getsource(create_app)
+        tree = ast.parse(source)
+        matches = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == symbol
+        ]
+        assert len(matches) == 1, f"expected one create_app nested function named {symbol}"
+        node = matches[0]
+        assert node.end_lineno is not None
+        lines = source.splitlines()
+        selected = "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    selected = textwrap.dedent(selected)
+    if not branch_predicate:
+        return selected
+    branch_tree = ast.parse(selected)
+    matches = [
+        node
+        for node in ast.walk(branch_tree)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == branch_predicate
+    ]
+    assert len(matches) == 1, f"expected one {symbol} branch {branch_predicate!r}"
+    return "\n".join(
+        segment
+        for statement in matches[0].body
+        if (segment := ast.get_source_segment(selected, statement)) is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "branch_predicate", "submission_tokens", "direct_mutation_tokens"),
+    [
+        pytest.param(
+            "act_on_chat_card",
+            "",
+            ("_settle_hypothesis(",),
+            (
+                "_apply_hypothesis_settlement(",
+                "_defer_hypothesis_card(",
+                "_discuss_hypothesis_card(",
+            ),
+            id="card-confirm-reject",
+        ),
+        pytest.param(
+            "act_on_chat_card",
+            "",
+            ("DialogueJobKind.CARD_DEFER",),
+            ("anchor_manager.release(", "update_payload(", "_defer_dialogue_confirmation("),
+            id="card-defer",
+        ),
+        pytest.param(
+            "act_on_chat_card",
+            "",
+            ("DialogueJobKind.CARD_DISCUSS",),
+            ("begin(", "anchor_manager.establish(", "rollback("),
+            id="card-discuss",
+        ),
+        pytest.param(
+            "insight_feedback",
+            "",
+            ("result = await _settle_hypothesis(",),
+            ("_apply_hypothesis_settlement(",),
+            id="legacy-feedback",
+        ),
+        pytest.param(
+            "_prepare_confusion_confirmation",
+            "",
+            ("DialogueJobKind.CONFUSION_OPEN_SYNC",),
+            ("confusion_manager.schedule_ask(", "update_confusion("),
+            id="pending-open-sync",
+        ),
+        pytest.param(
+            "_create_confirmation_turn",
+            "",
+            ("DialogueJobKind.ANCHOR_ESTABLISH",),
+            ("anchor_manager.establish(",),
+            id="pending-open-anchor",
+        ),
+        pytest.param(
+            "SocraticDialogue.respond",
+            "self._learning_mode is DialogueLearningMode.QUEUED",
+            ("queue.submit(", "DialogueJobKind.LEARN"),
+            ("learn_fn(", "_apply_dialogue_settlement("),
+            id="ordinary-chat-settle",
+        ),
+        pytest.param(
+            "_apply_durable_chat_success_side_effects",
+            "turn.scope == 'probe'",
+            ("DialogueJobKind.PROBE_REPLY_APPLY",),
+            ("_record_probe_feedback_history(", "_record_probe_cognition("),
+            id="durable-probe-reply",
+        ),
+        pytest.param(
+            "_apply_durable_chat_success_side_effects",
+            "turn.scope == 'confusion'",
+            ("DialogueJobKind.CONFUSION_REPLY_APPLY",),
+            ("_record_probe_cognition(", "_publish_probe_event("),
+            id="durable-confusion-reply",
+        ),
+    ],
+)
+def test_declared_dialogue_entries_submit_without_direct_mutation(
+    entry: str,
+    branch_predicate: str,
+    submission_tokens: tuple[str, ...],
+    direct_mutation_tokens: tuple[str, ...],
+) -> None:
+    """Q1/F3: every declared entry submits and performs no protected mutation."""
+    source = _dialogue_entry_source(entry, branch_predicate)
+    observed = {
+        "submitted": all(token in source for token in submission_tokens),
+        "direct_mutation": any(token in source for token in direct_mutation_tokens),
+    }
+    assert observed == {"submitted": True, "direct_mutation": False}
 
 
 def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
@@ -394,7 +526,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     first.llm.default_provider = "ollama"
     first.llm.ollama.model = "llama3"
     first.scheduler.pool_target_count = 30
-    ctx._rebuild_components(first)
+    await ctx.rebuild_from_config(first)
     old_engine = ctx.recommendation_engine
     old_callback = old_engine._pool_inventory_commit_callback
     assert old_callback is ctx.pool_inventory_commit_callback
@@ -404,7 +536,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     second.llm.default_provider = "ollama"
     second.llm.ollama.model = "llama3"
     second.scheduler.pool_target_count = 10
-    ctx._rebuild_components(second)
+    await ctx.rebuild_from_config(second)
     assert ctx.recommendation_engine._pool_inventory_commit_callback is old_callback
     assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
 
@@ -462,7 +594,7 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
     first.llm.default_provider = "ollama"
     first.llm.ollama.model = "llama3"
     first.scheduler.pool_target_count = 30
-    ctx._rebuild_components(first)
+    await ctx.rebuild_from_config(first)
     first_reloaded_engine = ctx.recommendation_engine
     first_callback = first_reloaded_engine._pool_inventory_commit_callback
 
@@ -470,7 +602,7 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
     second.llm.default_provider = "ollama"
     second.llm.ollama.model = "llama3"
     second.scheduler.pool_target_count = 10
-    ctx._rebuild_components(second)
+    await ctx.rebuild_from_config(second)
     current_callback = ctx.recommendation_engine._pool_inventory_commit_callback
     assert current_callback is first_callback
 
@@ -489,7 +621,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
     from openbiliclaw.config import Config
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
     from openbiliclaw.llm.service import LLMService
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
     config = Config(data_dir=str(tmp_path))
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
@@ -504,6 +636,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
         llm=None,
         soul_engine=soul,  # type: ignore[arg-type]
         llm_service=dialogue_service,
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     controller = SimpleNamespace(llm_concurrency_gate=dialogue_gate, event_hub=None)
 
@@ -530,6 +663,7 @@ def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_servic
         llm=None,
         soul_engine=gate_less_soul,
         llm_service=gate_less_dialogue_service,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     gate_less_app = create_app(
         memory_manager=SimpleNamespace(),
@@ -547,7 +681,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
 ) -> None:
     from openbiliclaw.config import Config
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
     config = Config(data_dir=str(tmp_path))
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
@@ -561,6 +695,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
         llm=None,
         soul_engine=soul,
         llm_service=dialogue_service,  # type: ignore[arg-type]
+        learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
     )
     controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
 
@@ -586,6 +721,7 @@ def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflic
                 llm_service=SimpleNamespace(  # type: ignore[arg-type]
                     concurrency_gate=LLMConcurrencyGate(2)
                 ),
+                learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
             ),
             runtime_controller=SimpleNamespace(event_hub=None),
         )
@@ -2018,15 +2154,17 @@ class TestBackendAPI:
                 session: str,
                 tools: object | None = None,
                 tool_dispatcher: object | None = None,
-                learn_queue: object | None = None,
                 database: object | None = None,
+                learning_mode: object,
+                settlement_queue: object | None = None,
             ) -> None:
                 self.llm = llm
                 self.soul_engine = soul_engine
                 self.llm_service = llm_service
                 self.session = session
-                self.learn_queue = learn_queue
                 self.database = database
+                self.learning_mode = learning_mode
+                self.settlement_queue = settlement_queue
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
@@ -8898,39 +9036,77 @@ class TestBackendAPI:
         assert restored["items"][0]["status"] == "completed"
         assert restored["items"][0]["reply"] == "你更在意的是它背后的逻辑。"
 
-    def test_confusion_scope_durable_turn_resolves_via_side_effect(self, tmp_path: Path) -> None:
-        """A durable scope="confusion" turn settles the confusion (single owner).
-
-        The reply's sentiment (keyword fallback, no LLM) decides the exit:
-        a positive answer confirms real interest and resolves the confusion.
-        The confusion is settled by the durable side-effect path only —
-        NOT by ``learn_from_dialogue`` settles (single ownership).
-        """
+    def test_confusion_scope_establishes_anchor_without_legacy_direct_settlement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The durable path establishes the anchor but never owns settlement."""
         import time
         from types import SimpleNamespace
 
         from fastapi.testclient import TestClient
 
         from openbiliclaw.soul.confusion import ConfusionManager
+        from openbiliclaw.soul.dialogue_anchor import DialogueAnchorManager
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJob, DialogueJobKind
+        from openbiliclaw.soul.ledger import ProfileLedger
         from openbiliclaw.storage.database import Database
 
+        class TrackingConfusionManager(ConfusionManager):
+            def __init__(self, database: Database) -> None:
+                super().__init__(database)
+                self.direct_resolve_calls = 0
+                self.direct_defer_calls = 0
+
+            def resolve(self, *args: object, **kwargs: object) -> str | None:
+                self.direct_resolve_calls += 1
+                return super().resolve(*args, **kwargs)  # type: ignore[arg-type]
+
+            def defer(self, *args: object, **kwargs: object) -> None:
+                self.direct_defer_calls += 1
+                super().defer(*args, **kwargs)  # type: ignore[arg-type]
+
         class FakeDialogue:
+            def __init__(self, anchor_manager: DialogueAnchorManager) -> None:
+                self._anchor_manager = anchor_manager
+                self.anchor_seen_before_reply = False
+
             async def respond(
                 self, user_message: str, *, scope: str = "chat", turn_id: str = ""
             ) -> str:
+                del user_message, scope, turn_id
+                self.anchor_seen_before_reply = self._anchor_manager.current() is not None
                 return "明白了"
 
         db = Database(tmp_path / "openbiliclaw.db")
         db.initialize()
         confusion_id = db.insert_confusion(topic="解压视频", observation="停留很短")
-        manager = ConfusionManager(db)
-        soul_engine = SimpleNamespace(_confusion_manager=manager)
+        manager = TrackingConfusionManager(db)
+        anchor_manager = DialogueAnchorManager(
+            tmp_path,
+            database=db,
+            ledger=ProfileLedger(db),
+        )
+        dialogue = FakeDialogue(anchor_manager)
+        soul_engine = SimpleNamespace(
+            _confusion_manager=manager,
+            _dialogue_anchor_manager=anchor_manager,
+        )
         app = create_app(
             memory_manager=object(),
             database=db,
             soul_engine=soul_engine,
-            dialogue=FakeDialogue(),
+            dialogue=dialogue,
         )
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        runtime_dispatch = queue._dispatcher
+        observed: list[tuple[DialogueJobKind, bool]] = []
+
+        async def observe(job: DialogueJob):  # type: ignore[no-untyped-def]
+            observed.append((job.kind, asyncio.current_task() is queue.worker_task))
+            return await runtime_dispatch(job)
+
+        queue._dispatcher = observe
 
         with TestClient(app) as client:
             client.post(
@@ -8941,7 +9117,7 @@ class TestBackendAPI:
                     "scope": "confusion",
                     "subject_id": str(confusion_id),
                     "subject_title": "解压视频",
-                    "message": "我就喜欢",  # strong_positive keyword → real_interest
+                    "message": "我就喜欢",
                 },
             )
             for _ in range(50):
@@ -8952,8 +9128,177 @@ class TestBackendAPI:
             assert turn["status"] == "completed"
 
         stored = manager.get(confusion_id)
-        assert stored.status == "resolved"
-        assert stored.resolution == "real_interest"
+        assert stored is not None
+        assert stored.status == "clarifying"
+        assert stored.resolution == ""
+        assert manager.direct_resolve_calls == 0
+        assert manager.direct_defer_calls == 0
+        assert dialogue.anchor_seen_before_reply is True
+        active_anchor = anchor_manager.current()
+        assert active_anchor is not None
+        assert active_anchor.kind == "confusion"
+        assert active_anchor.ref == str(confusion_id)
+        stored_turn = db.get_chat_turn("turn-confusion-1")
+        assert stored_turn is not None
+        assert stored_turn["payload"]["confusion_reply_apply"]["effects"] == {
+            "cognition": True,
+            "event": True,
+        }
+        assert observed == [
+            (DialogueJobKind.CONFUSION_OPEN_SYNC, True),
+            (DialogueJobKind.ANCHOR_ESTABLISH, True),
+            (DialogueJobKind.CONFUSION_REPLY_APPLY, True),
+        ]
+
+    def test_probe_result_handoff_runs_exploration_outside_worker_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """F8: classify in-worker once, then consume exploration in the producer task."""
+        import copy
+        import time
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+        from openbiliclaw.storage.database import Database
+
+        class FakeMemory:
+            def __init__(self) -> None:
+                self.runtime_state: dict[str, object] = {"probe_feedback_history": []}
+                self.cognition_updates: list[dict[str, object]] = []
+                self.mutations: list[tuple[frozenset[str], bool]] = []
+                self.queue: object | None = None
+
+            def update_discovery_runtime_state(self, mutate: object) -> None:
+                before = copy.deepcopy(self.runtime_state)
+                mutate(self.runtime_state)  # type: ignore[operator]
+                changed = frozenset(
+                    key
+                    for key in set(before) | set(self.runtime_state)
+                    if before.get(key) != self.runtime_state.get(key)
+                )
+                worker = getattr(self.queue, "worker_task", None)
+                self.mutations.append((changed, asyncio.current_task() is worker))
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.cognition_updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.cognition_updates = list(updates)
+
+        class FakeSentimentLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete_with_core_memory(self, **_kwargs: object) -> object:
+                self.calls += 1
+                return SimpleNamespace(content="weak_positive")
+
+        class FakeSpeculator:
+            def get_active_speculations(self) -> list[object]:
+                return [
+                    SimpleNamespace(
+                        domain="城市基础设施观察",
+                        category="城市",
+                        reason="近期关注城市空间",
+                        experience_mode="wander_observe",
+                        entry_load="light",
+                        specifics=[SimpleNamespace(name="交通节点")],
+                    )
+                ]
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+                self.queue: object | None = None
+
+            def bind_dialogue_settlement_queue(self, queue: object) -> None:
+                self.queue = queue
+
+        class FakeDialogue:
+            async def respond(
+                self,
+                _message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del scope, turn_id, session
+                return "可以，先作为轻量方向观察。"
+
+        database = Database(tmp_path / "openbiliclaw.db")
+        database.initialize()
+        memory = FakeMemory()
+        sentiment_llm = FakeSentimentLLM()
+        app = create_app(
+            memory_manager=memory,
+            database=database,
+            soul_engine=FakeSoulEngine(),
+            dialogue=FakeDialogue(),
+            recommendation_engine=SimpleNamespace(_llm=sentiment_llm),
+        )
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        memory.queue = queue
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "durable-probe-handoff",
+                    "session": "popup",
+                    "scope": "probe",
+                    "subject_id": "城市基础设施观察",
+                    "subject_title": "城市基础设施观察",
+                    "message": "有点意思，可以看看",
+                },
+            )
+            assert response.status_code == 200
+            for _ in range(50):
+                time.sleep(0.02)
+                state = memory.runtime_state
+                if "short_term_exploration_buffer" in state:
+                    break
+
+            duplicate = client.portal.call(
+                queue.submit_and_wait,
+                DialogueJobKind.PROBE_REPLY_APPLY,
+                {
+                    "turn_id": "durable-probe-handoff",
+                    "domain": "城市基础设施观察",
+                    "message": "有点意思，可以看看",
+                    "reply": "可以，先作为轻量方向观察。",
+                },
+            )
+
+        assert duplicate.classification == "weak_positive"
+        assert duplicate.exploration_intent is not None
+        assert duplicate.exploration_intent.evidence_id == "durable-probe-handoff"
+        assert sentiment_llm.calls == 1
+        stored_turn = database.get_chat_turn("durable-probe-handoff")
+        assert stored_turn is not None
+        stored_receipt = stored_turn["payload"]["probe_reply_apply"]
+        assert stored_receipt["classification"] == "weak_positive"
+        assert stored_receipt["effects"] == {
+            "settlement": True,
+            "history": True,
+            "cognition": True,
+            "event": True,
+        }
+        exploration_mutations = [
+            in_worker
+            for changed, in_worker in memory.mutations
+            if "short_term_exploration_buffer" in changed
+        ]
+        assert exploration_mutations == [False]
+        feedback_mutations = [
+            in_worker
+            for changed, in_worker in memory.mutations
+            if "probe_feedback_history" in changed
+        ]
+        assert feedback_mutations == [True]
 
     @pytest.mark.parametrize(
         ("failure", "expected_fragment"),
@@ -11110,6 +11455,1515 @@ class TestBackendAPI:
         assert cfg.llm.deepseek.api_key == "sk-new-deepseek-key"
         assert cfg.llm.deepseek.model == "deepseek-chat"
         assert cfg.llm.deepseek.base_url == "https://api.deepseek.com"
+
+
+class TestDialogueConfirmationCards:
+    """Durable cards, serialized settlement, and terminal projection."""
+
+    @staticmethod
+    def _build(tmp_path: Path):  # type: ignore[no-untyped-def]
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.engine import SoulEngine
+
+        class Registry:
+            async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+                return LLMResponse(content="[]", provider="fake")
+
+        class Dialogue:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def respond(
+                self,
+                message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del turn_id
+                self.calls.append((scope, session))
+                return f"回复：{message}"
+
+        memory = MemoryManager(tmp_path / "data")
+        memory.initialize()
+        engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+        dialogue = Dialogue()
+        app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=engine,
+            dialogue=dialogue,
+        )
+        return TestClient(app), memory, engine, dialogue
+
+    @staticmethod
+    def _seed_hypothesis(memory: object, hypothesis: str, confidence: float = 0.66) -> str:
+        from openbiliclaw.soul.identity import insight_hash8
+
+        layer = memory.get_layer("insight")
+        items = list(layer.data.get("hypotheses", []))
+        items.append(
+            {
+                "hypothesis": hypothesis,
+                "evidence": [f"依据：{hypothesis}"],
+                "confidence": confidence,
+                "validated": False,
+                "created_at": "2026-07-22",
+            }
+        )
+        layer.data["hypotheses"] = items
+        layer.save()
+        return insight_hash8(hypothesis)
+
+    @staticmethod
+    def _create_card(
+        client: object,
+        *,
+        turn_id: str,
+        ref: str,
+        hypothesis: str,
+        session: str = "popup",
+    ) -> dict[str, object]:
+        response = client.post(
+            "/api/chat/turns",
+            json={
+                "turn_id": turn_id,
+                "session": session,
+                "scope": "hypothesis",
+                "subject_id": ref,
+                "subject_title": hypothesis,
+                "message": "阿b 的猜测",
+                "payload": {"evidence_refs": [f"依据：{hypothesis}"]},
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_card_actions_and_legacy_submit_typed_jobs_to_actual_worker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Q1/F3: all card actions and legacy feedback execute in the one worker."""
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJob, DialogueJobKind
+
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        queue = client.app.state.runtime_context.dialogue_settlement_queue
+        assert queue is not None
+        real_dispatcher = queue._dispatcher
+        observed: list[tuple[DialogueJobKind, bool]] = []
+
+        async def observe(job: DialogueJob):
+            observed.append((job.kind, asyncio.current_task() is queue.worker_task))
+            return await real_dispatcher(job)
+
+        queue._dispatcher = observe
+        for action in ("confirm", "reject", "defer", "discuss"):
+            hypothesis = f"typed-job-{action}"
+            ref = self._seed_hypothesis(memory, hypothesis)
+            turn_id = f"typed-job-{action}"
+            self._create_card(
+                client,
+                turn_id=turn_id,
+                ref=ref,
+                hypothesis=hypothesis,
+            )
+            response = client.post(
+                f"/api/chat/cards/{turn_id}/action",
+                json={"action": action},
+            )
+            assert response.status_code == 200
+
+        legacy_hypothesis = "typed-job-legacy"
+        self._seed_hypothesis(memory, legacy_hypothesis)
+        legacy = client.post(
+            "/api/insights/feedback",
+            json={"hypothesis": legacy_hypothesis, "signal": "confirm"},
+        )
+        # The `discuss` action above left its card owning the dialogue anchor,
+        # so this legacy settle is refused. It must still be refused *honestly*
+        # (409, nothing written) rather than the old silent 200 {"ok":true}.
+        # The point of this test is unchanged: the typed job is still submitted
+        # to — and executed by — the one worker, which `observed` below asserts.
+        assert legacy.status_code == 409, legacy.text
+        assert observed == [
+            (DialogueJobKind.SETTLE_HYPOTHESIS, True),
+            (DialogueJobKind.SETTLE_HYPOTHESIS, True),
+            (DialogueJobKind.CARD_DEFER, True),
+            (DialogueJobKind.CARD_DISCUSS, True),
+            (DialogueJobKind.SETTLE_HYPOTHESIS, True),
+        ]
+
+    def test_hypothesis_card_is_completed_structured_turn_and_skips_worker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, dialogue = self._build(tmp_path)
+        hypothesis = "用户偏爱追问底层原理"
+        ref = self._seed_hypothesis(memory, hypothesis)
+
+        card = self._create_card(
+            client,
+            turn_id="card-completed",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        time.sleep(0.03)
+
+        assert card["status"] == "completed"
+        assert card["scope"] == "hypothesis"
+        assert card["payload"] == {
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": ref,
+            "title": hypothesis,
+            "evidence_refs": [f"依据：{hypothesis}"],
+            "actions": ["confirm", "reject", "discuss", "defer"],
+            "state": "pending",
+        }
+        assert dialogue.calls == []
+
+    @pytest.mark.parametrize(
+        ("action", "terminal", "validated"),
+        [("confirm", "confirmed", True), ("reject", "rejected", False)],
+    )
+    def test_confirm_and_reject_apply_serialized_settlement(
+        self,
+        tmp_path: Path,
+        action: str,
+        terminal: str,
+        validated: bool,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"假设-{action}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id=f"card-{action}", ref=ref, hypothesis=hypothesis)
+
+        response = client.post(
+            f"/api/chat/cards/card-{action}/action",
+            json={"action": action},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "applied"
+        assert response.json()["state"] == terminal
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert settlement["applied"] == 1
+        assert str(settlement["event_id"]).startswith("dialogue:")
+        assert str(settlement["event_id"]).endswith(":event")
+        stored = next(
+            item
+            for item in memory.get_layer("insight").data["hypotheses"]
+            if item["hypothesis"] == hypothesis
+        )
+        assert stored["validated"] is validated
+        events = memory.query_events(event_types=["feedback"])
+        assert len(events) == 1
+        assert json.loads(events[0]["metadata"])["settlement_ref"] == ref
+
+    def test_defer_persists_cooldown_without_creating_settlement(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户也许偏爱长视频"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-defer", ref=ref, hypothesis=hypothesis)
+
+        response = client.post(
+            "/api/chat/cards/card-defer/action",
+            json={"action": "defer"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "deferred"
+        assert memory._database.get_card_settlement(ref) is None
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["objects"][ref]["deferred_until"]
+
+    @pytest.mark.parametrize(
+        ("settle_action", "terminal_state"),
+        [("confirm", "confirmed"), ("reject", "rejected")],
+    )
+    def test_defer_on_terminal_card_returns_truth_without_writing_cooldown(
+        self,
+        tmp_path: Path,
+        settle_action: str,
+        terminal_state: str,
+    ) -> None:
+        """F3: defer cannot contradict or add cooldown to a terminal card."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"终态后 defer-{settle_action}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        turn_id = f"terminal-defer-{settle_action}"
+        self._create_card(client, turn_id=turn_id, ref=ref, hypothesis=hypothesis)
+        settled = client.post(
+            f"/api/chat/cards/{turn_id}/action",
+            json={"action": settle_action},
+        )
+        assert settled.status_code == 200
+        assert settled.json()["state"] == terminal_state
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        cooldown_before = state_path.read_bytes() if state_path.exists() else None
+
+        deferred = client.post(
+            f"/api/chat/cards/{turn_id}/action",
+            json={"action": "defer"},
+        )
+
+        assert deferred.status_code == 200
+        assert deferred.json() == {
+            "ok": True,
+            "outcome": "already_settled",
+            "verdict": terminal_state,
+            "state": terminal_state,
+        }
+        cooldown_after = state_path.read_bytes() if state_path.exists() else None
+        assert cooldown_after == cooldown_before
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == terminal_state
+
+    @pytest.mark.parametrize(
+        ("failure_stage", "checkpoint"),
+        [
+            ("event", "after_event"),
+            ("object", "after_object"),
+            ("marker", "after_rebuild_marker"),
+        ],
+    )
+    def test_fault_injection_retries_stable_effects_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_stage: str,
+        checkpoint: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"故障注入-{failure_stage}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            client,
+            turn_id=f"card-fault-{failure_stage}",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        app = client.app
+        client.close()
+        failed = False
+
+        def fail_checkpoint_once(observed: str, settlement_ref: str) -> None:
+            nonlocal failed
+            assert settlement_ref == ref
+            if observed == checkpoint and not failed:
+                failed = True
+                raise RuntimeError(f"{failure_stage} fault")
+
+        monkeypatch.setattr(
+            engine,
+            "_dialogue_settlement_checkpoint",
+            fail_checkpoint_once,
+        )
+        with TestClient(app, raise_server_exceptions=False) as fault_client:
+            first = fault_client.post(
+                f"/api/chat/cards/card-fault-{failure_stage}/action",
+                json={"action": "confirm"},
+            )
+            assert first.status_code == 500
+            partial = memory._database.get_card_settlement(ref)
+            assert partial is not None
+            assert partial["applied"] == 0
+            assert str(partial["event_id"]).endswith(":event")
+
+            retry = fault_client.post(
+                f"/api/chat/cards/card-fault-{failure_stage}/action",
+                json={"action": "confirm"},
+            )
+
+        assert retry.status_code == 200
+        assert retry.json()["outcome"] == "applied"
+        final = memory._database.get_card_settlement(ref)
+        assert final is not None
+        assert final["applied"] == 1
+        assert str(final["event_id"]).endswith(":event")
+        assert len(memory.query_events(event_types=["feedback"])) == 1
+
+    def test_unapplied_winner_retry_immediately_applies_original_winner(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户会追问证据链"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-owner", ref=ref, hypothesis=hypothesis)
+        self._create_card(
+            client,
+            turn_id="card-contender",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+        assert memory._database.try_create_card_settlement(
+            ref=ref,
+            verdict="confirmed",
+            turn_id="card-owner",
+            payload={
+                "kind": "hypothesis",
+                "title": hypothesis,
+                "action": "confirmed",
+                "derived": [],
+                "anchor_generation": 0,
+                "source": "card_action",
+            },
+        )
+        recovered_response = client.post(
+            "/api/chat/cards/card-contender/action",
+            json={"action": "reject"},
+        )
+        recovered = recovered_response.json()
+
+        assert recovered_response.status_code == 200
+        assert recovered["outcome"] == "applied"
+        assert recovered["verdict"] == "confirmed"
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert (settlement["verdict"], settlement["turn_id"], settlement["applied"]) == (
+            "confirmed",
+            "card-owner",
+            1,
+        )
+        assert settlement["payload"]["source"] == "card_action"
+        assert memory._database.get_chat_turn("card-owner")["payload"]["state"] == "confirmed"
+        assert memory._database.get_chat_turn("card-contender")["payload"]["state"] == "confirmed"
+
+    def test_applied_conflict_is_already_settled_and_refreshes_other_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户偏好机制分析"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-popup", ref=ref, hypothesis=hypothesis)
+        self._create_card(
+            client,
+            turn_id="card-webui",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+
+        assert (
+            client.post("/api/chat/cards/card-popup/action", json={"action": "confirm"}).status_code
+            == 200
+        )
+        conflict = client.post("/api/chat/cards/card-webui/action", json={"action": "reject"})
+
+        assert conflict.status_code == 200
+        assert conflict.json()["outcome"] == "already_settled"
+        assert conflict.json()["state"] == "confirmed"
+        popup = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        webui = client.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        assert [item["turn_id"] for item in popup] == ["card-popup"]
+        assert [item["turn_id"] for item in webui] == ["card-webui"]
+        assert popup[0]["payload"]["state"] == webui[0]["payload"]["state"] == "confirmed"
+
+    def test_blocked_worker_card_action_returns_processing_without_cancelling_job(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJob,
+            DialogueJobKind,
+            DialogueJobResult,
+        )
+
+        initial_client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户重视排队后的最终一致性"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            initial_client,
+            turn_id="card-processing",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        app = initial_client.app
+        initial_client.close()
+        queue = app.state.runtime_context.dialogue_settlement_queue
+        real_dispatcher = queue._dispatcher
+        blocker_entered = threading.Event()
+        release_blocker = threading.Event()
+        submitted_action: list[DialogueJob] = []
+
+        async def blocking_dispatcher(job: DialogueJob):
+            if (
+                job.kind is DialogueJobKind.LEARN
+                and job.payload.get("source") == "task-3.3-blocker"
+            ):
+                blocker_entered.set()
+                while not release_blocker.is_set():
+                    await asyncio.sleep(0.005)
+                return DialogueJobResult(outcome="completed")
+            return await real_dispatcher(job)
+
+        real_submit = queue.submit
+
+        def observe_submit(
+            kind: DialogueJobKind | str,
+            payload: dict[str, object],
+            *,
+            completion: bool = False,
+        ) -> DialogueJob | None:
+            job = real_submit(kind, payload, completion=completion)
+            if DialogueJobKind(kind) is DialogueJobKind.SETTLE_HYPOTHESIS and job is not None:
+                submitted_action.append(job)
+            return job
+
+        queue._dispatcher = blocking_dispatcher
+        queue.submit = observe_submit
+        with TestClient(app) as client:
+            client.portal.call(
+                queue.submit,
+                DialogueJobKind.LEARN,
+                {"source": "task-3.3-blocker"},
+            )
+            assert blocker_entered.wait(timeout=1)
+
+            started_at = time.monotonic()
+            response = client.post(
+                "/api/chat/cards/card-processing/action",
+                json={"action": "confirm"},
+            )
+            elapsed = time.monotonic() - started_at
+
+            assert response.status_code == 202
+            assert response.json()["outcome"] == "processing"
+            assert elapsed <= 1.5
+            assert len(submitted_action) == 1
+            assert submitted_action[0].completion is not None
+            assert not submitted_action[0].completion.cancelled()
+            assert not submitted_action[0].completion.done()
+
+            release_blocker.set()
+            deadline = time.monotonic() + 2.0
+            durable_state = ""
+            while time.monotonic() < deadline:
+                durable = client.get("/api/chat/turns/card-processing")
+                assert durable.status_code == 200
+                durable_state = str(durable.json()["payload"]["state"])
+                if durable_state == "confirmed":
+                    break
+                time.sleep(0.01)
+
+        assert durable_state == "confirmed"
+        assert submitted_action[0].completion is not None
+        assert submitted_action[0].completion.done()
+        assert not submitted_action[0].completion.cancelled()
+
+    @pytest.mark.parametrize(
+        "receipt_gap",
+        ["no_receipt", "applied_0_winner", "applied_1_publication_only"],
+    )
+    def test_processing_job_lost_on_restart_can_be_resubmitted(
+        self,
+        tmp_path: Path,
+        receipt_gap: str,
+    ) -> None:
+        import threading
+        from contextlib import suppress
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJob, DialogueJobKind
+        from openbiliclaw.soul.engine import SoulEngine
+
+        initial_client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = f"重启重投-{receipt_gap}"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        turn_id = f"lost-on-restart-{receipt_gap}"
+        self._create_card(
+            initial_client,
+            turn_id=turn_id,
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        first_app = initial_client.app
+        initial_client.close()
+        first_queue = first_app.state.runtime_context.dialogue_settlement_queue
+        real_dispatcher = first_queue._dispatcher
+        blocker_entered = threading.Event()
+
+        async def blocking_dispatcher(job: DialogueJob):
+            if (
+                job.kind is DialogueJobKind.LEARN
+                and job.payload.get("source") == "restart-loss-blocker"
+            ):
+                blocker_entered.set()
+                await asyncio.Event().wait()
+            return await real_dispatcher(job)
+
+        async def crash_and_discard_pending() -> None:
+            first_queue._accepting = False
+            first_queue._closed = True
+            worker = first_queue._worker
+            if worker is not None:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+                first_queue._worker = None
+            while not first_queue._queue.empty():
+                lost_job = first_queue._queue.get_nowait()
+                first_queue._complete_cancelled(lost_job)
+                first_queue._registry.release(lost_job.anchor_snapshot)
+                first_queue._queue.task_done()
+            first_queue._registry.clear()
+
+        first_queue._dispatcher = blocking_dispatcher
+        with TestClient(first_app) as first_runtime:
+            first_runtime.portal.call(
+                first_queue.submit,
+                DialogueJobKind.LEARN,
+                {"source": "restart-loss-blocker"},
+            )
+            assert blocker_entered.wait(timeout=1)
+            first = first_runtime.post(
+                f"/api/chat/cards/{turn_id}/action",
+                json={"action": "confirm"},
+            )
+            assert first.status_code == 202
+            assert first.json()["outcome"] == "processing"
+            assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "pending"
+            first_runtime.portal.call(crash_and_discard_pending)
+
+        winning_payload = {
+            "kind": "hypothesis",
+            "title": hypothesis,
+            "action": "confirmed",
+            "derived": [],
+            "anchor_generation": 0,
+            "source": "card_action",
+        }
+        if receipt_gap != "no_receipt":
+            assert memory._database.try_create_card_settlement(
+                ref=ref,
+                verdict="confirmed",
+                turn_id=turn_id,
+                payload=winning_payload,
+            )
+        if receipt_gap == "applied_1_publication_only":
+            memory._database.record_card_settlement_event_once(
+                ref=ref,
+                event={
+                    "event_type": "feedback",
+                    "title": hypothesis,
+                    "metadata": {
+                        "settlement_ref": ref,
+                        "settlement_kind": "hypothesis",
+                        "settlement_verdict": "confirmed",
+                        "turn_id": turn_id,
+                        "source": "card_action",
+                    },
+                },
+            )
+            layer = memory.get_layer("insight")
+            for item in layer.data["hypotheses"]:
+                if item["hypothesis"] == hypothesis:
+                    item["validated"] = True
+            layer.save()
+            assert memory._database.complete_card_settlement(
+                ref=ref,
+                result={
+                    "matched": True,
+                    "hypothesis": hypothesis,
+                    "signal": "confirm",
+                    "validated": True,
+                    "confidence": 0.66,
+                },
+            )
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "pending"
+
+        class Registry:
+            async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
+                return LLMResponse(content="[]", provider="fake")
+
+        class RestartedDialogue:
+            async def respond(
+                self,
+                message: str,
+                *,
+                scope: str = "chat",
+                turn_id: str = "",
+                session: str = "",
+            ) -> str:
+                del scope, turn_id, session
+                return f"回复：{message}"
+
+        restarted_engine = SoulEngine(llm=Registry(), memory=memory)  # type: ignore[arg-type]
+        object_calls = 0
+        real_object_apply = restarted_engine._apply_dialogue_settlement_object
+
+        async def count_object_apply(**kwargs: object):
+            nonlocal object_calls
+            object_calls += 1
+            return await real_object_apply(**kwargs)
+
+        restarted_engine._apply_dialogue_settlement_object = count_object_apply  # type: ignore[method-assign]
+        restarted_app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=restarted_engine,
+            dialogue=RestartedDialogue(),
+        )
+        with TestClient(restarted_app) as restarted:
+            retry = restarted.post(
+                f"/api/chat/cards/{turn_id}/action",
+                json={"action": "confirm"},
+            )
+            assert retry.status_code == 200
+            assert retry.json()["state"] == "confirmed"
+            assert restarted.get(f"/api/chat/turns/{turn_id}").json()["payload"]["state"] == (
+                "confirmed"
+            )
+
+        expected_object_calls = 0 if receipt_gap == "applied_1_publication_only" else 1
+        assert object_calls == expected_object_calls
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None
+        assert settlement["applied"] == 1
+        assert settlement["payload"] == winning_payload
+
+    def test_get_reconcile_projects_applied_receipt_without_reapplying_object_semantics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueDispatchReturn,
+            DialogueJob,
+            DialogueJobKind,
+        )
+
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户重视可复核证据"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(
+            client,
+            turn_id="reconcile-popup",
+            ref=ref,
+            hypothesis=hypothesis,
+        )
+        self._create_card(
+            client,
+            turn_id="reconcile-webui",
+            ref=ref,
+            hypothesis=hypothesis,
+            session="webui",
+        )
+        app = client.app
+        client.close()
+
+        object_calls = 0
+        derived_calls = 0
+        rebuild_calls = 0
+        real_object = engine.apply_feedback_object
+        real_derived = engine._apply_dialogue_settlement_derived
+        real_rebuild = engine._mark_rebuild_pending
+
+        async def count_object(feedback: dict[str, object]) -> dict[str, object]:
+            nonlocal object_calls
+            object_calls += 1
+            return await real_object(feedback)
+
+        async def count_derived(
+            *,
+            settlement: dict[str, object],
+            payload: dict[str, object],
+        ) -> list[str]:
+            nonlocal derived_calls
+            derived_calls += 1
+            return await real_derived(settlement=settlement, payload=payload)
+
+        async def count_rebuild(trigger_refs: list[str]) -> None:
+            nonlocal rebuild_calls
+            rebuild_calls += 1
+            await real_rebuild(trigger_refs)
+
+        injected = False
+
+        def fail_after_applied(checkpoint: str, settlement_ref: str) -> None:
+            nonlocal injected
+            assert settlement_ref == ref
+            if checkpoint == "after_applied_before_projection" and not injected:
+                injected = True
+                raise RuntimeError("injected applied publication gap")
+
+        monkeypatch.setattr(engine, "apply_feedback_object", count_object)
+        monkeypatch.setattr(engine, "_apply_dialogue_settlement_derived", count_derived)
+        monkeypatch.setattr(engine, "_mark_rebuild_pending", count_rebuild)
+        monkeypatch.setattr(engine, "_dialogue_settlement_checkpoint", fail_after_applied)
+
+        reconciled = threading.Event()
+        handlers = app.state.runtime_context.dialogue_settlement_handlers
+        runtime_reconcile = handlers[DialogueJobKind.CARD_RECONCILE]
+
+        async def observe_reconcile(job: DialogueJob) -> DialogueDispatchReturn:
+            result = await runtime_reconcile(job)
+            reconciled.set()
+            return result
+
+        handlers[DialogueJobKind.CARD_RECONCILE] = observe_reconcile
+        reconcile_queue = app.state.runtime_context.dialogue_settlement_queue
+        worker_projection_calls = 0
+        request_projection_calls = 0
+        real_project = memory._database.project_applied_card_settlement
+
+        def count_projection(settlement_ref: str) -> int:
+            nonlocal request_projection_calls, worker_projection_calls
+            if asyncio.current_task() is reconcile_queue.worker_task:
+                worker_projection_calls += 1
+            else:
+                request_projection_calls += 1
+            return real_project(settlement_ref)
+
+        monkeypatch.setattr(
+            memory._database,
+            "project_applied_card_settlement",
+            count_projection,
+        )
+        with TestClient(app, raise_server_exceptions=False) as runtime_client:
+            first = runtime_client.post(
+                "/api/chat/cards/reconcile-popup/action",
+                json={"action": "confirm"},
+            )
+            assert first.status_code == 500
+            receipt = memory._database.get_card_settlement(ref)
+            assert receipt is not None and receipt["applied"] == 1
+            popup_payload = memory._database.get_chat_turn("reconcile-popup")["payload"]
+            webui_payload = memory._database.get_chat_turn("reconcile-webui")["payload"]
+            assert popup_payload["state"] == "pending"
+            assert webui_payload["state"] == "pending"
+            assert (object_calls, derived_calls, rebuild_calls) == (1, 1, 1)
+
+            first_get = runtime_client.get("/api/chat/turns/reconcile-popup")
+            assert first_get.status_code == 200
+            assert first_get.json()["payload"]["state"] == "pending"
+            assert request_projection_calls == 0
+            assert reconciled.wait(timeout=2)
+
+            second_get = runtime_client.get("/api/chat/turns/reconcile-webui")
+
+        assert second_get.status_code == 200
+        assert second_get.json()["payload"]["state"] == "confirmed"
+        assert worker_projection_calls == 1
+        assert request_projection_calls == 0
+        assert (object_calls, derived_calls, rebuild_calls) == (1, 1, 1)
+        assert memory._database.get_chat_turn("reconcile-popup")["payload"]["state"] == "confirmed"
+        assert memory._database.get_chat_turn("reconcile-webui")["payload"]["state"] == "confirmed"
+
+    def test_discuss_worker_builds_anchor_and_failure_rolls_back(self, tmp_path: Path) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        first = "用户也许重视可证伪性"
+        first_ref = self._seed_hypothesis(memory, first)
+        self._create_card(client, turn_id="card-discuss-ok", ref=first_ref, hypothesis=first)
+
+        response = client.post("/api/chat/cards/card-discuss-ok/action", json={"action": "discuss"})
+        assert response.status_code == 200
+        assert response.json()["state"] == "discussing"
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.origin_turn_id == "card-discuss-ok"
+        payload = memory._database.get_chat_turn("card-discuss-ok")["payload"]
+        assert payload["state"] == "discussing"
+        assert "attempt_token" not in payload
+        assert "discussing_at" not in payload
+
+        second = "用户也许偏爱长链条论证"
+        second_ref = self._seed_hypothesis(memory, second)
+        self._create_card(client, turn_id="card-discuss-fail", ref=second_ref, hypothesis=second)
+        original = engine._dialogue_anchor_manager.establish
+
+        def fail_establish(**_kwargs: object) -> object:
+            raise RuntimeError("anchor store unavailable")
+
+        engine._dialogue_anchor_manager.establish = fail_establish  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="anchor store unavailable"):
+                client.post(
+                    "/api/chat/cards/card-discuss-fail/action",
+                    json={"action": "discuss"},
+                )
+        finally:
+            engine._dialogue_anchor_manager.establish = original  # type: ignore[method-assign]
+
+        rolled_back = memory._database.get_chat_turn("card-discuss-fail")["payload"]
+        assert rolled_back["state"] == "pending"
+        assert "attempt_token" not in rolled_back
+
+    def test_orphan_discussion_get_submits_immediate_worker_reconcile(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import threading
+
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户也许更信任一手资料"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-stale-discuss", ref=ref, hypothesis=hypothesis)
+        assert memory._database.update_chat_turn_payload_state(
+            "card-stale-discuss",
+            expected_state="pending",
+            new_state="discussing",
+        )
+        queue = client.app.state.runtime_context.dialogue_settlement_queue
+        repaired = threading.Event()
+        worker_calls: list[bool] = []
+        real_update = memory._database.update_chat_turn_payload_state
+
+        def observe_update(
+            turn_id: str,
+            *,
+            expected_state: str,
+            new_state: str,
+        ) -> bool:
+            if expected_state == "discussing" and new_state == "pending":
+                worker_calls.append(asyncio.current_task() is queue.worker_task)
+                repaired.set()
+            return real_update(
+                turn_id,
+                expected_state=expected_state,
+                new_state=new_state,
+            )
+
+        memory._database.update_chat_turn_payload_state = observe_update
+
+        first = client.get("/api/chat/turns/card-stale-discuss")
+
+        assert first.status_code == 200
+        assert first.json()["payload"]["state"] == "discussing"
+        assert repaired.wait(timeout=2)
+        second = client.get("/api/chat/turns/card-stale-discuss")
+        assert second.json()["payload"]["state"] == "pending"
+        assert worker_calls == [True]
+
+    def test_legacy_feedback_forwards_to_common_settlement_with_deprecated_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "用户偏爱完整因果链"
+        ref = self._seed_hypothesis(memory, hypothesis)
+
+        response = client.post(
+            "/api/insights/feedback",
+            json={"hypothesis": hypothesis, "signal": "confirm"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["deprecation"] == "true"
+        settlement = memory._database.get_card_settlement(ref)
+        assert settlement is not None and settlement["applied"] == 1
+        rows = memory._database.query_profile_ledger(days=1, limit=20)
+        settled = next(row for row in rows if row["write_point"] == "settle_insight")
+        assert settled["source"] == "legacy_endpoint"
+
+
+class TestPendingDialogueConfirmations:
+    """Wave B Task 5: pending list, active open, and deterministic throws."""
+
+    @staticmethod
+    def _build(tmp_path: Path):  # type: ignore[no-untyped-def]
+        return TestDialogueConfirmationCards._build(tmp_path)
+
+    @staticmethod
+    def _seed_hypothesis(memory: object, title: str, confidence: float = 0.66) -> str:
+        return TestDialogueConfirmationCards._seed_hypothesis(memory, title, confidence)
+
+    @staticmethod
+    def _post_user_turn(
+        client: object,
+        *,
+        turn_id: str,
+        session: str = "popup",
+        message: str = "继续聊聊",
+    ) -> object:
+        return client.post(
+            "/api/chat/turns",
+            json={
+                "turn_id": turn_id,
+                "session": session,
+                "scope": "chat",
+                "message": message,
+            },
+        )
+
+    def test_pending_list_filters_high_priority_caps_three_and_has_count_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        high_refs = {
+            self._seed_hypothesis(memory, "高优先假设一", 0.91),
+            self._seed_hypothesis(memory, "高优先假设二", 0.81),
+            self._seed_hypothesis(memory, "高优先假设三", 0.71),
+            self._seed_hypothesis(memory, "高优先假设四", 0.61),
+        }
+        low_ref = self._seed_hypothesis(memory, "低置信假设", 0.59)
+        validated_ref = self._seed_hypothesis(memory, "已经确认的假设", 0.95)
+        insight = memory.get_layer("insight")
+        for item in insight.data["hypotheses"]:
+            if item["hypothesis"] == "已经确认的假设":
+                item["validated"] = True
+        insight.save()
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="高优先疑惑",
+            observation="这次行为与长期偏好相反",
+            interpretation_confidence=0.72,
+            evidence_refs=["event-7"],
+        )
+        memory._database.insert_confusion(
+            source="awareness",
+            topic="低优先疑惑",
+            observation="证据还很弱",
+            interpretation_confidence=0.49,
+        )
+
+        response = client.get("/api/chat/pending-confirmations")
+        count = client.get(
+            "/api/chat/pending-confirmations",
+            params={"count_only": 1},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 3
+        assert len(body["items"]) == 3
+        refs = {item["ref"] for item in body["items"]}
+        assert str(confusion_id) in refs
+        assert refs <= high_refs | {str(confusion_id)}
+        assert low_ref not in refs
+        assert validated_ref not in refs
+        assert count.status_code == 200
+        assert count.json() == {"count": 3}
+
+    def test_confusion_keeps_a_seat_when_every_hypothesis_scores_higher(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A confusion must surface even when it scores below every hypothesis.
+
+        The two kinds measure confidence on opposite scales — a hypothesis'
+        score is "how sure am I this is true", a confusion's is "how sure am I
+        of my guess", and the awareness prompt only emits a confusion when that
+        guess is weak. One descending sort plus a top-3 cap therefore buried
+        confusions permanently: a real profile carries hundreds of ≥0.60
+        hypotheses (334 on the author's data, cutoff at 0.76) while genuine
+        confusions land around 0.3–0.5.
+        """
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        for index in range(6):
+            self._seed_hypothesis(memory, f"高置信假设-{index}", 0.90 - index / 100)
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="露营兴趣的突然性",
+            observation="只看几十秒就收藏，和木工的深看模式完全不同",
+            interpretation_confidence=0.50,
+        )
+
+        body = client.get("/api/chat/pending-confirmations").json()
+
+        assert body["count"] == 3
+        refs = [item["ref"] for item in body["items"]]
+        assert str(confusion_id) in refs, (
+            "the confusion holds a reserved seat despite scoring lowest"
+        )
+        kinds = [item["kind"] for item in body["items"]]
+        assert kinds.count("confusion") == 1, "exactly one seat is reserved, not more"
+        assert kinds.count("hypothesis") == 2, "the remaining seats still go to hypotheses"
+
+    def test_unused_confusion_seat_falls_back_to_hypotheses(self, tmp_path: Path) -> None:
+        """With no confusion pending, the reserved seat must not be wasted."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        for index in range(5):
+            self._seed_hypothesis(memory, f"只有假设-{index}", 0.90 - index / 100)
+
+        body = client.get("/api/chat/pending-confirmations").json()
+
+        assert body["count"] == 3
+        assert all(item["kind"] == "hypothesis" for item in body["items"])
+
+    def test_manual_open_three_items_ignores_both_cooldowns(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        refs = [
+            self._seed_hypothesis(memory, f"主动待聊-{index}", 0.66 + index / 100)
+            for index in range(3)
+        ]
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "global_last_thrown_at": datetime.now(UTC).isoformat(),
+                    "objects": {
+                        ref: {
+                            "last_asked_at": datetime.now(UTC).isoformat(),
+                            "deferred_until": "2099-01-01T00:00:00+00:00",
+                        }
+                        for ref in refs
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        opened = [
+            client.post(
+                f"/api/chat/pending-confirmations/{ref}/open",
+                json={"session": "popup"},
+            )
+            for ref in refs
+        ]
+
+        assert [response.status_code for response in opened] == [200, 200, 200]
+        assert len({response.json()["turn_id"] for response in opened}) == 3
+        assert all(response.json()["payload"]["state"] == "pending" for response in opened)
+        turns = client.get(
+            "/api/chat/turns",
+            params={"session": "popup", "scope": "hypothesis"},
+        ).json()["items"]
+        assert len(turns) == 3
+
+    def test_open_reuses_ref_in_same_session_and_creates_one_per_other_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "同一大脑多个屏幕", 0.73)
+
+        first = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        retry = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        other = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "webui"},
+        )
+
+        assert first.status_code == retry.status_code == other.status_code == 200
+        assert first.json()["turn_id"] == retry.json()["turn_id"]
+        assert other.json()["turn_id"] != first.json()["turn_id"]
+        assert (
+            len(
+                client.get(
+                    "/api/chat/turns",
+                    params={"session": "popup", "scope": "hypothesis"},
+                ).json()["items"]
+            )
+            == 1
+        )
+        assert (
+            len(
+                client.get(
+                    "/api/chat/turns",
+                    params={"session": "webui", "scope": "hypothesis"},
+                ).json()["items"]
+            )
+            == 1
+        )
+
+    def test_open_hypothesis_settlement_releases_anchor_and_leaves_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "主动打开后确认要解锚", 0.73)
+        opened = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "popup"},
+        )
+        assert opened.status_code == 200
+        assert engine._dialogue_anchor_manager.current() is not None
+
+        settled = client.post(
+            f"/api/chat/cards/{opened.json()['turn_id']}/action",
+            json={"action": "confirm"},
+        )
+
+        assert settled.status_code == 200
+        assert settled.json()["state"] == "confirmed"
+        assert engine._dialogue_anchor_manager.current() is None
+        refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref not in refs
+
+    def test_confusion_open_ignores_ask_cooldown_and_builds_question_anchor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="收藏后马上退出",
+            observation="收藏动作和停留时长互相冲突",
+            interpretation="可能是代理行为",
+            interpretation_confidence=0.78,
+            evidence_refs=["event-11"],
+        )
+        memory._database.update_confusion(
+            confusion_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+
+        response = client.post(
+            f"/api/chat/pending-confirmations/{confusion_id}/open",
+            json={"session": "popup"},
+        )
+
+        assert response.status_code == 200
+        turn = response.json()
+        assert turn["scope"] == "confusion"
+        assert turn["status"] == "completed"
+        assert turn["payload"]["kind"] == "confusion"
+        assert turn["reply"]
+        confusion = memory._database.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn["turn_id"]
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.kind == "confusion"
+        assert anchor.ref == str(confusion_id)
+        assert anchor.origin_turn_id == turn["turn_id"]
+
+    def test_pending_open_confusion_schedule_retarget_rollback_only_in_worker(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Q1/F3: every pending-open raw sink runs in the registered worker."""
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        queue = client.app.state.runtime_context.dialogue_settlement_queue
+        first_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="先排队的疑惑",
+            observation="需要验证 schedule 与 retarget",
+            interpretation_confidence=0.8,
+        )
+        second_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="创建失败的疑惑",
+            observation="需要验证 rollback",
+            interpretation_confidence=0.79,
+        )
+        operations: list[tuple[str, bool]] = []
+        real_schedule = engine._confusion_manager.schedule_ask
+        real_update = memory._database.update_confusion
+        real_establish = engine._dialogue_anchor_manager.establish
+
+        def observe_schedule(*args: object, **kwargs: object) -> bool:
+            operations.append(("schedule", asyncio.current_task() is queue.worker_task))
+            return bool(real_schedule(*args, **kwargs))
+
+        def observe_update(confusion_id: int, **fields: object) -> None:
+            if fields.get("status") == "open" and fields.get("ask_turn_id") == "":
+                operation = "rollback"
+            elif "ask_turn_id" in fields:
+                operation = "retarget"
+            else:
+                operation = "other"
+            operations.append((operation, asyncio.current_task() is queue.worker_task))
+            real_update(confusion_id, **fields)
+
+        def observe_establish(**fields: object) -> object:
+            operations.append(("establish", asyncio.current_task() is queue.worker_task))
+            return real_establish(**fields)
+
+        monkeypatch.setattr(engine._confusion_manager, "schedule_ask", observe_schedule)
+        monkeypatch.setattr(memory._database, "update_confusion", observe_update)
+        monkeypatch.setattr(engine._dialogue_anchor_manager, "establish", observe_establish)
+
+        first = client.post(
+            f"/api/chat/pending-confirmations/{first_id}/open",
+            json={"session": "popup"},
+        )
+        retarget = client.post(
+            f"/api/chat/pending-confirmations/{first_id}/open",
+            json={"session": "webui"},
+        )
+        assert first.status_code == retarget.status_code == 200
+
+        real_update(first_id, status="resolved")
+        real_create = memory._database.create_chat_confirmation_turn
+
+        def fail_second_create(**fields: object) -> object:
+            if str(fields.get("ref", "")) == str(second_id):
+                raise RuntimeError("injected confirmation create failure")
+            return real_create(**fields)
+
+        monkeypatch.setattr(
+            memory._database,
+            "create_chat_confirmation_turn",
+            fail_second_create,
+        )
+        with pytest.raises(RuntimeError, match="injected confirmation create failure"):
+            client.post(
+                f"/api/chat/pending-confirmations/{second_id}/open",
+                json={"session": "mobile"},
+            )
+
+        assert operations == [
+            ("schedule", True),
+            ("establish", True),
+            ("retarget", True),
+            ("establish", True),
+            ("schedule", True),
+            ("rollback", True),
+        ]
+
+    def test_restart_releases_clarifying_claim_without_corresponding_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """F4: a crash after durable claim cannot invisibly pin the unique slot."""
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        orphan_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="claim 后崩溃的疑惑",
+            observation="turn 尚未创建",
+            interpretation_confidence=0.84,
+        )
+        next_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="下一条疑惑",
+            observation="应能取得释放后的 slot",
+            interpretation_confidence=0.82,
+        )
+        assert memory._database.claim_confusion_clarifying(
+            orphan_id,
+            ask_turn_id="missing-after-crash",
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        memory._database.conn.execute(
+            """
+            UPDATE confusions
+               SET updated_at = datetime('now', '-31 seconds')
+             WHERE id = ?
+            """,
+            (orphan_id,),
+        )
+        memory._database.conn.commit()
+        assert memory._database.get_chat_turn("missing-after-crash") is None
+        client.close()
+        memory._database.close()
+
+        client2, memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        pending = client2.get("/api/chat/pending-confirmations")
+
+        assert pending.status_code == 200
+        orphan = memory2._database.get_confusion(orphan_id)
+        assert orphan is not None
+        assert orphan["status"] == "open"
+        assert orphan["ask_turn_id"] == ""
+        assert not orphan["asked_at"]
+        assert str(orphan_id) in {item["ref"] for item in pending.json()["items"]}
+
+        opened = client2.post(
+            f"/api/chat/pending-confirmations/{next_id}/open",
+            json={"session": "popup"},
+        )
+        assert opened.status_code == 200
+        claimed_next = memory2._database.get_confusion(next_id)
+        assert claimed_next is not None
+        assert claimed_next["status"] == "clarifying"
+        assert claimed_next["ask_turn_id"] == opened.json()["turn_id"]
+
+    def test_system_throw_global_12h_survives_restart_and_same_turn_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "系统抛出后要全局节流", 0.72)
+
+        first = self._post_user_turn(client, turn_id="user-global-1", session="popup")
+        assert first.status_code == 200
+        popup = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["scope"] for item in popup] == ["hypothesis", "chat"]
+        assert popup[0]["payload"]["ref"] == ref
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["global_last_thrown_at"]
+        client.close()
+        time.sleep(0.03)
+        memory._database.close()
+
+        client2, _memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        retry = self._post_user_turn(client2, turn_id="user-global-1", session="popup")
+        blocked = self._post_user_turn(client2, turn_id="user-global-2", session="webui")
+
+        assert retry.status_code == blocked.status_code == 200
+        popup_after = client2.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        webui_after = client2.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        assert [item["scope"] for item in popup_after] == ["hypothesis", "chat"]
+        assert [item["scope"] for item in webui_after] == ["chat"]
+
+    def test_concurrent_user_messages_atomically_claim_one_global_throw(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        first_client, memory, _engine, _dialogue = self._build(tmp_path)
+        self._seed_hypothesis(memory, "并发消息只能触发一次系统抛出", 0.74)
+        second_client = TestClient(first_client.app)
+
+        def send(index: int) -> int:
+            client = first_client if index == 0 else second_client
+            response = self._post_user_turn(
+                client,
+                turn_id=f"user-concurrent-{index}",
+                session=f"screen-{index}",
+            )
+            return response.status_code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = list(executor.map(send, range(2)))
+
+        assert statuses == [200, 200]
+        rows = memory._database.conn.execute(
+            "SELECT session FROM chat_turns WHERE scope = 'hypothesis'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_system_throw_requires_global_12h_and_object_72h(self, tmp_path: Path) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "对象冷却要叠加全局冷却", 0.74)
+        assert (
+            self._post_user_turn(
+                client,
+                turn_id="user-object-1",
+                session="popup",
+            ).status_code
+            == 200
+        )
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["global_last_thrown_at"] = (datetime.now(UTC) - timedelta(hours=13)).isoformat()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        blocked = self._post_user_turn(
+            client,
+            turn_id="user-object-2",
+            session="webui",
+        )
+        assert blocked.status_code == 200
+        assert [
+            item["scope"]
+            for item in client.get("/api/chat/turns", params={"session": "webui"}).json()["items"]
+        ] == ["chat"]
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["global_last_thrown_at"] = (datetime.now(UTC) - timedelta(hours=13)).isoformat()
+        state["objects"][ref]["last_asked_at"] = (
+            datetime.now(UTC) - timedelta(hours=73)
+        ).isoformat()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        allowed = self._post_user_turn(
+            client,
+            turn_id="user-object-3",
+            session="desktop-2",
+        )
+
+        assert allowed.status_code == 200
+        assert [
+            item["scope"]
+            for item in client.get("/api/chat/turns", params={"session": "desktop-2"}).json()[
+                "items"
+            ]
+        ] == ["hypothesis", "chat"]
+
+    def test_attachment_is_before_user_and_empty_or_retry_never_creates_extra_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        self._seed_hypothesis(memory, "附着必须稳定保序", 0.69)
+
+        empty = self._post_user_turn(
+            client,
+            turn_id="user-attach-empty",
+            message="   ",
+        )
+        assert empty.status_code == 422
+        assert client.get("/api/chat/turns", params={"session": "popup"}).json()["items"] == []
+
+        first = self._post_user_turn(client, turn_id="user-attach-1")
+        retry = self._post_user_turn(client, turn_id="user-attach-1")
+
+        assert first.status_code == retry.status_code == 200
+        turns = client.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["scope"] for item in turns] == ["hypothesis", "chat"]
+        assert turns[0]["payload"]["attached_to_turn_id"] == "user-attach-1"
+        assert turns[1]["turn_id"] == "user-attach-1"
+
+    def test_restart_repairs_card_inserted_before_user_without_duplicate_attachment(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        title = "崩溃缝隙也不能重复附着"
+        ref = self._seed_hypothesis(memory, title, 0.7)
+        memory._database.create_chat_turn(
+            turn_id="orphan-attachment",
+            session="popup",
+            scope="hypothesis",
+            subject_id=ref,
+            subject_title=title,
+            message="阿b 的猜测",
+            payload={
+                "type": "card",
+                "kind": "hypothesis",
+                "ref": ref,
+                "title": title,
+                "evidence_refs": [],
+                "actions": ["confirm", "reject", "discuss", "defer"],
+                "state": "pending",
+                "attached_to_turn_id": "user-after-crash",
+            },
+        )
+        memory._database.complete_chat_turn("orphan-attachment", reply="")
+        client.close()
+        memory._database.close()
+
+        client2, memory2, _engine2, _dialogue2 = self._build(tmp_path)
+        response = self._post_user_turn(client2, turn_id="user-after-crash")
+
+        assert response.status_code == 200
+        turns = client2.get("/api/chat/turns", params={"session": "popup"}).json()["items"]
+        assert [item["turn_id"] for item in turns] == [
+            "orphan-attachment",
+            "user-after-crash",
+        ]
+        state = json.loads(
+            (memory2._data_dir / "memory" / "dialogue_confirmation_state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["global_last_thrown_at"]
+        assert state["objects"][ref]["last_asked_at"]
 
 
 class TestEmbeddingAndCompatProviderE2E:
@@ -16918,3 +18772,153 @@ class TestRootRedirectLanding:
         response = client.get("/", follow_redirects=False)
         assert response.status_code == 302
         assert response.headers["location"] == "/web"
+
+
+class TestUnifiedInterestLineFeedbackIngestion:
+    """统一兴趣更新线 Wave A：/api/feedback 是否喂 pipeline 由开关决定。
+
+    Wave A 默认关——开着会让同一条反馈被新快线和仍在跑的旧批线双计。
+    """
+
+    class _FakeDatabase:
+        def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+            return {
+                "id": recommendation_id,
+                "bvid": "BV1REC",
+                "title": "讲透城市与建筑",
+                "topic_label": "建筑",
+                "up_name": "建筑师",
+            }
+
+        def update_recommendation_feedback(
+            self,
+            recommendation_id: int,
+            *,
+            feedback_type: str,
+            feedback_note: str = "",
+        ) -> None:
+            return None
+
+    class _SpyPipeline:
+        def __init__(self) -> None:
+            self.signals: list[Any] = []
+
+        async def ingest(self, signal: Any) -> object:
+            self.signals.append(signal)
+            return object()
+
+    class _FakeSoulEngine:
+        def __init__(self, *, unified: bool) -> None:
+            self.unified_interest_line_enabled = unified
+            self.pipeline = TestUnifiedInterestLineFeedbackIngestion._SpyPipeline()
+            self.batch_calls = 0
+
+        def is_profile_ready(self) -> bool:
+            return True
+
+        def record_immediate_feedback_cognition(
+            self,
+            *,
+            feedback_type: str,
+            title: str,
+            note: str = "",
+        ) -> None:
+            return None
+
+        async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            self.batch_calls += 1
+            return {"triggered": False}
+
+    def _post_feedback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        unified: bool,
+    ) -> tuple[Any, int]:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.memory.manager import MemoryManager
+
+        schedules = 0
+
+        class FakeFeedbackBatchScheduler:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def schedule(self) -> None:
+                nonlocal schedules
+                schedules += 1
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(api_app, "FeedbackBatchScheduler", FakeFeedbackBatchScheduler)
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        soul = self._FakeSoulEngine(unified=unified)
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=self._FakeDatabase(),
+                soul_engine=soul,
+            )
+        )
+
+        response = client.post(
+            "/api/feedback",
+            json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+        )
+        assert response.status_code == 200
+        return soul, schedules
+
+    def test_flag_off_leaves_feedback_behaviour_byte_identical(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=False)
+
+        assert soul.pipeline.signals == [], "开关关闭时反馈绝不能进 pipeline（否则与旧批线双计）"
+        assert schedules == 1, "旧批线调度保持不变"
+
+    def test_flag_on_feeds_one_feedback_signal_into_the_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from openbiliclaw.soul.pipeline import OnionLayer, SignalType
+
+        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=True)
+
+        assert len(soul.pipeline.signals) == 1
+        signal = soul.pipeline.signals[0]
+        assert signal.signal_type is SignalType.FEEDBACK
+        assert signal.payload["feedback_type"] == "dislike"
+        assert signal.payload["title"] == "讲透城市与建筑"
+        assert signal.payload["note"] == "太浅了"
+        assert signal.target_layers == frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE})
+        assert schedules == 1, "Wave A 旧批线仍照常调度"
+
+
+class TestSoulEngineFeedbackConfigPlumbing:
+    """三个 SoulEngine 构造点必须读同一套 config（三面契约）。
+
+    Wave A 只给 ``api/runtime_context.py`` 接了 ``unified_interest_line``，
+    而 ``feedback_batch_threshold`` 从来只有这一面在传——CLI 与 OpenClaw
+    两面都在用硬编码默认值 3。对应的 CLI/OpenClaw 断言分别在
+    ``tests/test_cli.py`` 与 ``tests/test_openclaw_adapter.py``。
+    """
+
+    def test_runtime_context_forwards_feedback_batch_config(self, tmp_path: Path) -> None:
+        from openbiliclaw.api.runtime_context import build_runtime_context
+        from openbiliclaw.config import Config
+
+        config = Config(data_dir=str(tmp_path / "data"))
+        config.llm.default_provider = "ollama"
+        config.llm.ollama.model = "llama3"
+        config.scheduler.feedback_batch_threshold = 6
+        config.scheduler.unified_interest_line = True
+
+        ctx = build_runtime_context(config)
+
+        assert ctx.soul_engine is not None
+        assert ctx.soul_engine.unified_interest_line_enabled is True
+        assert ctx.soul_engine._feedback_batch_threshold == 6

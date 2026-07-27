@@ -1,6 +1,6 @@
 # LLM 多模型支持
 
-> 运行时并发由单一 `LLMConcurrencyGate` 管理：所有 provider 请求受总 gate（默认 4）约束，后台还受 `max(1, total-1)`（默认 3）约束。后台 admission 依据 canonical durable inventory 把工作分为 `refill.expression > refill.evaluation > refill.supply > maintenance`；有 refill waiter 时保证下一批新准入至少两个 refill 槽并可借满三个，库存为零时 park 新 maintenance。对话、`api.sentiment` 与用户主动发起的 `api.config_probe` 是交互流量；未知 caller 只告警一次并按 maintenance 处理。旧 `bypass_semaphore=True` 只绕过后台 gate，`PrioritySemaphore` 仍从 `llm.service` 兼容导出。
+> 运行时并发由单一 `LLMConcurrencyGate` 管理：所有 provider 请求受总 gate（默认 4）约束，后台还受 `max(1, total-1)`（默认 3）约束。后台 admission 依据 canonical durable inventory 把工作分为 `refill.expression > refill.evaluation > refill.supply > maintenance`；有 refill waiter 时保证下一批新准入至少两个 refill 槽并可借满三个，库存为零时 park 新 maintenance（**park 有 5 分钟上限** `MAINTENANCE_STARVATION_GRACE_SECONDS`：库存持续为零且补货始终不来时——所有 source 关闭、凭据失效或网络不通——到点强制放行并打 WARNING 指出补货可能失败。画像流水线归 `soul.*` = maintenance，无上限的 park 会让日常浏览静默停止更新画像，而 maintenance 本身不可能把池子补上；库存恢复非 EMPTY 时该豁免立即撤销并为下次重新武装）。对话、`api.sentiment` 与用户主动发起的 `api.config_probe` 是交互流量；未知 caller 只告警一次并按 maintenance 处理。旧 `bypass_semaphore=True` 只绕过后台 gate，`PrioritySemaphore` 仍从 `llm.service` 兼容导出。
 
 热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测使用 `api.config_probe` 交互分类，只经过 total gate：即使 canonical inventory 为空，用户仍能测试并修复阻塞初始化的模型配置，但探测不会绕过总 provider 并发上限。
 
@@ -23,6 +23,8 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 多端点实例注册 + 全局 / 模块有序链 + 实例级 cooldown + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
+| v0.3.182+ 对话洞察锚 prompt | ✅ | `build_dialogue_insight_prompt(..., active_list=None, anchor=None)` 保持模块级静态 system 与确定性 `sort_keys=True` user JSON。`anchor=None` 保留无锚字节形态；非空 `anchor` 只在 user message 追加 `<current_anchor>` 与 kind×relation 输出契约，不把代次数据污染 prompt-cache system 前缀。 |
+| v0.3.182+ 对话结算在线内所有权 | ✅ | API runtime 的 `SocraticDialogue(mode=queued)` 在唯一 `DialogueSettlementQueue` worker 内 await 回复后的完整 `learn_from_dialogue`，普通 chat settles 与锚 relation 在同一 worker 直接 apply；不 detached、不进 task registry，也不为整项套 300 秒队列 timeout，provider 自身有限 timeout 与 total gate 不变。探针对话的 sentiment classifier 也只在 `probe.reply.apply` job 内调用一次；弱正向只把 typed `ExplorationIntent` 交回 dispatcher，真实 exploration 写入在 permit 外沿用既有路径。CLI/OpenClaw 两处 `legacy_direct` 继续既有 detached learning，不进入此所有权域。 |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.185+ 401 终态化与归属可见 | ✅ | `llm.base.LLMAuthError` 携带 `provider_name` / `endpoint`；OpenAI 系（openai / deepseek / ollama / openrouter / openai_compatible）、Claude、Gemini 的 `_map_error()` 在 401 时统一抛出它并记 WARNING（含 base_url + 上游 body 摘要），三家 `_is_retryable()` 一致视其为终态、**零重试**（此前 401 被当作可重试的通用 `LLMProviderError`，每分片白跑 3 次，在 provider 后台留下大量被拒请求）。`describe_llm_failure()` 的鉴权文案改为指名「{provider}（{host}）拒绝了当前 API key」并提示临时 token 过期这一成因；host 经 `urlsplit().hostname` 提取，base_url 内联凭据不外泄。裸子串 `"401"` 判定收紧为 `_LLM_AUTH_STATUS_RE` 限定形式（`HTTP 401` / `Error code: 401` / `"code":401` / `status_code=401`，排除 4010/4011），避免 request id 或 402 余额不足回包里的 `401` 让 auth 桶盖掉 rate-limited 桶 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / unauthenticated / invalid API key / api key not valid 与限定形式 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
@@ -251,6 +253,31 @@ except Exception as exc:
         # 批量调用方可跳过逐条 fallback，等待下一轮调度重试。
         ...
 ```
+
+### Dialogue insight prompt
+
+```python
+from openbiliclaw.llm.prompts import build_dialogue_insight_prompt
+
+messages = build_dialogue_insight_prompt(
+    user_message="我支持这个判断，但想把表述改得更准确。",
+    assistant_reply="你是在修正范围，而不是否定方向。",
+    core_memory=memory.get_core_memory(),
+    active_list={
+        "speculations": [{"domain": "桌游"}],
+        "insights": [{"hash": "2d0a6ff1", "hypothesis": "用户重视原始研究"}],
+        "confusions": [{"id": "7", "topic": "桌游"}],
+    },
+    anchor={
+        "kind": "hypothesis",
+        "ref": "2d0a6ff1",
+        "generation": 3,
+        "hypothesis": "用户重视原始研究",
+    },
+)
+```
+
+`anchor` 是可选公开参数。未传或传 `None` 时，builder 不增加任何锚段，继续输出普通 `{candidates, settles}` 契约；传入时只在 user message 增加当前锚和 `anchor.relation` 契约，允许 hypothesis 的 `support/contradict/revise/ambiguous/unrelated` 或 confusion 的 `answer/ambiguous/unrelated`。调用方仍必须用持久化 ref+generation 做 CAS，prompt 中的 generation 不是授权凭证。
 
 ### 结构化 JSON 解析 helper
 

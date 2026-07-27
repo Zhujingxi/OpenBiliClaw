@@ -117,6 +117,7 @@ class ProfileLedger:
         gate_verdict: str = "",
         held_id: str = "",
         error: str = "",
+        effect_key: str = "",
     ) -> None:
         """Append one ledger row. Never raises — failures log at WARNING."""
         db = self._database
@@ -138,6 +139,7 @@ class ProfileLedger:
                 gate_verdict=str(gate_verdict or ""),
                 held_id=str(held_id or ""),
                 error=str(error or ""),
+                effect_key=str(effect_key or ""),
             )
         except Exception:
             logger.warning(

@@ -308,3 +308,94 @@ async def test_awareness_analyzer_consumes_wrapped_notes_after_shared_parser_mig
 
     assert len(notes) == 1
     assert notes[0].observation == "最近连续浏览系统拆解内容。"
+
+
+@pytest.mark.asyncio
+async def test_per_note_evidence_is_kept_exact_when_the_model_cites_real_events() -> None:
+    """A validated per-note citation is exact, not approximate.
+
+    Before this, attribution was always per-round: the whole consumed batch was
+    stapled onto every note with `approximate=True`, so "which events produced
+    this observation" was unanswerable even when the model knew.
+    """
+    from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
+
+    raw = json.dumps(
+        {
+            "notes": [
+                {
+                    "date": "2026-07-26",
+                    "observation": "连续完整看完木工长视频。",
+                    "trend": "深度投入。",
+                    "emotion_guess": "专注",
+                    "source_event_ids": [11, 13],
+                },
+                {
+                    "date": "2026-07-26",
+                    "observation": "说不清是哪几条造成的整体印象。",
+                    "trend": "面上的观察。",
+                    "emotion_guess": "中性",
+                    "source_event_ids": [],
+                },
+            ],
+            "confusions": [],
+        },
+        ensure_ascii=False,
+    )
+    events = [{"id": item, "event_type": "view", "title": f"e{item}"} for item in (11, 12, 13)]
+
+    notes, _ = await AwarenessAnalyzer(FakeStructuredService(raw)).analyze_with_confusions(
+        events=events,
+        preference={},
+        soul_profile={},
+    )
+
+    assert len(notes) == 2
+    precise, vague = notes
+    assert precise.source_event_ids == [11, 13]
+    assert precise.source_event_ids_approximate is False, "a validated citation is exact"
+    # No citation → honest fallback to the whole batch, explicitly flagged.
+    assert vague.source_event_ids == [11, 12, 13]
+    assert vague.source_event_ids_approximate is True
+
+
+@pytest.mark.asyncio
+async def test_hallucinated_evidence_ids_fall_back_to_approximate_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An id outside the analysed batch must never enter the evidence chain.
+
+    A chain pointing at events that never fed the observation is worse than an
+    honest approximate one, so one bad id demotes the whole note rather than
+    keeping the plausible-looking survivors.
+    """
+    from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
+
+    raw = json.dumps(
+        {
+            "notes": [
+                {
+                    "date": "2026-07-26",
+                    "observation": "引用了没给过的事件。",
+                    "trend": "无。",
+                    "emotion_guess": "中性",
+                    "source_event_ids": [11, 999],
+                }
+            ],
+            "confusions": [],
+        },
+        ensure_ascii=False,
+    )
+    events = [{"id": item, "event_type": "view", "title": f"e{item}"} for item in (11, 12)]
+
+    with caplog.at_level("WARNING"):
+        notes, _ = await AwarenessAnalyzer(FakeStructuredService(raw)).analyze_with_confusions(
+            events=events,
+            preference={},
+            soul_profile={},
+        )
+
+    assert notes[0].source_event_ids == [11, 12], "demoted to the real batch"
+    assert notes[0].source_event_ids_approximate is True
+    assert 999 not in notes[0].source_event_ids
+    assert "outside the analysed batch" in caplog.text

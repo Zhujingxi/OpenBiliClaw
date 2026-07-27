@@ -6,8 +6,12 @@ Transforms raw behavioral data into deep, layered understanding of a person.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,15 +35,39 @@ from .cognition_cycle import (
 )
 from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
+from .dialogue_anchor import ENTRY_CONFUSION_PROMPT, DialogueAnchor, DialogueAnchorManager
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
+)
+from .dialogue_learn_queue import (
+    ANCHOR_NOT_APPLICABLE,
+    AnchorAbsent,
+    AnchorAdmissionSnapshot,
+    AnchorFailed,
+    AnchorMutationTerminal,
+    AnchorNotApplicable,
+    AnchorPersisted,
+    AnchorReserved,
+    DialogueDispatchResult,
+    DialogueJob,
+    DialogueJobKind,
+    DialogueJobResult,
+    DialogueSettlementQueue,
 )
 from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
-from .pipeline import ProfileUpdatePipeline, migrate_pipeline_deep_buffers
+from .pipeline import (
+    FeedbackConsumerHooks,
+    OnionLayer,
+    ProfileSignal,
+    ProfileUpdatePipeline,
+    SignalType,
+    migrate_pipeline_deep_buffers,
+    signal_from_feedback,
+)
 from .posture_gate import ACCEPT, GateDecision, PostureGate
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
@@ -82,6 +110,53 @@ _REBUILD_WRITE_POINT: dict[str, str] = {
 # (spec invariant 3 / r3/F1). Rejected or unvalidated hypotheses are invisible
 # to every rebuild, so a reject's next rebuild squeezes an old conclusion out.
 _REBUILD_MIN_CONFIDENCE = 0.75
+# Autonomous deep influence (2026-07-27, user decision): a hypothesis the user
+# never ruled on may shape a gated soul rebuild WITHOUT explicit confirmation,
+# once behaviour has corroborated it long enough. The bar is deliberately
+# higher than the user-confirmed path on every axis:
+# - confidence >= 0.8 (vs 0.75): on real cognition output fresh hypotheses land
+#   at 0.5-0.75; only repeated cross-cycle corroboration pushes one to 0.8+.
+# - age >= 7 days: one enthusiastic afternoon must not rewrite the deep layer;
+#   seven days spans multiple cognition cycles and usage moods.
+# - evidence >= 3: a hypothesis resting on a single observation stays a guess.
+# A user rejection (user_verdict == "rejected") blocks autonomy permanently,
+# and every autonomous rebuild still passes the posture gate. Recalibrate the
+# confidence bar after any provider/model swap (pitfall rule 3).
+_AUTO_VALIDATE_MIN_CONFIDENCE = 0.8
+_AUTO_VALIDATE_MIN_AGE_DAYS = 7
+_AUTO_VALIDATE_MIN_EVIDENCE = 3
+# Fast tier (user decision 2026-07-27, "置信度非常高的话可以直接更新"): near-
+# certainty waives the tenure bar, nothing else. On real cognition output a
+# fresh hypothesis lands at 0.5-0.75 and 0.8+ already takes repeated cross-
+# cycle corroboration, so 0.95 is only reachable when the model is essentially
+# certain across many corroborating merges. The evidence floor, the untouched-
+# by-the-user requirement, the posture gate and the rejection veto all still
+# apply — speed is the only thing this tier buys.
+_AUTO_VALIDATE_FAST_MIN_CONFIDENCE = 0.95
+_AUTO_HYPOTHESIS_REF_PREFIX = "auto_hypothesis:"
+# How many of the events init just recorded may be cited by a persisted draft.
+# Attribution here is per-round (the model was never asked which note came from
+# which event), so the notes are flagged approximate; the cap only keeps the
+# citation list from growing with the whole history.
+_INIT_DRAFT_EVIDENCE_CAP = 300
+
+
+def _init_draft_evidence(value: object) -> list[str]:
+    """Normalise a draft's evidence list, dropping blanks and non-strings."""
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _clamp_init_draft_confidence(value: object) -> float:
+    """Coerce a draft confidence into [0, 1], defaulting to 0.5."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(1.0, round(number, 4)))
+
+
 # Debounce between a confirm/reject migration and the gated rebuild it schedules
 # (spec r3/F3). 6h sits between conversational cadence and the 12h cognition
 # loop — first-round calibration, re-tune after the first production month
@@ -93,6 +168,58 @@ _DEEP_REBUILD_DEBOUNCE_HOURS = 6
 _REBUILD_MAX_RETRIES = 2
 # Cap on the confirmed-hypothesis list carried in the gate snapshot context.
 _REBUILD_CONTEXT_HYPOTHESIS_CAP = 12
+
+# First-round calibration (2026-07-22): 0.5 rejects clear paraphrases without
+# suppressing a side topic that merely shares one generic word. Recalibrate
+# after the first production month or any tokenizer/model swap.
+#
+# Known bound (measured 2026-07-26): this is a *lexical* defence. It reliably
+# catches restatements that reuse wording ("用户喜欢深度技术内容" vs
+# "喜欢深度技术内容" scores 0.78) and reliably misses semantic duplicates that
+# reword ("用户喜欢深度技术内容" vs "用户偏好硬核原理讲解" scores 0.06). A
+# bge-m3 cosine pass was calibrated as a second layer and rejected: over five
+# duplicate and five side-topic pairs the classes were 0.599–0.796 and
+# 0.446–0.569, i.e. a 0.03-wide separation band. No threshold in that band is
+# trustworthy, and a false positive (silently discarding a genuine side remark
+# the user just made) costs more than the false negative it would prevent (one
+# redundant candidate, which downstream consolidation already merges). If this
+# is revisited, calibrate on real dialogue transcripts rather than synthetic
+# pairs, and keep the asymmetry in mind: prefer under- to over-filtering.
+_ANCHOR_CANDIDATE_JACCARD_THRESHOLD = 0.5
+# Product calibration (2026-07-22): one clarification is enough to distinguish
+# hesitation from avoidance without turning the dialogue into an interrogation.
+_ANCHOR_AMBIGUOUS_FOLLOW_UP_LIMIT = 1
+_CHINESE_STOPWORDS = frozenset("的了是在我有")
+_ENGLISH_STOPWORDS = frozenset(
+    {"a", "the", "is", "am", "are", "of", "to", "and", "i", "have", "in"}
+)
+_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+_ENGLISH_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_ANCHOR_RELATIONS_BY_KIND = {
+    "hypothesis": frozenset({"support", "contradict", "revise", "ambiguous", "unrelated"}),
+    "confusion": frozenset({"answer", "ambiguous", "unrelated"}),
+}
+_CONFUSION_SETTLEMENT_RESOLUTIONS = frozenset({"real_interest", "proxy_behavior", "dismissed"})
+
+
+def _dialogue_anchor_tokens(value: str) -> set[str]:
+    normalized = unicodedata.normalize("NFC", value).lower()
+    tokens = {
+        token for token in _ENGLISH_TOKEN_RE.findall(normalized) if token not in _ENGLISH_STOPWORDS
+    }
+    for run in _CJK_RUN_RE.findall(normalized):
+        filtered = "".join(character for character in run if character not in _CHINESE_STOPWORDS)
+        tokens.update(filtered[index : index + 2] for index in range(max(0, len(filtered) - 1)))
+    return tokens
+
+
+def _dialogue_anchor_jaccard(left: str, right: str) -> float:
+    left_tokens = _dialogue_anchor_tokens(left)
+    right_tokens = _dialogue_anchor_tokens(right)
+    union = left_tokens | right_tokens
+    if not union:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(union)
 
 
 def _memory_database(memory: Any) -> Any | None:
@@ -204,6 +331,7 @@ class SoulEngine:
         profile_consolidation_like_target_soft: int = 450,
         profile_consolidation_archive_enabled: bool = True,
         feedback_batch_threshold: int = 3,
+        unified_interest_line: bool = False,
         posture_gate_mode: str = "shadow",
         posture_gate_force_enforce: bool = False,
         database: Any | None = None,
@@ -212,6 +340,15 @@ class SoulEngine:
         self._memory = memory
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
+        # Unified interest line kill switch (spec 2026-07-27). False (Wave A
+        # default) keeps feedback on the legacy batch only — turning both on
+        # would let the same feedback be counted twice.
+        self._unified_interest_line = bool(unified_interest_line)
+        # Monotonic count of gated soul rebuilds driven by a pipeline feedback
+        # batch. The shim snapshots it around a tick so its ``profile_rebuilt``
+        # return key keeps the legacy meaning without threading a result object
+        # back out through the pipeline's best-effort hook boundary.
+        self._pipeline_feedback_rebuilds = 0
         self._feedback_batch_lock = asyncio.Lock()
         # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
         # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
@@ -282,6 +419,7 @@ class SoulEngine:
             # 12h-loop fallback trigger for the debounced confirmed-hypotheses
             # rebuild (spec invariant 4). Bound method; only invoked at run time.
             pending_rebuild_hook=self.run_pending_rebuild_if_due,
+            confusion_replay_hook=self.replay_confusion_dialogue_attributions,
         )
         self._profile_consolidator: ProfileConsolidator | None = None
         if profile_consolidation_enabled:
@@ -306,6 +444,8 @@ class SoulEngine:
             cognition_cycle=self._cognition_cycle,
             speculator_idle_interval_minutes=speculator_idle_interval_minutes,
             profile_consolidator=self._profile_consolidator,
+            unified_interest_line=self._unified_interest_line,
+            feedback_batch_threshold=self._feedback_batch_threshold,
         )
         # Detached dislike writeback from manual edits, feedback batches, and
         # dialogue learning. The purge runs an LLM+embedding recall that must
@@ -331,6 +471,16 @@ class SoulEngine:
         # Confusion state machine over the same database — drives the topic
         # freeze reflex at the dialogue preference write chokepoint (Phase 2).
         self._confusion_manager = ConfusionManager(self._ledger_database, self._ledger)
+        self._dialogue_anchor_manager = DialogueAnchorManager(
+            data_dir,
+            database=self._ledger_database,
+            ledger=self._ledger,
+        )
+        # The API runtime binds its one queue after constructing both sides of
+        # the dispatcher cycle. Public submit façades fail closed until then;
+        # worker-only apply methods never infer a fallback executor.
+        self._dialogue_settlement_queue: DialogueSettlementQueue | None = None
+        self._dialogue_mutation_guard: Callable[[], None] | None = None
         # Wire the same ledger into the speculator so promote/confirm/reject
         # write points (D5 #5) land in the same audit trail.
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
@@ -349,6 +499,16 @@ class SoulEngine:
         set_gate = getattr(self._pipeline, "set_posture_gate", None)
         if callable(set_gate):
             set_gate(self._posture_gate)
+        # Unified interest line: hand the pipeline the retired feedback batch's
+        # privileges. Wired ONLY when the switch is on, so flipping it off
+        # returns the consuming side to today's behaviour too.
+        if self._unified_interest_line:
+            self._pipeline.set_feedback_hooks(
+                FeedbackConsumerHooks(
+                    archive_dislikes=self._archive_disliked_topics,
+                    after_update=self._after_pipeline_feedback_interest,
+                )
+            )
         # Held-replay crash recovery (Wave B, r5/R4-1): any held update left in
         # ``replaying`` at construction is a leftover from a previously crashed
         # session — reconcile it to ``applied_unverified`` (never resubmit;
@@ -375,6 +535,16 @@ class SoulEngine:
     def pipeline(self) -> Any:
         """Access the ProfileUpdatePipeline for direct signal ingestion."""
         return self._pipeline
+
+    @property
+    def unified_interest_line_enabled(self) -> bool:
+        """Whether feedback flows into the pipeline fast line (spec 2026-07-27).
+
+        False (Wave A default) means ``/api/feedback`` must NOT ingest a
+        FEEDBACK signal: the legacy feedback batch is still running and would
+        double-count the same user action.
+        """
+        return self._unified_interest_line
 
     async def analyze_events(
         self,
@@ -413,6 +583,7 @@ class SoulEngine:
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
+        self._persist_init_cognition_drafts(self._init_cognition_context)
         # Ledger write point D5 #7: full-preference (re)build from raw events —
         # the init bootstrap and any full-events re-analysis both land here.
         existing_preference = dict(preference_layer.data)
@@ -455,8 +626,15 @@ class SoulEngine:
         preference_layer = self._memory.get_layer("preference").data
         awareness_notes = [awareness_note_to_dict(item) for item in self._load_awareness_notes()]
         active_insights = [insight_hypothesis_to_dict(item) for item in self._load_insights()]
-        awareness_notes.extend(self._init_awareness_context())
-        active_insights.extend(self._init_insight_context())
+        # Init drafts are persisted by ``_persist_init_cognition_drafts``, so the
+        # two loads above normally already contain them. The in-memory context is
+        # still appended because that persistence is best-effort — but dedup by
+        # normalized text, or the profile builder would weigh every init draft
+        # twice and read it as two independent observations.
+        self._extend_without_duplicates(
+            awareness_notes, self._init_awareness_context(), "observation"
+        )
+        self._extend_without_duplicates(active_insights, self._init_insight_context(), "hypothesis")
         legacy_profile = await self._profile_builder.build(
             history=history,
             preference=preference_layer,
@@ -498,6 +676,26 @@ class SoulEngine:
         # load-bearing profile stage.
 
         return profile
+
+    def _extend_without_duplicates(
+        self,
+        existing: list[dict[str, object]],
+        extra: list[dict[str, object]],
+        field: str,
+    ) -> None:
+        """Append ``extra`` to ``existing``, skipping entries already present."""
+        seen = {
+            key
+            for key in (self._normalize_context_text(str(item.get(field, ""))) for item in existing)
+            if key
+        }
+        for item in extra:
+            key = self._normalize_context_text(str(item.get(field, "")))
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            existing.append(item)
 
     def _init_awareness_context(self) -> list[dict[str, object]]:
         raw_items = self._init_cognition_context.get("awareness")
@@ -923,6 +1121,18 @@ class SoulEngine:
                 "metadata": feedback,
             }
         )
+        result = await self.apply_feedback_object(feedback)
+        await self.mark_feedback_rebuild(feedback, result)
+        return result
+
+    async def apply_feedback_object(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        """Apply only the idempotent hypothesis-object feedback effect.
+
+        Durable card settlement owns event receipt and rebuild-marker effects
+        separately, so the single settlement worker calls this method directly.
+        ``update_from_feedback`` remains the compatibility facade that executes
+        all three effects in the historical order.
+        """
         hypotheses = self._load_insights()
         target = self._normalize_text(str(feedback.get("hypothesis", "")))
         signal = str(feedback.get("signal", "")).strip().lower()
@@ -933,33 +1143,31 @@ class SoulEngine:
             "validated": False,
             "confidence": 0.0,
         }
-        migrated = False
+        changed = False
         for item in hypotheses:
             if self._normalize_text(item.hypothesis) != target:
                 continue
+            previous_validated = item.validated
+            previous_confidence = item.confidence
             if signal in {"confirm", "like", "support"}:
                 item.validated = True
                 item.confidence = min(1.0, round(max(item.confidence, 0.75), 4))
-                migrated = True
+                item.user_verdict = "confirmed"
             elif signal in {"reject", "dislike", "deny"}:
                 item.validated = False
                 item.confidence = max(0.0, round(min(item.confidence, 0.35), 4))
-                migrated = True
+                # Record that the user ruled on this, not just the low score:
+                # a later insight pass must not talk it back up (see
+                # InsightAnalyzer._merge_confidence).
+                item.user_verdict = "rejected"
+            changed = item.validated != previous_validated or item.confidence != previous_confidence
             result["matched"] = True
             result["hypothesis"] = item.hypothesis
             result["validated"] = item.validated
             result["confidence"] = item.confidence
             break
-        if result["matched"]:
+        if result["matched"] and changed:
             self._save_insights(hypotheses)
-            # A confirm OR reject migration (single-point ownership, spec
-            # invariant 4) schedules a debounced gated rebuild: the filtered
-            # rebuild input changes (a confirm adds the hypothesis; a reject
-            # drops it), so the next rebuild reflects — or squeezes out — it.
-            if migrated:
-                await self._mark_rebuild_pending(
-                    [f"insight_feedback:{signal}:{str(result['hypothesis'])[:60]}"]
-                )
             # The insight layer is the source of truth, but get_profile()
             # (UI profile-summary + delight scoring) reads the windowed
             # ``active_insights`` snapshot cached on the soul layer. Without
@@ -972,6 +1180,1008 @@ class SoulEngine:
                 confidence=float(result["confidence"]),
             )
         return result
+
+    async def mark_feedback_rebuild(
+        self,
+        feedback: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Apply the idempotent rebuild-marker segment for matched feedback."""
+        signal = str(feedback.get("signal", "")).strip().lower()
+        if not bool(result.get("matched", False)) or signal not in {
+            "confirm",
+            "like",
+            "support",
+            "reject",
+            "dislike",
+            "deny",
+        }:
+            return
+        await self._mark_rebuild_pending(
+            [f"insight_feedback:{signal}:{str(result.get('hypothesis', ''))[:60]}"]
+        )
+
+    def feedback_result(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        """Read the current hypothesis state without replaying a completed segment."""
+        target = self._normalize_text(str(feedback.get("hypothesis", "")))
+        signal = str(feedback.get("signal", "")).strip().lower()
+        result: dict[str, Any] = {
+            "matched": False,
+            "hypothesis": str(feedback.get("hypothesis", "")),
+            "signal": signal,
+            "validated": False,
+            "confidence": 0.0,
+        }
+        for item in self._load_insights():
+            if self._normalize_text(item.hypothesis) != target:
+                continue
+            result.update(
+                {
+                    "matched": True,
+                    "hypothesis": item.hypothesis,
+                    "validated": item.validated,
+                    "confidence": item.confidence,
+                }
+            )
+            break
+        return result
+
+    def bind_dialogue_settlement_queue(self, queue: DialogueSettlementQueue) -> None:
+        """Bind the runtime-owned single queue used by public submit façades."""
+        current = self._dialogue_settlement_queue
+        if current is not None and current is not queue:
+            raise RuntimeError("SoulEngine already has a dialogue settlement queue")
+        self._dialogue_settlement_queue = queue
+        guard = queue.require_dialogue_settlement_worker
+        self._dialogue_mutation_guard = guard
+        self._dialogue_anchor_manager.install_mutation_guard(guard)
+        self._confusion_manager.install_mutation_guard(guard)
+
+    def _require_dialogue_settlement_worker(self) -> None:
+        guard = self._dialogue_mutation_guard
+        if guard is None:
+            # Low-level queue tests construct the dispatcher before binding an
+            # engine façade. Production runtimes always install their own
+            # per-context guard through ``bind_dialogue_settlement_queue``.
+            from .dialogue_settlement_guard import require_dialogue_settlement_worker
+
+            require_dialogue_settlement_worker()
+            return
+        guard()
+
+    async def submit_hypothesis_settlement(
+        self,
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        derived: list[dict[str, object]] | None = None,
+    ) -> dict[str, Any]:
+        """Submit one hypothesis settlement with its admission anchor frozen."""
+        normalized_ref = ref.strip()
+        queue = self._require_dialogue_settlement_queue()
+        completion = await queue.submit_and_wait(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "ref": normalized_ref,
+                "hypothesis": hypothesis,
+                "requested_verdict": requested_verdict,
+                "turn_id": turn_id,
+                "source": source,
+                "derived": list(derived or []),
+                "target_kind": "hypothesis",
+                "target_ref": normalized_ref,
+            },
+        )
+        if completion.settlement is not None:
+            return dict(completion.settlement)
+        return {"outcome": completion.outcome}
+
+    async def submit_confusion_answer_settlement(
+        self,
+        *,
+        ref: str,
+        confusion_id: int,
+        interpretation: str,
+        note: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Submit one confusion answer with its admission anchor frozen."""
+        normalized_ref = ref.strip()
+        queue = self._require_dialogue_settlement_queue()
+        completion = await queue.submit_and_wait(
+            DialogueJobKind.SETTLE_CONFUSION,
+            {
+                "ref": normalized_ref,
+                "confusion_id": confusion_id,
+                "interpretation": interpretation,
+                "note": note,
+                "turn_id": turn_id,
+                "source": source,
+                "target_kind": "confusion",
+                "target_ref": normalized_ref,
+            },
+        )
+        if completion.settlement is not None:
+            return dict(completion.settlement)
+        return {"outcome": completion.outcome}
+
+    async def submit_confusion_settlement(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        note: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Submit one confirm/reject confusion action to the single queue."""
+        try:
+            confusion_id = int(ref)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Confusion settlement ref must be an integer: {ref!r}") from exc
+        interpretation = {
+            "confirm": "real_interest",
+            "confirmed": "real_interest",
+            "reject": "proxy_behavior",
+            "rejected": "proxy_behavior",
+        }.get(requested_verdict.strip().lower())
+        if interpretation is None:
+            raise ValueError(f"Unsupported confusion settlement: {requested_verdict!r}")
+        return await self.submit_confusion_answer_settlement(
+            ref=ref,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            turn_id=turn_id,
+            source=source,
+        )
+
+    def _require_dialogue_settlement_queue(self) -> DialogueSettlementQueue:
+        queue = self._dialogue_settlement_queue
+        if queue is None:
+            raise RuntimeError("Dialogue settlement queue is not bound")
+        return queue
+
+    async def _apply_hypothesis_settlement(
+        self,
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+        derived: list[dict[str, object]] | None = None,
+    ) -> dict[str, Any]:
+        """Apply one admitted hypothesis settlement in the actual worker."""
+        return await self._apply_dialogue_settlement(
+            kind="hypothesis",
+            ref=ref,
+            title=hypothesis,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+            derived=derived,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_confusion_answer_settlement(
+        self,
+        *,
+        ref: str,
+        confusion_id: int,
+        interpretation: str,
+        note: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+    ) -> dict[str, Any]:
+        """Apply one admitted confusion answer in the actual worker."""
+        return await self._apply_dialogue_settlement(
+            kind="confusion",
+            ref=ref,
+            title=f"confusion:{confusion_id}",
+            requested_verdict="answer",
+            turn_id=turn_id,
+            source=source,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_confusion_settlement(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        note: str,
+        turn_id: str,
+        source: str,
+        anchor_snapshot: AnchorAdmissionSnapshot,
+    ) -> dict[str, Any]:
+        """Apply one admitted unanchored confusion action in the worker."""
+        try:
+            confusion_id = int(ref)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Confusion settlement ref must be an integer: {ref!r}") from exc
+        interpretation = {
+            "confirm": "real_interest",
+            "confirmed": "real_interest",
+            "reject": "proxy_behavior",
+            "rejected": "proxy_behavior",
+        }.get(requested_verdict.strip().lower())
+        if interpretation is None:
+            raise ValueError(f"Unsupported confusion settlement: {requested_verdict!r}")
+        return await self._apply_confusion_answer_settlement(
+            ref=ref,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note=note,
+            turn_id=turn_id,
+            source=source,
+            anchor_snapshot=anchor_snapshot,
+        )
+
+    async def _apply_speculation_settlement(
+        self,
+        *,
+        ref: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Apply one ordinary-chat speculation settlement in the worker."""
+        return await self._apply_dialogue_settlement(
+            kind="speculation",
+            ref=ref,
+            title=ref,
+            requested_verdict=requested_verdict,
+            turn_id=turn_id,
+            source=source,
+            anchor_snapshot=ANCHOR_NOT_APPLICABLE,
+        )
+
+    async def _apply_card_reconcile(self, *, ref: str) -> dict[str, Any]:
+        """Replay publication only for one already-applied winner receipt."""
+        self._require_dialogue_settlement_worker()
+        database = self._ledger_database
+        if database is None:
+            raise RuntimeError("Dialogue settlement store is not ready")
+        settlement = database.get_card_settlement(ref.strip())
+        if not isinstance(settlement, dict):
+            return {
+                "outcome": "not_found",
+                "settlement_ref": ref.strip(),
+            }
+        if int(settlement.get("applied", 0)) != 1:
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=settlement,
+            )
+        raw_payload = settlement.get("payload")
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+        result = self._reconcile_applied_dialogue_settlement_publication(
+            ref=ref.strip(),
+            settlement=settlement,
+            payload=payload,
+        )
+        return self._dialogue_settlement_response(
+            outcome="already_settled",
+            settlement=settlement,
+            result=result,
+        )
+
+    async def _apply_dialogue_settlement(
+        self,
+        *,
+        kind: str,
+        ref: str,
+        title: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+        derived: list[dict[str, object]] | None = None,
+        confusion_id: int = 0,
+        interpretation: str = "",
+        note: str = "",
+        anchor_snapshot: AnchorAdmissionSnapshot,
+    ) -> dict[str, Any]:
+        """Apply one frozen winner through idempotent effects in the worker."""
+        self._require_dialogue_settlement_worker()
+        database = self._ledger_database
+        required_methods = (
+            "try_create_card_settlement",
+            "get_card_settlement",
+            "record_card_settlement_event_once",
+            "complete_card_settlement",
+            "project_applied_card_settlement",
+        )
+        if database is None or any(
+            not callable(getattr(database, name, None)) for name in required_methods
+        ):
+            raise RuntimeError("Dialogue settlement store is not ready")
+
+        normalized_kind = kind.strip().lower()
+        normalized_request = requested_verdict.strip().lower()
+        normalized_ref = ref.strip()
+        normalized_turn_id = turn_id.strip()
+        if not normalized_ref:
+            raise ValueError("Dialogue settlement ref is required")
+        settlement = database.get_card_settlement(normalized_ref)
+        anchor_generation = 0
+        if settlement is None:
+            incoming_anchor_error = self._validate_dialogue_settlement_anchor(
+                kind=normalized_kind,
+                ref=normalized_ref,
+                snapshot=anchor_snapshot,
+            )
+            if incoming_anchor_error:
+                return self._dialogue_settlement_anchor_error(
+                    outcome=incoming_anchor_error,
+                    ref=normalized_ref,
+                )
+            anchor_generation = self._dialogue_settlement_anchor_generation(
+                kind=normalized_kind,
+                ref=normalized_ref,
+                snapshot=anchor_snapshot,
+            )
+        if normalized_kind == "hypothesis":
+            verdict = {
+                "confirm": "confirmed",
+                "confirmed": "confirmed",
+                "support": "confirmed",
+                "reject": "rejected",
+                "rejected": "rejected",
+                "contradict": "rejected",
+                "revise": "revised",
+                "revised": "revised",
+            }.get(normalized_request)
+            if verdict is None:
+                raise ValueError(f"Unsupported hypothesis settlement: {requested_verdict!r}")
+            winning_payload: dict[str, object] = {
+                "kind": "hypothesis",
+                "title": title.strip(),
+                "action": verdict,
+                "derived": list(derived or []),
+                "anchor_generation": anchor_generation,
+                "source": source,
+            }
+        elif normalized_kind == "confusion":
+            normalized_interpretation = interpretation.strip().lower()
+            if (
+                normalized_request != "answer"
+                or confusion_id <= 0
+                or normalized_interpretation not in _CONFUSION_SETTLEMENT_RESOLUTIONS
+            ):
+                raise ValueError("Unsupported confusion answer settlement")
+            verdict = f"answer:{normalized_interpretation}"
+            winning_payload = {
+                "kind": "confusion",
+                "title": title.strip(),
+                "action": "answer",
+                "confusion_id": confusion_id,
+                "interpretation": normalized_interpretation,
+                "note": note,
+                "anchor_generation": anchor_generation,
+                "source": source,
+            }
+        elif normalized_kind == "speculation":
+            verdict = {
+                "confirm": "confirmed",
+                "confirmed": "confirmed",
+                "reject": "rejected",
+                "rejected": "rejected",
+            }.get(normalized_request)
+            if verdict is None:
+                raise ValueError(f"Unsupported speculation settlement: {requested_verdict!r}")
+            winning_payload = {
+                "kind": "speculation",
+                "title": title.strip(),
+                "action": verdict,
+                "source": source,
+            }
+        else:
+            raise ValueError(f"Unsupported dialogue settlement kind: {kind!r}")
+
+        if settlement is None:
+            database.try_create_card_settlement(
+                ref=normalized_ref,
+                verdict=verdict,
+                turn_id=normalized_turn_id,
+                payload=winning_payload,
+            )
+            settlement = database.get_card_settlement(normalized_ref)
+        if not isinstance(settlement, dict):
+            raise RuntimeError("Dialogue settlement arbitration row disappeared")
+        stored_payload = settlement.get("payload")
+        payload = dict(stored_payload) if isinstance(stored_payload, dict) else {}
+        stored_kind = str(payload.get("kind", normalized_kind)).strip().lower()
+        stored_title = str(payload.get("title", title)).strip()
+        stored_source = str(payload.get("source", source)).strip() or source
+        stored_verdict = str(settlement.get("verdict", "")).strip().lower()
+        if int(settlement.get("applied", 0)) == 1:
+            applied_result = self._reconcile_applied_dialogue_settlement_publication(
+                ref=normalized_ref,
+                settlement=settlement,
+                payload=payload,
+            )
+            return self._dialogue_settlement_response(
+                outcome="already_settled",
+                settlement=settlement,
+                result=applied_result,
+            )
+
+        stored_anchor_snapshot = self._stored_dialogue_settlement_anchor_snapshot(
+            kind=stored_kind,
+            ref=normalized_ref,
+            payload=payload,
+        )
+        stored_anchor_error = self._validate_dialogue_settlement_anchor(
+            kind=stored_kind,
+            ref=normalized_ref,
+            snapshot=stored_anchor_snapshot,
+        )
+        if stored_anchor_error:
+            return self._dialogue_settlement_anchor_error(
+                outcome=stored_anchor_error,
+                ref=normalized_ref,
+            )
+
+        event_type = {
+            "hypothesis": "feedback",
+            "confusion": "confusion_settlement",
+            "speculation": "speculation_settlement",
+        }.get(stored_kind)
+        if event_type is None:
+            raise RuntimeError(f"Stored dialogue settlement kind is invalid: {stored_kind!r}")
+        event_metadata: dict[str, object] = {
+            "settlement_ref": normalized_ref,
+            "settlement_kind": stored_kind,
+            "settlement_verdict": stored_verdict,
+            "turn_id": str(settlement.get("turn_id", normalized_turn_id)),
+            "source": stored_source,
+        }
+        if stored_kind == "hypothesis":
+            event_metadata.update(self._settlement_feedback(stored_title, stored_verdict))
+        elif stored_kind == "confusion":
+            event_metadata.update(
+                {
+                    "confusion_id": payload.get("confusion_id", 0),
+                    "interpretation": payload.get("interpretation", ""),
+                }
+            )
+        else:
+            event_metadata["domain"] = stored_title
+        event = {
+            "event_type": event_type,
+            "title": stored_title,
+            "metadata": event_metadata,
+        }
+        database.record_card_settlement_event_once(
+            ref=normalized_ref,
+            event=event,
+        )
+        self._dialogue_settlement_checkpoint("after_event", normalized_ref)
+        result = await self._apply_dialogue_settlement_object(
+            settlement=settlement,
+            payload=payload,
+        )
+        self._dialogue_settlement_checkpoint("after_object", normalized_ref)
+        if result is None:
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=settlement,
+            )
+        derived_trigger_refs = await self._apply_dialogue_settlement_derived(
+            settlement=settlement,
+            payload=payload,
+        )
+        self._dialogue_settlement_checkpoint("after_derived", normalized_ref)
+        rebuild_trigger_refs = self._dialogue_settlement_rebuild_trigger_refs(
+            settlement=settlement,
+            payload=payload,
+            result=result,
+            derived_trigger_refs=derived_trigger_refs,
+        )
+        if rebuild_trigger_refs:
+            await self._mark_rebuild_pending(rebuild_trigger_refs)
+        self._dialogue_settlement_checkpoint("after_rebuild_marker", normalized_ref)
+        self._record_dialogue_settlement_ledgers(
+            ref=normalized_ref,
+            settlement=settlement,
+            payload=payload,
+            result=result,
+        )
+
+        if not bool(database.complete_card_settlement(ref=normalized_ref, result=result)):
+            latest = database.get_card_settlement(normalized_ref)
+            if isinstance(latest, dict) and int(latest.get("applied", 0)) == 1:
+                latest_payload_raw = latest.get("payload")
+                latest_payload = (
+                    dict(latest_payload_raw) if isinstance(latest_payload_raw, dict) else {}
+                )
+                latest_result = self._reconcile_applied_dialogue_settlement_publication(
+                    ref=normalized_ref,
+                    settlement=latest,
+                    payload=latest_payload,
+                )
+                return self._dialogue_settlement_response(
+                    outcome="already_settled",
+                    settlement=latest,
+                    result=latest_result,
+                )
+            return self._dialogue_settlement_response(
+                outcome="processing",
+                settlement=latest if isinstance(latest, dict) else settlement,
+                result=result,
+            )
+        latest = database.get_card_settlement(normalized_ref) or settlement
+        self._dialogue_settlement_checkpoint(
+            "after_applied_before_projection",
+            normalized_ref,
+        )
+        self._project_dialogue_settlement(normalized_ref, latest)
+        self._dialogue_settlement_checkpoint("after_projection", normalized_ref)
+        self._publish_dialogue_settlement_anchor(normalized_ref, latest)
+        self._dialogue_settlement_checkpoint("after_anchor_release", normalized_ref)
+        return self._dialogue_settlement_response(
+            outcome="applied",
+            settlement=latest,
+            result=result,
+        )
+
+    def _validate_dialogue_settlement_anchor(
+        self,
+        *,
+        kind: str,
+        ref: str,
+        snapshot: AnchorAdmissionSnapshot,
+    ) -> str:
+        """Validate the frozen state without ever upgrading it from current."""
+        if isinstance(snapshot, AnchorFailed):
+            return "anchor_dependency_failed"
+        if isinstance(snapshot, AnchorReserved):
+            raise RuntimeError("Unresolved anchor reservation reached settlement apply")
+        if isinstance(snapshot, AnchorNotApplicable):
+            return "" if kind == "speculation" else "stale_anchor"
+        if isinstance(snapshot, AnchorPersisted):
+            if snapshot.kind != kind or snapshot.ref != ref:
+                return "stale_anchor"
+            active = self._dialogue_anchor_manager.validate_snapshot(
+                snapshot.ref,
+                snapshot.generation,
+            )
+            if active is None or active.kind != snapshot.kind:
+                return "stale_anchor"
+            return ""
+        if snapshot.target_kind != kind or snapshot.target_ref != ref:
+            return "stale_anchor"
+        return "stale_anchor" if self._dialogue_anchor_manager.current() is not None else ""
+
+    @staticmethod
+    def _dialogue_settlement_anchor_generation(
+        *,
+        kind: str,
+        ref: str,
+        snapshot: AnchorAdmissionSnapshot,
+    ) -> int:
+        if isinstance(snapshot, AnchorPersisted):
+            if snapshot.kind != kind or snapshot.ref != ref:
+                raise ValueError("Persisted settlement anchor target mismatch")
+            return snapshot.generation
+        if isinstance(snapshot, AnchorAbsent):
+            if snapshot.target_kind != kind or snapshot.target_ref != ref:
+                raise ValueError("Absent settlement anchor target mismatch")
+            return 0
+        if isinstance(snapshot, AnchorNotApplicable) and kind == "speculation":
+            return 0
+        if isinstance(snapshot, AnchorFailed):
+            return 0
+        raise ValueError("Settlement apply requires a resolved admission anchor")
+
+    @staticmethod
+    def _stored_dialogue_settlement_anchor_snapshot(
+        *,
+        kind: str,
+        ref: str,
+        payload: dict[str, Any],
+    ) -> AnchorAdmissionSnapshot:
+        if kind == "speculation":
+            return ANCHOR_NOT_APPLICABLE
+        try:
+            generation = max(0, int(payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Stored settlement anchor generation is invalid") from exc
+        if generation > 0:
+            return AnchorPersisted(kind=kind, ref=ref, generation=generation)
+        return AnchorAbsent(target_kind=kind, target_ref=ref, tombstone_epoch=1)
+
+    @staticmethod
+    def _dialogue_settlement_anchor_error(*, outcome: str, ref: str) -> dict[str, Any]:
+        return {
+            "outcome": outcome,
+            "state": "stale",
+            "settlement_ref": ref,
+            "settlement_verdict": "",
+        }
+
+    async def _apply_dialogue_settlement_object(
+        self,
+        *,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Apply the winner's idempotent object segment."""
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        verdict = str(settlement.get("verdict", "")).strip().lower()
+        title = str(payload.get("title", "")).strip()
+        if kind == "hypothesis":
+            feedback = self._settlement_feedback(title, verdict)
+            return await self.apply_feedback_object(feedback)
+        if kind == "speculation":
+            state = self._speculator._load_state()
+            active = next(
+                (item for item in state.active if item.domain.casefold() == title.casefold()),
+                None,
+            )
+            cooldown = next(
+                (item for item in state.cooldown if item.domain.casefold() == title.casefold()),
+                None,
+            )
+            if verdict == "confirmed":
+                applied = bool(active is not None and active.status == "confirmed")
+                if not applied:
+                    applied = bool(self._speculator.user_confirm_speculation(title))
+                status = "confirmed"
+            else:
+                applied = cooldown is not None
+                if not applied:
+                    applied = bool(self._speculator.user_reject_speculation(title))
+                status = "rejected"
+            return {
+                "matched": applied,
+                "domain": title,
+                "status": status if applied else "",
+            }
+        if kind != "confusion":
+            raise RuntimeError(f"Stored dialogue settlement kind is invalid: {kind!r}")
+        try:
+            confusion_id = int(payload.get("confusion_id", 0))
+            generation = max(0, int(payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Stored confusion settlement payload is invalid") from exc
+        confusion = self._confusion_manager.get(confusion_id)
+        if confusion is not None and confusion.status in {"resolved", "dismissed"}:
+            return {
+                "matched": True,
+                "confusion_id": confusion_id,
+                "status": confusion.status,
+                "interpretation": str(payload.get("interpretation", "")),
+            }
+        if generation > 0:
+            terminal = self._confusion_manager.process_anchor_settlement(
+                confusion_id,
+                action="resolve",
+                interpretation=str(payload.get("interpretation", "")),
+                note=str(payload.get("note", "")),
+                turn_id=str(settlement.get("turn_id", "")),
+                anchor_generation=generation,
+            )
+        else:
+            terminal = self._confusion_manager.resolve(
+                confusion_id,
+                resolution=str(payload.get("interpretation", "")),
+                note=str(payload.get("note", "")),
+            )
+        if terminal is None:
+            return None
+        return {
+            "matched": True,
+            "confusion_id": confusion_id,
+            "status": terminal,
+            "interpretation": str(payload.get("interpretation", "")),
+        }
+
+    async def _apply_dialogue_settlement_derived(
+        self,
+        *,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> list[str]:
+        """Upsert revise-derived hypotheses and return their stable rebuild refs."""
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        verdict = str(settlement.get("verdict", "")).strip().lower()
+        if kind != "hypothesis" or verdict != "revised":
+            return []
+        return await self._persist_anchor_derived_hypotheses(
+            _as_dict_list(payload.get("derived")),
+        )
+
+    def _dialogue_settlement_rebuild_trigger_refs(
+        self,
+        *,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+        result: dict[str, Any],
+        derived_trigger_refs: list[str],
+    ) -> list[str]:
+        """Build the complete marker set so one retry cannot refresh its clock."""
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        if kind != "hypothesis":
+            return []
+        refs: list[str] = []
+        feedback = self._settlement_feedback(
+            str(payload.get("title", "")),
+            str(settlement.get("verdict", "")),
+        )
+        signal = str(feedback.get("signal", "")).strip().lower()
+        if bool(result.get("matched", False)) and signal in {
+            "confirm",
+            "like",
+            "support",
+            "reject",
+            "dislike",
+            "deny",
+        }:
+            refs.append(f"insight_feedback:{signal}:{str(result.get('hypothesis', ''))[:60]}")
+        for trigger_ref in derived_trigger_refs:
+            if trigger_ref and trigger_ref not in refs:
+                refs.append(trigger_ref)
+        return refs
+
+    def _record_dialogue_settlement_ledgers(
+        self,
+        *,
+        ref: str,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Best-effort audit effects keyed independently from business apply."""
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        title = str(payload.get("title", "")).strip()
+        verdict = str(settlement.get("verdict", "")).strip().lower()
+        source = str(payload.get("source", "")).strip()
+        turn_id = str(settlement.get("turn_id", ""))
+        write_point = {
+            "hypothesis": "settle_insight",
+            "confusion": "settle_confusion",
+            "speculation": "settle_speculation",
+        }.get(kind)
+        if write_point is None:
+            raise RuntimeError(f"Stored dialogue settlement kind is invalid: {kind!r}")
+        self._ledger.record(
+            write_point=write_point,
+            source=source,
+            before={"title": title, "verdict": verdict},
+            after={"matched": bool(result.get("matched", False))},
+            source_refs=[ref],
+            outcome="success" if bool(result.get("matched", False)) else "failed",
+            turn_id=turn_id,
+            effect_key=self._dialogue_settlement_ledger_effect_key(ref),
+        )
+        if kind != "hypothesis" or verdict != "revised":
+            return
+        current = {self._normalize_text(item.hypothesis): item for item in self._load_insights()}
+        for item in _as_dict_list(payload.get("derived")):
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            normalized = self._normalize_text(content)
+            hypothesis = current.get(normalized)
+            confidence = (
+                hypothesis.confidence
+                if hypothesis is not None
+                else round(
+                    max(0.75, min(1.0, self._to_float(item.get("confidence", 0.0)))),
+                    4,
+                )
+            )
+            self._ledger.record(
+                write_point="anchor_revise_derived",
+                source="dialogue_anchor",
+                after={"hypothesis": content, "confidence": confidence},
+                source_refs=[content[:60]],
+                turn_id=turn_id,
+                effect_key=self._dialogue_settlement_derived_ledger_effect_key(
+                    ref,
+                    normalized,
+                ),
+            )
+
+    @staticmethod
+    def _dialogue_settlement_ledger_effect_key(ref: str) -> str:
+        ref_digest = hashlib.sha256(ref.encode("utf-8")).hexdigest()
+        return f"dialogue:{ref_digest}:ledger"
+
+    @staticmethod
+    def _dialogue_settlement_derived_ledger_effect_key(
+        ref: str,
+        normalized_content: str,
+    ) -> str:
+        ref_digest = hashlib.sha256(ref.encode("utf-8")).hexdigest()
+        content_digest = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+        return f"dialogue:{ref_digest}:derived:{content_digest}"
+
+    def _dialogue_settlement_stored_result(
+        self,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        stored_result = settlement.get("result")
+        if isinstance(stored_result, dict) and stored_result:
+            return dict(stored_result)
+        return self._read_dialogue_settlement_result(settlement, payload)
+
+    def _reconcile_applied_dialogue_settlement_publication(
+        self,
+        *,
+        ref: str,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay only observer/projection/anchor effects after applied=1."""
+        result = self._dialogue_settlement_stored_result(settlement, payload)
+        self._record_dialogue_settlement_ledgers(
+            ref=ref,
+            settlement=settlement,
+            payload=payload,
+            result=result,
+        )
+        self._project_dialogue_settlement(ref, settlement)
+        self._dialogue_settlement_checkpoint("after_projection", ref)
+        self._publish_dialogue_settlement_anchor(ref, settlement)
+        self._dialogue_settlement_checkpoint("after_anchor_release", ref)
+        return result
+
+    def _dialogue_settlement_checkpoint(self, checkpoint: str, ref: str) -> None:
+        """No-op seam for exact crash-boundary fault injection."""
+        del checkpoint, ref
+
+    def _read_dialogue_settlement_result(
+        self,
+        settlement: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        kind = str(payload.get("kind", "hypothesis")).strip().lower()
+        if kind == "hypothesis":
+            return self.feedback_result(
+                self._settlement_feedback(
+                    str(payload.get("title", "")),
+                    str(settlement.get("verdict", "")),
+                )
+            )
+        if kind == "speculation":
+            domain = str(payload.get("title", "")).strip()
+            state = self._speculator._load_state()
+            active = next(
+                (item for item in state.active if item.domain.casefold() == domain.casefold()),
+                None,
+            )
+            cooldown = next(
+                (item for item in state.cooldown if item.domain.casefold() == domain.casefold()),
+                None,
+            )
+            status = active.status if active is not None else ("rejected" if cooldown else "")
+            return {
+                "matched": bool(status),
+                "domain": domain,
+                "status": status,
+            }
+        try:
+            confusion_id = int(payload.get("confusion_id", 0))
+        except (TypeError, ValueError):
+            confusion_id = 0
+        confusion = self._confusion_manager.get(confusion_id) if confusion_id else None
+        return {
+            "matched": confusion is not None,
+            "confusion_id": confusion_id,
+            "status": confusion.status if confusion is not None else "",
+            "interpretation": str(payload.get("interpretation", "")),
+        }
+
+    @staticmethod
+    def _settlement_feedback(title: str, verdict: str) -> dict[str, Any]:
+        signal = "confirm" if verdict.strip().lower() == "confirmed" else "reject"
+        return {"hypothesis": title, "signal": signal}
+
+    def _project_dialogue_settlement(
+        self,
+        ref: str,
+        settlement: dict[str, Any],
+    ) -> None:
+        """Idempotently project an applied receipt to every matching card."""
+        if int(settlement.get("applied", 0)) != 1:
+            return
+        payload = settlement.get("payload")
+        stored_payload = dict(payload) if isinstance(payload, dict) else {}
+        kind = str(stored_payload.get("kind", "hypothesis")).strip().lower()
+        if kind == "hypothesis":
+            database = self._ledger_database
+            project = getattr(database, "project_applied_card_settlement", None)
+            if callable(project):
+                project(ref)
+
+    def _publish_dialogue_settlement_anchor(
+        self,
+        ref: str,
+        settlement: dict[str, Any],
+    ) -> None:
+        """Release only the exact frozen generation from an applied receipt."""
+        if int(settlement.get("applied", 0)) != 1:
+            return
+        payload = settlement.get("payload")
+        stored_payload = dict(payload) if isinstance(payload, dict) else {}
+        kind = str(stored_payload.get("kind", "hypothesis")).strip().lower()
+        anchor = self._dialogue_anchor_manager.current()
+        if anchor is None or anchor.kind != kind or anchor.ref != ref:
+            return
+        try:
+            expected_generation = max(0, int(stored_payload.get("anchor_generation", 0)))
+        except (TypeError, ValueError):
+            expected_generation = 0
+        if expected_generation <= 0 or anchor.generation != expected_generation:
+            logger.warning(
+                "dialogue settlement anchor release fenced: ref=%r receipt_generation=%s "
+                "active_generation=%s",
+                ref,
+                expected_generation,
+                anchor.generation,
+            )
+            return
+        if kind == "hypothesis":
+            verdict = str(settlement.get("verdict", "")).strip().lower()
+            card_state = {
+                "confirmed": "confirmed",
+                "revised": "revised",
+            }.get(verdict, "rejected")
+            self._dialogue_anchor_manager.release(
+                reason="settled",
+                card_state=card_state,
+                expected_generation=expected_generation,
+            )
+        else:
+            self._dialogue_anchor_manager.release(
+                reason="settled",
+                expected_generation=expected_generation,
+            )
+
+    def _dialogue_settlement_response(
+        self,
+        *,
+        outcome: str,
+        settlement: dict[str, Any],
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = settlement.get("payload")
+        stored_payload = dict(payload) if isinstance(payload, dict) else {}
+        kind = str(stored_payload.get("kind", "hypothesis")).strip().lower()
+        stored_verdict = str(settlement.get("verdict", "")).strip().lower()
+        if kind == "confusion" or stored_verdict.startswith("answer:"):
+            public_verdict = "answered"
+        else:
+            public_verdict = {
+                "confirmed": "confirmed",
+                "revised": "revised",
+            }.get(stored_verdict, "rejected")
+        response: dict[str, Any] = {
+            "ok": outcome != "processing",
+            "outcome": outcome,
+            "verdict": public_verdict,
+            "settlement_verdict": stored_verdict,
+            "state": public_verdict if outcome != "processing" else "processing",
+        }
+        effective_result = result or self._read_dialogue_settlement_result(
+            settlement,
+            stored_payload,
+        )
+        response.update(effective_result)
+        return response
 
     def _sync_insight_to_soul_snapshot(
         self,
@@ -1018,14 +2228,19 @@ class SoulEngine:
         session: str,
         scope: str = "chat",
         turn_id: str = "",
+        anchor_ref: str = "",
+        anchor_generation: int = 0,
     ) -> dict[str, object]:
         """Persist a chat turn and update long-term understanding when warranted.
 
         ``scope`` / ``turn_id`` (Phase 1) are threaded from the durable chat
-        path. ``scope`` defaults to ``"chat"``; only ``"chat"`` turns run the
-        ``settles`` inventory settling (Task 3) — probe / confusion scopes are
-        settled by the durable side-effect path (single ownership). ``turn_id``
-        is stamped on the ledger rows as an idempotency observation key.
+        path. ``scope`` defaults to ``"chat"``; only unanchored ``"chat"``
+        turns run inventory ``settles``. Probe settlement stays in its durable
+        side effect; confusion settlement belongs exclusively to the serialized
+        dialogue-anchor processor. ``turn_id`` is stamped on ledger rows as an
+        idempotency observation key. Provider calls retain their own finite
+        timeouts; this mutation-bearing method intentionally has no whole-job
+        timeout that could cancel it between local effects.
         """
         await self._memory.propagate_event(
             {
@@ -1040,36 +2255,112 @@ class SoulEngine:
             }
         )
         active_list, insight_hash_map = self._build_dialogue_active_list()
-        try:
-            extract_result = await self._dialogue_insight_analyzer.extract(
-                user_message=user_message,
-                assistant_reply=assistant_reply,
-                core_memory=self._memory.get_core_memory(),
-                active_list=active_list,
+        active_anchor: DialogueAnchor | None = None
+        anchor_context: dict[str, object] | None = None
+        anchor_texts: list[str] = []
+        if anchor_ref or anchor_generation:
+            self._dialogue_anchor_manager.expire()
+            active_anchor = self._dialogue_anchor_manager.validate_snapshot(
+                anchor_ref,
+                anchor_generation,
             )
+            if active_anchor is None:
+                return self._stale_anchor_drop_result(
+                    anchor_ref=anchor_ref,
+                    anchor_generation=anchor_generation,
+                    turn_id=turn_id,
+                    phase="pre_llm",
+                )
+            anchor_context, anchor_texts = self._build_dialogue_anchor_context(active_anchor)
+        anchor_decision: dict[str, object] | None = None
+        try:
+            if anchor_context is None:
+                # Preserve the pre-anchor invocation bytes/signature exactly.
+                extract_result = await self._dialogue_insight_analyzer.extract(
+                    user_message=user_message,
+                    assistant_reply=assistant_reply,
+                    core_memory=self._memory.get_core_memory(),
+                    active_list=active_list,
+                )
+            else:
+                extract_result = await self._dialogue_insight_analyzer.extract(
+                    user_message=user_message,
+                    assistant_reply=assistant_reply,
+                    core_memory=self._memory.get_core_memory(),
+                    active_list=active_list,
+                    anchor=anchor_context,
+                )
             # Tolerate the legacy list return as well as the new
             # {"candidates", "settles"} dict.
             if isinstance(extract_result, dict):
-                extracted = list(extract_result.get("candidates", []))
-                settles = list(extract_result.get("settles", []))
+                extracted = _as_dict_list(extract_result.get("candidates"))
+                settles = _as_dict_list(extract_result.get("settles"))
+                raw_anchor_decision = extract_result.get("anchor")
+                if isinstance(raw_anchor_decision, dict):
+                    anchor_decision = raw_anchor_decision
             else:
-                extracted = list(extract_result)
+                extracted = [dict(item) for item in extract_result if isinstance(item, dict)]
                 settles = []
         except DialogueInsightAnalysisError:
             logger.exception("Failed to extract dialogue insight candidates.")
             extracted = []
             settles = []
 
-        # Process settles (single ownership, spec §invariant 6): only plain
-        # scope="chat" turns settle here — probe / confusion durable turns are
-        # settled by the durable side-effect path, so skip to avoid double
-        # settling.
-        if scope == "chat" and settles:
+        # The LLM call above yields control for an unbounded interval. An API
+        # action, TTL release, or newer dialogue entry may replace the anchor
+        # while it is in flight. Re-read and compare the ref+generation pair
+        # immediately after the response and before *any* object, replay-queue,
+        # candidate, or profile side effect. A stale answer is observation-only:
+        # discard every parsed output and leave the new generation untouched.
+        if active_anchor is not None:
+            revalidated_anchor = self._dialogue_anchor_manager.validate_snapshot(
+                anchor_ref,
+                anchor_generation,
+            )
+            if revalidated_anchor is None:
+                return self._stale_anchor_drop_result(
+                    anchor_ref=anchor_ref,
+                    anchor_generation=anchor_generation,
+                    turn_id=turn_id,
+                    phase="post_llm",
+                )
+            active_anchor = revalidated_anchor
+
+        anchor_outcome = ""
+        if active_anchor is not None:
+            extracted = self._filter_anchor_overlap_candidates(extracted, anchor_texts)
+            if anchor_decision is None:
+                logger.warning(
+                    "dialogue anchor decision missing/invalid; keeping generation=%s",
+                    active_anchor.generation,
+                )
+                anchor_outcome = "kept_invalid"
+            else:
+                anchor_outcome = await self._process_dialogue_anchor_decision(
+                    anchor=active_anchor,
+                    anchor_texts=anchor_texts,
+                    decision=anchor_decision,
+                    turn_id=turn_id,
+                )
+                if anchor_outcome == "stale":
+                    return self._stale_anchor_drop_result(
+                        anchor_ref=anchor_ref,
+                        anchor_generation=anchor_generation,
+                        turn_id=turn_id,
+                        phase="generation_cas",
+                    )
+
+        # Process inventory settles (single ownership, spec §invariant 6): an
+        # anchored turn belongs to the dialogue-anchor processor. Probe turns
+        # retain their durable side effect, so both paths are excluded here.
+        if scope == "chat" and settles and active_anchor is None:
             await self._process_dialogue_settles(
                 settles=settles,
                 active_list=active_list,
                 insight_hash_map=insight_hash_map,
                 turn_id=turn_id,
+                admission_anchor_ref=anchor_ref,
+                admission_anchor_generation=anchor_generation,
             )
 
         merged_candidates = self._merge_insight_candidates(
@@ -1082,12 +2373,15 @@ class SoulEngine:
             item for item in merged_candidates if self._candidate_ready_for_learning(item)
         ]
         if not eligible_candidates:
-            return {
-                "event_logged": True,
-                "candidate_count": len(extracted),
-                "preference_updated": False,
-                "profile_rebuilt": False,
-            }
+            return self._with_anchor_outcome(
+                {
+                    "event_logged": True,
+                    "candidate_count": len(extracted),
+                    "preference_updated": False,
+                    "profile_rebuilt": False,
+                },
+                anchor_outcome,
+            )
 
         # Posture-gate access point ① (Phase 3): interest/dislike take the fast
         # line unchanged; goal/value/state deep candidates pass the gate. In
@@ -1096,13 +2390,29 @@ class SoulEngine:
         # ``enforce`` drops rejected candidates and demotes downgraded ones to
         # insight hypotheses (confidence × 0.6).
         gated_candidates = await self._gate_dialogue_candidates(eligible_candidates)
+        # Dialogue fast lane (user decision 2026-07-27): a gate-accepted deep
+        # candidate is the user's own first-person statement — that IS the
+        # confirmation the deep unique mode asks for. Persist it as a validated
+        # hypothesis so it becomes a durable rebuild input instead of vanishing
+        # after one preference prompt, and force a same-turn rebuild below even
+        # when no interest weight moved (a pure self-statement often doesn't).
+        accepted_deep_candidates = [
+            item
+            for item in gated_candidates
+            if str(item.get("kind", "")).strip() in _DEEP_CANDIDATE_KINDS
+        ]
+        if accepted_deep_candidates:
+            self._persist_confirmed_deep_candidates(accepted_deep_candidates, turn_id=turn_id)
         if not gated_candidates:
-            return {
-                "event_logged": True,
-                "candidate_count": len(extracted),
-                "preference_updated": False,
-                "profile_rebuilt": False,
-            }
+            return self._with_anchor_outcome(
+                {
+                    "event_logged": True,
+                    "candidate_count": len(extracted),
+                    "preference_updated": False,
+                    "profile_rebuilt": False,
+                },
+                anchor_outcome,
+            )
 
         preference_layer = self._memory.get_layer("preference")
         existing_preference = dict(preference_layer.data)
@@ -1201,16 +2511,16 @@ class SoulEngine:
         profile_rebuilt = False
         rebuild_gate_ok = (
             self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_DIALOGUE,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=candidate_refs,
-                    context={"candidate_refs": candidate_refs},
-                )
-            ).blocks
-        )
+            or bool(accepted_deep_candidates)
+        ) and not (
+            await self._gate_soul_rebuild(
+                trigger=_REBUILD_TRIGGER_DIALOGUE,
+                existing_preference=existing_preference,
+                updated_preference=updated_preference,
+                source_refs=candidate_refs,
+                context={"candidate_refs": candidate_refs},
+            )
+        ).blocks
         if rebuild_gate_ok:
             # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
             try:
@@ -1262,15 +2572,45 @@ class SoulEngine:
         except Exception:
             logger.debug("pending rebuild trigger (dialogue) failed", exc_info=True)
 
-        return {
-            "event_logged": True,
-            "candidate_count": len(extracted),
-            "preference_updated": True,
-            "profile_rebuilt": profile_rebuilt,
-        }
+        return self._with_anchor_outcome(
+            {
+                "event_logged": True,
+                "candidate_count": len(extracted),
+                "preference_updated": True,
+                "profile_rebuilt": profile_rebuilt,
+            },
+            anchor_outcome,
+        )
 
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
-        """Reanalyze preference/profile after enough new feedback has accumulated."""
+        """Reanalyze preference/profile after enough new feedback has accumulated.
+
+        Wave B shim (spec 2026-07-27 Phase 3). The method name is the coupling
+        point for all three external callers (``runtime/feedback_scheduler.py``,
+        the CLI feedback command, ``integrations/openclaw/operations.py``), so
+        they stay zero-change across the merge:
+
+        - ``unified_interest_line`` OFF → the legacy feedback batch verbatim.
+        - ON → a one-shot idempotent migration of everything after the legacy
+          cursor into the pipeline, then a pipeline tick so a
+          threshold-satisfying INTEREST buffer consumes now instead of waiting
+          out ``min_interval_seconds``.
+
+        None of the three callers reads the returned dict (each awaits and
+        discards it), but the legacy keys are preserved anyway so the shape
+        stays a stable contract.
+        """
+        if self._unified_interest_line:
+            return await self._process_feedback_via_unified_line()
+        return await self._process_feedback_batch_legacy()
+
+    async def _process_feedback_batch_legacy(self) -> dict[str, object]:
+        """The pre-unified-line feedback batch, unchanged.
+
+        Reached whenever ``scheduler.unified_interest_line`` is false — the
+        rollback path. Byte-identical to what ``process_feedback_batch_if_needed``
+        did before the shim, so ``TestFeedbackBatchContract`` still pins it.
+        """
         if self._feedback_batch_lock.locked():
             return {
                 "triggered": False,
@@ -1297,6 +2637,165 @@ class SoulEngine:
         except Exception:
             logger.debug("pending rebuild trigger (feedback batch) failed", exc_info=True)
         return result
+
+    async def _process_feedback_via_unified_line(self) -> dict[str, object]:
+        """The unified interest line's replacement for the feedback batch.
+
+        Two steps, in order: (1) a one-shot migration of everything the legacy
+        cursor never consumed, (2) a pipeline tick so a buffer that already
+        satisfies the FEEDBACK priority threshold consumes NOW rather than
+        waiting out ``min_interval_seconds`` (spec invariant 1). Live feedback
+        is already ingested by ``/api/feedback``; this path exists so the
+        debounce scheduler still has something to drive and so restarts don't
+        strand a buffer that filled just before shutdown.
+        """
+        if self._feedback_batch_lock.locked():
+            return {
+                "triggered": False,
+                "feedback_count": 0,
+                "preference_updated": False,
+                "profile_rebuilt": False,
+                "skipped": True,
+                "reason": "feedback_batch_in_progress",
+            }
+        rebuilds_before = self._pipeline_feedback_rebuilds
+        updates: list[Any] = []
+        async with self._feedback_batch_lock:
+            migrated, migration_updates = await self._migrate_legacy_feedback_cursor_if_needed()
+            updates.extend(migration_updates)
+            # Measured AFTER the migration ingest: the pre-existing strong-signal
+            # bypass means that ingest may already have consumed what it just
+            # buffered, and those rows are counted by ``migrated`` instead.
+            buffered = self._buffered_feedback_signal_count()
+            flush = await self._pipeline.tick()
+            updates.extend(getattr(flush, "layers_updated", []))
+        interest_updates = [
+            update
+            for update in updates
+            if getattr(getattr(update, "layer", None), "value", "") == OnionLayer.INTEREST.value
+        ]
+        # A periodic hook for the debounced confirmed-hypotheses rebuild (spec
+        # invariant 4). Best-effort — never breaks feedback processing. The
+        # held-replay consumer is NOT re-run here: on the unified line it is a
+        # feedback-batch privilege that already ran inside
+        # ``_after_pipeline_feedback_interest`` if (and only if) the drained
+        # batch actually carried FEEDBACK signals.
+        try:
+            await self.run_pending_rebuild_if_due()
+        except Exception:
+            logger.debug("pending rebuild trigger (unified line) failed", exc_info=True)
+        return {
+            "triggered": bool(interest_updates),
+            # FEEDBACK signals this call actually put in play: the migrated rows
+            # plus whatever the live buffer was still holding. Disjoint by
+            # construction — ``buffered`` is read after the migration ingest.
+            "feedback_count": migrated + buffered,
+            # Legacy meaning: "the preference layer was rewritten", which the
+            # batch reported unconditionally once it fired. A consumed INTEREST
+            # batch is exactly that. Whether the rewrite produced visible changes
+            # is the separate ``preference_changed`` key.
+            "preference_updated": bool(interest_updates),
+            "preference_changed": any(getattr(u, "changed", False) for u in interest_updates),
+            "profile_rebuilt": self._pipeline_feedback_rebuilds > rebuilds_before,
+            "unified_interest_line": True,
+            "migrated_feedback_events": migrated,
+        }
+
+    def _buffered_feedback_signal_count(self) -> int:
+        """How many FEEDBACK signals the INTEREST buffer is holding right now.
+
+        The unified line's analogue of the legacy batch's ``feedback_count``:
+        the number the priority-flush threshold is compared against.
+        """
+        try:
+            buffers = self._pipeline._buffers  # noqa: SLF001 - same-package read
+            buf = buffers.get(OnionLayer.INTEREST.value)
+            if buf is None:
+                return 0
+            return sum(
+                1 for sig in buf.signals if sig.get("signal_type") == SignalType.FEEDBACK.value
+            )
+        except Exception:
+            return 0
+
+    async def _migrate_legacy_feedback_cursor_if_needed(self) -> tuple[int, list[Any]]:
+        """One-shot: hand the pipeline every feedback row the legacy cursor left.
+
+        Returns ``(migrated_count, layer_updates)`` — the ingest can consume the
+        buffer on the spot (the pre-existing strong-signal bypass), so the shim
+        needs those updates to report ``triggered`` honestly.
+
+        Signals are built with ``signal_from_feedback``, NOT ``signals_from_events``:
+        the latter never emits ``SignalType.FEEDBACK`` (it only ever produces
+        BEHAVIOR_EVENT / ENGAGEMENT_EVENT), so migrated rows would silently lose
+        every feedback privilege — the priority flush, dislike archiving, the
+        gated soul rebuild, and the ``source="feedback"`` ledger provenance.
+
+        **Retractions are skipped.** The legacy batch excluded them from both the
+        threshold count and the analysis input (they are neutralizations, not
+        preference-learning input) and they have already had their effect on the
+        rows they retracted at the time they were recorded. Ingesting historical
+        retractions now would replay a discount against a preference layer that
+        was computed without the corresponding positives — the retraction
+        semantics change (exclude → discount) is a *forward* change for live
+        signals only, and the A/B gate 3 covers it there. The cursor still
+        advances past them so they are never rescanned.
+
+        **Ordering: persist the cursor + marker FIRST, ingest second.** Both live
+        in one JSON file, so there is no window where the marker exists without
+        the advanced cursor. The remaining crash window (state written, process
+        dies before the buffer is durable) loses at most the un-migrated tail —
+        bounded, and those rows stay in the event ledger forever. The opposite
+        ordering would re-ingest real user feedback on every crashed restart,
+        double-counting it into the preference layer: exactly the harm the Wave A
+        dark launch existed to prevent, and unbounded in how often it can repeat.
+        """
+        state = self._memory.load_feedback_state()
+        if str(state.get("unified_interest_line_migrated_at", "")).strip():
+            return 0, []
+        last_processed_id = self._to_int(state.get("last_processed_feedback_event_id", 0))
+        scanned = [
+            self._deserialize_event(event)
+            for event in self._memory.query_events_since(
+                after_event_id=last_processed_id,
+                event_types=["feedback"],
+            )
+        ]
+        pending = [event for event in scanned if not self._is_retraction_feedback(event)]
+        last_scanned_id = max(
+            (self._to_int(event.get("id", 0)) for event in scanned),
+            default=0,
+        )
+        self._memory.save_feedback_state(
+            {
+                "last_processed_feedback_event_id": max(last_scanned_id, last_processed_id),
+                # Not a re-analysis — leave the legacy timestamp alone.
+                "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
+                "unified_interest_line_migrated_at": datetime.now().isoformat(),
+            }
+        )
+        if not pending:
+            return 0, []
+        signals = [self._feedback_event_to_signal(event) for event in pending]
+        ingest_result = await self._pipeline.ingest_batch(signals)
+        logger.info(
+            "Unified interest line: migrated %d unconsumed feedback event(s) "
+            "past legacy cursor %d into the pipeline",
+            len(signals),
+            last_processed_id,
+        )
+        return len(signals), list(getattr(ingest_result, "layers_updated", []))
+
+    @staticmethod
+    def _feedback_event_to_signal(event: dict[str, Any]) -> ProfileSignal:
+        """Rebuild the FEEDBACK signal ``/api/feedback`` would have emitted."""
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return signal_from_feedback(
+            str(metadata.get("feedback_type") or "").strip(),
+            str(event.get("title") or ""),
+            str(metadata.get("feedback_note") or ""),
+        )
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
         """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
@@ -1363,50 +2862,13 @@ class SoulEngine:
             preference_layer.save()
             _entry.after = dict(updated_preference)
 
-        profile_rebuilt = False
-        # P2 (spec r3/F4): a feedback batch with a significant preference shift
-        # now passes access point ③ — previously this rebuild bypassed every
-        # gate. off/shadow proceed; enforce downgrade/reject abandons the rebuild.
-        feedback_rebuild_ok = (
-            self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=feedback_refs,
-                    context={"feedback_count": feedback_count, "feedback_refs": feedback_refs},
-                )
-            ).blocks
+        profile_rebuilt = await self._gated_feedback_soul_rebuild(
+            existing_preference=existing_preference,
+            updated_preference=updated_preference,
+            existing_profile=existing_profile,
+            source_refs=feedback_refs,
+            feedback_count=feedback_count,
         )
-        if feedback_rebuild_ok:
-            # Ledger write point D5 #4b: feedback-batch full soul rebuild.
-            try:
-                with self._ledger.action(
-                    write_point="feedback_soul_rebuild",
-                    source="feedback",
-                    before=existing_profile,
-                    source_refs=feedback_refs,
-                ) as _entry:
-                    legacy_profile = await self._profile_builder.build(
-                        history=[],
-                        preference=updated_preference,
-                        awareness_notes=[
-                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                        ],
-                        active_insights=self._rebuild_active_insights(),
-                    )
-                    profile = OnionProfile.from_legacy(legacy_profile)
-                    profile.populate_from_flat_preference(updated_preference)
-                    soul_layer = self._memory.get_layer("soul")
-                    soul_layer.data.clear()
-                    soul_layer.data.update(profile.to_dict())
-                    soul_layer.save()
-                    _entry.after = dict(soul_layer.data)
-                self._memory.sync_profile_files(profile)
-                profile_rebuilt = True
-            except Exception:
-                logger.exception("Failed to rebuild soul profile after feedback refresh.")
 
         if newly_added_dislikes:
             self._schedule_dislike_purge(
@@ -1443,6 +2905,102 @@ class SoulEngine:
             "preference_updated": True,
             "profile_rebuilt": profile_rebuilt,
         }
+
+    async def _gated_feedback_soul_rebuild(
+        self,
+        *,
+        existing_preference: dict[str, Any],
+        updated_preference: dict[str, Any],
+        existing_profile: dict[str, Any],
+        source_refs: list[str],
+        feedback_count: int,
+    ) -> bool:
+        """Rebuild the whole soul after feedback, if the gate lets it through.
+
+        P2 (spec r3/F4): a feedback-driven significant preference shift passes
+        access point ③ — previously this rebuild bypassed every gate. off/shadow
+        proceed; enforce downgrade/reject abandons the rebuild. Shared by the
+        legacy feedback batch and the unified interest line so both triggers
+        keep the exact same deep-write discipline. Returns whether the soul
+        profile was actually rebuilt.
+        """
+        rebuild_ok = (
+            self._preference_changed_significantly(existing_preference, updated_preference)
+            and not (
+                await self._gate_soul_rebuild(
+                    trigger=_REBUILD_TRIGGER_FEEDBACK_BATCH,
+                    existing_preference=existing_preference,
+                    updated_preference=updated_preference,
+                    source_refs=source_refs,
+                    context={"feedback_count": feedback_count, "feedback_refs": source_refs},
+                )
+            ).blocks
+        )
+        if not rebuild_ok:
+            return False
+        # Ledger write point D5 #4b: feedback-batch full soul rebuild.
+        try:
+            with self._ledger.action(
+                write_point="feedback_soul_rebuild",
+                source="feedback",
+                before=existing_profile,
+                source_refs=source_refs,
+            ) as _entry:
+                legacy_profile = await self._profile_builder.build(
+                    history=[],
+                    preference=updated_preference,
+                    awareness_notes=[
+                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                    ],
+                    active_insights=self._rebuild_active_insights(),
+                )
+                profile = OnionProfile.from_legacy(legacy_profile)
+                profile.populate_from_flat_preference(updated_preference)
+                soul_layer = self._memory.get_layer("soul")
+                soul_layer.data.clear()
+                soul_layer.data.update(profile.to_dict())
+                soul_layer.save()
+                _entry.after = dict(soul_layer.data)
+            self._memory.sync_profile_files(profile)
+            return True
+        except Exception:
+            logger.exception("Failed to rebuild soul profile after feedback refresh.")
+            return False
+
+    async def _after_pipeline_feedback_interest(
+        self,
+        *,
+        existing_preference: dict[str, Any],
+        updated_preference: dict[str, Any],
+        source_refs: list[str],
+        feedback_count: int,
+    ) -> None:
+        """Unified interest line: the batch's post-write privileges.
+
+        Called by the pipeline right after a FEEDBACK-carrying INTEREST batch is
+        persisted. Mirrors what ``_process_feedback_batch_if_needed_locked``
+        does after its own preference write: the gated soul rebuild, then the
+        held-replay consumer. Both are best-effort — neither may break the
+        interest update.
+        """
+        existing_profile = dict(self._memory.get_layer("soul").data)
+        try:
+            if await self._gated_feedback_soul_rebuild(
+                existing_preference=existing_preference,
+                updated_preference=updated_preference,
+                existing_profile=existing_profile,
+                source_refs=source_refs,
+                feedback_count=feedback_count,
+            ):
+                self._pipeline_feedback_rebuilds += 1
+        except Exception:
+            logger.exception("Gated soul rebuild after a pipeline feedback batch failed")
+        # Consume any held updates left ``replaying`` by a resolved real-interest
+        # confusion — same best-effort contract the legacy batch had.
+        try:
+            await self.replay_held_updates()
+        except Exception:
+            logger.debug("held-replay consumer failed", exc_info=True)
 
     def _compact_feedback_event_for_analysis(
         self,
@@ -1667,6 +3225,86 @@ class SoulEngine:
         notes = layer_data.get("notes", [])
         return [awareness_note_from_dict(item) for item in notes if isinstance(item, dict)]
 
+    def _persist_init_cognition_drafts(self, context: dict[str, Any]) -> None:
+        """Write init's awareness/insight drafts into the long-term layers.
+
+        These drafts used to live only in ``_init_cognition_context``: they
+        shaped the first portrait and were then discarded, and because init's
+        history never reached the event table the cognition cycle could not
+        re-derive them either. The practical cost was a brand-new install whose
+        待聊 list was empty — the system had just formed concrete hypotheses
+        about the user and asked none of them.
+
+        Drafts are merged through the same paths a regular cognition pass uses,
+        so dedup, lifecycle and user verdicts behave identically. Awareness
+        notes cite the events init recorded this run when available, and are
+        flagged approximate because the model attributed per round, not per
+        note. Best-effort: a failure here must not fail init.
+        """
+        if not isinstance(context, dict) or not context:
+            return
+        try:
+            source_event_ids: list[int] = []
+            database = self._ledger_database
+            if database is not None:
+                try:
+                    source_event_ids = [
+                        int(row["id"])
+                        for row in database.conn.execute(
+                            "SELECT id FROM events ORDER BY id DESC LIMIT ?",
+                            (_INIT_DRAFT_EVIDENCE_CAP,),
+                        )
+                    ]
+                except Exception:
+                    logger.debug("init draft evidence lookup failed", exc_info=True)
+            raw_awareness = [
+                item for item in _as_dict_list(context.get("awareness")) if item.get("observation")
+            ]
+            if raw_awareness:
+                notes = [
+                    AwarenessNote(
+                        date=str(item.get("date", "") or "init"),
+                        observation=str(item.get("observation", "")).strip(),
+                        trend=str(item.get("trend", "")).strip(),
+                        emotion_guess=str(item.get("emotion_guess", "")).strip(),
+                        note_id=uuid4().hex[:12],
+                        source_event_ids=list(source_event_ids),
+                        source_event_ids_approximate=bool(source_event_ids),
+                    )
+                    for item in raw_awareness
+                ]
+                merged_notes = self._awareness_analyzer.merge_notes(
+                    self._load_awareness_notes(), notes
+                )
+                self._save_awareness_notes(merged_notes)
+            raw_insights = [
+                item for item in _as_dict_list(context.get("insights")) if item.get("hypothesis")
+            ]
+            if raw_insights:
+                hypotheses = [
+                    InsightHypothesis(
+                        hypothesis=str(item.get("hypothesis", "")).strip(),
+                        evidence=_init_draft_evidence(item.get("evidence")),
+                        confidence=_clamp_init_draft_confidence(item.get("confidence")),
+                        validated=False,
+                        created_at=datetime.now().date().isoformat(),
+                    )
+                    for item in raw_insights
+                ]
+                merged_insights = self._insight_analyzer.merge_insights(
+                    self._load_insights(), hypotheses
+                )
+                self._save_insights(merged_insights)
+            self._ledger.record(
+                write_point="init_cognition_persist",
+                source="init",
+                before={},
+                after={"awareness": len(raw_awareness), "insights": len(raw_insights)},
+                source_refs=[f"events:{len(source_event_ids)}"],
+            )
+        except Exception:
+            logger.warning("init cognition drafts were not persisted", exc_info=True)
+
     def _save_awareness_notes(self, notes: list[AwarenessNote]) -> None:
         layer = self._memory.get_layer("awareness")
         layer.data.clear()
@@ -1684,17 +3322,50 @@ class SoulEngine:
         layer.data.update({"hypotheses": [insight_hypothesis_to_dict(item) for item in insights]})
         layer.save()
 
+    @staticmethod
+    def _hypothesis_auto_validated(item: InsightHypothesis, *, now: datetime | None = None) -> bool:
+        """Whether behaviour alone has earned this hypothesis deep influence.
+
+        See the ``_AUTO_VALIDATE_*`` constants for the bar and its calibration.
+        A user verdict of any kind disqualifies: "rejected" blocks permanently,
+        and "confirmed" already travels the validated path.
+        """
+        if item.validated or item.user_verdict:
+            return False
+        if item.confidence < _AUTO_VALIDATE_MIN_CONFIDENCE:
+            return False
+        if len([e for e in item.evidence if str(e).strip()]) < _AUTO_VALIDATE_MIN_EVIDENCE:
+            return False
+        try:
+            created = datetime.fromisoformat(str(item.created_at))
+        except (TypeError, ValueError):
+            return False  # undated == unproven tenure
+        if item.confidence >= _AUTO_VALIDATE_FAST_MIN_CONFIDENCE:
+            # Near-certainty skips the tenure wait; every other guard above
+            # (evidence, no user verdict) has already been enforced.
+            return True
+        reference = now or datetime.now()
+        if created.tzinfo is not None and reference.tzinfo is None:
+            reference = reference.astimezone(created.tzinfo)
+        elif created.tzinfo is None and reference.tzinfo is not None:
+            created = created.astimezone(reference.tzinfo)
+        age = reference - created
+        return age >= timedelta(days=_AUTO_VALIDATE_MIN_AGE_DAYS)
+
     def _rebuild_active_insights(self) -> list[dict[str, object]]:
         """Insight dicts eligible to shape a soul rebuild (spec invariant 3 / F1).
 
-        Only validated hypotheses with confidence >= 0.75 are visible to a
-        rebuild; rejected/unvalidated ones are filtered out, so a reject's next
-        rebuild squeezes the old conclusion out instead of leaving it forever.
+        Two doors in: user-confirmed (validated, confidence >= 0.75) and
+        behaviour-earned autonomy (``_hypothesis_auto_validated`` — stricter
+        bar, never available to anything the user rejected). Everything else is
+        filtered out, so a reject's next rebuild squeezes the old conclusion
+        out instead of leaving it forever.
         """
         return [
             insight_hypothesis_to_dict(item)
             for item in self._load_insights()
-            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
+            if (item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE)
+            or self._hypothesis_auto_validated(item)
         ]
 
     # -- Pending confirmed-hypotheses rebuild state machine (spec r3/F3) -------
@@ -1720,37 +3391,77 @@ class SoulEngine:
         path = self._rebuild_state_path()
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.tmp")
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             tmp_path.replace(path)
-        except OSError:
-            logger.debug("Failed to save rebuild pending state", exc_info=True)
+        except (OSError, TypeError, ValueError):
+            logger.warning("Failed to save rebuild pending state", exc_info=True)
+            raise
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to clean rebuild pending temp file: %s",
+                    tmp_path,
+                    exc_info=True,
+                )
 
     async def _mark_rebuild_pending(self, trigger_refs: list[str]) -> None:
         """Set/refresh the pending marker (confirm & reject single point, inv 4).
 
-        A new migration always re-stamps ``set_at`` and resets ``retry_count`` —
-        "new evidence reopens" — merging its refs with any still-pending ones.
+        Replaying an existing trigger is a no-op so it cannot extend debounce or
+        erase a bounded-retry attempt.  A genuinely new trigger re-stamps
+        ``set_at`` and resets ``retry_count`` — "new evidence reopens" — while
+        merging its ref with any still-pending ones.
         """
         async with self._rebuild_pending_lock:
             state = self._load_rebuild_state()
             existing = state.get("pending")
             refs = (
-                list(existing.get("trigger_refs", []))
+                [ref for ref in existing.get("trigger_refs", []) if isinstance(ref, str) and ref]
                 if isinstance(existing, dict) and isinstance(existing.get("trigger_refs"), list)
                 else []
             )
+            seen_auto_refs = (
+                [
+                    ref
+                    for ref in state.get("auto_hypothesis_trigger_refs", [])
+                    if isinstance(ref, str) and ref.startswith(_AUTO_HYPOTHESIS_REF_PREFIX)
+                ]
+                if isinstance(state.get("auto_hypothesis_trigger_refs"), list)
+                else []
+            )
+            has_new_trigger = False
+            has_new_auto_ref = False
             for ref in trigger_refs:
-                if ref not in refs:
+                if ref.startswith(_AUTO_HYPOTHESIS_REF_PREFIX):
+                    if ref in seen_auto_refs:
+                        continue
+                    seen_auto_refs.append(ref)
+                    has_new_auto_ref = True
+                if ref and ref not in refs:
                     refs.append(ref)
+                    has_new_trigger = True
+            if isinstance(existing, dict) and not has_new_trigger:
+                if has_new_auto_ref:
+                    state["auto_hypothesis_trigger_refs"] = seen_auto_refs
+                    self._save_rebuild_state(state)
+                return
+            if not refs:
+                return
             state["pending"] = {
                 "set_at": datetime.now().isoformat(),
                 "trigger_refs": refs,
                 "retry_count": 0,
             }
+            if has_new_auto_ref:
+                state["auto_hypothesis_trigger_refs"] = seen_auto_refs
             self._save_rebuild_state(state)
 
     async def run_pending_rebuild_if_due(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -1772,6 +3483,22 @@ class SoulEngine:
         intact rather than clobbered by this run's outcome.
         """
         current = now or datetime.now()
+        # Behaviour-earned hypotheses join the same debounced pending machine
+        # user confirmations use — same gate, same ledger, same retry bounds.
+        # _mark_rebuild_pending is idempotent for already-known refs, so
+        # re-scanning at every checkpoint cannot extend the debounce.
+        try:
+            auto_refs = sorted(
+                f"{_AUTO_HYPOTHESIS_REF_PREFIX}"
+                f"{hashlib.sha1(item.hypothesis.encode('utf-8')).hexdigest()[:12]}"
+                for item in self._load_insights()
+                if self._hypothesis_auto_validated(item, now=current)
+            )
+            if auto_refs:
+                await self._mark_rebuild_pending(auto_refs)
+        except Exception:
+            logger.debug("auto-validated hypothesis scan failed", exc_info=True)
+
         async with self._rebuild_pending_lock:
             if self._rebuild_running:
                 return {"ran": False, "reason": "in_progress"}
@@ -1832,13 +3559,18 @@ class SoulEngine:
         """
         preference = dict(self._memory.get_layer("preference").data)
         existing_profile = dict(self._memory.get_layer("soul").data)
-        validated = [
+        insights = self._load_insights()
+        confirmed = [
             item
-            for item in self._load_insights()
+            for item in insights
             if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
         ]
+        auto_validated = [item for item in insights if self._hypothesis_auto_validated(item)]
         context: dict[str, object] = {
-            "confirmed_hypotheses": [item.hypothesis for item in validated][
+            "confirmed_hypotheses": [item.hypothesis for item in confirmed][
+                :_REBUILD_CONTEXT_HYPOTHESIS_CAP
+            ],
+            "auto_validated_hypotheses": [item.hypothesis for item in auto_validated][
                 :_REBUILD_CONTEXT_HYPOTHESIS_CAP
             ],
             "trigger_refs": trigger_refs,
@@ -1889,6 +3621,685 @@ class SoulEngine:
             return datetime.fromisoformat(value)
         except ValueError:
             return None
+
+    async def replay_confusion_dialogue_attributions(self) -> int:
+        """Enumerate replay candidates read-only and submit the dedicated kind."""
+        queue = self._require_dialogue_settlement_queue()
+        if asyncio.current_task() is queue.worker_task:
+            from .dialogue_learn_queue import DialogueSettlementReentryError
+
+            raise DialogueSettlementReentryError(
+                "confusion attribution replay hook cannot submit from the worker"
+            )
+        pending = self._confusion_manager.pending_dialogue_replays()
+        if not pending:
+            return 0
+        admitted: list[asyncio.Future[DialogueJobResult]] = []
+        for row in pending:
+            try:
+                confusion_id = int(row.get("confusion_id", 0))
+            except (TypeError, ValueError):
+                continue
+            confusion = self._confusion_manager.get(confusion_id)
+            if confusion is None:
+                continue
+            has_replay_queue = bool(confusion.replay_queue)
+            replay_head = confusion.replay_queue[0] if has_replay_queue else {}
+            replay_id = str(
+                replay_head.get("replay_id")
+                or replay_head.get("turn_id")
+                or row.get("turn_id")
+                or ""
+            ).strip()
+            turn_id = str(row.get("turn_id") or replay_head.get("turn_id") or "").strip()
+            if not replay_id:
+                continue
+            active_anchor = self._dialogue_anchor_manager.current()
+            needs_anchor = bool(
+                not has_replay_queue
+                and confusion.status == "clarifying"
+                and (
+                    active_anchor is None
+                    or (
+                        active_anchor.kind == "confusion" and active_anchor.ref == str(confusion_id)
+                    )
+                )
+            )
+            payload: dict[str, object] = {
+                "confusion_id": confusion_id,
+                "turn_id": turn_id,
+                "replay_id": replay_id,
+                "ask_turn_id": str(row.get("ask_turn_id", "")),
+                "subject_id": str(row.get("subject_id", "")),
+                "subject_title": str(row.get("subject_title", "")),
+                "message": str(row.get("message", "")),
+                "reply": str(row.get("reply", "")),
+                "has_replay_queue": has_replay_queue,
+                "needs_anchor": needs_anchor,
+                "target_kind": "confusion",
+                "target_ref": str(confusion_id),
+                "producer_source": "cognition_cycle",
+            }
+            job = queue.submit(
+                DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY,
+                payload,
+                completion=True,
+            )
+            if job is not None and job.completion is not None:
+                admitted.append(job.completion)
+
+        processed = 0
+        for completion_future in admitted:
+            try:
+                completion = await asyncio.shield(completion_future)
+            except Exception:
+                logger.warning("confusion attribution replay job failed", exc_info=True)
+                continue
+            if completion.outcome == "applied":
+                processed += 1
+        return processed
+
+    async def _dispatch_confusion_attribution_replay(
+        self,
+        job: DialogueJob,
+    ) -> DialogueDispatchResult | DialogueJobResult:
+        """Prepare one replay, resolving any builder before its async effects."""
+        self._require_dialogue_settlement_worker()
+        confusion_id = int(str(job.payload.get("confusion_id", 0)))
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        ref = str(confusion_id)
+        if self._confusion_replay_receipt_exists(turn_id):
+            result = DialogueJobResult(outcome="already_terminal")
+            if job.owned_anchor_reservation_id is None:
+                return result
+            return DialogueDispatchResult(
+                result=result,
+                anchor_terminal=AnchorMutationTerminal.already_terminal(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                ),
+            )
+
+        has_replay_queue = bool(job.payload.get("has_replay_queue", False))
+        if has_replay_queue:
+            return await self._apply_confusion_attribution_replay_effect(
+                job=job,
+                anchor=None,
+            )
+
+        confusion = self._confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status != "clarifying":
+            result = DialogueJobResult(outcome="already_terminal")
+            if job.owned_anchor_reservation_id is None:
+                return result
+            return DialogueDispatchResult(
+                result=result,
+                anchor_terminal=AnchorMutationTerminal.already_terminal(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                ),
+            )
+
+        if job.owned_anchor_reservation_id is not None:
+            existing = self._dialogue_anchor_manager.current()
+            established = self._dialogue_anchor_manager.establish(
+                kind="confusion",
+                ref=ref,
+                origin_turn_id=(
+                    confusion.ask_turn_id or str(job.payload.get("ask_turn_id", "")) or turn_id
+                ),
+                entry=ENTRY_CONFUSION_PROMPT,
+            )
+            terminal = (
+                AnchorMutationTerminal.no_op(
+                    self._dialogue_anchor_actual_state(kind="confusion", ref=ref),
+                )
+                if (
+                    existing is not None
+                    and existing.kind == established.kind
+                    and existing.ref == established.ref
+                )
+                else AnchorMutationTerminal.persisted(
+                    kind=established.kind,
+                    ref=established.ref,
+                    generation=established.generation,
+                )
+            )
+
+            async def _after_anchor_resolution() -> DialogueJobResult:
+                return await self._apply_confusion_attribution_replay_effect(
+                    job=job,
+                    anchor=established,
+                )
+
+            return DialogueDispatchResult(
+                result=DialogueJobResult(outcome="prepared"),
+                anchor_terminal=terminal,
+                followup=_after_anchor_resolution,
+            )
+
+        snapshot = job.effective_anchor_snapshot
+        anchor = (
+            self._dialogue_anchor_manager.validate_snapshot(
+                snapshot.ref,
+                snapshot.generation,
+            )
+            if isinstance(snapshot, AnchorPersisted)
+            else None
+        )
+        if anchor is None or anchor.kind != "confusion" or anchor.ref != ref:
+            return DialogueJobResult(outcome="skipped_foreign_anchor")
+        return await self._apply_confusion_attribution_replay_effect(
+            job=job,
+            anchor=anchor,
+        )
+
+    async def _apply_confusion_attribution_replay_effect(
+        self,
+        *,
+        job: DialogueJob,
+        anchor: DialogueAnchor | None,
+    ) -> DialogueJobResult:
+        """Analyze/apply one replay identity without submitting a nested job."""
+        self._require_dialogue_settlement_worker()
+        confusion_id = int(str(job.payload.get("confusion_id", 0)))
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        replay_id = str(job.payload.get("replay_id", "")).strip()
+        if self._confusion_replay_receipt_exists(turn_id):
+            return DialogueJobResult(outcome="already_terminal")
+        confusion = self._confusion_manager.get(confusion_id)
+        if confusion is None:
+            return DialogueJobResult(outcome="already_terminal")
+
+        if bool(job.payload.get("has_replay_queue", False)):
+            if confusion.replay_queue:
+                head = confusion.replay_queue[0]
+                head_id = str(head.get("replay_id") or head.get("turn_id") or "")
+                if head_id != replay_id:
+                    return DialogueJobResult(outcome="already_terminal")
+            settlement_reader = getattr(
+                self._ledger_database,
+                "get_card_settlement",
+                None,
+            )
+            settlement = (
+                settlement_reader(str(confusion_id)) if callable(settlement_reader) else None
+            )
+            settlement_payload = settlement.get("payload") if isinstance(settlement, dict) else None
+            if (
+                isinstance(settlement, dict)
+                and int(settlement.get("applied", 0)) == 0
+                and isinstance(settlement_payload, dict)
+                and str(settlement_payload.get("kind", "")) == "confusion"
+            ):
+                try:
+                    generation = max(
+                        0,
+                        int(settlement_payload.get("anchor_generation", 0)),
+                    )
+                except (TypeError, ValueError):
+                    generation = 0
+                snapshot: AnchorAdmissionSnapshot = (
+                    AnchorPersisted(
+                        kind="confusion",
+                        ref=str(confusion_id),
+                        generation=generation,
+                    )
+                    if generation > 0
+                    else AnchorAbsent(
+                        target_kind="confusion",
+                        target_ref=str(confusion_id),
+                        tombstone_epoch=1,
+                    )
+                )
+                result = await self._apply_confusion_answer_settlement(
+                    ref=str(confusion_id),
+                    confusion_id=confusion_id,
+                    interpretation=str(settlement_payload.get("interpretation", "")),
+                    note=str(settlement_payload.get("note", "")),
+                    turn_id=str(settlement.get("turn_id", turn_id)),
+                    source=str(settlement_payload.get("source", "recovery")),
+                    anchor_snapshot=snapshot,
+                )
+                return DialogueJobResult(
+                    outcome=(
+                        "retry_pending" if result.get("outcome") == "processing" else "applied"
+                    ),
+                )
+            terminal = self._confusion_manager.retry_anchor_settlements(confusion_id)
+            if terminal is None:
+                return DialogueJobResult(outcome="retry_pending")
+            current = self._dialogue_anchor_manager.current()
+            if (
+                current is not None
+                and current.kind == "confusion"
+                and current.ref == str(confusion_id)
+            ):
+                self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    expected_generation=current.generation,
+                )
+            return DialogueJobResult(outcome="applied")
+
+        if confusion.status != "clarifying" or anchor is None:
+            return DialogueJobResult(outcome="already_terminal")
+        anchor_context, anchor_texts = self._build_dialogue_anchor_context(anchor)
+        label = str(job.payload.get("subject_title") or job.payload.get("subject_id") or "这个方向")
+        user_message = f"[关于我有点困惑的「{label}」的澄清] {str(job.payload.get('message', ''))}"
+        try:
+            extract_result = await self._dialogue_insight_analyzer.extract(
+                user_message=user_message,
+                assistant_reply=str(job.payload.get("reply", "")),
+                core_memory=self._memory.get_core_memory(),
+                active_list=self._build_dialogue_active_list()[0],
+                anchor=anchor_context,
+            )
+        except DialogueInsightAnalysisError:
+            logger.warning(
+                "confusion dialogue attribution replay failed analysis: turn_id=%s",
+                turn_id,
+                exc_info=True,
+            )
+            return DialogueJobResult(outcome="retry_pending")
+        raw_decision = extract_result.get("anchor")
+        if not isinstance(raw_decision, dict):
+            logger.warning(
+                "confusion dialogue attribution replay missing decision: turn_id=%s",
+                turn_id,
+            )
+            return DialogueJobResult(outcome="retry_pending")
+        if (
+            self._dialogue_anchor_manager.validate_snapshot(
+                anchor.ref,
+                anchor.generation,
+            )
+            is None
+        ):
+            return DialogueJobResult(outcome="stale")
+        outcome = await self._process_dialogue_anchor_decision(
+            anchor=anchor,
+            anchor_texts=anchor_texts,
+            decision=raw_decision,
+            turn_id=turn_id,
+        )
+        if outcome in {"kept_invalid", "kept_failed", "queued_failed", "stale"}:
+            return DialogueJobResult(outcome="retry_pending")
+        return DialogueJobResult(outcome="applied")
+
+    def _confusion_replay_receipt_exists(self, turn_id: str) -> bool:
+        if not turn_id or self._ledger_database is None:
+            return False
+        get_turn = getattr(self._ledger_database, "get_chat_turn", None)
+        row = get_turn(turn_id) if callable(get_turn) else None
+        raw_payload = row.get("payload", {}) if isinstance(row, dict) else {}
+        return bool(
+            isinstance(raw_payload, dict)
+            and int(raw_payload.get("confusion_anchor_processed", 0) or 0) == 1
+        )
+
+    def _dialogue_anchor_actual_state(
+        self,
+        *,
+        kind: str,
+        ref: str,
+    ) -> AnchorPersisted | AnchorAbsent:
+        current = self._dialogue_anchor_manager.current()
+        if current is not None and current.kind == kind and current.ref == ref:
+            return AnchorPersisted(
+                kind=current.kind,
+                ref=current.ref,
+                generation=current.generation,
+            )
+        return AnchorAbsent(
+            target_kind=kind,
+            target_ref=ref,
+            tombstone_epoch=1,
+        )
+
+    def _build_dialogue_anchor_context(
+        self,
+        anchor: DialogueAnchor,
+    ) -> tuple[dict[str, object], list[str]]:
+        """Resolve an anchor ref to the object text injected into the existing LLM call."""
+        texts: list[str] = []
+        if anchor.kind == "hypothesis":
+            hypotheses = [item.hypothesis for item in self._load_insights() if item.hypothesis]
+            hypothesis_by_ref = build_hash8_map(hypotheses)
+            hypothesis = hypothesis_by_ref.get(anchor.ref, "")
+            if hypothesis:
+                texts.append(hypothesis)
+            else:
+                logger.warning("dialogue hypothesis anchor ref no longer resolves: %s", anchor.ref)
+        else:
+            try:
+                confusion_id = int(anchor.ref.rsplit(":", maxsplit=1)[-1])
+            except ValueError:
+                confusion_id = 0
+            confusion = self._confusion_manager.get(confusion_id) if confusion_id else None
+            if confusion is not None:
+                texts.extend(
+                    text
+                    for text in (
+                        confusion.topic.strip(),
+                        confusion.observation.strip(),
+                        confusion.interpretation.strip(),
+                    )
+                    if text
+                )
+            else:
+                logger.warning("dialogue confusion anchor ref no longer resolves: %s", anchor.ref)
+        context = {
+            "kind": anchor.kind,
+            "ref": anchor.ref,
+            "generation": anchor.generation,
+            "text": texts[0] if texts else "",
+            "object_texts": texts,
+            "ambiguous_count": anchor.ambiguous_count,
+        }
+        return context, texts
+
+    def _filter_anchor_overlap_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        anchor_texts: list[str],
+    ) -> list[dict[str, object]]:
+        """Drop candidates that duplicate anchored content (second defence)."""
+        if not anchor_texts:
+            return candidates
+        kept: list[dict[str, object]] = []
+        for candidate in candidates:
+            content = str(candidate.get("content", "")).strip()
+            overlap = max(
+                (_dialogue_anchor_jaccard(content, anchor_text) for anchor_text in anchor_texts),
+                default=0.0,
+            )
+            if overlap >= _ANCHOR_CANDIDATE_JACCARD_THRESHOLD:
+                logger.warning(
+                    "dialogue candidate overlaps dialogue anchor (jaccard=%.3f); dropped: %s",
+                    overlap,
+                    content[:80],
+                )
+                continue
+            kept.append(candidate)
+        return kept
+
+    async def _process_dialogue_anchor_decision(
+        self,
+        *,
+        anchor: DialogueAnchor,
+        anchor_texts: list[str],
+        decision: dict[str, object],
+        turn_id: str,
+    ) -> str:
+        """Apply one matrix-validated anchor relation without another LLM call."""
+        raw_relation = decision.get("relation")
+        relation = raw_relation.strip() if isinstance(raw_relation, str) else ""
+        allowed = _ANCHOR_RELATIONS_BY_KIND.get(anchor.kind, frozenset())
+        all_relations = frozenset().union(*_ANCHOR_RELATIONS_BY_KIND.values())
+        if relation not in all_relations:
+            logger.warning("dialogue anchor decision dropped in engine: relation=%r", raw_relation)
+            return "kept_invalid"
+        if relation not in allowed:
+            logger.warning(
+                "dialogue anchor relation outside kind matrix in engine: kind=%s relation=%s; "
+                "coercing to unrelated",
+                anchor.kind,
+                relation,
+            )
+            relation = "unrelated"
+
+        if relation == "unrelated":
+            updated = self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            if updated is None:
+                current = self._dialogue_anchor_manager.current()
+                if current is not None:
+                    return "stale"
+            if anchor.kind == "confusion":
+                confusion_id = self._confusion_anchor_id(anchor)
+                if confusion_id:
+                    self._confusion_manager.record_anchor_relation_processed(
+                        confusion_id,
+                        relation=relation,
+                        turn_id=turn_id,
+                    )
+            return "unrelated" if updated is not None else "released_unrelated"
+
+        if relation == "ambiguous":
+            updated = self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            if updated is None:
+                return "stale"
+            if updated.ambiguous_count <= _ANCHOR_AMBIGUOUS_FOLLOW_UP_LIMIT:
+                self._ledger.record(
+                    write_point="anchor_follow_up",
+                    source="dialogue_anchor",
+                    after={"ambiguous_count": updated.ambiguous_count},
+                    source_refs=[f"{anchor.kind}:{anchor.ref}"],
+                    turn_id=turn_id,
+                )
+                if anchor.kind == "confusion":
+                    confusion_id = self._confusion_anchor_id(anchor)
+                    if confusion_id:
+                        self._confusion_manager.record_anchor_relation_processed(
+                            confusion_id,
+                            relation=relation,
+                            turn_id=turn_id,
+                        )
+                return "follow_up"
+            if anchor.kind == "hypothesis":
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    card_state="deferred",
+                    expected_generation=anchor.generation,
+                )
+            else:
+                confusion_id = self._confusion_anchor_id(anchor)
+                terminal = (
+                    self._confusion_manager.process_anchor_settlement(
+                        confusion_id,
+                        action="defer",
+                        note="second ambiguous dialogue turn",
+                        turn_id=turn_id,
+                        anchor_generation=anchor.generation,
+                    )
+                    if confusion_id
+                    else None
+                )
+                if terminal is None:
+                    return "queued_failed"
+                released = self._dialogue_anchor_manager.release(
+                    reason="settled",
+                    expected_generation=anchor.generation,
+                )
+            return "deferred" if released is not None else "stale"
+
+        # Every valid non-ambiguous relation resets both counters before its
+        # object-specific side effect. A failed side effect leaves a clean,
+        # still-active anchor for the next turn.
+        if (
+            self._dialogue_anchor_manager.note_relation(
+                relation,
+                expected_generation=anchor.generation,
+            )
+            is None
+        ):
+            return "stale"
+        if anchor.kind == "hypothesis":
+            hypothesis = anchor_texts[0] if anchor_texts else ""
+            if not hypothesis:
+                logger.warning("dialogue hypothesis anchor has no resolvable object text")
+                return "kept_invalid"
+            if relation in {"support", "contradict"}:
+                result = await self._apply_hypothesis_settlement(
+                    ref=anchor.ref,
+                    hypothesis=hypothesis,
+                    requested_verdict=relation,
+                    turn_id=turn_id,
+                    source="dialogue_anchor",
+                    anchor_snapshot=AnchorPersisted(
+                        kind=anchor.kind,
+                        ref=anchor.ref,
+                        generation=anchor.generation,
+                    ),
+                )
+                if result.get("outcome") == "processing":
+                    return "queued_failed"
+                return str(result.get("state", "stale"))
+            if relation == "revise":
+                raw_derived = decision.get("derived")
+                derived = _as_dict_list(raw_derived)
+                result = await self._apply_hypothesis_settlement(
+                    ref=anchor.ref,
+                    hypothesis=hypothesis,
+                    requested_verdict="revise",
+                    turn_id=turn_id,
+                    source="dialogue_anchor",
+                    derived=derived,
+                    anchor_snapshot=AnchorPersisted(
+                        kind=anchor.kind,
+                        ref=anchor.ref,
+                        generation=anchor.generation,
+                    ),
+                )
+                if result.get("outcome") == "processing":
+                    return "queued_failed"
+                if result.get("settlement_verdict") == "revised":
+                    return "revised"
+                return str(result.get("state", "stale"))
+            return "kept_invalid"
+
+        if relation != "answer":
+            return "kept_invalid"
+        interpretation = str(decision.get("interpretation", "")).strip()
+        if interpretation not in {"real_interest", "proxy_behavior", "dismissed"}:
+            logger.warning(
+                "dialogue confusion answer has invalid interpretation=%r",
+                interpretation,
+            )
+            return "kept_invalid"
+        confusion_id = self._confusion_anchor_id(anchor)
+        if not confusion_id:
+            return "kept_invalid"
+        result = await self._apply_confusion_answer_settlement(
+            ref=anchor.ref,
+            confusion_id=confusion_id,
+            interpretation=interpretation,
+            note="dialogue_anchor",
+            turn_id=turn_id,
+            source="dialogue_anchor",
+            anchor_snapshot=AnchorPersisted(
+                kind=anchor.kind,
+                ref=anchor.ref,
+                generation=anchor.generation,
+            ),
+        )
+        if result.get("outcome") == "processing":
+            return "queued_failed"
+        return "answered"
+
+    async def _persist_anchor_derived_hypotheses(
+        self,
+        derived: list[dict[str, object]],
+    ) -> list[str]:
+        """Idempotently upsert revise-derived hypotheses and return marker refs."""
+        existing = self._load_insights()
+        by_text = {self._normalize_text(item.hypothesis): item for item in existing}
+        trigger_refs: list[str] = []
+        changed = False
+        for item in derived:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            confidence = max(0.75, min(1.0, self._to_float(item.get("confidence", 0.0))))
+            evidence = str(item.get("evidence", "")).strip()
+            normalized = self._normalize_text(content)
+            hypothesis = by_text.get(normalized)
+            if hypothesis is None:
+                hypothesis = InsightHypothesis(
+                    hypothesis=content,
+                    evidence=[evidence] if evidence else [],
+                    confidence=round(confidence, 4),
+                    validated=True,
+                    created_at=datetime.now().isoformat(),
+                    # The user supplied this wording themselves in the dialogue,
+                    # so it counts as a user verdict — a later insight pass must
+                    # not talk its confidence down.
+                    user_verdict="confirmed",
+                )
+                existing.append(hypothesis)
+                by_text[normalized] = hypothesis
+                changed = True
+            else:
+                next_confidence = round(max(hypothesis.confidence, confidence), 4)
+                if not hypothesis.validated:
+                    hypothesis.validated = True
+                    changed = True
+                if hypothesis.user_verdict != "confirmed":
+                    hypothesis.user_verdict = "confirmed"
+                    changed = True
+                if hypothesis.confidence != next_confidence:
+                    hypothesis.confidence = next_confidence
+                    changed = True
+                if evidence and evidence not in hypothesis.evidence:
+                    hypothesis.evidence.append(evidence)
+                    changed = True
+            trigger_refs.append(f"anchor_revise:{content[:60]}")
+        if changed:
+            self._save_insights(existing)
+        return trigger_refs
+
+    @staticmethod
+    def _confusion_anchor_id(anchor: DialogueAnchor) -> int:
+        try:
+            return int(anchor.ref.rsplit(":", maxsplit=1)[-1])
+        except ValueError:
+            logger.warning("dialogue confusion anchor has malformed ref=%r", anchor.ref)
+            return 0
+
+    @staticmethod
+    def _with_anchor_outcome(
+        result: dict[str, object],
+        outcome: str,
+    ) -> dict[str, object]:
+        if outcome:
+            result["anchor_outcome"] = outcome
+        return result
+
+    def _stale_anchor_drop_result(
+        self,
+        *,
+        anchor_ref: str,
+        anchor_generation: int,
+        turn_id: str,
+        phase: str,
+    ) -> dict[str, object]:
+        """Warn and audit one stale queued anchor result without side effects."""
+        logger.warning(
+            "stale dialogue anchor result discarded before side effects: "
+            "phase=%s ref=%r generation=%s turn_id=%s",
+            phase,
+            anchor_ref,
+            anchor_generation,
+            turn_id,
+        )
+        self._ledger.record(
+            write_point="anchor_stale_generation_drop",
+            source=phase,
+            before={"ref": anchor_ref, "generation": anchor_generation},
+            after={"discarded": True},
+            source_refs=[f"anchor:{anchor_ref}"],
+            turn_id=turn_id,
+        )
+        return {
+            "event_logged": True,
+            "candidate_count": 0,
+            "preference_updated": False,
+            "profile_rebuilt": False,
+            "anchor_outcome": "stale",
+        }
 
     def _merge_insight_candidates(
         self,
@@ -1999,6 +4410,8 @@ class SoulEngine:
         active_list: dict[str, object],
         insight_hash_map: dict[str, str],
         turn_id: str,
+        admission_anchor_ref: str,
+        admission_anchor_generation: int,
     ) -> None:
         """Settle active objects referenced by a chat turn (whitelist = injected).
 
@@ -2007,6 +4420,10 @@ class SoulEngine:
         (speculation confirm/reject, insight feedback) and records a ledger row
         stamped with ``turn_id`` (idempotency observation key).
         """
+        if admission_anchor_ref or admission_anchor_generation:
+            raise RuntimeError(
+                "Ordinary dialogue settles require the admission-time absent anchor state"
+            )
         spec_domains = {
             str(item.get("domain", "")).strip()
             for item in _as_dict_list(active_list.get("speculations"))
@@ -2024,89 +4441,56 @@ class SoulEngine:
                 if ref not in spec_domains:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                await self._settle_speculation(ref, verdict, turn_id)
+                try:
+                    await self._apply_speculation_settlement(
+                        ref=ref,
+                        requested_verdict=verdict,
+                        turn_id=turn_id,
+                        source="chat",
+                    )
+                except Exception:
+                    logger.exception("Failed to settle speculation %s", ref)
             elif kind == "insight":
                 hypothesis = insight_hash_map.get(ref)
                 if hypothesis is None:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                await self._settle_insight(hypothesis, verdict, turn_id)
+                try:
+                    await self._apply_hypothesis_settlement(
+                        ref=ref,
+                        hypothesis=hypothesis,
+                        requested_verdict=verdict,
+                        turn_id=turn_id,
+                        source="chat",
+                        anchor_snapshot=AnchorAbsent(
+                            target_kind="hypothesis",
+                            target_ref=ref,
+                            tombstone_epoch=1,
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to settle insight %s", ref)
             elif kind == "confusion":
                 if ref not in confusion_ids:
                     logger.warning("dialogue settle ref not in injected list: %s", ref)
                     continue
-                self._settle_confusion(ref, verdict, turn_id)
+                try:
+                    await self._apply_confusion_settlement(
+                        ref=ref,
+                        requested_verdict=verdict,
+                        note="chat_settle",
+                        turn_id=turn_id,
+                        source="chat",
+                        anchor_snapshot=AnchorAbsent(
+                            target_kind="confusion",
+                            target_ref=ref,
+                            tombstone_epoch=1,
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to settle confusion %s", ref)
             else:
                 logger.warning("dialogue settle dropped: unknown kind=%s", kind)
-
-    async def _settle_speculation(self, domain: str, verdict: str, turn_id: str) -> None:
-        before = {"domain": domain, "verdict": verdict}
-        applied = False
-        try:
-            if verdict == "confirm":
-                applied = bool(self._speculator.user_confirm_speculation(domain))
-            elif verdict == "reject":
-                applied = bool(self._speculator.user_reject_speculation(domain))
-        except Exception:
-            logger.exception("Failed to settle speculation %s", domain)
-        self._ledger.record(
-            write_point="settle_speculation",
-            source="chat",
-            before=before,
-            after={"domain": domain, "applied": applied},
-            source_refs=[domain],
-            outcome="success" if applied else "failed",
-            turn_id=turn_id,
-        )
-
-    async def _settle_insight(self, hypothesis: str, verdict: str, turn_id: str) -> None:
-        signal = "confirm" if verdict == "confirm" else "reject"
-        result: dict[str, Any] = {}
-        try:
-            result = await self.update_from_feedback({"hypothesis": hypothesis, "signal": signal})
-        except Exception:
-            logger.exception("Failed to settle insight via feedback")
-        matched = bool(result.get("matched", result.get("updated", False)))
-        self._ledger.record(
-            write_point="settle_insight",
-            source="chat",
-            before={"hypothesis": hypothesis[:80], "verdict": verdict},
-            after={"matched": matched},
-            source_refs=[hypothesis[:60]],
-            outcome="success" if matched else "failed",
-            turn_id=turn_id,
-        )
-
-    def _settle_confusion(self, ref: str, verdict: str, turn_id: str) -> None:
-        """Directly resolve a confusion referenced from a plain chat turn.
-
-        ``confirm`` → the confused behaviour reflects a real interest
-        (``real_interest``, held updates replay); ``reject`` → it was a proxy /
-        misread (``proxy_behavior``, held updates discarded). The confusion's
-        direct-settle exit (gate off ⇒ direct write + ledger, spec §Phase 2).
-        """
-        try:
-            confusion_id = int(ref)
-        except (TypeError, ValueError):
-            logger.warning("confusion settle dropped: non-int ref=%r", ref)
-            return
-        resolution = "real_interest" if verdict == "confirm" else "proxy_behavior"
-        terminal: str | None = None
-        try:
-            terminal = self._confusion_manager.resolve(
-                confusion_id, resolution=resolution, note="chat_settle"
-            )
-        except Exception:
-            logger.exception("Failed to settle confusion %s", confusion_id)
-        self._ledger.record(
-            write_point="settle_confusion",
-            source="chat",
-            before={"confusion_id": confusion_id, "verdict": verdict},
-            after={"resolution": resolution, "status": terminal},
-            source_refs=[ref],
-            outcome="success" if terminal else "failed",
-            turn_id=turn_id,
-        )
 
     async def replay_held_updates(self) -> dict[str, object]:
         """Rebase resolved-real-interest held updates into preference analysis.
@@ -2263,6 +4647,53 @@ class SoulEngine:
             evidence=[evidence_text] if evidence_text else [],
             confidence=round(max(0.0, min(1.0, confidence)) * 0.6, 4),
         )
+
+    def _persist_confirmed_deep_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        """Persist gate-accepted deep self-statements as validated hypotheses.
+
+        First-person statements carry ``user_verdict="confirmed"`` — the user
+        said it themselves, in their own words, and the posture gate already
+        judged it consistent. Merged through ``merge_insights`` so a repeated
+        statement reinforces one row instead of duplicating.
+        """
+        hypotheses: list[InsightHypothesis] = []
+        for item in candidates:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            evidence_text = str(item.get("evidence", "")).strip()
+            hypotheses.append(
+                InsightHypothesis(
+                    hypothesis=content,
+                    evidence=[evidence_text] if evidence_text else [],
+                    confidence=_clamp_init_draft_confidence(item.get("confidence", 0.8)),
+                    validated=True,
+                    created_at=datetime.now().date().isoformat(),
+                    user_verdict="confirmed",
+                )
+            )
+        if not hypotheses:
+            return
+        try:
+            merged = self._insight_analyzer.merge_insights(self._load_insights(), hypotheses)
+            self._save_insights(merged)
+            self._ledger.record(
+                write_point="dialogue_deep_selfstatement",
+                source="chat",
+                after={
+                    "count": len(hypotheses),
+                    "kinds": sorted({str(c.get("kind", "")) for c in candidates}),
+                },
+                source_refs=[h.hypothesis[:60] for h in hypotheses],
+                turn_id=turn_id or "",
+            )
+        except Exception:
+            logger.warning("deep self-statement persistence failed", exc_info=True)
 
     def _persist_downgraded_insights(self, insights: list[InsightHypothesis]) -> None:
         existing = self._load_insights()

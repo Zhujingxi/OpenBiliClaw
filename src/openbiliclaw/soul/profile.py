@@ -100,6 +100,13 @@ class InsightHypothesis:
     confidence: float = 0.5  # 0.0 - 1.0
     validated: bool = False  # Has this been confirmed?
     created_at: str = ""
+    # "" (never judged) | "confirmed" | "rejected". Distinct from ``validated``:
+    # ``validated`` says "treat this as true", while ``user_verdict`` records
+    # that the *user* ruled on it at all. Without it a reject was only a low
+    # score, and the next insight pass — same model, same kind of evidence —
+    # could hand the hypothesis a high score again, silently undoing the user's
+    # 「不准」and putting it back in the 待聊 list. Legacy rows load as "".
+    user_verdict: str = ""
 
 
 @dataclass
@@ -429,6 +436,7 @@ def insight_hypothesis_to_dict(item: InsightHypothesis) -> dict[str, object]:
         "confidence": item.confidence,
         "validated": item.validated,
         "created_at": item.created_at,
+        "user_verdict": item.user_verdict,
     }
 
 
@@ -439,7 +447,14 @@ def insight_hypothesis_from_dict(raw_data: dict[str, object]) -> InsightHypothes
         confidence=_as_float(raw_data.get("confidence", 0.5), 0.5),
         validated=bool(raw_data.get("validated", False)),
         created_at=str(raw_data.get("created_at", "")),
+        user_verdict=_as_user_verdict(raw_data.get("user_verdict")),
     )
+
+
+def _as_user_verdict(raw_value: object) -> str:
+    """Whitelist the stored verdict; anything unexpected means 'never judged'."""
+    verdict = str(raw_value or "").strip().lower()
+    return verdict if verdict in {"confirmed", "rejected"} else ""
 
 
 def _as_list(raw_value: object) -> list[object]:

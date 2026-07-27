@@ -25,9 +25,24 @@ if TYPE_CHECKING:
     from openbiliclaw.soul.profile import OnionProfile
     from openbiliclaw.soul.profile_builder import ProfileBuilder
 
-from .pipeline import LayerUpdateResult, OnionLayer
+from .pipeline import LayerUpdateResult, OnionLayer, SignalType
 
 logger = logging.getLogger(__name__)
+
+# Unified interest line (spec 2026-07-27): a drained batch carrying at least one
+# FEEDBACK signal inherits the retired feedback batch's privileges — dislike
+# archive, gated soul rebuild, held replay — and its ledger provenance.
+_FEEDBACK_LEDGER_SOURCE = "feedback"
+
+
+def _feedback_signal_ids(signals: list[dict[str, object]]) -> list[str]:
+    """Signal ids of the FEEDBACK rows in this batch (empty ⇒ not a feedback batch)."""
+    return [
+        str(sig.get("id", "")).strip()
+        for sig in signals
+        if sig.get("signal_type") == SignalType.FEEDBACK.value
+    ]
+
 
 LayerUpdater = Callable[..., Awaitable[LayerUpdateResult]]
 
@@ -86,6 +101,7 @@ async def update_layer(
     embedding_service: Any | None = None,
     llm_service: Any | None = None,
     posture_gate: Any | None = None,
+    feedback_hooks: Any | None = None,
 ) -> LayerUpdateResult:
     """Dispatch to the appropriate layer updater.
 
@@ -115,12 +131,22 @@ async def update_layer(
         profile_builder=profile_builder,
         embedding_service=embedding_service,
         llm_service=llm_service,
+        feedback_hooks=feedback_hooks,
     )
 
     # Ledger write point D5 #3: pipeline per-layer updater persistence. One row
     # per layer that actually changed (a no-op update writes nothing).
     if result.changed:
-        _record_layer_ledger(memory=memory, layer=layer, result=result)
+        # Ledger continuity (spec invariant 5): a feedback-triggered consumption
+        # keeps the ``feedback`` provenance the retired ``feedback_preference_
+        # overwrite`` row carried, so `openbiliclaw ledger` can still follow the
+        # feedback line across the merge.
+        source = (
+            _FEEDBACK_LEDGER_SOURCE
+            if _feedback_signal_ids(signals)
+            else f"pipeline:{getattr(layer, 'value', str(layer))}"
+        )
+        _record_layer_ledger(memory=memory, layer=layer, result=result, source=source)
     return result
 
 
@@ -129,6 +155,7 @@ def _record_layer_ledger(
     memory: MemoryManager,
     layer: OnionLayer,
     result: LayerUpdateResult,
+    source: str = "",
 ) -> None:
     from openbiliclaw.soul.ledger import ProfileLedger
 
@@ -136,12 +163,59 @@ def _record_layer_ledger(
     layer_name = getattr(layer, "value", str(layer))
     ledger.record(
         write_point="pipeline_layer_update",
-        source=f"pipeline:{layer_name}",
+        source=source or f"pipeline:{layer_name}",
         before={"layer": layer_name},
         after={"layer": layer_name, "changes": list(result.changes)},
         source_refs=list(result.changes) or [f"layer:{layer_name}"],
         outcome="success",
     )
+
+
+def _apply_topic_lifecycle_evidence(
+    *,
+    memory: MemoryManager,
+    existing_preference: dict[str, Any],
+    updated_preference: dict[str, Any],
+) -> None:
+    """Stamp lifecycle state on interests produced by the incremental pipeline.
+
+    Without this, only ``analyze_events`` / ``learn_from_dialogue`` /
+    the feedback batch stamped ``state``. Ordinary browsing — the dominant
+    input path — went through here and produced interests with no ``state``
+    at all, which ``get_state()`` reads as ``active``. New topics therefore
+    skipped the trial period entirely and immediately competed for
+    recommendation weight, and the 12h ``scan_lifecycle`` never backfilled
+    them (it treats a stateless interest as already active).
+
+    Mirrors ``SoulEngine._apply_topic_lifecycle_evidence``; ``source`` is
+    ``pipeline`` so the ledger still shows which path stamped the transition.
+    Best-effort: any failure is logged at DEBUG and never breaks the update.
+    """
+    try:
+        from openbiliclaw.soul.ledger import ProfileLedger
+        from openbiliclaw.soul.topic_lifecycle import apply_evidence
+
+        existing_interests = [
+            item for item in existing_preference.get("interests", []) if isinstance(item, dict)
+        ]
+        updated_interests = updated_preference.get("interests")
+        if not isinstance(updated_interests, list):
+            return
+        merged, transitions = apply_evidence(existing_interests, updated_interests)
+        updated_preference["interests"] = merged
+        if not transitions:
+            return
+        ledger = ProfileLedger(getattr(memory, "_database", None))
+        for tr in transitions:
+            ledger.record(
+                write_point="topic_lifecycle",
+                source="pipeline",
+                before={"topic": tr.name, "state": tr.from_state},
+                after={"topic": tr.name, "state": tr.to_state},
+                source_refs=[f"reason:{tr.reason}"],
+            )
+    except Exception:
+        logger.debug("pipeline topic lifecycle evidence overlay failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +278,17 @@ async def _update_interest(
     preference_analyzer: PreferenceAnalyzer,
     embedding_service: Any | None = None,
     llm_service: Any | None = None,
+    feedback_hooks: Any | None = None,
     **_: Any,
 ) -> LayerUpdateResult:
-    """Update interest layer by delegating to PreferenceAnalyzer."""
+    """Update interest layer by delegating to PreferenceAnalyzer.
+
+    When the drained batch carries FEEDBACK signals and the unified interest
+    line is on (``feedback_hooks`` wired), this is also the retired feedback
+    batch's consumption point: newly disliked topics are archived before the
+    preference write, and ``feedback_context`` asks the pipeline to run the
+    gated soul rebuild + held replay after the profile write.
+    """
     # Convert signals back to event format for PreferenceAnalyzer
     events: list[dict[str, Any]] = []
     for sig in signals:
@@ -222,14 +304,49 @@ async def _update_interest(
 
     pre_update_profile = deepcopy(profile)
 
+    # A small event batch is ambiguous on its own — three woodworking videos
+    # could be a new interest or an old one resurfacing. Passing the recent
+    # cognition tail (same window regenerate_portrait uses) lets the analyzer
+    # interpret the batch against what the system already believes instead of
+    # in a vacuum. Init chunks and the feedback batch deliberately do NOT pass
+    # this: init has no cognition yet, and feedback is judged on its own words.
+    from .profile import awareness_note_to_dict, insight_hypothesis_to_dict
+
+    awareness_notes = [awareness_note_to_dict(n) for n in profile.recent_awareness[-5:]]
+    active_insights = [insight_hypothesis_to_dict(i) for i in profile.active_insights[-5:]]
+
     try:
         updated_preference = await preference_analyzer.analyze_events(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes or None,
+            active_insights=active_insights or None,
         )
     except Exception:
         logger.exception("PreferenceAnalyzer failed during interest update")
         return LayerUpdateResult(layer=OnionLayer.INTEREST, changed=False)
+
+    # Count this analysis as one unit of lifecycle evidence before persisting,
+    # so pipeline-born topics enter `trial` like every other write path.
+    _apply_topic_lifecycle_evidence(
+        memory=memory,
+        existing_preference=existing_preference,
+        updated_preference=updated_preference,
+    )
+
+    old_dislikes = _string_set(existing_preference.get("disliked_topics"))
+    new_dislikes = _string_set(updated_preference.get("disliked_topics"))
+    newly_added_dislikes = new_dislikes - old_dislikes
+
+    # Feedback-batch privilege ①: archive (never delete) interests the user just
+    # told us to avoid, in the same snapshot that gets persisted and populated
+    # into the onion profile below.
+    feedback_signal_ids = _feedback_signal_ids(signals)
+    if feedback_signal_ids and newly_added_dislikes and feedback_hooks is not None:
+        try:
+            feedback_hooks.archive_dislikes(updated_preference, sorted(newly_added_dislikes))
+        except Exception:
+            logger.debug("feedback dislike archive hook failed", exc_info=True)
 
     # Persist flat preference (unchanged pipeline)
     preference_layer.data.clear()
@@ -264,9 +381,6 @@ async def _update_interest(
                 f"兴趣权重变化: {name} {old_interests[name]:.2f} → {new_interests[name]:.2f}"
             )
 
-    old_dislikes = _string_set(existing_preference.get("disliked_topics"))
-    new_dislikes = _string_set(updated_preference.get("disliked_topics"))
-    newly_added_dislikes = new_dislikes - old_dislikes
     for topic in newly_added_dislikes:
         changes.append(f"新增讨厌: {topic}")
 
@@ -312,6 +426,18 @@ async def _update_interest(
         except Exception:
             logger.debug("Speculator seed ingestion skipped", exc_info=True)
 
+    # Feedback-batch privileges ②③ run after the profile write — hand the
+    # pipeline everything the gated rebuild + held replay need.
+    feedback_context: dict[str, object] | None = None
+    if feedback_signal_ids and feedback_hooks is not None:
+        feedback_context = {
+            "existing_preference": existing_preference,
+            "updated_preference": updated_preference,
+            "feedback_count": len(feedback_signal_ids),
+            "source_refs": [f"feedback_signal:{sid}" for sid in feedback_signal_ids if sid]
+            or ["feedback_batch"],
+        }
+
     return LayerUpdateResult(
         layer=OnionLayer.INTEREST,
         changed=bool(changes),
@@ -320,6 +446,7 @@ async def _update_interest(
         trigger="偏好分析",
         evidence=f"分析了 {len(events)} 条事件",
         timestamp=datetime.now().isoformat(),
+        feedback_context=feedback_context,
     )
 
 

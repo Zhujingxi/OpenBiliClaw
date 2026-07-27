@@ -21,6 +21,28 @@ guided init: signals → preferences → full profile commit
 
 config UI draft → /api/config/discover-models → exact instance GET /models
                 → editable model list + local effort advisory (no config write)
+interest updates: events / dialogue / feedback(priority) → ProfileUpdatePipeline → INTEREST
+                  legacy feedback batch retired; unified_interest_line=false is rollback only
+
+durable dialogue → confirmation entry(pending list / cards)
+                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → typed settlement queue[all 11 declared kinds] → one actual worker + guard
+                 → pending≤3 → user open(no cooldown) | system 12h+object 72h
+                   → confirmation INSERT → attached user INSERT (created_at,rowid)
+                 → anchor snapshot(kind + ref + generation) → existing insight extraction
+                 → kind×relation matrix ┐
+                 → hypothesis card action ┴→ frozen snapshot → worker-only apply
+                   action: local completion≤1s → 200
+                         | blocked head → 202 processing → popup/desktop GET 1/2/5s, ≤30s
+                   confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
+                   → lightweight ref winner receipt
+                   → event → object → derived → rebuild-marker → applied
+                   → stable audit / cross-session projection / exact-generation release
+
+config hot-reload → pause/drain old settlement worker → exact revoke old permit
+                  → start/register new → publish new → stop old
+                  └─ timeout before revoke: resume old + abort
+                     new start failure: fresh nonce reauthorize old + resume
 
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
@@ -33,7 +55,7 @@ background refresh → maintenance DB worker / isolated connection
                    → ≤50 mutations per transaction → commit/yield/retry next batch
 ```
 
-1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话与唯一主动洞察确认入口（待聊列表/卡片；认知更新区只读）· 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **LLM 实例路由层** — `config / Web UI -> [llm.instances.<id>] -> 全局或分模块有序实例链 -> LLMRegistry -> Provider adapter`。实例 ID 是路由、健康与 cooldown 身份，adapter 类型只是协议实现，因此同类型的多个 Base URL / token / model 可以同时存在。模块默认继承全局链；自定义链只在链内降级，耗尽后不越界。配置界面的另一条只读支路是 `draft -> /api/config/discover-models -> exact instance GET /models`，只返回模型 ID 与本地 Effort 建议，不写盘、不改链。
@@ -76,30 +98,29 @@ background refresh → maintenance DB worker / isolated connection
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建
 - 五层灵魂模型（事件→偏好→觉察→洞察→灵魂）
-- 认知画像流水线（`soul/ledger.py` + `soul/confusion.py` + `soul/posture_gate.py`）：三条更新线（对话学习 / 增量管线 / 整份重建）之上叠加统一审计与一致性纪律。**台账** `profile_update_ledger` 是所有画像写点的只追加 best-effort 观察者（含 shadow 门控 `gate_verdict`）。**疑惑** `confusions`「看不懂」对象由觉察 / 推测僵局产生，驱动澄清（ask/wait/probe）、topic 冻结（新增/上调搁置进 held_updates，已有权重不回滚）与 held 重放（resolved 真实兴趣型 rebase 进下次偏好分析），代理行为出口对证据事件折价。**态势门控** `PostureGate` 拦深层写入。**深层线归一后**（v0.3.178+，见 `docs/modules/soul.md`「深层影响唯一模式」）有效接入点两条：深层对话候选 goal/value/state、soul 整份重建（泛化承载 dialogue / feedback_batch / confirmed_hypotheses 三触发源）；interest 快线与 ROLE 不过门控。**接入点②（管线 VALUES/CORE 层）已随 P1 退役**——pipeline 不再消费 VALUES/CORE，`update_layer` 对这两层封死 no-op，深层变更改由「假设确认 → 门控下 soul 重建」唯一模式驱动（`GateDecision.is_error` 区分真实 downgrade 与瞬时错误，供 rebuild_pending 状态机清标/重试）。三模式：`off` 完全旁路、`shadow`(默认) 异步旁路零延迟采数、`enforce` 同步拦截（downgrade 转假设），enforce 受 ≥14 天 shadow 观察的 save-time 校验。
+- 认知画像流水线（`soul/ledger.py` + `soul/dialogue_anchor.py` + `soul/confusion.py` + `soul/posture_gate.py`）：兴趣层的事件驱动写入已经收敛为一条 `ProfileUpdatePipeline → INTEREST` 路径，行为、对话与 feedback 都是管线信号，其中 feedback 带优先级阈值；旧反馈批默认退役，仅 `unified_interest_line=false` 回退时恢复。其上叠加统一审计与一致性纪律。**单锚**由 queue admission 冻结成带 kind/ref/generation 的 persisted/reserved/failed/absent snapshot；worker 只做 exact validation，绝不把受理时的 generation 0 升级成执行时出现的未来锚。**对象结算**在 `SoulEngine` 中拆成公开 `submit_*` 与 worker-only `_apply_*`；11 个 declared kind 的生产入口已全部接入一个 in-memory queue/actual worker，锚 relation 和普通 chat settles 在当前 learn worker task 内直接 apply，不递归排队或 inline dispatch。guard 校验 actual worker Task + lifecycle nonce，不存在 child 临时授权；request task、active child 与跨 job detached child 均不能进入 protected façade 或冒充队外 producer。`card_settlements` 只保存 immutable winner、result、stable event identity 与 `applied`，数据库级文件锁、5 分钟 lease、claim token、三段 CAS、discussion attempt token 与恢复 scanner 已删除。apply 顺序固定为 event → object → derived → rebuild marker → applied → projection → exact-generation anchor release；前四类 effect 可幂等重放，`applied=1` 后的显式 retry 只补 ledger observer / projection / anchor publication。结算与 revise-derived 台账使用稳定 hash effect key，首次 audit 写失败不阻断业务，恢复后补写不重复。列表/单 turn GET 只 submit `card.reconcile`，由 worker 补 publication 或修复无活锚 orphan discussion。队列 job 不落盘；重启后由 action retry/GET reconcile 重新 admission，不增加 scanner/job table。疑惑锚对象段仍先入 `confusions.replay_queue`（FIFO 5、精确队头、四类解锚清空台账），12h cycle 只枚举并提交专属 attribution replay。疑惑 topic 冻结、held 重放与代理证据折价不变。**态势门控**继续只覆盖深层对话候选与 soul 整份重建；VALUES/CORE 管线层已退役，三模式仍为 off/shadow/enforce。
 - 分类词表（`taxonomy.py`）：偏好层一级分类收敛到固定 `CATEGORY_VOCAB`，`PreferenceAnalyzer` 在写入前用精确命中 / embedding 最近邻 /「其他」兜底解析，避免自由文本分类污染长期画像。
 - 分类迁移与画像整理：`CategoryMigrator` 通过 `profile-consolidate --migrate-categories` 把存量自由分类迁到固定词表；`ProfileConsolidator` 的 12h 整理流程按 `(name, category)` 处理同名异义主题，支持 LLM 用 `{name, category}` 精确引用成员。
 - 用户画像覆盖层（`overrides.py`）：用户手动编辑存独立 `profile_overrides.json`，在读收口 `get_profile()` 与镜像收口 `sync_profile_files()` 叠加到 AI 画像之上（有效画像 = AI ⊕ 覆盖），画像重建不覆盖用户编辑；删 / 拉黑经有效 dislikes 影响 discovery / recommendation / delight 硬过滤（Phase 1 后端；编辑 UI 见 Phase 2/3）
 - `event_filters` / `satisfaction_filter_enabled` — 偏好分析前只丢弃 `negative`（quick_exit / explicit_negative）事件，保留 positive / neutral / unknown 作为上下文
 - `negative_exemplars` — 从事件层抽取近期 negative 标题，供 Discovery eval-batch 做负样本锚点
 - `/api/events` — 浏览器插件统一行为入口；批次内逐条写入，raw `dislike` 规范为 `feedback`，未知事件进入响应 `rejected` 明细而不是让整批 500，避免插件重试造成已写入事件重复。若 soul 画像明确未初始化，普通行为事件返回 `not_initialized` 拒收且不写 memory；首轮画像信号只由点击「开始初始化」后的 guided init 来源任务拉取。profile ready 后，accepted 事件会在落 memory 后通过 `signals_from_events()` 进入 `ProfileUpdatePipeline.ingest_batch()`，并会先用 `last_profile_pipeline_event_id` 补喂旧 discovery-pending 事件，再通过 `request_replenishment(reason="event_ingest")` 排队补货需求；`pending_signal_events` 只是 discovery refresh 水位，不代表画像待处理队列。
-- `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
+- `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，默认立即把反馈作为 FEEDBACK 优先信号投入 `ProfileUpdatePipeline` 的 INTEREST 缓冲；`FeedbackBatchScheduler` 只做 debounce 后的 shim flush 与一次性旧游标迁移。仅 `unified_interest_line=false` 回退时才恢复旧批的游标读取与全量偏好分析。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
 - `InterestSpeculator` — 兴趣推测与投机性发现
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
-- 苏格拉底式用户对话；回复后的用户主动学习链用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
+- 苏格拉底式用户对话；API runtime 显式使用 `queued`，成功回复后同步提交 typed `learn` 到唯一 `DialogueSettlementQueue`，worker 在线内直接 await 学习；同一队列还拥有卡片动作、锚、普通 settles、探针/疑惑与 legacy façade。CLI/OpenClaw 两处显式使用 `legacy_direct`，保持既有 detached direct learning 且位于 queue/guard 外。两条学习链都用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
 
 对话链路的失败边界是端到端一致的：
 
 ```text
-Web / CLI / OpenClaw
-        │ dialogue request
-        ▼
-SocraticDialogue ── success ──> user+agent history ──> background learning
-                                      (bypass background admission; keep total gate)
-                                                       └─ new dislike ──> shared pool purge
-        │
-        └─ failure/timeout ──> rollback provisional history
-                              └─> boundary-safe error / failed durable turn
+Web/API durable → SocraticDialogue(queued) → user+agent history
+                  └─ all declared settlement entries → DialogueSettlementQueue → one worker
+card action → await local job ≤1s → 200 | 202 processing → popup/desktop poll ≤30s
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history
+               └─ detached direct learning (outside queue/guard)
+learning → bypass background admission; keep total gate
+         └─ new dislike → shared pool purge
+failure/timeout → rollback provisional history → boundary-safe error / failed durable turn
 ```
 
 Web durable turn 只在成功回复后记录认知并发布成功事件；失败行的 `reply` 为空、`error` 为安全分类文案。桌面 Web 首屏的推荐读取、runtime 读取与 health/profile/activity/config 等次级 hydration 保持三个独立分支，任一慢请求不阻塞其余分支渲染。
@@ -108,7 +129,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - 五层网状记忆管理
 - 跨层关联和双向修正
 - 自我编辑和遗忘机制
-- `view` 事件在与事件行相同的 SQLite 事务内 upsert canonical `seen_items(source_platform:content_id)`；旧库按游标回填全部历史 view，不再用“最近 2000 条”扫描充当推荐去重。`reshuffle` 只记录一次强度 `0.1`、satisfaction-neutral 的批次导航事实，不把当前十张卡伪装成十条负反馈。
+- 「已消费」事件（`view` / `favorite` / `like` / `coin`，2026-07-26 起不再只有 `view`）在与事件行相同的 SQLite 事务内 upsert canonical `seen_items(source_platform:content_id)`；旧库按游标回填全部历史，类型集扩大时按 `scanned_event_types_version` 自动倒回重扫一次，不再用“最近 2000 条”扫描充当推荐去重。另有一条**非事件**入口：account sync 每轮把完整 B 站收藏快照经 `Database.mark_items_seen()` 直接写入账本——只有「新增」收藏才会变成事件，存量收藏没有事件可派生，快照标记幂等且不产生事件，因此不会重复计入偏好信号。`reshuffle` 只记录一次强度 `0.1`、satisfaction-neutral 的批次导航事实，不把当前十张卡伪装成十条负反馈。
 
 ### Content Discovery (`discovery/`)
 - 多策略内容发现（B 站 search · trending · related_chain · explore + 小红书 `xiaohongshu` + 抖音 `douyin` + YouTube `yt_search` / `yt_trending` / `yt_channel` + X (Twitter) `search` / `feed`(For-You) / `creator`(账号订阅) + 知乎 `search` / `hot` / `feed` / `creator` / `related` 插件任务 + Reddit `search` / `hot` / `subreddit` / `related` rdt-cli 默认命令后端 / 插件 fallback + Bangumi `search` / `ranked` / `latest` 官方匿名 API），按 `runtime.source_policy` 生成的平台有效配比补池；默认保存的 share 为 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi = 5 / 1 / 1 / 1 / 1 / 1 / 1 / 1，但默认只启用 B 站，关闭的平台不会占候选池 quota。B 站仍在主 refresh 计划内并行 fan-out；当 B 站 API search 处于冷却且扩展在线时，`BilibiliExtensionSearchProducer` 会作为兜底入队 `bili_tasks` 搜索任务；XHS / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 低于可换 quota 时分别交给独立 producer；补货请求还会受 raw-material ceiling headroom 约束，避免不可服务库存已满时继续消耗 LLM / discovery。Bangumi producer 使用逐日条目预算、类型 cursor、最小间隔与持久化 `Retry-After` cooldown，只 enqueue raw candidate。统一 `KeywordPlanner` 是生成侧：它只写 `discovery_keywords` query cache，不抓内容；当 `explore_refresh_hours` 到期 / 即将到期且 B 站有补货空间时，会在已有 merged keyword 调用中追加 `explore_domains`，把返回的探索 query 写入 `keyword_kind="explore"` 的 B 站关键词池，成功插入后推进 `last_explore_refresh_at`，后续由 `ExploreStrategy` claim / fetch / candidate pipeline 评估；普通 B 站与 Bangumi search 只 claim `keyword_kind="regular"`。
@@ -162,7 +183,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - `runtime.autostart` — 当前用户作用域开机自启动 manager：macOS LaunchAgent、Windows HKCU Run（源码 `pythonw + .pyw` / 冻结包直接 `OpenBiliClaw.exe`，兼容旧双路径项）、Linux XDG autostart；`reconcile()` 由 CLI 与冻结桌面入口共用，API / CLI / 插件设置页通过 `GET /api/autostart-status` 与 `POST /api/autostart/apply` 管理，带 env-managed / `config.local.toml` shadow guard，并用开启「先写 config 后注册 OS」、关闭「先注销 OS 后写 config」的方向化事务避免崩溃残留
 - `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从所有启用的 chat 实例和独立 embedding 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
 - `ContinuousRefreshController` — 管理补货、来源 producer 与 API daemon 的 `CandidateEvalCoordinator` 子任务；幂等 `run_startup_maintenance()` 是 host 暴露服务前的统一零 LLM 库存恢复边界。API daemon 的 `run_forever()` 先调用它再启动 delight/candidate/background loops，pipeline 的单次 enqueue callback 是 coordinator 唯一即时唤醒；OpenClaw direct bootstrap 不运行该 loop，因此不 attach dormant candidate / expression coordinator，而将 `recommend(refresh_if_needed=True)` 的首轮 source/evaluation 限为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），在 commit 后同步 drain ≤4 expression copy、禁用本次 split retry。库存维护使用独立单线程 worker/连接，每事务最多 50 行、每 tick 最多 8 批，批间释放 SQLite 写锁并让出 event loop；75ms 锁冲突直接延后。fresh history 为空时该 operation 直接 serve 首 batch 已复制的 canonical subset；其 one-shot callback 不创建 prewarm/provider background task，剩余 pending 由后续请求续补。热重载的新 controller 也先恢复；同一 controller 后续进入 loop 不重复维护。
-- `FeedbackBatchScheduler` — API 侧推荐反馈合并器；`/api/feedback` 只标记 dirty 并启动一次 debounce 后台任务，burst 内多条反馈 coalesce 成一次 feedback batch，批处理中又收到新反馈时补跑下一轮。Soul 层 single-flight 负责兜底其它入口的并发保护。
+- `FeedbackBatchScheduler` — API 侧推荐反馈 debounce owner；默认驱动 `process_feedback_batch_if_needed()` shim 做统一线的兜底 flush / 一次性迁移，burst 内多条反馈 coalesce，处理中又收到新反馈时补跑下一轮。旧 feedback batch 只在 `unified_interest_line=false` 回退时执行；Soul 层 single-flight 继续保护其它入口。
 - `/api/runtime-status` / `runtime-stream` — 对插件、移动 Web 和桌面 Web 发布同一套候选池库存口径：`pool_available_count` 只表示当前可立即被 `serve()` 消费的内容，`pool_raw_count` 表示基础 fresh 素材加待评估 raw candidates，`pool_pending_count` 表示已有素材但仍缺评估、文案、分类或可跳转链接；命中持久化 `seen_items` 的素材不算 pending。`pool_pending_eval_count` / `pool_evaluated_pending_count` 分别拆出待 LLM 评估和已评估待 admission 的数量；`pending_signal_events` 只表示 discovery refresh 游标后的新动作数量，用于下一次统一补货判断，不会由事件入口直接执行 refresh。前端只把 available 显示为“可换”，pending 显示为“正在整理”；后台补池的 source deficit 也使用 available-by-source，而 raw trim / headroom 使用 all-raw-material by-source。推荐读取、换一批和续页消费候选池后会立即广播新的 `refresh.pool_updated` 快照，使其它已打开客户端收敛到扣减后的库存，而不重载推荐列表。
 - `_publish_probe_if_available` — proactive push 循环中的探针仲裁器；从正向兴趣和避雷探针池中每轮最多选一条，正向探针事件携带 `probe_mode/challenge`，普通 `near` 和挑战探针使用独立 active 额度；只投递 `active` 候选，且只有推送到订阅者后才通过原子 runtime state 更新记录 domain / axis / distance history，避免后台旧快照覆盖用户刚处理的探针反馈
 - `background_llm_work_allowed()` — 共享 gate predicate；`scheduler.enabled=false` 会暂停 daemon-owned 后台 LLM / embedding 工作，`scheduler.pause_on_extension_disconnect=true` 时还要求浏览器插件 presence 在线或仍处于断开宽限窗口。该 gate 覆盖 refresh、candidate eval、pool precompute、soul pipeline、xhs/dy/youtube/zhihu producer、proactive push、低频 account sync、startup one-shot 和 OpenClaw direct bootstrap；首个完整画像尚未落盘或 guided init 活跃时（`InitCoordinator.init_active()`）也返回 False，一处暂停所有后台循环，防止 account sync 在用户点击初始化前抢先分析/重复落库，让 init 的显式 analyze / build / backfill 独占（init 自身直调 `soul_engine` / `run_init_backfill`，不查该 gate）。阶段 2/3 另以 task-local scope 绕过空库存 maintenance admission，但仍受 total gate；阶段 4 不继承该 scope，靠 supply / evaluation / expression 正常补货优先级完成
@@ -184,11 +205,12 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
-1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe`）和可选的内容上下文。
-2. 后端先把 turn 写入 SQLite `chat_turns(status='pending')`，随后用后台任务调用 Dialogue 引擎生成回复。
-3. popup 通过 `/api/chat/turns/{turn_id}` 轮询，并在初始化时按 `session/scope` 重新 hydrate 历史。
+1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
+2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
+3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker。confirm/reject、legacy、discuss/defer 与 reconciliation 均只 submit frozen-snapshot worker executor；旧 discuss attempt-token/CAS/scanner 已删除。action 最多 shield 等本地 job 1 秒：完成保持 200，队头阻塞返回 202 且 job 继续。
+4. popup 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。两端初始化时仍按 `session/scope` hydrate 可见历史；Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。移动 Web 没有卡片 action UI，保持只读。
 
-这条数据流让 Chrome 在切 tab、reload 或内存压力下丢弃不可见 side panel 后，仍能恢复 pending thinking 占位、完成回复或失败状态。完成后的 delight/probe/avoidance_probe scope 会继续发布对应 cognition/runtime 事件，主聊天仍按原有受控学习链路进入画像更新。
+历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 
 ### Init 多源画像导入
 
@@ -255,7 +277,7 @@ X 是第六个内容源，分两条独立通路：
 - `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未命中 `seen_items` 的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `maintain_pool_inventory()` 是 runtime 唯一 destructive maintenance 边界：`canonical available -> recover eligible suppressed -> protected IDs -> stale/explore/topic/source plans -> cross-table raw plan -> invariant validation -> commit`；恢复复用 canonical readiness，仅额外要求 `recommended_at IS NULL`，并按来源缺口、相关度、评分时间和稳定 ID 排序。每批最多修改 50 行，维护查询、持久化已看身份与动态 delight 阈值都接受同一显式 isolated connection；专属 worker 与 serve worker 分队列，绝不把共享 `Database.conn` 直接扔进 `to_thread()` 并发事务。
 - `load_pool_serve_snapshot_async()` / `persist_pool_serve_async()` 是交互读写边界：前者在一个一致只读事务中聚合推荐所需状态，后者在短 `BEGIN IMMEDIATE` 中原子写 recommendation + shown；交互锁等待按 8×250ms 有界，维护锁等待固定 75ms。
-- `chat_turns` 持久化 side panel durable chat turn，字段包含 `turn_id/session/scope/subject/message/status/reply/error/created_at/updated_at`；`scope` 支持 `chat`、`delight`、`probe` 和 `avoidance_probe`
+- `chat_turns` 持久化 durable turn，字段含 `payload` JSON 与创建/更新时间；列表以 `(created_at,rowid)` 稳定排序。确认入口在 `BEGIN IMMEDIATE` 内依次按 `attached_to_turn_id`、`(ref,session)` 查重再插入 completed turn，因此并发 open 与卡片先落库的 crash gap 都不重复。discussion 只使用 payload `state`，不存在 `attempt_token/discussing_at` 或 stale scanner。`card_settlements` 是轻量 ref winner receipt：`INSERT OR IGNORE` 固化 `verdict/turn_id/payload`，`result/applied` 划定对象语义终态，`event_id` 与事件 INSERT 同一 SQLite 事务。表中不再有 lease、claim token 或 `seg_*`；非 SQLite mandatory effect 只由单 worker 执行，stable-key/set-upsert 覆盖全部故障点。`confusions.replay_queue` 提供上限 5 的归属 FIFO、精确队头出队与 completed reply receipt 扫描；它是对象归属数据，不是 settlement job inbox。
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 
 ## 运行时数据库约束

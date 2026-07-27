@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -16,14 +19,609 @@ from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidat
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.storage.database import Database
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 def _db(tmp_path: Path) -> Database:
     db = Database(tmp_path / "init.db")
     db.initialize()
     return db
+
+
+def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    columns = {
+        str(row["name"]): str(row["dflt_value"])
+        for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+    }
+
+    assert columns["payload"] == "'{}'"
+    settlement_columns = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert settlement_columns == {
+        "ref",
+        "verdict",
+        "turn_id",
+        "payload",
+        "applied",
+        "result",
+        "event_id",
+        "created_at",
+        "updated_at",
+    }
+
+
+def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-chat.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE chat_turns (
+            turn_id TEXT PRIMARY KEY,
+            session TEXT NOT NULL DEFAULT 'popup',
+            scope TEXT NOT NULL DEFAULT 'chat',
+            subject_id TEXT NOT NULL DEFAULT '',
+            subject_title TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            reply TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO chat_turns (turn_id, message) VALUES ('legacy-turn', '旧消息');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    assert "payload" in {
+        str(row["name"]) for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+    }
+    assert db.get_chat_turn("legacy-turn")["payload"] == {}
+
+
+def test_card_settlement_schema_rebuilds_wave_a_table_without_claim_columns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-settlement.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE card_settlements (
+            ref TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO card_settlements (ref, verdict, turn_id)
+        VALUES ('abc12345', 'confirmed', 'legacy-card');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    row = db.get_card_settlement("abc12345")
+    assert row is not None
+    assert row == {
+        "ref": "abc12345",
+        "verdict": "confirmed",
+        "turn_id": "legacy-card",
+        "payload": {},
+        "applied": 0,
+        "result": {},
+        "event_id": "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    assert row["created_at"]
+    assert row["updated_at"]
+    columns = {
+        str(info["name"])
+        for info in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert columns == {
+        "ref",
+        "verdict",
+        "turn_id",
+        "payload",
+        "applied",
+        "result",
+        "event_id",
+        "created_at",
+        "updated_at",
+    }
+
+
+@pytest.mark.parametrize(
+    ("applied", "seg_event", "expected_event_recorded"),
+    [(0, 0, False), (0, 1, True), (1, 0, True)],
+)
+def test_card_settlement_schema_rebuilds_claim_table_preserving_winner_and_event_identity(
+    tmp_path: Path,
+    applied: int,
+    seg_event: int,
+    expected_event_recorded: bool,
+) -> None:
+    path = tmp_path / f"legacy-claim-{applied}-{seg_event}.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        f"""
+        CREATE TABLE card_settlements (
+            ref TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{{}}',
+            applied INTEGER NOT NULL DEFAULT 0,
+            apply_claim_at TEXT,
+            apply_claim_token TEXT NOT NULL DEFAULT '',
+            seg_event INTEGER NOT NULL DEFAULT 0,
+            seg_object INTEGER NOT NULL DEFAULT 0,
+            seg_marker INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO card_settlements (
+            ref, verdict, turn_id, payload, applied, apply_claim_at,
+            apply_claim_token, seg_event, seg_object, seg_marker
+        )
+        VALUES (
+            'winner-ref', 'revised', 'winner-turn',
+            '{{"kind":"hypothesis","title":"原赢家"}}',
+            {applied}, '2026-07-22T04:00:00+00:00',
+            'old-owner', {seg_event}, 1, 1
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    row = db.get_card_settlement("winner-ref")
+    assert row is not None
+    assert row["verdict"] == "revised"
+    assert row["turn_id"] == "winner-turn"
+    assert row["payload"] == {"kind": "hypothesis", "title": "原赢家"}
+    assert row["applied"] == applied
+    assert bool(row["event_id"]) is expected_event_recorded
+    columns = {
+        str(info["name"])
+        for info in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+    }
+    assert not columns.intersection(
+        {
+            "apply_claim_at",
+            "apply_claim_token",
+            "seg_event",
+            "seg_object",
+            "seg_marker",
+        }
+    )
+
+
+def test_card_settlement_fresh_schema_double_initialize_is_idempotent(tmp_path: Path) -> None:
+    path = tmp_path / "double-init.db"
+    db = Database(path)
+    db.initialize()
+    assert db.try_create_card_settlement(
+        ref="double-init-ref",
+        verdict="confirmed",
+        turn_id="double-init-turn",
+        payload={"kind": "hypothesis", "title": "保留赢家"},
+    )
+    before = db.get_card_settlement("double-init-ref")
+    db.close()
+
+    reopened = Database(path)
+    reopened.initialize()
+    reopened.initialize()
+
+    assert reopened.get_card_settlement("double-init-ref") == before
+
+
+@pytest.mark.parametrize(
+    ("initial", "target"),
+    [
+        ("pending", "confirmed"),
+        ("pending", "rejected"),
+        ("pending", "deferred"),
+        ("pending", "discussing"),
+        ("discussing", "confirmed"),
+        ("discussing", "rejected"),
+        ("discussing", "deferred"),
+        ("discussing", "pending"),
+    ],
+)
+def test_chat_turn_payload_state_cas_allows_declared_transitions(
+    tmp_path: Path,
+    initial: str,
+    target: str,
+) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(
+        turn_id=f"{initial}-{target}",
+        message="卡片",
+        payload={"type": "card", "state": initial, "marker": "preserved"},
+    )
+
+    assert db.update_chat_turn_payload_state(
+        f"{initial}-{target}",
+        expected_state=initial,
+        new_state=target,
+    )
+    payload = db.get_chat_turn(f"{initial}-{target}")["payload"]
+    assert payload == {"type": "card", "state": target, "marker": "preserved"}
+
+
+def test_chat_turn_payload_state_cas_rejects_stale_or_illegal_transition(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(
+        turn_id="card-cas",
+        message="卡片",
+        payload={"type": "card", "state": "pending"},
+    )
+
+    assert not db.update_chat_turn_payload_state(
+        "card-cas",
+        expected_state="discussing",
+        new_state="confirmed",
+    )
+    with pytest.raises(ValueError, match="Unsupported card payload transition"):
+        db.update_chat_turn_payload_state(
+            "card-cas",
+            expected_state="confirmed",
+            new_state="pending",
+        )
+    assert db.get_chat_turn("card-cas")["payload"]["state"] == "pending"
+
+
+def test_card_settlement_insert_or_ignore_arbitrates_across_connections(tmp_path: Path) -> None:
+    path = tmp_path / "settlement.db"
+    seed = Database(path)
+    seed.initialize()
+    seed.close()
+    barrier = threading.Barrier(50)
+
+    def contend(index: int) -> tuple[bool, str, str]:
+        database = Database(path)
+        database.initialize()
+        verdict = "confirmed" if index % 2 == 0 else "rejected"
+        turn_id = f"turn-{index}"
+        try:
+            barrier.wait(timeout=5)
+            inserted = database.try_create_card_settlement(
+                ref="hypothesis:abc12345",
+                verdict=verdict,
+                turn_id=turn_id,
+                payload={"request_index": index},
+            )
+            return inserted, verdict, turn_id
+        finally:
+            database.close()
+
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        outcomes = list(executor.map(contend, range(50)))
+
+    assert Counter(inserted for inserted, _verdict, _turn_id in outcomes) == {
+        False: 49,
+        True: 1,
+    }
+    winner = next(item for item in outcomes if item[0])
+    reopened = Database(path)
+    reopened.initialize()
+    settlement = reopened.get_card_settlement("hypothesis:abc12345")
+    assert settlement is not None
+    assert (settlement["verdict"], settlement["turn_id"]) == winner[1:]
+    assert settlement["applied"] == 0
+
+
+def test_confirmation_turn_deduplicates_ref_session_atomically_but_not_cross_session(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def create(index: int) -> tuple[dict[str, object], bool]:
+        barrier.wait(timeout=2)
+        return db.create_chat_confirmation_turn(
+            turn_id=f"card-{index}",
+            session="popup",
+            scope="hypothesis",
+            ref="abc12345",
+            title="并发打开同一假设",
+            message="阿b 的猜测",
+            reply="",
+            payload={
+                "type": "card",
+                "kind": "hypothesis",
+                "ref": "abc12345",
+                "title": "并发打开同一假设",
+                "state": "pending",
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(create, range(2)))
+
+    assert sorted(created for _row, created in results) == [False, True]
+    assert len({str(row["turn_id"]) for row, _created in results}) == 1
+    webui, created = db.create_chat_confirmation_turn(
+        turn_id="card-webui",
+        session="webui",
+        scope="hypothesis",
+        ref="abc12345",
+        title="并发打开同一假设",
+        message="阿b 的猜测",
+        reply="",
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": "abc12345",
+            "title": "并发打开同一假设",
+            "state": "pending",
+        },
+    )
+    assert created is True
+    assert webui["turn_id"] == "card-webui"
+    count = db.conn.execute(
+        "SELECT COUNT(*) FROM chat_turns WHERE subject_id = 'abc12345'"
+    ).fetchone()[0]
+    assert count == 2
+
+
+def test_card_settlement_event_and_completion_are_idempotent_without_claims(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    assert db.try_create_card_settlement(
+        ref="abc12345",
+        verdict="confirmed",
+        turn_id="card-popup",
+        payload={"kind": "hypothesis", "title": "用户偏爱深度内容"},
+    )
+    event = {
+        "event_type": "feedback",
+        "title": "用户偏爱深度内容",
+        "metadata": {"settlement_ref": "abc12345", "signal": "confirm"},
+    }
+
+    event_results = [
+        db.record_card_settlement_event_once(ref="abc12345", event=event) for _ in range(10)
+    ]
+    assert event_results == [True, *([False] * 9)]
+    completion_results = [
+        db.complete_card_settlement(
+            ref="abc12345",
+            result={"matched": True, "state": "confirmed"},
+        )
+        for _ in range(10)
+    ]
+    assert completion_results == [True, *([False] * 9)]
+
+    row = db.get_card_settlement("abc12345")
+    assert row is not None
+    assert row["event_id"].startswith("dialogue:")
+    assert len(row["event_id"]) == 79
+    assert row["applied"] == 1
+    assert row["result"] == {"matched": True, "state": "confirmed"}
+    events = db.query_events(event_types=["feedback"])
+    assert len(events) == 1
+    assert json.loads(events[0]["metadata"])["settlement_ref"] == "abc12345"
+
+
+@pytest.mark.parametrize(
+    "invalid_ref",
+    ["", "   ", "bad\x00ref", "x" * 1025],
+)
+def test_card_settlement_ref_validation_rejects_unsafe_effect_key_input(
+    tmp_path: Path,
+    invalid_ref: str,
+) -> None:
+    db = _db(tmp_path)
+    with pytest.raises(ValueError, match="ref is invalid"):
+        db.try_create_card_settlement(
+            ref=invalid_ref,
+            verdict="confirmed",
+            turn_id="unsafe-ref",
+        )
+
+
+def test_profile_ledger_stable_effect_key_inserts_once(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    effect_key = f"dialogue:{'a' * 64}:derived:{'b' * 64}"
+
+    first = db.insert_profile_ledger(
+        write_point="anchor_revise_derived",
+        source="dialogue_anchor",
+        source_refs=["derived"],
+        turn_id="turn-1",
+        effect_key=effect_key,
+    )
+    replay = db.insert_profile_ledger(
+        write_point="anchor_revise_derived",
+        source="dialogue_anchor",
+        source_refs=["derived"],
+        turn_id="turn-1",
+        effect_key=effect_key,
+    )
+
+    assert first > 0
+    assert replay == 0
+    assert (
+        len(
+            db.query_profile_ledger(
+                days=1,
+                write_point="anchor_revise_derived",
+            )
+        )
+        == 1
+    )
+    assert db.query_profile_ledger(days=1)[0]["effect_key"] == effect_key
+
+
+def test_profile_ledger_effect_key_migrates_legacy_table(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-profile-ledger.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE profile_update_ledger (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            write_point    TEXT NOT NULL,
+            source         TEXT NOT NULL DEFAULT '',
+            before_summary TEXT NOT NULL DEFAULT '',
+            after_summary  TEXT NOT NULL DEFAULT '',
+            diff           TEXT NOT NULL DEFAULT '',
+            source_refs    TEXT NOT NULL DEFAULT '',
+            outcome        TEXT NOT NULL DEFAULT 'success',
+            turn_id        TEXT NOT NULL DEFAULT '',
+            gate_verdict   TEXT NOT NULL DEFAULT '',
+            held_id        TEXT NOT NULL DEFAULT '',
+            error          TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO profile_update_ledger (write_point)
+        VALUES ('legacy-write');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    columns = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA table_info(profile_update_ledger)").fetchall()
+    }
+    assert "effect_key" in columns
+    rows = db.query_profile_ledger(days=1)
+    assert rows[0]["write_point"] == "legacy-write"
+    assert rows[0]["effect_key"] == ""
+
+
+@pytest.mark.parametrize(
+    "effect_key",
+    (
+        "dialogue:raw-ref:ledger",
+        f"dialogue:{'a' * 64}:derived:not-a-hash",
+    ),
+)
+def test_profile_ledger_rejects_unsafe_stable_effect_key(
+    tmp_path: Path,
+    effect_key: str,
+) -> None:
+    db = _db(tmp_path)
+
+    with pytest.raises(ValueError, match="effect key is invalid"):
+        db.insert_profile_ledger(
+            write_point="settle_insight",
+            effect_key=effect_key,
+        )
+
+
+def test_card_projection_ignores_unapplied_receipt_and_refreshes_all_sessions(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    for session in ("popup", "webui"):
+        db.create_chat_turn(
+            turn_id=f"card-{session}",
+            message="阿b 的猜测",
+            session=session,
+            scope="hypothesis",
+            payload={"type": "card", "ref": "abc12345", "state": "pending"},
+        )
+    db.try_create_card_settlement(ref="abc12345", verdict="confirmed", turn_id="card-popup")
+
+    assert db.project_applied_card_settlement("abc12345") == 0
+    assert db.get_chat_turn("card-popup")["payload"]["state"] == "pending"
+
+    assert db.record_card_settlement_event_once(
+        ref="abc12345",
+        event={
+            "event_type": "feedback",
+            "title": "假设",
+            "metadata": {"settlement_ref": "abc12345"},
+        },
+    )
+    assert db.complete_card_settlement(ref="abc12345", result={"matched": True})
+    assert db.project_applied_card_settlement("abc12345") == 2
+    assert db.get_chat_turn("card-popup")["payload"]["state"] == "confirmed"
+    assert db.get_chat_turn("card-webui")["payload"]["state"] == "confirmed"
+
+
+def test_legacy_card_settlement_columns_are_migration_only() -> None:
+    source_path = Path(Database.__module__.replace(".", "/") + ".py")
+    source = (Path(__file__).parents[1] / "src" / source_path).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    migration_start = next(
+        index
+        for index, line in enumerate(lines, start=1)
+        if "def _migrate_card_settlements_to_wave_2" in line
+    )
+    migration_end = next(
+        index
+        for index, line in enumerate(lines[migration_start:], start=migration_start + 1)
+        if line.startswith("    def ") and "_migrate_card_settlements_to_wave_2" not in line
+    )
+    legacy_names = {
+        "apply_claim_at",
+        "apply_claim_token",
+        "seg_event",
+        "seg_object",
+        "seg_marker",
+    }
+    occurrences = {
+        name: [index for index, line in enumerate(lines, start=1) if name in line]
+        for name in legacy_names
+    }
+    assert all(occurrences.values())
+    assert all(
+        migration_start <= line_number < migration_end
+        for line_numbers in occurrences.values()
+        for line_number in line_numbers
+    )
+
+
+def test_orphan_discussing_card_returns_to_pending_without_recovery_token(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(
+        turn_id="card-discuss",
+        message="阿b 的猜测",
+        scope="hypothesis",
+        payload={"type": "card", "ref": "abc12345", "state": "discussing"},
+    )
+
+    assert db.update_chat_turn_payload_state(
+        "card-discuss",
+        expected_state="discussing",
+        new_state="pending",
+    )
+    payload = db.get_chat_turn("card-discuss")["payload"]
+    assert payload == {"type": "card", "ref": "abc12345", "state": "pending"}
+
+
+def test_chat_turn_list_uses_rowid_for_equal_created_at(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    db.create_chat_turn(turn_id="z-first", message="先插入")
+    db.create_chat_turn(turn_id="a-second", message="后插入")
+    db.conn.execute("UPDATE chat_turns SET created_at = '2026-07-22 01:00:00'")
+    db.conn.commit()
+
+    rows = db.list_chat_turns(limit=2)
+
+    assert [row["turn_id"] for row in rows] == ["z-first", "a-second"]
 
 
 def test_get_latest_init_run_none_when_empty(tmp_path: Path) -> None:
@@ -364,8 +962,6 @@ def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
 
 # --- recent_event_urls (cross-source dedup helper) -------------------------
 
-from datetime import UTC, datetime, timedelta  # noqa: E402
-
 
 def _insert_event_with_age(
     db: Database,
@@ -515,6 +1111,161 @@ def test_claim_confusion_clarifying_cross_connection(tmp_path: Path) -> None:
     assert results.count(True) == 1
     clarifying = db0.list_confusions(statuses=["clarifying"])
     assert len(clarifying) == 1
+
+
+def test_orphan_recovery_does_not_release_active_claim_before_turn_creation(
+    tmp_path: Path,
+) -> None:
+    """F4: the age fence survives a two-connection claim→create interleave."""
+    path = tmp_path / "confusion_orphan_interleave.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="活跃创建窗口")
+    turn_id = "confirmation-active-window"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+
+        # Connection B runs recovery in the exact claim→create gap. The fresh
+        # claim is active, so it cannot report a release.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=turn_id,
+                minimum_age_seconds=30.0,
+            )
+            is False
+        )
+
+        row, created = creator.create_chat_confirmation_turn(
+            turn_id=turn_id,
+            session="popup",
+            scope="confusion",
+            ref=str(confusion_id),
+            title="活跃创建窗口",
+            message="",
+            reply="请告诉我实际情况",
+            payload={
+                "type": "question",
+                "kind": "confusion",
+                "ref": str(confusion_id),
+                "state": "clarifying",
+            },
+        )
+        assert created is True
+        assert row["turn_id"] == turn_id
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn_id
+        assert reconciler.get_chat_turn(turn_id) is not None
+    finally:
+        reconciler.close()
+        creator.close()
+
+
+def test_orphan_recovery_live_turn_fence_survives_zero_age_mutation_probe(
+    tmp_path: Path,
+) -> None:
+    """M3: an aggressive aged-claim recovery still cannot remove a live turn."""
+    path = tmp_path / "confusion_orphan_live_turn.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="已有提问")
+    turn_id = "confirmation-live-turn"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        row, created = creator.create_chat_confirmation_turn(
+            turn_id=turn_id,
+            session="popup",
+            scope="confusion",
+            ref=str(confusion_id),
+            title="已有提问",
+            message="",
+            reply="请告诉我实际情况",
+            payload={
+                "type": "question",
+                "kind": "confusion",
+                "ref": str(confusion_id),
+                "state": "clarifying",
+            },
+        )
+        assert created is True
+        assert row["turn_id"] == turn_id
+        # Zero age deliberately removes the grace-period reason for rejection:
+        # this assertion depends specifically on NOT EXISTS(chat_turns), so
+        # deleting the live-turn fence (M3) makes the official test fail.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=turn_id,
+                minimum_age_seconds=0.0,
+            )
+            is False
+        )
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == turn_id
+        assert reconciler.get_chat_turn(turn_id) is not None
+    finally:
+        reconciler.close()
+        creator.close()
+
+
+def test_orphan_recovery_ask_turn_identity_survives_zero_age_mutation_probe(
+    tmp_path: Path,
+) -> None:
+    """F4: stale recovery ownership cannot release a newer ask-turn claim."""
+    path = tmp_path / "confusion_orphan_claim_identity.db"
+    creator = Database(path)
+    creator.initialize()
+    reconciler = Database(path)
+    reconciler.initialize()
+    confusion_id = creator.insert_confusion(topic="新旧提问身份")
+    current_turn_id = "confirmation-current-owner"
+    stale_turn_id = "confirmation-stale-owner"
+
+    try:
+        assert creator.claim_confusion_clarifying(
+            confusion_id,
+            ask_turn_id=current_turn_id,
+            asked_at=datetime.now(UTC).isoformat(),
+        )
+        # Zero age removes the grace-period reason for rejection and neither
+        # turn exists. Only expected_ask_turn_id identity may fence this stale
+        # recovery attempt, so deleting/corrupting that SQL condition turns
+        # this assertion red.
+        assert (
+            reconciler.release_orphan_confusion_claim(
+                confusion_id,
+                expected_ask_turn_id=stale_turn_id,
+                minimum_age_seconds=0.0,
+            )
+            is False
+        )
+        confusion = reconciler.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "clarifying"
+        assert confusion["ask_turn_id"] == current_turn_id
+        assert reconciler.get_chat_turn(current_turn_id) is None
+        assert reconciler.get_chat_turn(stale_turn_id) is None
+    finally:
+        reconciler.close()
+        creator.close()
 
 
 def test_update_confusion_rejects_unknown_column(tmp_path: Path) -> None:

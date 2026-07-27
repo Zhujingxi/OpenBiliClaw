@@ -288,7 +288,10 @@ class OpenClawAdapter:
         answer becomes signal the next time the profile is rebuilt.
         """
         try:
-            from openbiliclaw.soul.dialogue import SocraticDialogue
+            from openbiliclaw.soul.dialogue import (
+                DialogueLearningMode,
+                SocraticDialogue,
+            )
 
             soul_engine = self.services.soul_engine
             llm_service = getattr(self.services, "llm_service", None)
@@ -302,6 +305,7 @@ class OpenClawAdapter:
                 soul_engine=soul_engine,
                 llm_service=llm_service,
                 session=request.session,
+                learning_mode=DialogueLearningMode.LEGACY_DIRECT,
             )
             reply = await dialogue.respond(request.message)
         except Exception as exc:  # pragma: no cover - defensive adapter boundary

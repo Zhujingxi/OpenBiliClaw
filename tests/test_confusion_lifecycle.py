@@ -8,8 +8,11 @@ state machine with crash-recovery idempotency.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+import pytest
 
 from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
 from openbiliclaw.soul.confusion import (
@@ -18,6 +21,12 @@ from openbiliclaw.soul.confusion import (
     ConfusionManager,
     HeldUpdate,
 )
+from openbiliclaw.soul.dialogue_anchor import (
+    ENTRY_CONFUSION_PROMPT,
+    ENTRY_PENDING_OPEN,
+    DialogueAnchorManager,
+)
+from openbiliclaw.soul.ledger import ProfileLedger
 from openbiliclaw.soul.speculator import (
     SpeculativeInterest,
     _stalemate_from_rejected,
@@ -185,6 +194,292 @@ def test_confusion_from_row_decodes_held_updates(tmp_path: Path) -> None:
     assert confusion.held_updates[0].kind == "upgrade"
 
 
+def test_confusion_replay_queue_migrates_legacy_table(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-confusion.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE confusions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'open',
+            source TEXT NOT NULL DEFAULT '',
+            topic TEXT NOT NULL DEFAULT '',
+            observation TEXT NOT NULL DEFAULT '',
+            interpretation TEXT NOT NULL DEFAULT '',
+            interpretation_confidence REAL NOT NULL DEFAULT 0.0,
+            evidence_refs TEXT NOT NULL DEFAULT '[]',
+            resolution TEXT NOT NULL DEFAULT '',
+            resolution_note TEXT NOT NULL DEFAULT '',
+            asked_at TIMESTAMP,
+            ask_turn_id TEXT NOT NULL DEFAULT '',
+            defer_count INTEGER NOT NULL DEFAULT 0,
+            expires_at TIMESTAMP,
+            held_updates TEXT NOT NULL DEFAULT '[]',
+            resolved_at TIMESTAMP
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    columns = {row["name"] for row in db.conn.execute("PRAGMA table_info(confusions)")}
+    assert "replay_queue" in columns
+    confusion_id = db.insert_confusion(topic="迁移", observation="仍需澄清")
+    assert db.get_confusion(confusion_id)["replay_queue"] == []
+
+
+def test_anchor_settlement_replay_is_fifo_and_failure_stops_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    manager = ConfusionManager(db, ledger=ProfileLedger(db))
+    confusion_id = db.insert_confusion(topic="桌游", observation="待澄清")
+    calls: list[str] = []
+    failures_left = 2
+    real_resolve = manager.resolve
+
+    def flaky_resolve(
+        target_id: int,
+        *,
+        resolution: str,
+        note: str = "",
+        now: datetime | None = None,
+    ) -> str | None:
+        nonlocal failures_left
+        calls.append(note)
+        if note == "T1" and failures_left:
+            failures_left -= 1
+            raise RuntimeError("injected settlement failure")
+        return real_resolve(target_id, resolution=resolution, note=note, now=now)
+
+    monkeypatch.setattr(manager, "resolve", flaky_resolve)
+
+    assert (
+        manager.process_anchor_settlement(
+            confusion_id,
+            action="resolve",
+            interpretation="real_interest",
+            note="T1",
+            turn_id="turn-1",
+            anchor_generation=1,
+        )
+        is None
+    )
+    assert [item["turn_id"] for item in manager.get(confusion_id).replay_queue] == ["turn-1"]
+
+    assert (
+        manager.process_anchor_settlement(
+            confusion_id,
+            action="resolve",
+            interpretation="proxy_behavior",
+            note="T2",
+            turn_id="turn-2",
+            anchor_generation=1,
+        )
+        is None
+    )
+    assert calls == ["T1", "T1"]
+    assert [item["turn_id"] for item in manager.get(confusion_id).replay_queue] == [
+        "turn-1",
+        "turn-2",
+    ]
+
+    assert manager.retry_anchor_settlements(confusion_id) == "resolved"
+    assert calls == ["T1", "T1", "T1", "T2"]
+    assert manager.get(confusion_id).replay_queue == []
+
+
+def test_confusion_replay_queue_caps_at_five_and_ledgers_oldest_drop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    manager = ConfusionManager(db, ledger=ProfileLedger(db))
+    confusion_id = db.insert_confusion(topic="故障队列", observation="持续失败")
+
+    def always_fail(*args: object, **kwargs: object) -> str:
+        del args, kwargs
+        raise RuntimeError("injected permanent failure")
+
+    monkeypatch.setattr(manager, "resolve", always_fail)
+    for index in range(6):
+        assert (
+            manager.process_anchor_settlement(
+                confusion_id,
+                action="resolve",
+                interpretation="real_interest",
+                note=f"T{index + 1}",
+                turn_id=f"turn-{index + 1}",
+                anchor_generation=1,
+            )
+            is None
+        )
+
+    assert [item["turn_id"] for item in manager.get(confusion_id).replay_queue] == [
+        "turn-2",
+        "turn-3",
+        "turn-4",
+        "turn-5",
+        "turn-6",
+    ]
+    dropped = [
+        row
+        for row in db.query_profile_ledger(days=1, limit=50)
+        if row["write_point"] == "confusion_replay_dropped"
+    ]
+    assert len(dropped) == 1
+    assert dropped[0]["turn_id"] == "turn-1"
+
+
+def test_replay_queue_survives_restart_and_head_pop_is_fenced(tmp_path: Path) -> None:
+    path = tmp_path / "persistent-replay.db"
+    db = Database(path)
+    db.initialize()
+    confusion_id = db.insert_confusion(topic="持久化", observation="等待重放")
+    for turn_id in ("turn-1", "turn-2"):
+        db.enqueue_confusion_replay(
+            confusion_id,
+            {
+                "replay_id": turn_id,
+                "turn_id": turn_id,
+                "action": "resolve",
+                "interpretation": "real_interest",
+                "anchor_generation": 1,
+            },
+        )
+    assert not db.pop_confusion_replay_head(confusion_id, expected_id="turn-2")
+    db.close()
+
+    restarted = Database(path)
+    restarted.initialize()
+    assert [item["turn_id"] for item in restarted.get_confusion(confusion_id)["replay_queue"]] == [
+        "turn-1",
+        "turn-2",
+    ]
+    assert restarted.pop_confusion_replay_head(confusion_id, expected_id="turn-1")
+    assert [item["turn_id"] for item in restarted.get_confusion(confusion_id)["replay_queue"]] == [
+        "turn-2"
+    ]
+
+
+def test_terminal_confusion_with_unpopped_head_is_recovered_by_fallback_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    manager = ConfusionManager(db, ledger=ProfileLedger(db))
+    confusion_id = db.insert_confusion(topic="崩溃窗", observation="resolve 已提交但尚未 pop")
+    assert db.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-22T01:00:00+00:00",
+    )
+    db.enqueue_confusion_replay(
+        confusion_id,
+        {
+            "replay_id": "crash-turn",
+            "turn_id": "crash-turn",
+            "action": "resolve",
+            "interpretation": "real_interest",
+            "note": "commit-before-pop",
+            "anchor_generation": 1,
+        },
+    )
+
+    def crash_after_resolve(_confusion_id: int, *, expected_id: str) -> bool:
+        del expected_id
+        assert db.get_confusion(_confusion_id)["status"] == "resolved"
+        raise RuntimeError("crash after resolve commit")
+
+    monkeypatch.setattr(db, "pop_confusion_replay_head", crash_after_resolve)
+    with pytest.raises(RuntimeError, match="crash after resolve commit"):
+        manager.retry_anchor_settlements(confusion_id)
+
+    crashed = db.get_confusion(confusion_id)
+    assert crashed["status"] == "resolved"
+    assert [item["turn_id"] for item in crashed["replay_queue"]] == ["crash-turn"]
+
+    # Model an actual process crash/restart: discard the connection and recover
+    # through a fresh Database + manager, not the object that injected failure.
+    db.close()
+    restarted_db = Database(tmp_path / "confusion.db")
+    restarted_db.initialize()
+    restarted = ConfusionManager(restarted_db, ledger=ProfileLedger(restarted_db))
+    pending = restarted.pending_dialogue_replays()
+    assert len(pending) == 1
+    assert pending[0]["confusion_id"] == confusion_id
+    assert pending[0]["has_replay_queue"] == 1
+
+    assert restarted.retry_anchor_settlements(confusion_id) == "resolved"
+    assert restarted.get(confusion_id).replay_queue == []
+
+
+@pytest.mark.parametrize("reason", ["replaced", "ttl", "settled", "unrelated"])
+def test_every_anchor_release_clears_confusion_replay_queue_with_ledger(
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    db = _db(tmp_path)
+    ledger = ProfileLedger(db)
+    confusion_id = db.insert_confusion(topic="释放", observation="有待重放")
+    assert db.claim_confusion_clarifying(
+        confusion_id,
+        ask_turn_id="question",
+        asked_at="2026-07-22T01:00:00+00:00",
+    )
+    db.enqueue_confusion_replay(
+        confusion_id,
+        {
+            "turn_id": "queued-turn",
+            "action": "resolve",
+            "interpretation": "real_interest",
+            "note": "queued",
+            "anchor_generation": 1,
+        },
+    )
+    anchor_manager = DialogueAnchorManager(tmp_path, database=db, ledger=ledger)
+    anchor_manager.establish(
+        kind="confusion",
+        ref=str(confusion_id),
+        origin_turn_id="question",
+        entry=ENTRY_CONFUSION_PROMPT,
+    )
+
+    if reason == "replaced":
+        anchor_manager.establish(
+            kind="hypothesis",
+            ref="replacement",
+            origin_turn_id="",
+            entry=ENTRY_PENDING_OPEN,
+        )
+    elif reason == "ttl":
+        current = anchor_manager.current()
+        assert current is not None
+        anchor_manager.expire(
+            now=datetime.fromisoformat(current.established_at) + timedelta(hours=2)
+        )
+    elif reason == "settled":
+        anchor_manager.release(reason="settled")
+    else:
+        anchor_manager.note_relation("unrelated")
+        anchor_manager.note_relation("unrelated")
+
+    assert db.get_confusion(confusion_id)["replay_queue"] == []
+    dropped = [
+        row
+        for row in db.query_profile_ledger(days=1, limit=50)
+        if row["write_point"] == "confusion_replay_dropped"
+    ]
+    assert len(dropped) == 1
+    assert reason in dropped[0]["after_summary"]
+
+
 # --------------------------------------------------------------------------
 # Task 5: ask scheduling + 72h cooldown
 # --------------------------------------------------------------------------
@@ -271,6 +566,8 @@ def test_resolve_dismissed_status_and_idempotent(tmp_path: Path) -> None:
     assert mgr.resolve(cid, resolution="dismissed") == "dismissed"
     # Idempotent — a terminal confusion is not re-resolved.
     assert mgr.resolve(cid, resolution="real_interest") == "dismissed"
+    mgr.defer(cid)
+    assert mgr.get(cid).status == "dismissed"
 
 
 def test_resolve_rejects_bad_resolution(tmp_path: Path) -> None:

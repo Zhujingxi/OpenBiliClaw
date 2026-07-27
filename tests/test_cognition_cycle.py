@@ -162,6 +162,36 @@ async def test_awareness_retries_once_and_succeeds(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_due_cycle_triggers_confusion_attribution_replay_once(tmp_path: Path) -> None:
+    memory = _seed_memory(tmp_path)
+    replay_calls = 0
+
+    async def replay_confusion_attributions() -> int:
+        nonlocal replay_calls
+        replay_calls += 1
+        return 1
+
+    cycle = CognitionCycle(
+        memory=memory,
+        awareness_analyzer=_FlakyAwarenessAnalyzer(
+            fail_first_n=0,
+            succeed_payload=[],
+        ),  # type: ignore[arg-type]
+        insight_analyzer=_NoopInsightAnalyzer(),  # type: ignore[arg-type]
+        min_interval_seconds=60,
+        confusion_replay_hook=replay_confusion_attributions,
+    )
+    now = datetime(2026, 7, 22, 12, 0, 0)
+
+    first = await cycle.run_if_due(now=now)
+    second = await cycle.run_if_due(now=now + timedelta(seconds=30))
+
+    assert first.ran is True
+    assert second.throttled is True
+    assert replay_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_awareness_double_failure_preserves_schedule(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import logging
@@ -17,6 +18,7 @@ import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 from uuid import UUID
@@ -209,10 +211,51 @@ if TYPE_CHECKING:
 
     from openbiliclaw.api.source_auth.contract import SourceAuthContract
     from openbiliclaw.api.source_auth.write import CredentialWriteOutcome
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueDispatchResult,
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+    )
 
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+
+_HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
+# Settled for good — no reconcile, no further action. ``revised`` belongs here:
+# the user replaced the wording and accepted the correction, which is as final
+# as a plain confirm/reject and must not read back as 已标记不准.
+_TERMINAL_CARD_STATES = frozenset({"confirmed", "rejected", "revised"})
+# First-round calibration (2026-07-22): 0.60 is the lower edge at which an
+# unvalidated hypothesis is concrete enough to ask about; open confusions use
+# 0.50 because their explicit contradiction is already stronger evidence.
+# The badge/list is deliberately capped at three to keep the entry lightweight.
+_PENDING_HYPOTHESIS_MIN_CONFIDENCE = 0.60
+_PENDING_CONFUSION_MIN_CONFIDENCE = 0.50
+_PENDING_CONFIRMATION_LIMIT = 3
+# Seats reserved for confusions when any qualify. The two kinds score confidence
+# on opposite scales: a hypothesis' confidence means "how sure am I this is
+# true" (higher = more worth asking), while a confusion's
+# interpretation_confidence means "how sure am I of my guess" — and the prompt
+# explicitly says only a LOW-confidence reading should become a confusion. Sorting
+# both into one descending list therefore buries the least-understood items
+# last, and a real profile carries hundreds of ≥0.60 hypotheses (334 on the
+# author's own data, top-3 cutoff at 0.76), so confusions could never surface in
+# the user-initiated list at all. Unused seats fall back to hypotheses.
+_PENDING_CONFUSION_RESERVED_SLOTS = 1
+# First-round calibration (2026-07-24): confirmation turn creation is a local
+# SQLite effect budgeted at 1 second. A 30x fence distinguishes that live
+# claim→create window from a crashed creator before orphan recovery may run.
+_CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS = 30.0
+# First-round calibration (2026-07-22): at most two unsolicited entries per
+# day, while a particular object stays quiet for three days. Recalibrate from
+# observed defer rates after the first production month.
+_CONFIRMATION_GLOBAL_COOLDOWN_HOURS = 12
+# First-round calibration (2026-07-22): three days matches the existing
+# object-level ask budget and makes "以后再说" durable without becoming a
+# permanent dismissal. Recalibrate after the first production month.
+_CONFIRMATION_OBJECT_COOLDOWN_HOURS = 72
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
 # provider call, so ``touch()`` proves that the wrapper/event loop still owns the
@@ -1546,16 +1589,48 @@ def create_app(
             # core components were provided by the caller.
             soul_engine=soul_engine,
             dialogue=dialogue,
+            dialogue_settlement_queue=getattr(dialogue, "_settlement_queue", None),
             runtime_controller=runtime_controller,
             recommendation_engine=recommendation_engine,
             account_sync_service=account_sync_service,
             auto_update_service=auto_update_service,
             llm_concurrency_gate=injected_gate,
         )
-        if ctx.dialogue is None:
-            from openbiliclaw.soul.dialogue import SocraticDialogue
+        if ctx.dialogue_settlement_queue is None:
+            from openbiliclaw.api.runtime_context import (
+                _build_dialogue_settlement_dispatcher,
+            )
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
 
-            ctx.dialogue = SocraticDialogue(llm=None, soul_engine=soul_engine, session="popup")
+            anchor_manager = getattr(soul_engine, "_dialogue_anchor_manager", None)
+            anchor_provider = getattr(anchor_manager, "snapshot", None)
+            ctx.dialogue_settlement_queue = DialogueSettlementQueue(
+                _build_dialogue_settlement_dispatcher(
+                    soul_engine,
+                    ctx.dialogue_settlement_handlers,
+                ),
+                anchor_provider=anchor_provider if callable(anchor_provider) else None,
+                guard=ctx.dialogue_settlement_guard,
+            )
+            bind_settlement_queue = getattr(
+                soul_engine,
+                "bind_dialogue_settlement_queue",
+                None,
+            )
+            if callable(bind_settlement_queue):
+                bind_settlement_queue(ctx.dialogue_settlement_queue)
+        if ctx.dialogue is None:
+            from openbiliclaw.soul.dialogue import (
+                DialogueLearningMode,
+                SocraticDialogue,
+            )
+
+            ctx.dialogue = SocraticDialogue(
+                llm=None,
+                soul_engine=soul_engine,
+                session="popup",
+                learning_mode=DialogueLearningMode.REPLY_ONLY_TEST,
+            )
         if ctx.auto_update_service is None:
             from openbiliclaw.runtime.updater import AutoUpdateService
 
@@ -2026,6 +2101,44 @@ def create_app(
         with suppress(Exception):
             feedback_batch_scheduler.schedule()
 
+    async def _ingest_feedback_signal(
+        *,
+        feedback_type: str,
+        title: str,
+        note: str,
+    ) -> int:
+        """Feed one recommendation feedback into the profile-update pipeline.
+
+        Unified interest line, Wave A (spec 2026-07-27): the pipeline becomes
+        the single event-driven writer of the interest layer. Gated behind
+        ``scheduler.unified_interest_line`` because the legacy feedback batch
+        (``_schedule_post_feedback_tasks``) still runs — with both consumers
+        live the same feedback would be counted twice. Best-effort: a pipeline
+        failure never breaks the feedback response.
+        """
+        if ctx.soul_engine is None:
+            return 0
+        if not bool(getattr(ctx.soul_engine, "unified_interest_line_enabled", False)):
+            return 0
+        is_ready = getattr(ctx.soul_engine, "is_profile_ready", None)
+        if callable(is_ready):
+            with suppress(Exception):
+                if not bool(is_ready()):
+                    return 0
+        pipeline = getattr(ctx.soul_engine, "pipeline", None)
+        ingest = getattr(pipeline, "ingest", None)
+        if not callable(ingest):
+            return 0
+
+        from openbiliclaw.soul.pipeline import signal_from_feedback
+
+        try:
+            await ingest(signal_from_feedback(feedback_type, title, note))
+        except Exception:
+            logger.exception("Failed to ingest feedback into profile pipeline")
+            return 0
+        return 1
+
     async def _ingest_profile_update_events(events: list[dict[str, Any]]) -> int:
         """Feed events into the profile-update pipeline when ready.
 
@@ -2267,13 +2380,337 @@ def create_app(
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
     running_chat_turn_tasks: set[str] = set()
 
+    def _dialogue_confirmation_state_path() -> Any:
+        from pathlib import Path
+
+        data_dir = getattr(ctx.memory_manager, "_data_dir", None) or config.data_path
+        return Path(data_dir) / "memory" / "dialogue_confirmation_state.json"
+
+    def _normalize_dialogue_confirmation_state(raw: object) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raw = {}
+        raw_objects = raw.get("objects", {})
+        objects = raw_objects if isinstance(raw_objects, dict) else {}
+        normalized_objects: dict[str, dict[str, str]] = {}
+        for raw_ref, raw_item in objects.items():
+            if not isinstance(raw_item, dict):
+                continue
+            ref = str(raw_ref).strip()
+            if not ref:
+                continue
+            normalized_objects[ref] = {
+                "last_asked_at": str(raw_item.get("last_asked_at", "")).strip(),
+                "deferred_until": str(raw_item.get("deferred_until", "")).strip(),
+            }
+        return {
+            "global_last_thrown_at": str(raw.get("global_last_thrown_at", "")).strip(),
+            "objects": normalized_objects,
+        }
+
+    def _load_dialogue_confirmation_state() -> dict[str, Any]:
+        path = _dialogue_confirmation_state_path()
+        if not path.exists():
+            return _normalize_dialogue_confirmation_state({})
+        try:
+            with open(path, encoding="utf-8") as state_file:
+                return _normalize_dialogue_confirmation_state(json.load(state_file))
+        except (OSError, ValueError):
+            logger.warning("Failed to load dialogue confirmation state; using defaults")
+            return _normalize_dialogue_confirmation_state({})
+
+    def _update_dialogue_confirmation_state(
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any]:
+        from openbiliclaw.memory.json_state import update_json_state
+
+        def apply(state: dict[str, Any]) -> dict[str, Any]:
+            mutate(state)
+            return state
+
+        return update_json_state(
+            _dialogue_confirmation_state_path(),
+            default_factory=lambda: _normalize_dialogue_confirmation_state({}),
+            normalize=_normalize_dialogue_confirmation_state,
+            serialize=_normalize_dialogue_confirmation_state,
+            mutate=apply,
+        )
+
+    def _defer_dialogue_confirmation(ref: str) -> str:
+        _require_dialogue_settlement_worker()
+        deferred_until = (
+            datetime.now(UTC) + timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
+        ).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            item["deferred_until"] = deferred_until
+
+        _update_dialogue_confirmation_state(mutate)
+        return deferred_until
+
+    def _parse_confirmation_timestamp(raw: object) -> datetime | None:
+        value = str(raw or "").strip().replace("Z", "+00:00")
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _hypothesis_confirmation_items() -> list[dict[str, Any]]:
+        from openbiliclaw.soul.identity import build_hash8_map
+
+        loader = getattr(ctx.soul_engine, "_load_insights", None)
+        if not callable(loader):
+            return []
+        try:
+            hypotheses = list(loader())
+        except Exception:
+            logger.debug("Failed to load pending hypotheses", exc_info=True)
+            return []
+        by_title = {
+            str(getattr(item, "hypothesis", "")).strip(): item
+            for item in hypotheses
+            if str(getattr(item, "hypothesis", "")).strip()
+        }
+        ref_map = build_hash8_map(list(by_title))
+        settlement_reader = getattr(ctx.database, "get_card_settlement", None)
+        items: list[dict[str, Any]] = []
+        for ref, title in ref_map.items():
+            hypothesis = by_title[title]
+            try:
+                confidence = float(getattr(hypothesis, "confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if (
+                bool(getattr(hypothesis, "validated", False))
+                or confidence < _PENDING_HYPOTHESIS_MIN_CONFIDENCE
+            ):
+                continue
+            if callable(settlement_reader) and settlement_reader(ref) is not None:
+                continue
+            items.append(
+                {
+                    "kind": "hypothesis",
+                    "ref": ref,
+                    "title": title,
+                    "evidence_refs": [
+                        str(value).strip()
+                        for value in getattr(hypothesis, "evidence", [])
+                        if str(value).strip()
+                    ],
+                    "confidence": confidence,
+                    "created_at": str(getattr(hypothesis, "created_at", "") or ""),
+                }
+            )
+        return items
+
+    def _confusion_confirmation_item(confusion: Any) -> dict[str, Any] | None:
+        try:
+            confidence = float(getattr(confusion, "interpretation_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < _PENDING_CONFUSION_MIN_CONFIDENCE:
+            return None
+        topic = str(getattr(confusion, "topic", "") or "").strip()
+        observation = str(getattr(confusion, "observation", "") or "").strip()
+        title = topic or observation or "有件事我还没看懂"
+        return {
+            "kind": "confusion",
+            "ref": str(getattr(confusion, "id", "") or ""),
+            "title": title,
+            "observation": observation,
+            "interpretation": str(getattr(confusion, "interpretation", "") or "").strip(),
+            "evidence_refs": [
+                str(value).strip()
+                for value in getattr(confusion, "evidence_refs", [])
+                if str(value).strip()
+            ],
+            "confidence": confidence,
+            "created_at": "",
+        }
+
+    def _pending_confirmation_items(*, limit: int) -> list[dict[str, Any]]:
+        def rank(item: dict[str, Any]) -> tuple[float, int, str]:
+            return (
+                -float(item.get("confidence", 0.0) or 0.0),
+                0 if item.get("kind") == "confusion" else 1,
+                str(item.get("ref", "")),
+            )
+
+        hypotheses = sorted(_hypothesis_confirmation_items(), key=rank)
+        confusions: list[dict[str, Any]] = []
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is not None:
+            try:
+                for confusion in confusion_manager.list_open():
+                    item = _confusion_confirmation_item(confusion)
+                    if item is not None:
+                        confusions.append(item)
+            except Exception:
+                logger.debug("Failed to load pending confusions", exc_info=True)
+        confusions.sort(key=rank)
+
+        capacity = max(0, int(limit))
+        # Reserve seats for confusions first (see _PENDING_CONFUSION_RESERVED_SLOTS
+        # for why a single descending sort starves them), then fill the rest with
+        # hypotheses, then hand any still-unused capacity back to the other kind.
+        reserved = min(len(confusions), _PENDING_CONFUSION_RESERVED_SLOTS, capacity)
+        picked = confusions[:reserved]
+        picked += hypotheses[: capacity - len(picked)]
+        if len(picked) < capacity:
+            picked += confusions[reserved : reserved + (capacity - len(picked))]
+        picked.sort(key=rank)
+        return picked
+
+    def _pending_confirmation_by_ref(ref: str) -> dict[str, Any] | None:
+        normalized_ref = ref.strip()
+        if not normalized_ref:
+            return None
+        for item in _hypothesis_confirmation_items():
+            if item["ref"] == normalized_ref:
+                return item
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is None:
+            return None
+        try:
+            confusion_id = int(normalized_ref)
+        except ValueError:
+            return None
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status not in {"open", "clarifying"}:
+            return None
+        return _confusion_confirmation_item(confusion)
+
+    def _system_confirmation_window_open(
+        state: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> bool:
+        last = _parse_confirmation_timestamp(state.get("global_last_thrown_at", ""))
+        return last is None or now - last >= timedelta(hours=_CONFIRMATION_GLOBAL_COOLDOWN_HOURS)
+
+    def _system_confirmation_object_ready(
+        state: dict[str, Any],
+        *,
+        ref: str,
+        now: datetime,
+    ) -> bool:
+        objects = state.get("objects", {})
+        raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
+        item = raw_item if isinstance(raw_item, dict) else {}
+        deferred_until = _parse_confirmation_timestamp(item.get("deferred_until", ""))
+        if deferred_until is not None and now < deferred_until:
+            return False
+        last = _parse_confirmation_timestamp(item.get("last_asked_at", ""))
+        return last is None or now - last >= timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
+
+    def _mark_dialogue_confirmation_thrown(
+        ref: str,
+        *,
+        now: datetime,
+        preserve_existing: bool = False,
+    ) -> None:
+        timestamp = now.astimezone(UTC).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            if not preserve_existing or not str(state.get("global_last_thrown_at", "")).strip():
+                state["global_last_thrown_at"] = timestamp
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            if not preserve_existing or not str(item.get("last_asked_at", "")).strip():
+                item["last_asked_at"] = timestamp
+
+        _update_dialogue_confirmation_state(mutate)
+
+    def _claim_dialogue_confirmation_throw(ref: str, *, now: datetime) -> bool:
+        """Atomically reserve both persisted system-throw cooldown gates."""
+        claimed = False
+        timestamp = now.astimezone(UTC).isoformat()
+
+        def mutate(state: dict[str, Any]) -> None:
+            nonlocal claimed
+            if not _system_confirmation_window_open(state, now=now):
+                return
+            if not _system_confirmation_object_ready(state, ref=ref, now=now):
+                return
+            state["global_last_thrown_at"] = timestamp
+            objects = cast("dict[str, dict[str, str]]", state.setdefault("objects", {}))
+            item = objects.setdefault(ref, {"last_asked_at": "", "deferred_until": ""})
+            item["last_asked_at"] = timestamp
+            claimed = True
+
+        _update_dialogue_confirmation_state(mutate)
+        return claimed
+
+    def _get_chat_confirmation_turn(*, ref: str, session: str) -> dict[str, Any] | None:
+        getter = _chat_db_method("get_chat_confirmation_turn")
+        if getter is not None:
+            return cast("dict[str, Any] | None", getter(ref=ref, session=session))
+        for row in reversed(list(fallback_chat_turns.values())):
+            payload = row.get("payload", {})
+            if (
+                row.get("session") == session
+                and row.get("subject_id") == ref
+                and isinstance(payload, dict)
+                and payload.get("ref") == ref
+                and (
+                    payload.get("type") == "question"
+                    or (
+                        payload.get("type") == "card"
+                        and payload.get("state") in {"pending", "discussing"}
+                    )
+                )
+            ):
+                return dict(row)
+        return None
+
+    def _get_chat_confirmation_attachment(
+        *,
+        attached_to_turn_id: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        getter = _chat_db_method("get_chat_confirmation_attachment")
+        if getter is not None:
+            return cast(
+                "dict[str, Any] | None",
+                getter(attached_to_turn_id=attached_to_turn_id, session=session),
+            )
+        for row in fallback_chat_turns.values():
+            payload = row.get("payload", {})
+            if (
+                row.get("session") == session
+                and isinstance(payload, dict)
+                and payload.get("attached_to_turn_id") == attached_to_turn_id
+            ):
+                return dict(row)
+        return None
+
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
-        if normalized in {"chat", "delight", "probe", "avoidance_probe", "confusion"}:
+        if normalized in {
+            "chat",
+            "delight",
+            "probe",
+            "avoidance_probe",
+            "confusion",
+            "hypothesis",
+        }:
             return normalized
         return "chat"
 
     def _normalize_chat_turn(row: dict[str, Any]) -> ChatTurnOut:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw_payload = {}
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
         return ChatTurnOut(
             turn_id=str(row.get("turn_id", "")),
             session=str(row.get("session", "popup") or "popup"),
@@ -2284,6 +2721,7 @@ def create_app(
             reply=str(row.get("reply", "") or ""),
             status=str(row.get("status", "pending") or "pending"),
             error=str(row.get("error", "") or ""),
+            payload=payload,
             created_at=str(row.get("created_at", "") or ""),
             updated_at=str(row.get("updated_at", "") or ""),
         )
@@ -2292,12 +2730,159 @@ def create_app(
         method = getattr(ctx.database, name, None)
         return method if callable(method) else None
 
-    def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
+    def _dialogue_settlement_queue() -> Any:
+        queue = getattr(ctx, "dialogue_settlement_queue", None)
+        if queue is None:
+            raise HTTPException(status_code=503, detail="Dialogue settlement queue not ready.")
+        return queue
+
+    def _require_dialogue_settlement_worker() -> None:
+        require = getattr(
+            _dialogue_settlement_queue(),
+            "require_dialogue_settlement_worker",
+            None,
+        )
+        if not callable(require):
+            raise RuntimeError("Dialogue settlement worker guard is not installed")
+        require()
+
+    async def _submit_dialogue_settlement(
+        kind: DialogueJobKind,
+        payload: dict[str, object],
+        *,
+        wait_seconds: float = 1.0,
+    ) -> DialogueJobResult | None:
+        """Submit once and preserve the in-memory job when the HTTP wait expires.
+
+        One second is calibrated for local SQLite/JSON effects, not remote LLM
+        work. A longer queue head returns the established processing contract.
+        """
+        queue = _dialogue_settlement_queue()
+        job = queue.submit(kind, payload, completion=True)
+        if job is None or job.completion is None:
+            raise HTTPException(status_code=503, detail="Dialogue settlement queue is paused.")
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(job.completion),
+                timeout=wait_seconds,
+            )
+        except TimeoutError:
+            return None
+
+    async def _submit_dialogue_settlement_required(
+        kind: DialogueJobKind,
+        payload: dict[str, object],
+    ) -> DialogueJobResult:
+        """Await a required local command without imposing the HTTP fast-path budget."""
+        queue = _dialogue_settlement_queue()
+        submit_and_wait = getattr(queue, "submit_and_wait", None)
+        if not callable(submit_and_wait):
+            raise RuntimeError("Dialogue settlement queue cannot await required work")
+        return cast(
+            "DialogueJobResult",
+            await submit_and_wait(kind, payload),
+        )
+
+    def _read_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
         get_chat_turn = _chat_db_method("get_chat_turn")
         if get_chat_turn is not None:
             return cast("dict[str, Any] | None", get_chat_turn(turn_id))
         row = fallback_chat_turns.get(turn_id)
         return dict(row) if row else None
+
+    def _get_chat_turn_row(turn_id: str) -> dict[str, Any] | None:
+        return _read_chat_turn_row(turn_id)
+
+    async def _reconcile_orphan_confusion_claims(*, limit: int = 200) -> int:
+        """Release crash-gap clarifying rows whose claimed turn was never created."""
+        list_confusions = getattr(ctx.database, "list_confusions", None)
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        if not callable(list_confusions) or not callable(
+            getattr(settlement_queue, "submit_and_wait", None)
+        ):
+            return 0
+        rows = list_confusions(statuses=["clarifying"], limit=max(1, int(limit)))
+        released = 0
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        for row in rows:
+            ask_turn_id = str(row.get("ask_turn_id", "")).strip()
+            if ask_turn_id and _read_chat_turn_row(ask_turn_id) is not None:
+                continue
+            completion = await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "reconcile_orphan",
+                    "confusion_id": int(row["id"]),
+                    "expected_ask_turn_id": ask_turn_id,
+                    "minimum_age_seconds": _CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS,
+                },
+            )
+            settlement = completion.settlement or {}
+            released += int(bool(settlement.get("released", False)))
+        return released
+
+    def _submit_chat_card_reconcile(row: dict[str, Any]) -> None:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return
+        if not isinstance(raw_payload, dict) or raw_payload.get("type") != "card":
+            return
+        state = str(raw_payload.get("state", "")).strip().lower()
+        if state in _TERMINAL_CARD_STATES:
+            return
+        ref = str(raw_payload.get("ref", "")).strip()
+        kind = str(raw_payload.get("kind", "hypothesis")).strip().lower()
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        submit = getattr(settlement_queue, "submit", None)
+        if not ref or not kind or not callable(submit):
+            return
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        try:
+            submit(
+                DialogueJobKind.CARD_RECONCILE,
+                {
+                    "ref": ref,
+                    "kind": kind,
+                    "turn_id": str(row.get("turn_id", "")),
+                    "source": "chat_turn_get",
+                },
+            )
+        except Exception:
+            logger.warning("card.reconcile submission failed for ref=%r", ref, exc_info=True)
+
+    def _reconcile_chat_card_row(row: dict[str, Any]) -> bool:
+        """Repair one orphan discussion from inside the settlement worker."""
+        _require_dialogue_settlement_worker()
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return False
+        if not isinstance(raw_payload, dict) or raw_payload.get("type") != "card":
+            return False
+        if str(raw_payload.get("state", "")) != "discussing":
+            return False
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active_anchor = anchor_manager.current() if anchor_manager is not None else None
+        if active_anchor is not None and active_anchor.origin_turn_id == str(
+            row.get("turn_id", "")
+        ):
+            return False
+        update_payload = _chat_db_method("update_chat_turn_payload_state")
+        return bool(
+            update_payload is not None
+            and update_payload(
+                str(row.get("turn_id", "")),
+                expected_state="discussing",
+                new_state="pending",
+            )
+        )
 
     def _list_chat_turn_rows(
         *,
@@ -2307,10 +2892,11 @@ def create_app(
     ) -> list[dict[str, Any]]:
         list_chat_turns = _chat_db_method("list_chat_turns")
         if list_chat_turns is not None:
-            return cast(
+            rows = cast(
                 "list[dict[str, Any]]",
                 list_chat_turns(session=session, scope=scope, limit=limit),
             )
+            return rows
         rows = [
             dict(row)
             for row in fallback_chat_turns.values()
@@ -2319,7 +2905,12 @@ def create_app(
         rows.sort(key=lambda row: (str(row.get("created_at", "")), str(row.get("turn_id", ""))))
         return rows[-max(1, int(limit)) :]
 
-    def _create_chat_turn_row(payload: ChatTurnIn, *, turn_id: str) -> dict[str, Any]:
+    def _create_chat_turn_row(
+        payload: ChatTurnIn,
+        *,
+        turn_id: str,
+        structured_payload: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
         create_chat_turn = _chat_db_method("create_chat_turn")
         if create_chat_turn is not None:
             return cast(
@@ -2331,6 +2922,7 @@ def create_app(
                     subject_id=payload.subject_id.strip(),
                     subject_title=payload.subject_title.strip(),
                     message=payload.message.strip(),
+                    payload=structured_payload or {},
                 ),
             )
 
@@ -2349,11 +2941,269 @@ def create_app(
                 "status": "pending",
                 "reply": "",
                 "error": "",
+                "payload": dict(structured_payload or {}),
                 "created_at": now,
                 "updated_at": now,
             },
         )
         return dict(fallback_chat_turns[turn_id])
+
+    def _confusion_question_reply(item: dict[str, Any]) -> str:
+        title = str(item.get("title", "")).strip() or "这件事"
+        observation = str(item.get("observation", "")).strip()
+        if observation:
+            return f"我对「{title}」有点没看懂：{observation}。你愿意说说实际情况吗？"
+        return f"我对「{title}」有点没看懂。你愿意说说实际情况吗？"
+
+    async def _prepare_confusion_confirmation(
+        item: dict[str, Any],
+        *,
+        turn_id: str,
+        ignore_cooldown: bool,
+    ) -> bool:
+        """Schedule or retarget one confusion; report whether open became clarifying."""
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is None:
+            raise HTTPException(status_code=503, detail="Confusion manager not ready.")
+        try:
+            confusion_id = int(str(item.get("ref", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Pending confirmation not found.") from exc
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status not in {"open", "clarifying"}:
+            raise HTTPException(status_code=409, detail="Confusion is no longer open.")
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        if confusion.status == "open":
+            completion = await _submit_dialogue_settlement(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "schedule",
+                    "confusion_id": confusion_id,
+                    "ask_turn_id": turn_id,
+                    "asked_at": datetime.now(UTC).isoformat(),
+                    "ignore_cooldown": ignore_cooldown,
+                },
+            )
+            if completion is None:
+                raise HTTPException(status_code=503, detail="Confusion scheduling is delayed.")
+            settlement = completion.settlement or {}
+            claimed = bool(settlement.get("claimed", False))
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Another confusion already owns the clarifying slot.",
+                )
+            return True
+        if confusion.ask_turn_id != turn_id:
+            completion = await _submit_dialogue_settlement(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "retarget",
+                    "confusion_id": confusion_id,
+                    "ask_turn_id": turn_id,
+                    "asked_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            if completion is None:
+                raise HTTPException(status_code=503, detail="Confusion retarget is delayed.")
+        return False
+
+    async def _create_confirmation_turn(
+        item: dict[str, Any],
+        *,
+        session: str,
+        attached_to_turn_id: str = "",
+        user_initiated: bool,
+    ) -> tuple[ChatTurnOut, bool]:
+        normalized_session = session.strip() or "popup"
+        ref = str(item.get("ref", "")).strip()
+        kind = str(item.get("kind", "")).strip()
+        existing = _get_chat_confirmation_turn(ref=ref, session=normalized_session)
+        if existing is not None and not attached_to_turn_id:
+            if kind == "confusion":
+                await _prepare_confusion_confirmation(
+                    item,
+                    turn_id=str(existing.get("turn_id", "")),
+                    ignore_cooldown=user_initiated,
+                )
+            row = existing
+            created = False
+        else:
+            if attached_to_turn_id:
+                stable_key = f"{normalized_session}\0{attached_to_turn_id}"
+                turn_id = f"confirmation-{uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex}"
+            else:
+                turn_id = f"confirmation-{uuid.uuid4().hex}"
+            claimed_open = False
+            if kind == "confusion":
+                claimed_open = await _prepare_confusion_confirmation(
+                    item,
+                    turn_id=turn_id,
+                    ignore_cooldown=user_initiated,
+                )
+            structured_payload: dict[str, object]
+            if kind == "hypothesis":
+                structured_payload = {
+                    "type": "card",
+                    "kind": "hypothesis",
+                    "ref": ref,
+                    "title": str(item.get("title", "")).strip(),
+                    "evidence_refs": list(item.get("evidence_refs", [])),
+                    "actions": list(_HYPOTHESIS_CARD_ACTIONS),
+                    "state": "pending",
+                }
+                message = "阿b 的猜测"
+                reply = ""
+                scope = "hypothesis"
+            elif kind == "confusion":
+                structured_payload = {
+                    "type": "question",
+                    "kind": "confusion",
+                    "ref": ref,
+                    "title": str(item.get("title", "")).strip(),
+                    "evidence_refs": list(item.get("evidence_refs", [])),
+                    "state": "clarifying",
+                }
+                message = ""
+                reply = _confusion_question_reply(item)
+                scope = "confusion"
+            else:
+                raise HTTPException(status_code=404, detail="Pending confirmation not found.")
+            if attached_to_turn_id:
+                structured_payload["attached_to_turn_id"] = attached_to_turn_id
+            creator = _chat_db_method("create_chat_confirmation_turn")
+            try:
+                if creator is not None:
+                    row, created = creator(
+                        turn_id=turn_id,
+                        session=normalized_session,
+                        scope=scope,
+                        ref=ref,
+                        title=str(item.get("title", "")).strip(),
+                        message=message,
+                        reply=reply,
+                        payload=structured_payload,
+                    )
+                else:
+                    internal = ChatTurnIn(
+                        message=message,
+                        turn_id=turn_id,
+                        session=normalized_session,
+                        scope=scope,
+                        subject_id=ref,
+                        subject_title=str(item.get("title", "")).strip(),
+                    )
+                    row = _create_chat_turn_row(
+                        internal,
+                        turn_id=turn_id,
+                        structured_payload=structured_payload,
+                    )
+                    _complete_chat_turn_row(turn_id, reply=reply)
+                    row = _get_chat_turn_row(turn_id) or row
+                    created = True
+            except Exception:
+                if claimed_open:
+                    from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+                    await _submit_dialogue_settlement(
+                        DialogueJobKind.CONFUSION_OPEN_SYNC,
+                        {
+                            "operation": "rollback",
+                            "confusion_id": int(ref),
+                            "ask_turn_id": "",
+                        },
+                    )
+                raise
+            if kind == "confusion" and str(row.get("turn_id", "")) != turn_id:
+                from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+                completion = await _submit_dialogue_settlement(
+                    DialogueJobKind.CONFUSION_OPEN_SYNC,
+                    {
+                        "operation": "retarget",
+                        "confusion_id": int(ref),
+                        "ask_turn_id": str(row.get("turn_id", "")),
+                        "asked_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                if completion is None:
+                    raise HTTPException(status_code=503, detail="Confusion retarget is delayed.")
+
+        turn = _normalize_chat_turn(row)
+        should_anchor = user_initiated or kind == "confusion"
+        if should_anchor:
+            from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            producer_source = (
+                "pending_confusion_throw" if kind == "confusion" else "pending_probe_throw"
+            )
+            completion = await _submit_dialogue_settlement(
+                DialogueJobKind.ANCHOR_ESTABLISH,
+                {
+                    "target_kind": kind,
+                    "target_ref": ref,
+                    "origin_turn_id": turn.turn_id,
+                    "entry": ENTRY_PENDING_OPEN,
+                    "producer_source": producer_source,
+                },
+            )
+            if completion is None:
+                raise HTTPException(status_code=503, detail="Dialogue anchor is delayed.")
+        return turn, bool(created)
+
+    async def _maybe_attach_system_confirmation(
+        payload: ChatTurnIn,
+        *,
+        turn_id: str,
+    ) -> ChatTurnOut | None:
+        normalized_session = payload.session.strip() or "popup"
+        existing_attachment = _get_chat_confirmation_attachment(
+            attached_to_turn_id=turn_id,
+            session=normalized_session,
+        )
+        now = datetime.now(UTC)
+        if existing_attachment is not None:
+            turn = _normalize_chat_turn(existing_attachment)
+            ref = str(turn.payload.get("ref", "")).strip()
+            if ref:
+                _mark_dialogue_confirmation_thrown(
+                    ref,
+                    now=now,
+                    preserve_existing=True,
+                )
+            return turn
+
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is not None and anchor_manager.current() is not None:
+            return None
+        state = _load_dialogue_confirmation_state()
+        if not _system_confirmation_window_open(state, now=now):
+            return None
+        for item in _pending_confirmation_items(limit=200):
+            ref = str(item.get("ref", "")).strip()
+            if not _system_confirmation_object_ready(state, ref=ref, now=now):
+                continue
+            if _get_chat_confirmation_turn(ref=ref, session=normalized_session) is not None:
+                continue
+            if not _claim_dialogue_confirmation_throw(ref, now=now):
+                return None
+            try:
+                turn, _created = await _create_confirmation_turn(
+                    item,
+                    session=normalized_session,
+                    attached_to_turn_id=turn_id,
+                    user_initiated=False,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    return None
+                raise
+            if str(turn.payload.get("attached_to_turn_id", "")) != turn_id:
+                return None
+            return turn
+        return None
 
     def _complete_chat_turn_row(turn_id: str, *, reply: str) -> None:
         complete_chat_turn = _chat_db_method("complete_chat_turn")
@@ -4403,6 +5253,13 @@ def create_app(
         except Exception:
             logger.debug("Guided-init boot reconciliation failed", exc_info=True)
 
+        try:
+            released = await _reconcile_orphan_confusion_claims()
+            if released:
+                logger.info("Released %d orphan confusion claim(s) on boot", released)
+        except Exception:
+            logger.exception("Confusion claim boot reconciliation failed")
+
         if bool(getattr(ctx, "degraded", False)):
             return
         await ctx.restart_background_tasks(app)
@@ -4428,13 +5285,12 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
-        # Phase 1: drain the dialogue learn queue so in-flight / queued learns
-        # complete before the process exits (self-owned worker; not covered by
-        # the background-task cancellation above).
-        learn_queue = getattr(ctx, "dialogue_learn_queue", None)
-        if learn_queue is not None:
+        # Drain the self-owned dialogue settlement queue; it is not covered by
+        # the background-task cancellation above.
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        if settlement_queue is not None:
             with suppress(Exception):
-                await learn_queue.shutdown(timeout=30)
+                await settlement_queue.shutdown(timeout=30)
         bangumi_client = getattr(ctx, "bangumi_client", None)
         close_bangumi = getattr(bangumi_client, "aclose", None)
         if callable(close_bangumi):
@@ -7035,6 +7891,53 @@ def create_app(
             return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
 
+    async def _ensure_confusion_dialogue_anchor(turn: ChatTurnOut) -> None:
+        """Queue the claim and anchor before this reply can admit its learn job."""
+        if turn.scope != "confusion":
+            return
+        confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+        if confusion_manager is None:
+            return
+        try:
+            confusion_id = int(turn.subject_id)
+        except (TypeError, ValueError):
+            logger.warning("Cannot establish confusion anchor for subject_id=%r", turn.subject_id)
+            return
+        confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status in {"resolved", "dismissed", "expired"}:
+            return
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        if confusion.status == "open":
+            scheduled = await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_OPEN_SYNC,
+                {
+                    "operation": "schedule",
+                    "confusion_id": confusion_id,
+                    "ask_turn_id": turn.turn_id,
+                    "asked_at": datetime.now(UTC).isoformat(),
+                    "ignore_cooldown": False,
+                },
+            )
+            claimed = bool((scheduled.settlement or {}).get("claimed", False))
+            if not claimed:
+                raise RuntimeError("Confusion clarifying slot is not available")
+            confusion = confusion_manager.get(confusion_id)
+        if confusion is None or confusion.status != "clarifying":
+            raise RuntimeError("Confusion could not enter clarifying state")
+        from openbiliclaw.soul.dialogue_anchor import ENTRY_CONFUSION_PROMPT
+
+        await _submit_dialogue_settlement_required(
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            {
+                "target_kind": "confusion",
+                "target_ref": str(confusion_id),
+                "origin_turn_id": confusion.ask_turn_id or turn.turn_id,
+                "entry": ENTRY_CONFUSION_PROMPT,
+                "producer_source": "durable_confusion_ensure",
+            },
+        )
+
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
         if ctx.dialogue is None:
             raise RuntimeError("Dialogue service is not configured.")
@@ -7044,11 +7947,22 @@ def create_app(
             concurrency.chat_active = True
         try:
             async with chat_turn_lock:
+                respond_kwargs: dict[str, object] = {
+                    "scope": turn.scope or "chat",
+                    "turn_id": turn.turn_id,
+                }
+                try:
+                    supports_session = (
+                        "session" in inspect.signature(ctx.dialogue.respond).parameters
+                    )
+                except (TypeError, ValueError):
+                    supports_session = False
+                if supports_session:
+                    respond_kwargs["session"] = turn.session
                 reply = await asyncio.wait_for(
                     ctx.dialogue.respond(
                         _contextual_chat_message(turn),
-                        scope=turn.scope or "chat",
-                        turn_id=turn.turn_id,
+                        **respond_kwargs,
                     ),
                     timeout=120,
                 )
@@ -7080,69 +7994,28 @@ def create_app(
             )
         elif turn.scope == "probe":
             domain = turn.subject_id or turn.subject_title
-            sentiment, classifier = await _classify_probe_sentiment(turn.message, reply, domain)
-            speculator = getattr(ctx.soul_engine, "_speculator", None)
-            chat_response = "chat_neutral"
-            resulting_action = "none"
-            if sentiment == "negative":
-                chat_response = "chat_rejected"
-                resulting_action = "rejected"
-                if speculator is not None:
-                    with suppress(Exception):
-                        speculator.user_reject_speculation(domain, cooldown_days=14)
-                summary = f"你对「{domain}」的反馈偏负面（{turn.message}），已暂时搁置 14 天。"
-            elif sentiment == "strong_positive":
-                chat_response = "chat_confirmed"
-                resulting_action = "confirmed"
-                if speculator is not None:
-                    with suppress(Exception):
-                        _confirm_speculation_with_source(
-                            speculator,
-                            domain,
-                            confirmation_source="chat_confirmed",
-                        )
-                summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
-            elif sentiment == "weak_positive":
-                chat_response = "weak_positive"
-                resulting_action = "weak_positive_deferred"
-                _record_exploration_buffer_event(
-                    domain=domain,
-                    source_event="weak_positive_chat",
-                )
-                summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
-            elif sentiment == "neutral_deferred":
-                defer_outcome = "deferred"
-                if speculator is not None:
-                    with suppress(Exception):
-                        defer_result = speculator.user_defer_speculation(domain)
-                        defer_outcome = defer_result.outcome
-                if defer_outcome == "exhausted":
-                    chat_response = "defer_exhausted"
-                    resulting_action = "defer_exhausted"
-                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
-                else:
-                    chat_response = "defer"
-                    resulting_action = "deferred"
-                    summary = f"你想把「{domain}」先放一放，过阵子再聊。"
-            else:
-                summary = f"关于「{domain}」你说：{turn.message}"
-            if speculator is not None:
-                _record_probe_feedback_history(
-                    domain,
-                    chat_response,
-                    speculator=speculator,
-                    message=turn.message,
-                    classification=sentiment,
-                    classifier=classifier,
-                    resulting_action=resulting_action,
-                )
-            _record_probe_cognition(
-                summary,
-                domain,
-                "chat",
-                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            completion = await _submit_dialogue_settlement_required(
+                DialogueJobKind.PROBE_REPLY_APPLY,
+                {
+                    "turn_id": turn.turn_id,
+                    "domain": domain,
+                    "message": turn.message,
+                    "reply": reply,
+                },
             )
-            await _publish_probe_event("interest.chat", summary, domain)
+            intent = completion.exploration_intent
+            if intent is not None:
+                queue = _dialogue_settlement_queue()
+                if asyncio.current_task() is getattr(queue, "worker_task", None):
+                    raise RuntimeError("Exploration handoff cannot run in the settlement worker")
+                _record_exploration_buffer_event(
+                    domain=intent.domain,
+                    source_event=intent.source_event,
+                    specifics=list(intent.specifics),
+                    evidence_id=intent.evidence_id,
+                )
         elif turn.scope == "avoidance_probe":
             domain = turn.subject_id or turn.subject_title
             sentiment, classifier = await _classify_probe_sentiment(turn.message, reply, domain)
@@ -7218,47 +8091,630 @@ def create_app(
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
         elif turn.scope == "confusion":
-            # Confusion ask resolution (single ownership — durable side effect,
-            # NOT learn_from_dialogue settles). The user's reply disambiguates a
-            # behaviour we could not read: positive → real interest (held
-            # updates replay); negative → proxy / misread (held discarded);
-            # neutral → defer (keep the 72h cooldown).
-            label = turn.subject_title or turn.subject_id or "这个方向"
-            manager = getattr(ctx.soul_engine, "_confusion_manager", None)
-            try:
-                confusion_id = int(turn.subject_id)
-            except (TypeError, ValueError):
-                confusion_id = 0
-            sentiment, _classifier = await _classify_probe_sentiment(turn.message, reply, label)
-            if manager is not None and confusion_id:
-                if sentiment in {"strong_positive", "weak_positive"}:
-                    with suppress(Exception):
-                        manager.resolve(confusion_id, resolution="real_interest", note=turn.message)
-                    summary = f"你确认了对「{label}」确实有兴趣，之前搁置的信号会重新纳入。"
-                elif sentiment == "negative":
-                    with suppress(Exception):
-                        manager.resolve(
-                            confusion_id, resolution="proxy_behavior", note=turn.message
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            await _submit_dialogue_settlement_required(
+                DialogueJobKind.CONFUSION_REPLY_APPLY,
+                {
+                    "turn_id": turn.turn_id,
+                    "subject_id": turn.subject_id,
+                    "subject_title": turn.subject_title,
+                    "message": turn.message,
+                    "reply": reply,
+                },
+            )
+
+    def _hypothesis_card_payload(payload: ChatTurnIn) -> dict[str, object]:
+        raw_evidence = payload.payload.get("evidence_refs", [])
+        evidence_refs = (
+            [str(item).strip() for item in raw_evidence if str(item).strip()]
+            if isinstance(raw_evidence, list)
+            else []
+        )
+        return {
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": payload.subject_id.strip(),
+            "title": payload.subject_title.strip(),
+            "evidence_refs": evidence_refs,
+            "actions": list(_HYPOTHESIS_CARD_ACTIONS),
+            "state": "pending",
+        }
+
+    async def _settle_hypothesis(
+        *,
+        ref: str,
+        hypothesis: str,
+        requested_verdict: str,
+        turn_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+        completion = await _submit_dialogue_settlement(
+            DialogueJobKind.SETTLE_HYPOTHESIS,
+            {
+                "ref": ref,
+                "hypothesis": hypothesis,
+                "requested_verdict": requested_verdict,
+                "turn_id": turn_id,
+                "source": source,
+                "derived": [],
+                "target_kind": "hypothesis",
+                "target_ref": ref,
+            },
+        )
+        if completion is None:
+            return {
+                "ok": False,
+                "outcome": "processing",
+                "verdict": requested_verdict,
+                "state": "processing",
+                "settlement_ref": ref,
+            }
+        if completion.settlement is not None:
+            return dict(completion.settlement)
+        return {"outcome": completion.outcome}
+
+    def _defer_hypothesis_card(turn: ChatTurnOut) -> dict[str, Any]:
+        _require_dialogue_settlement_worker()
+        state = str(turn.payload.get("state", "")).strip().lower()
+        if state in _TERMINAL_CARD_STATES:
+            return {
+                "ok": True,
+                "outcome": "already_settled",
+                "verdict": state,
+                "state": state,
+            }
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active_anchor = anchor_manager.current() if anchor_manager is not None else None
+        if (
+            state == "discussing"
+            and anchor_manager is not None
+            and active_anchor is not None
+            and active_anchor.origin_turn_id == turn.turn_id
+        ):
+            anchor_manager.release(
+                reason="settled",
+                card_state="deferred",
+                expected_generation=active_anchor.generation,
+            )
+        elif state in {"pending", "discussing"}:
+            update_payload = _chat_db_method("update_chat_turn_payload_state")
+            if update_payload is None or not bool(
+                update_payload(
+                    turn.turn_id,
+                    expected_state=state,
+                    new_state="deferred",
+                )
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Card state changed; refresh and retry."
+                )
+        deferred_until = _defer_dialogue_confirmation(str(turn.payload.get("ref", "")))
+        return {
+            "ok": True,
+            "outcome": "deferred",
+            "verdict": "deferred",
+            "state": "deferred",
+            "deferred_until": deferred_until,
+        }
+
+    def _anchor_actual_state(kind: str, ref: str) -> Any:
+        from openbiliclaw.soul.dialogue_learn_queue import AnchorAbsent, AnchorPersisted
+
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is None:
+            return AnchorAbsent(target_kind=kind, target_ref=ref, tombstone_epoch=1)
+        active = anchor_manager.current()
+        if active is not None and active.kind == kind and active.ref == ref:
+            return AnchorPersisted(
+                kind=active.kind,
+                ref=active.ref,
+                generation=active.generation,
+            )
+        return AnchorAbsent(target_kind=kind, target_ref=ref, tombstone_epoch=1)
+
+    def _discuss_hypothesis_card(
+        turn: ChatTurnOut,
+        job: DialogueJob,
+    ) -> DialogueDispatchResult:
+        """Apply card discuss in-worker and return before reservation resolution."""
+        from types import MappingProxyType
+
+        from openbiliclaw.soul.dialogue_anchor import ENTRY_CARD_DISCUSS
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorMutationTerminal,
+            DialogueDispatchResult,
+            DialogueJobResult,
+        )
+
+        _require_dialogue_settlement_worker()
+        if job.owned_anchor_reservation_id is None:
+            raise RuntimeError("card.discuss reached worker without an anchor reservation")
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is None:
+            raise RuntimeError("Dialogue anchor manager not ready")
+        ref = str(turn.payload.get("ref", "")).strip()
+        state = str(turn.payload.get("state", ""))
+        if state not in {"pending", "discussing"}:
+            result = {
+                "ok": True,
+                "outcome": "already_settled",
+                "verdict": state,
+                "state": state,
+            }
+            return DialogueDispatchResult(
+                result=DialogueJobResult(
+                    outcome="already_settled",
+                    settlement=MappingProxyType(result),
+                ),
+                anchor_terminal=AnchorMutationTerminal.already_terminal(
+                    _anchor_actual_state("hypothesis", ref),
+                ),
+            )
+        if state == "pending":
+            update_payload = _chat_db_method("update_chat_turn_payload_state")
+            if update_payload is None or not bool(
+                update_payload(
+                    turn.turn_id,
+                    expected_state="pending",
+                    new_state="discussing",
+                )
+            ):
+                raise RuntimeError("Card state changed before discuss apply")
+        response = {
+            "ok": True,
+            "outcome": "discussing",
+            "verdict": "discussing",
+            "state": "discussing",
+        }
+        existing = anchor_manager.current()
+        try:
+            established = anchor_manager.establish(
+                kind="hypothesis",
+                ref=ref,
+                origin_turn_id=turn.turn_id,
+                entry=ENTRY_CARD_DISCUSS,
+            )
+        except Exception as exc:
+            failure = exc
+            terminal = AnchorMutationTerminal.failed(
+                _anchor_actual_state("hypothesis", ref),
+                cause=f"{type(failure).__name__}: {failure}",
+            )
+
+            async def _rollback_failed_discuss() -> None:
+                update_payload = _chat_db_method("update_chat_turn_payload_state")
+                if update_payload is not None:
+                    update_payload(
+                        turn.turn_id,
+                        expected_state="discussing",
+                        new_state="pending",
+                    )
+                raise failure
+
+            return DialogueDispatchResult(
+                result=DialogueJobResult(outcome="failed"),
+                anchor_terminal=terminal,
+                followup=_rollback_failed_discuss,
+            )
+        terminal = (
+            AnchorMutationTerminal.no_op(
+                _anchor_actual_state("hypothesis", ref),
+            )
+            if (
+                existing is not None
+                and existing.kind == established.kind
+                and existing.ref == established.ref
+            )
+            else AnchorMutationTerminal.persisted(
+                kind=established.kind,
+                ref=established.ref,
+                generation=established.generation,
+            )
+        )
+        return DialogueDispatchResult(
+            result=DialogueJobResult(
+                outcome="discussing",
+                settlement=MappingProxyType(response),
+            ),
+            anchor_terminal=terminal,
+        )
+
+    async def _handle_card_defer(job: DialogueJob) -> DialogueJobResult:
+        from types import MappingProxyType
+
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobResult
+
+        row = _read_chat_turn_row(str(job.payload.get("turn_id", "")))
+        if row is None:
+            raise RuntimeError("Card disappeared before defer apply")
+        result = _defer_hypothesis_card(_normalize_chat_turn(row))
+        return DialogueJobResult(
+            outcome=str(result["outcome"]),
+            settlement=MappingProxyType(result),
+        )
+
+    async def _handle_card_discuss(job: DialogueJob) -> DialogueDispatchResult:
+        row = _read_chat_turn_row(str(job.payload.get("turn_id", "")))
+        if row is None:
+            raise RuntimeError("Card disappeared before discuss apply")
+        return _discuss_hypothesis_card(_normalize_chat_turn(row), job)
+
+    async def _handle_anchor_establish(job: DialogueJob) -> DialogueDispatchResult:
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorMutationTerminal,
+            DialogueDispatchResult,
+            DialogueJobResult,
+        )
+
+        _require_dialogue_settlement_worker()
+        if job.owned_anchor_reservation_id is None:
+            raise RuntimeError("anchor.establish reached worker without a reservation")
+        kind = str(job.payload.get("target_kind", "")).strip()
+        ref = str(job.payload.get("target_ref", "")).strip()
+        origin_turn_id = str(job.payload.get("origin_turn_id", "")).strip()
+        entry = str(job.payload.get("entry", "")).strip()
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        if anchor_manager is None:
+            raise RuntimeError("Dialogue anchor manager not ready")
+        existing = anchor_manager.current()
+        established = anchor_manager.establish(
+            kind=kind,
+            ref=ref,
+            origin_turn_id=origin_turn_id,
+            entry=entry,
+        )
+        terminal = (
+            AnchorMutationTerminal.no_op(
+                _anchor_actual_state(kind, ref),
+            )
+            if (
+                existing is not None
+                and existing.kind == established.kind
+                and existing.ref == established.ref
+            )
+            else AnchorMutationTerminal.persisted(
+                kind=established.kind,
+                ref=established.ref,
+                generation=established.generation,
+            )
+        )
+        return DialogueDispatchResult(
+            result=DialogueJobResult(outcome=terminal.disposition.value),
+            anchor_terminal=terminal,
+        )
+
+    async def _handle_confusion_open_sync(job: DialogueJob) -> DialogueJobResult:
+        from types import MappingProxyType
+
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobResult
+
+        _require_dialogue_settlement_worker()
+        operation = str(job.payload.get("operation", "")).strip().lower()
+        if operation not in {"schedule", "retarget", "rollback", "reconcile_orphan"}:
+            raise ValueError(f"Unsupported confusion.open.sync operation: {operation!r}")
+        try:
+            confusion_id = int(str(job.payload.get("confusion_id", 0)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confusion.open.sync requires an integer confusion_id") from exc
+        result: dict[str, object] = {"operation": operation, "confusion_id": confusion_id}
+        if operation == "schedule":
+            confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+            if confusion_manager is None:
+                raise RuntimeError("Confusion manager not ready")
+            asked_at_raw = str(job.payload.get("asked_at", "")).strip()
+            asked_at = datetime.fromisoformat(asked_at_raw) if asked_at_raw else datetime.now(UTC)
+            result["claimed"] = bool(
+                confusion_manager.schedule_ask(
+                    confusion_id,
+                    ask_turn_id=str(job.payload.get("ask_turn_id", "")),
+                    now=asked_at,
+                    ignore_cooldown=bool(job.payload.get("ignore_cooldown", False)),
+                )
+            )
+        elif operation == "reconcile_orphan":
+            releaser = getattr(ctx.database, "release_orphan_confusion_claim", None)
+            if not callable(releaser):
+                raise RuntimeError("Confusion orphan recovery is not ready")
+            result["released"] = bool(
+                releaser(
+                    confusion_id,
+                    expected_ask_turn_id=str(job.payload.get("expected_ask_turn_id", "")).strip(),
+                    minimum_age_seconds=float(
+                        cast(
+                            "Any",
+                            job.payload.get(
+                                "minimum_age_seconds",
+                                _CONFUSION_ORPHAN_CLAIM_MIN_AGE_SECONDS,
+                            ),
                         )
-                    summary = f"明白了，「{label}」只是顺手，不算真的兴趣。"
-                elif sentiment == "neutral_deferred":
-                    with suppress(Exception):
-                        manager.defer(confusion_id)
-                    summary = f"关于「{label}」先放一放，过阵子再问。"
-                else:
-                    with suppress(Exception):
-                        manager.resolve(confusion_id, resolution="dismissed", note=turn.message)
-                    summary = f"关于「{label}」你说：{turn.message}"
+                    ),
+                )
+            )
+        else:
+            updater = getattr(ctx.database, "update_confusion", None)
+            if not callable(updater):
+                raise RuntimeError("Confusion store is not ready")
+            if operation == "retarget":
+                updater(
+                    confusion_id,
+                    ask_turn_id=str(job.payload.get("ask_turn_id", "")),
+                    asked_at=str(job.payload.get("asked_at", "")),
+                )
             else:
-                summary = f"关于「{label}」你说：{turn.message}"
+                updater(confusion_id, status="open", ask_turn_id="")
+            result["updated"] = True
+        return DialogueJobResult(
+            outcome="completed",
+            settlement=MappingProxyType(result),
+        )
+
+    def _chat_turn_effect_receipt(turn_id: str, receipt_key: str) -> dict[str, object] | None:
+        row = _read_chat_turn_row(turn_id)
+        if row is None:
+            return None
+        raw_payload = row.get("payload", {})
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        raw_receipt = payload.get(receipt_key)
+        return dict(raw_receipt) if isinstance(raw_receipt, dict) else None
+
+    def _store_chat_turn_effect_receipt(
+        turn_id: str,
+        receipt_key: str,
+        receipt: dict[str, object],
+    ) -> None:
+        store = _chat_db_method("store_chat_turn_effect_receipt")
+        if store is None or not bool(
+            store(
+                turn_id,
+                receipt_key=receipt_key,
+                receipt=receipt,
+            )
+        ):
+            raise RuntimeError(f"Could not persist {receipt_key} for turn {turn_id!r}")
+
+    async def _handle_probe_reply_apply(job: DialogueJob) -> DialogueJobResult:
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            DialogueJobResult,
+            ExplorationIntent,
+        )
+
+        _require_dialogue_settlement_worker()
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        domain = str(job.payload.get("domain", "")).strip()
+        message = str(job.payload.get("message", ""))
+        reply = str(job.payload.get("reply", ""))
+        if not turn_id or not domain:
+            raise ValueError("probe.reply.apply requires turn_id and domain")
+        receipt_key = "probe_reply_apply"
+        receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
+        speculator = getattr(ctx.soul_engine, "_speculator", None)
+        if receipt is None:
+            sentiment, classifier = await _classify_probe_sentiment(message, reply, domain)
+            metadata = (
+                _probe_metadata_from_active_speculation(speculator, domain)
+                if speculator is not None
+                else {"domain": domain}
+            )
+            chat_response = "chat_neutral"
+            resulting_action = "none"
+            if sentiment == "negative":
+                chat_response = "chat_rejected"
+                resulting_action = "rejected"
+                summary = f"你对「{domain}」的反馈偏负面（{message}），已暂时搁置 14 天。"
+            elif sentiment == "strong_positive":
+                chat_response = "chat_confirmed"
+                resulting_action = "confirmed"
+                summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
+            elif sentiment == "weak_positive":
+                chat_response = "weak_positive"
+                resulting_action = "weak_positive_deferred"
+                summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+            elif sentiment == "neutral_deferred":
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把「{domain}」先放一放，过阵子再聊。"
+            else:
+                summary = f"关于「{domain}」你说：{message}"
+            raw_specifics = metadata.get("specifics", [])
+            specific_names = (
+                [str(item) for item in raw_specifics if str(item).strip()]
+                if isinstance(raw_specifics, list)
+                else []
+            )
+            receipt = {
+                "classification": sentiment,
+                "classifier": classifier,
+                "resulting_action": resulting_action,
+                "chat_response": chat_response,
+                "summary": summary,
+                "metadata": dict(metadata),
+                "specifics": specific_names,
+                "effects": {
+                    "settlement": False,
+                    "history": False,
+                    "cognition": False,
+                    "event": False,
+                },
+            }
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        sentiment = str(receipt.get("classification", "neutral"))
+        classifier = str(receipt.get("classifier", "neutral_default"))
+        resulting_action = str(receipt.get("resulting_action", "none"))
+        chat_response = str(receipt.get("chat_response", "chat_neutral"))
+        summary = str(receipt.get("summary", f"关于「{domain}」你说：{message}"))
+        raw_metadata = receipt.get("metadata", {})
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {"domain": domain}
+        raw_specifics = receipt.get("specifics", [])
+        specifics_tuple = (
+            tuple(str(item) for item in raw_specifics if str(item).strip())
+            if isinstance(raw_specifics, list)
+            else ()
+        )
+        raw_effects = receipt.get("effects", {})
+        effects = dict(raw_effects) if isinstance(raw_effects, dict) else {}
+
+        if not bool(effects.get("settlement", False)):
+            if sentiment == "negative" and speculator is not None:
+                with suppress(Exception):
+                    speculator.user_reject_speculation(domain, cooldown_days=14)
+            elif sentiment == "strong_positive" and speculator is not None:
+                with suppress(Exception):
+                    _confirm_speculation_with_source(
+                        speculator,
+                        domain,
+                        confirmation_source="chat_confirmed",
+                    )
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    with suppress(Exception):
+                        defer_outcome = speculator.user_defer_speculation(domain).outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+                    receipt["chat_response"] = chat_response
+                    receipt["resulting_action"] = resulting_action
+                    receipt["summary"] = summary
+            effects["settlement"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("history", False)):
+            if speculator is not None:
+                _record_probe_feedback_history(
+                    domain,
+                    chat_response,
+                    speculator=speculator,
+                    message=message,
+                    classification=sentiment,
+                    classifier=classifier,
+                    resulting_action=resulting_action,
+                    metadata=metadata,
+                )
+            effects["history"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("cognition", False)):
             _record_probe_cognition(
                 summary,
-                turn.subject_id or label,
+                domain,
+                "chat",
+                detail=f"你的反馈：{message}\n阿b的回复：{reply}",
+            )
+            effects["cognition"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        if not bool(effects.get("event", False)):
+            await _publish_probe_event("interest.chat", summary, domain)
+            effects["event"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+
+        exploration_intent = (
+            ExplorationIntent(
+                domain=domain,
+                source_event="weak_positive_chat",
+                specifics=specifics_tuple,
+                evidence_id=turn_id,
+            )
+            if sentiment == "weak_positive"
+            else None
+        )
+        return DialogueJobResult(
+            outcome="applied",
+            classification=sentiment,
+            classifier=classifier,
+            resulting_action=resulting_action,
+            exploration_intent=exploration_intent,
+        )
+
+    async def _handle_confusion_reply_apply(job: DialogueJob) -> DialogueJobResult:
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobResult
+
+        _require_dialogue_settlement_worker()
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        if not turn_id:
+            raise ValueError("confusion.reply.apply requires turn_id")
+        subject_id = str(job.payload.get("subject_id", "")).strip()
+        label = str(job.payload.get("subject_title", "")).strip() or subject_id or "这个方向"
+        message = str(job.payload.get("message", ""))
+        reply = str(job.payload.get("reply", ""))
+        domain = subject_id or label
+        receipt_key = "confusion_reply_apply"
+        receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
+        if receipt is None:
+            receipt = {
+                "summary": f"关于「{label}」你说：{message}",
+                "effects": {"cognition": False, "event": False},
+            }
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        summary = str(receipt.get("summary", f"关于「{label}」你说：{message}"))
+        raw_effects = receipt.get("effects", {})
+        effects = dict(raw_effects) if isinstance(raw_effects, dict) else {}
+        if not bool(effects.get("cognition", False)):
+            _record_probe_cognition(
+                summary,
+                domain,
                 "chat",
                 source="confusion",
-                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+                detail=f"你的反馈：{message}\n阿b的回复：{reply}",
             )
-            await _publish_probe_event("confusion.chat", summary, turn.subject_id or label)
+            effects["cognition"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        if not bool(effects.get("event", False)):
+            await _publish_probe_event("confusion.chat", summary, domain)
+            effects["event"] = True
+            receipt["effects"] = effects
+            _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
+        return DialogueJobResult(outcome="applied")
+
+    async def _handle_card_reconcile(job: DialogueJob) -> DialogueJobResult:
+        from types import MappingProxyType
+
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueJobResult
+
+        _require_dialogue_settlement_worker()
+        turn_id = str(job.payload.get("turn_id", "")).strip()
+        row = _read_chat_turn_row(turn_id) if turn_id else None
+        repaired = _reconcile_chat_card_row(row) if row is not None else False
+        reconcile = getattr(ctx.soul_engine, "_apply_card_reconcile", None)
+        if not callable(reconcile):
+            raise RuntimeError("card.reconcile worker handler is not ready")
+        result = await reconcile(ref=str(job.payload.get("ref", "")))
+        if not isinstance(result, dict):
+            raise RuntimeError("card.reconcile returned an invalid result")
+        if repaired and result.get("outcome") == "not_found":
+            result = {
+                "outcome": "reconciled",
+                "state": "pending",
+                "settlement_ref": str(job.payload.get("ref", "")),
+            }
+        return DialogueJobResult(
+            outcome=str(result.get("outcome", "completed")),
+            settlement=MappingProxyType(dict(result)),
+        )
+
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+    ctx.dialogue_settlement_handlers.update(
+        {
+            DialogueJobKind.CARD_DEFER: _handle_card_defer,
+            DialogueJobKind.CARD_DISCUSS: _handle_card_discuss,
+            DialogueJobKind.CARD_RECONCILE: _handle_card_reconcile,
+            DialogueJobKind.ANCHOR_ESTABLISH: _handle_anchor_establish,
+            DialogueJobKind.PROBE_REPLY_APPLY: _handle_probe_reply_apply,
+            DialogueJobKind.CONFUSION_REPLY_APPLY: _handle_confusion_reply_apply,
+            DialogueJobKind.CONFUSION_OPEN_SYNC: _handle_confusion_open_sync,
+        }
+    )
 
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:
@@ -7272,6 +8728,7 @@ def create_app(
             if turn.status != "pending":
                 return
             try:
+                await _ensure_confusion_dialogue_anchor(turn)
                 reply = await _generate_durable_chat_reply(turn)
             except Exception as exc:
                 logger.exception("Failed to generate durable chat turn %s", turn_id)
@@ -7300,6 +8757,14 @@ def create_app(
         message = payload.message.strip()
         if not message:
             raise HTTPException(status_code=422, detail="Chat message is required.")
+        normalized_scope = _normalize_chat_scope(payload.scope)
+        if normalized_scope == "hypothesis" and (
+            not payload.subject_id.strip() or not payload.subject_title.strip()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Hypothesis cards require subject_id and subject_title.",
+            )
         raw_turn_id = payload.turn_id.strip()
         turn_id = raw_turn_id or f"turn-{uuid.uuid4().hex}"
         existing = _get_chat_turn_row(turn_id)
@@ -7308,9 +8773,111 @@ def create_app(
             if turn.status == "pending":
                 asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
             return turn
+        if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
+            # Deterministic attachment boundary: the confirmation row is
+            # committed before the user's durable row, so equal-second
+            # timestamps are still ordered by SQLite rowid.
+            await _maybe_attach_system_confirmation(payload, turn_id=turn_id)
+        if normalized_scope == "hypothesis":
+            row = _create_chat_turn_row(
+                payload,
+                turn_id=turn_id,
+                structured_payload=_hypothesis_card_payload(payload),
+            )
+            _complete_chat_turn_row(turn_id, reply="")
+            completed = _get_chat_turn_row(turn_id)
+            if completed is None:
+                raise RuntimeError("Completed hypothesis card disappeared")
+            return _normalize_chat_turn(completed)
         row = _create_chat_turn_row(payload, turn_id=turn_id)
         asyncio.create_task(_complete_durable_chat_turn(turn_id))
         return _normalize_chat_turn(row)
+
+    @app.get("/api/chat/pending-confirmations", response_model=None)
+    async def list_pending_confirmations(
+        count_only: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        await _reconcile_orphan_confusion_claims()
+        items = _pending_confirmation_items(limit=_PENDING_CONFIRMATION_LIMIT)
+        if count_only:
+            return {"count": len(items)}
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/chat/pending-confirmations/{ref}/open", response_model=ChatTurnOut)
+    async def open_pending_confirmation(
+        ref: str,
+        payload: Annotated[dict[str, object], Body()],
+    ) -> ChatTurnOut:
+        await _reconcile_orphan_confusion_claims()
+        item = _pending_confirmation_by_ref(ref)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Pending confirmation not found.")
+        session = str(payload.get("session", "popup")).strip() or "popup"
+        turn, _created = await _create_confirmation_turn(
+            item,
+            session=session,
+            user_initiated=True,
+        )
+        return turn
+
+    @app.post("/api/chat/cards/{turn_id}/action", response_model=None)
+    async def act_on_chat_card(
+        turn_id: str,
+        payload: Annotated[dict[str, object], Body()],
+    ) -> Response | dict[str, Any]:
+        action = str(payload.get("action", "")).strip().lower()
+        if action not in _HYPOTHESIS_CARD_ACTIONS:
+            raise HTTPException(status_code=422, detail="Unsupported card action.")
+        row = _get_chat_turn_row(turn_id.strip())
+        if row is None:
+            raise HTTPException(status_code=404, detail="Chat card not found.")
+        turn = _normalize_chat_turn(row)
+        if turn.payload.get("type") != "card" or turn.payload.get("kind") != "hypothesis":
+            raise HTTPException(status_code=409, detail="Chat turn is not a hypothesis card.")
+        if action in {"defer", "discuss"}:
+            from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+            ref = str(turn.payload.get("ref", "")).strip()
+            kind = DialogueJobKind.CARD_DEFER if action == "defer" else DialogueJobKind.CARD_DISCUSS
+            completion = await _submit_dialogue_settlement(
+                kind,
+                {
+                    "turn_id": turn.turn_id,
+                    "action": action,
+                    "target_kind": "hypothesis",
+                    "target_ref": ref,
+                    "producer_source": "card_action",
+                },
+            )
+            if completion is None:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": False,
+                        "outcome": "processing",
+                        "verdict": action,
+                        "state": "processing",
+                        "settlement_ref": ref,
+                    },
+                )
+            result = (
+                dict(completion.settlement)
+                if completion.settlement is not None
+                else {"outcome": completion.outcome}
+            )
+            if result.get("outcome") == "processing":
+                return JSONResponse(status_code=202, content=result)
+            return result
+        result = await _settle_hypothesis(
+            ref=str(turn.payload.get("ref", "")).strip(),
+            hypothesis=str(turn.payload.get("title", "")).strip(),
+            requested_verdict=action,
+            turn_id=turn.turn_id,
+            source="card_action",
+        )
+        if result.get("outcome") == "processing":
+            return JSONResponse(status_code=202, content=result)
+        return result
 
     @app.get("/api/chat/turns", response_model=ChatTurnListResponse)
     async def list_chat_turns(
@@ -7324,14 +8891,17 @@ def create_app(
             scope=normalized_scope,
             limit=limit,
         )
+        for row in rows:
+            _submit_chat_card_reconcile(row)
         return ChatTurnListResponse(items=[_normalize_chat_turn(row) for row in rows])
 
     @app.get("/api/chat/turns/{turn_id}", response_model=ChatTurnOut)
     async def get_chat_turn(turn_id: str) -> ChatTurnOut:
-        row = _get_chat_turn_row(turn_id.strip())
+        row = _read_chat_turn_row(turn_id.strip())
         if row is None:
             raise HTTPException(status_code=404, detail="Chat turn not found.")
         turn = _normalize_chat_turn(row)
+        _submit_chat_card_reconcile(row)
         if turn.status == "pending":
             asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
         return turn
@@ -8051,6 +9621,11 @@ def create_app(
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
+        await _ingest_feedback_signal(
+            feedback_type=feedback_type,
+            title=rec_title,
+            note=note,
+        )
         _schedule_post_feedback_tasks()
         return FeedbackResponse(
             ok=True,
@@ -8205,14 +9780,14 @@ def create_app(
         )
 
     @app.post("/api/insights/feedback", response_model=InsightFeedbackResponse)
-    async def insight_feedback(payload: InsightFeedbackIn) -> InsightFeedbackResponse:
-        """Calibrate an insight hypothesis from a user confirm/reject.
+    async def insight_feedback(
+        payload: InsightFeedbackIn,
+        response: Response,
+    ) -> InsightFeedbackResponse:
+        """Deprecated compatibility forwarder for insight feedback.
 
-        The popup's insight cards surface ``active_insights`` (hypothesis +
-        confidence). This endpoint routes a confirm/reject back into
-        ``SoulEngine.update_from_feedback`` so the hypothesis is validated and
-        re-weighted (confirm → confidence ≥0.75; reject → ≤0.35), closing the
-        loop that was previously implemented but unwired.
+        New clients act on durable dialogue cards. Old clients retain the same
+        response shape while entering the identical serialized settlement path.
         """
         signal = payload.signal.strip().lower()
         if signal not in {"confirm", "like", "support", "reject", "dislike", "deny"}:
@@ -8222,15 +9797,59 @@ def create_app(
             raise HTTPException(status_code=422, detail="hypothesis is required.")
         if ctx.soul_engine is None:
             raise HTTPException(status_code=503, detail="Soul engine not ready.")
+        from openbiliclaw.soul.identity import build_hash8_map, insight_hash8
 
-        result = await ctx.soul_engine.update_from_feedback(
-            {"hypothesis": hypothesis, "signal": signal}
+        ref = insight_hash8(hypothesis)
+        load_insights = getattr(ctx.soul_engine, "_load_insights", None)
+        if callable(load_insights):
+            texts = [
+                str(getattr(item, "hypothesis", "")).strip()
+                for item in load_insights()
+                if str(getattr(item, "hypothesis", "")).strip()
+            ]
+            mapping = build_hash8_map(texts)
+            matched_ref = next(
+                (candidate_ref for candidate_ref, text in mapping.items() if text == hypothesis),
+                "",
+            )
+            if matched_ref:
+                ref = matched_ref
+        action = "confirm" if signal in {"confirm", "like", "support"} else "reject"
+        result = await _settle_hypothesis(
+            ref=ref,
+            hypothesis=hypothesis,
+            requested_verdict=action,
+            turn_id=f"legacy-{uuid.uuid4().hex}",
+            source="legacy_endpoint",
         )
+        deprecation_headers = {
+            "Deprecation": "true",
+            "Link": '</api/chat/pending-confirmations>; rel="successor-version"',
+        }
+        for header_name, header_value in deprecation_headers.items():
+            response.headers[header_name] = header_value
+        outcome = str(result.get("outcome", "")).strip().lower()
+        # Anchor refusal is a real failure: nothing was written to
+        # card_settlements / profile_update_ledger. Never report ok=true
+        # (the previous silent-success path broke old clients that only
+        # checked the HTTP status / ok flag).
+        if outcome in {"stale_anchor", "anchor_dependency_failed"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot settle this insight while another dialogue anchor "
+                    f"is active (outcome={outcome}). Finish or release the "
+                    "active conversation first, then retry."
+                ),
+                headers=deprecation_headers,
+            )
+        if outcome == "processing":
+            response.status_code = 202
         return InsightFeedbackResponse(
-            ok=True,
+            ok=outcome != "processing",
             matched=bool(result.get("matched", False)),
             hypothesis=str(result.get("hypothesis", hypothesis)),
-            signal=str(result.get("signal", signal)),
+            signal=str(result.get("signal", action)),
             validated=bool(result.get("validated", False)),
             confidence=float(result.get("confidence", 0.0)),
         )

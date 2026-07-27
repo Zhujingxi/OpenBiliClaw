@@ -43,6 +43,162 @@ class SoulProfileBuildError(Exception):
     """Raised when soul-profile generation fails or returns invalid data."""
 
 
+# Init history sampling (2026-07-26). The profile builder used to feed the LLM
+# the first N rows of history — titles[:100], contexts[:100], recent/older[:50]
+# — i.e. whatever the fetch happened to return first. On a real account that is
+# the newest slice only: with 1000 rows of history the model saw ~100 and every
+# long-standing interest older than that window was invisible, no matter how
+# strongly the user had engaged with it.
+#
+# Selection now mirrors what the incremental path already believes:
+#   * weight  — the same satisfaction semantics preference analysis uses
+#               (explicit interaction > finished watch > bounced), so a
+#               collected/liked item outranks a 10-second bounce.
+#   * spread  — history is bucketed by time and every bucket gets a quota, so
+#               the profile covers the whole span instead of the newest tail.
+# Rows without usable timestamps keep arrival order (degrade, never drop).
+_HISTORY_TIME_BUCKETS = 6
+# Prompt budget: ~100 rows of titles+contexts is what the previous slicing
+# already cost, so this keeps token spend flat while changing *which* rows.
+_HISTORY_SAMPLE_LIMIT = 100
+# Share of the budget held for explicit interactions before time bucketing.
+# 0.4 leaves the majority to time coverage while guaranteeing that a burst
+# of collects is never scheduled away by other buckets' quotas.
+_HISTORY_STRONG_RESERVE = 0.4
+_STRONG_HISTORY_WEIGHT = 3.0
+# Explicit acts of intent. Kept in sync with cognition_cycle's strong-signal
+# notion: these are the events a user had to choose to perform.
+_STRONG_HISTORY_EVENTS = frozenset(
+    {"favorite", "like", "coin", "feedback", "comment", "reply", "danmaku", "collect"}
+)
+
+
+def _history_timestamp(item: dict[str, Any]) -> float:
+    """Best-effort epoch seconds for a history row (0.0 when unknown)."""
+    raw_metadata = item.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    for value in (
+        item.get("view_at"),
+        # Favourites timestamp themselves with fav_time; without it every
+        # favourite would look undated and fall out of the time bucketing that
+        # keeps early behaviour represented.
+        item.get("fav_time"),
+        item.get("timestamp"),
+        metadata.get("timestamp"),
+        metadata.get("view_at"),
+        metadata.get("fav_time"),
+    ):
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number <= 0:
+            continue
+        # Extension events arrive in epoch milliseconds; history rows in seconds.
+        return number / 1000.0 if number > 1e11 else number
+    return 0.0
+
+
+def _history_weight(item: dict[str, Any]) -> float:
+    """How representative this row is of the user, not how recent it is."""
+    raw_metadata = item.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    event_type = str(item.get("event_type", "") or "").strip().lower()
+    if event_type in _STRONG_HISTORY_EVENTS:
+        return 3.0
+
+    def _number(*candidates: object) -> float:
+        for value in candidates:
+            if isinstance(value, bool) or not isinstance(value, int | float | str):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                return number
+        return 0.0
+
+    duration = _number(item.get("duration"), metadata.get("video_duration_seconds"))
+    watched = _number(
+        item.get("progress"), item.get("watch_seconds"), metadata.get("watch_seconds")
+    )
+    if duration <= 0 or watched <= 0:
+        return 1.0  # unknown completion — treat as an ordinary view
+    ratio = watched / duration
+    if ratio >= 0.8:
+        return 2.0
+    if ratio >= 0.3:
+        return 1.0
+    return 0.3  # bounced: still evidence, just weak
+
+
+def _sample_representative(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Pick ``limit`` rows spread across time, preferring representative ones.
+
+    Two passes, because time coverage and representativeness genuinely compete:
+    a burst of collects inside one week would otherwise be crowded out by the
+    per-bucket quota of every other week.
+
+    1. Reserve up to ``_HISTORY_STRONG_RESERVE`` of the budget for explicit acts
+       of intent (collect / like / coin ...). Those are rows the user chose to
+       perform; losing them to a scheduling rule is the same class of bug as
+       burying confusions under high-confidence hypotheses.
+    2. Spend the rest bucketed by time so long-standing interests survive a
+       recent binge.
+
+    Returns rows in chronological order so the model reads a coherent stream.
+    Falls back to arrival order when there is not enough time signal to bucket.
+    """
+    if limit <= 0 or len(items) <= limit:
+        return list(items)
+    dated = [(idx, item, _history_timestamp(item)) for idx, item in enumerate(items)]
+    timestamps = [ts for _, _, ts in dated if ts > 0]
+    if len(timestamps) < len(dated) // 2:
+        return items[:limit]  # not enough time signal to bucket honestly
+
+    picked: list[tuple[int, dict[str, Any], float]] = []
+    chosen: set[int] = set()
+
+    reserve = int(limit * _HISTORY_STRONG_RESERVE)
+    by_weight = sorted(dated, key=lambda row: (-_history_weight(row[1]), row[2], row[0]))
+    for row in by_weight:
+        if len(picked) >= reserve or _history_weight(row[1]) < _STRONG_HISTORY_WEIGHT:
+            break
+        picked.append(row)
+        chosen.add(id(row[1]))
+
+    remaining = limit - len(picked)
+    if remaining > 0:
+        ordered = sorted(
+            (row for row in dated if id(row[1]) not in chosen),
+            key=lambda row: (row[2], row[0]),
+        )
+        span = max(1, len(ordered))
+        buckets: list[list[tuple[int, dict[str, Any], float]]] = [
+            [] for _ in range(_HISTORY_TIME_BUCKETS)
+        ]
+        for position, row in enumerate(ordered):
+            index = min(_HISTORY_TIME_BUCKETS - 1, position * _HISTORY_TIME_BUCKETS // span)
+            buckets[index].append(row)
+        for bucket_index, bucket in enumerate(buckets):
+            share = remaining // max(1, _HISTORY_TIME_BUCKETS - bucket_index)
+            ranked = sorted(bucket, key=lambda row: (-_history_weight(row[1]), row[2]))
+            take = ranked[:share]
+            picked.extend(take)
+            chosen.update(id(taken[1]) for taken in take)
+            remaining -= len(take)
+        if remaining > 0:  # thin buckets left budget on the table
+            leftovers = sorted(
+                (row for row in dated if id(row[1]) not in chosen),
+                key=lambda row: (-_history_weight(row[1]), row[2]),
+            )
+            picked.extend(leftovers[:remaining])
+    return [row[1] for row in sorted(picked, key=lambda row: (row[2], row[0]))]
+
+
 @dataclass
 class ProfileBuilder:
     """Generate an initial soul profile from history and preference context."""
@@ -259,10 +415,14 @@ class ProfileBuilder:
             else:
                 regular_items.append(item)
 
-        titles = [str(item.get("title", "")).strip() for item in regular_items if item.get("title")]
+        # Representative sampling replaces "whatever arrived first". Everything
+        # below derives from this sample, so titles / contexts / recent / older
+        # all describe the same rows rather than three different prefixes.
+        sampled_items = _sample_representative(regular_items, _HISTORY_SAMPLE_LIMIT)
+        titles = [str(item.get("title", "")).strip() for item in sampled_items if item.get("title")]
         # Extract authors from multiple possible field names
         authors: list[str] = []
-        for item in regular_items:
+        for item in regular_items:  # frequency ranking stays on the full set
             author = (
                 item.get("author_name")
                 or item.get("author")
@@ -327,8 +487,8 @@ class ProfileBuilder:
         older_titles: list[str] = []
         recent_contexts: list[str] = []
         older_contexts: list[str] = []
-        cutoff = max(1, len(regular_items) * 3 // 10)
-        for i, item in enumerate(regular_items):
+        cutoff = max(1, len(sampled_items) * 3 // 10)
+        for i, item in enumerate(sampled_items):
             title = str(item.get("title", "")).strip()
             if not title:
                 continue
@@ -347,18 +507,26 @@ class ProfileBuilder:
         # additional payload at the worst case, comparable to the existing
         # titles[:100] payload.
         all_contexts: list[str] = []
-        for item in regular_items:
+        for item in sampled_items:
             ctx_line = _item_context(item)
             if ctx_line:
                 all_contexts.append(ctx_line)
 
         summary: dict[str, object] = {
             "count": len(regular_items),
-            "titles": titles[:100],
+            "titles": titles,
             "authors": top_authors,
         }
+        if len(sampled_items) < len(regular_items):
+            summary["sampling_hint"] = (
+                f"共 {len(regular_items)} 条历史，按「时间分布 + 代表性权重」抽取 "
+                f"{len(sampled_items)} 条送入分析："
+                "先按时间分成若干段保证长期兴趣不被最近行为淹没，"
+                "段内优先收藏/点赞/投币等明确互动与高完播内容，"
+                "短暂划走的内容只保留少量。titles / contexts 描述的是同一批被抽中的行为。"
+            )
         if all_contexts:
-            summary["contexts"] = all_contexts[:100]
+            summary["contexts"] = all_contexts
             summary["contexts_hint"] = (
                 "contexts 是 v0.3.22+ 跨源统一的事件自然语言摘要,"
                 "每行一个'在 X 平台干了 Y'。优先以 contexts 来理解用户行为,"
@@ -366,16 +534,16 @@ class ProfileBuilder:
                 "可作为细化的结构化补充。"
             )
         if recent_titles:
-            summary["recent_titles"] = recent_titles[:50]
+            summary["recent_titles"] = recent_titles
             summary["recent_hint"] = (
                 f"最近观看的 {len(recent_titles)} 个视频(前30%)代表当前活跃兴趣"
             )
         if older_titles:
-            summary["older_titles"] = older_titles[:50]
+            summary["older_titles"] = older_titles
         if recent_contexts:
-            summary["recent_contexts"] = recent_contexts[:50]
+            summary["recent_contexts"] = recent_contexts
         if older_contexts:
-            summary["older_contexts"] = older_contexts[:50]
+            summary["older_contexts"] = older_contexts
         if favorites_summary:
             summary["favorites_summary"] = favorites_summary
         if following_summary:

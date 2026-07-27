@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.llm.service import _background_admission_bypass
@@ -907,6 +908,13 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        # Feedback line config, three-surface contract with
+        # ``api/runtime_context.py`` and the OpenClaw bootstrap: the CLI
+        # feedback command runs the same batch (and, once the unified interest
+        # line is on, the same pipeline fast line), so it must read the same
+        # knobs instead of falling back to the constructor defaults.
+        feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
+        unified_interest_line=cfg.scheduler.unified_interest_line,
         database=_get_runtime_database(),
     )
 
@@ -952,9 +960,14 @@ def _build_recommendation_engine() -> Any:
 
 def _build_dialogue(soul_engine: Any) -> Any:
     """Build the Socratic dialogue helper for interactive chat."""
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
-    return SocraticDialogue(llm=_build_registry(), soul_engine=soul_engine, session="cli")
+    return SocraticDialogue(
+        llm=_build_registry(),
+        soul_engine=soul_engine,
+        session="cli",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
+    )
 
 
 def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
@@ -1211,16 +1224,33 @@ def _history_item_to_event(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title", "")).strip()
     author = str(item.get("author_name", item.get("author", ""))).strip()
     view_at = history_meta.get("view_at", item.get("view_at", ""))
+    metadata: dict[str, Any] = {
+        "bvid": bvid,
+        "view_at": view_at,
+    }
+    if bvid:
+        metadata["content_id"] = bvid
+    # Watch metrics decide how ``classify_event_satisfaction`` reads this row.
+    # Without them every video the user ever watched lands in the ledger as
+    # "unknown satisfaction" — a 100%-watched video and a 3-second bounce look
+    # identical to everything downstream of init.
+    for source_field, target in (
+        ("progress", "watch_seconds"),
+        ("duration", "video_duration_seconds"),
+    ):
+        value = item.get(source_field)
+        if isinstance(value, (int, float)) and value > 0:
+            metadata[target] = float(value)
+    tag = str(item.get("tag_name", "") or "").strip()
+    if tag:
+        metadata["category"] = tag
     return build_event(
         event_type="view",
         source_platform=SOURCE_BILIBILI,
         title=title,
         url=f"https://www.bilibili.com/video/{bvid}" if bvid else "",
         author=author,
-        metadata={
-            "bvid": bvid,
-            "view_at": view_at,
-        },
+        metadata=metadata,
     )
 
 
@@ -4334,6 +4364,205 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+_INIT_IMPORT_IDENTITY_KEYS = (
+    "content_id",
+    "bvid",
+    "note_id",
+    "aweme_id",
+    "video_id",
+    "yt_video_id",
+    "post_id",
+    "up_name",
+)
+_INIT_IMPORT_TIMESTAMP_KEYS = ("timestamp", "view_at", "fav_time")
+
+
+def _init_import_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Identify one imported account row: (event type, item, when it happened).
+
+    Returns ``None`` when the row carries no usable identity, which means it
+    cannot be recognised on a later import and must be kept.
+    """
+    event_type = str(event.get("event_type") or event.get("type") or "").strip()
+    raw_metadata = event.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    identity = ""
+    for key in _INIT_IMPORT_IDENTITY_KEYS:
+        candidate = str(metadata.get(key, "") or "").strip()
+        if candidate:
+            identity = candidate
+            break
+    if not identity:
+        identity = str(event.get("url", "") or "").strip()
+    if not identity:
+        return None
+    stamp = ""
+    for key in _INIT_IMPORT_TIMESTAMP_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            stamp = str(int(value))
+            break
+    return (event_type, identity, stamp)
+
+
+def _drop_events_already_imported(
+    database: Any,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter init's import down to rows the ledger has not already recorded.
+
+    Re-running ``init`` re-fetches the same account snapshot and used to persist
+    all of it again: on a real re-run 56% of the ledger became duplicate rows,
+    699 of them keyed to the identical watch timestamp. That is not a second
+    view — it is the same behaviour counted twice, inflating every weight
+    derived from event counts.
+
+    The key includes the timestamp precisely so a genuine repeat still lands: a
+    rewatch has a different ``view_at``, a re-added favourite a different
+    ``fav_time``. Rows with no identity at all are kept — unrecognisable is not
+    the same as duplicate. Best-effort: if the ledger cannot be read, nothing is
+    dropped.
+    """
+    import logging
+
+    if database is None or not events:
+        return events, 0
+    logger = logging.getLogger("openbiliclaw.cli")
+    seen: set[tuple[str, str, str]] = set()
+    try:
+        for row in database.conn.execute("SELECT event_type, url, metadata FROM events"):
+            metadata = row["metadata"]
+            if isinstance(metadata, str):
+                with suppress(Exception):
+                    metadata = json.loads(metadata)
+            key = _init_import_key(
+                {
+                    "event_type": row["event_type"],
+                    "url": row["url"],
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                }
+            )
+            if key is not None:
+                seen.add(key)
+    except Exception:
+        logger.debug("init import dedup lookup failed; importing everything", exc_info=True)
+        return events, 0
+
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for event in events:
+        key = _init_import_key(event)
+        if key is not None and key in seen:
+            skipped += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        kept.append(event)
+    return kept, skipped
+
+
+def _favorites_to_history_rows(favorites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn fetched favourites into individual profile-history rows.
+
+    ``event_type`` is the load-bearing field: it earns these rows the
+    strong-signal weight and the reserved share of ProfileBuilder's sample, and
+    makes their context line read "收藏了" instead of "看了".
+    """
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI
+
+    rows: list[dict[str, Any]] = []
+    for fav in favorites:
+        title = str(fav.get("title", "")).strip()
+        if not title:
+            continue
+        rows.append(
+            {
+                "title": title,
+                "author_name": str(fav.get("upper", "")).strip(),
+                "event_type": "favorite",
+                "source_platform": SOURCE_BILIBILI,
+                "fav_time": fav.get("fav_time"),
+                "duration": fav.get("duration"),
+            }
+        )
+    return rows
+
+
+def _build_bilibili_init_events(
+    *,
+    history: list[dict[str, Any]],
+    favorites_data: list[dict[str, Any]],
+    following_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn stage-1 Bilibili data into unified events for the ledger.
+
+    Extracted from ``run_guided_init`` so the identity and metadata each event
+    carries can be tested directly — that identity is what decides whether the
+    recommender knows the user already consumed this content.
+    """
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
+
+    events = [_history_item_to_event(item) for item in history]
+    for fav in favorites_data:
+        folder = str(fav.get("folder", "")).strip()
+        upper = str(fav.get("upper", "")).strip()
+        # Identity is what makes a favourite deduplicable. Without a bvid these
+        # events carried no url and no content_id, so seen_items never learned
+        # about them and a video the user had explicitly saved could come back
+        # as a fresh recommendation.
+        fav_bvid = str(fav.get("bvid", "") or "").strip()
+        fav_metadata: dict[str, Any] = {
+            "folder": folder,
+            "upper": upper,
+        }
+        if fav_bvid:
+            fav_metadata["bvid"] = fav_bvid
+            fav_metadata["content_id"] = fav_bvid
+        for source_field, target in (
+            ("fav_time", "fav_time"),
+            ("pubtime", "pubtime"),
+            ("play_count", "play_count"),
+        ):
+            value = fav.get(source_field)
+            if isinstance(value, (int, float)) and value > 0:
+                fav_metadata[target] = int(value)
+        intro = str(fav.get("intro", "") or "").strip()
+        if intro and intro != "-":
+            fav_metadata["intro"] = intro[:200]
+        duration = fav.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            fav_metadata["video_duration_seconds"] = float(duration)
+        events.append(
+            build_event(
+                event_type="favorite",
+                source_platform=SOURCE_BILIBILI,
+                title=str(fav.get("title", "")),
+                url=f"https://www.bilibili.com/video/{fav_bvid}" if fav_bvid else "",
+                author=upper,
+                metadata=fav_metadata,
+            )
+        )
+    for user in following_data:
+        sign = str(user.get("sign", "")).strip()
+        name = str(user.get("name", ""))
+        events.append(
+            build_event(
+                event_type="follow",
+                source_platform=SOURCE_BILIBILI,
+                title=name,
+                author=name,
+                context=(
+                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
+                ),
+                metadata={
+                    "up_name": name,
+                    "sign": sign,
+                },
+            )
+        )
+    return events
+
+
 def _xhs_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert XHS bootstrap events into profile-builder history rows.
 
@@ -4642,6 +4871,92 @@ def cost(
         "[dim]（费率为公开渠道估算,与 provider 实际账单可能差 ±20%。"
         "tail daemon 日志可以看每次调用的实时 [llm-cost] INFO 行,"
         "cache 命中率 < 30% 的 caller 在 by-caller 表里会标红。）[/dim]",
+    )
+
+
+def _fetch_pending_confirmation_snapshot() -> dict[str, Any]:
+    """Read the canonical pending-confirmation snapshot from the local API."""
+    import httpx
+
+    from openbiliclaw.config import load_config
+
+    port = load_config().api.port
+    url = f"http://127.0.0.1:{port}/api/chat/pending-confirmations"
+    try:
+        with httpx.Client(timeout=5.0, trust_env=False) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"无法读取 {url}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("待聊确认端点返回了无效对象。")
+    raw_items = payload.get("items", [])
+    raw_count = payload.get("count", 0)
+    if (
+        not isinstance(raw_items, list)
+        or not isinstance(raw_count, int)
+        or isinstance(raw_count, bool)
+    ):
+        raise RuntimeError("待聊确认端点返回了无效列表。")
+    items = [item for item in raw_items if isinstance(item, dict)]
+    if len(items) != len(raw_items):
+        raise RuntimeError("待聊确认端点返回了无效条目。")
+    return {"count": raw_count, "items": items}
+
+
+@app.command()
+def questions() -> None:
+    """只读查看当前待聊的假设与疑惑。"""
+    _require_runtime_config()
+    try:
+        snapshot = _fetch_pending_confirmation_snapshot()
+    except RuntimeError as exc:
+        _print_status_panel(
+            "error",
+            "无法读取待聊确认",
+            f"{exc}\n请确认本地 API 服务已启动。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    items = snapshot["items"]
+    _print_page_title("待聊确认", "只读列表 · 与本地 API 同步")
+    if not items:
+        _print_status_panel("info", "暂无待聊确认", "当前没有高优先级的假设或疑惑。")
+        return
+
+    table = Table(show_header=True, header_style="bold cyan", title="待确认的对话话题")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("类型", no_wrap=True)
+    table.add_column("话题")
+    table.add_column("置信度", justify="right", no_wrap=True)
+    table.add_column("依据")
+    table.add_column("Ref", no_wrap=True)
+    for index, item in enumerate(items, start=1):
+        kind = "疑惑" if str(item.get("kind", "")) == "confusion" else "猜测"
+        try:
+            confidence = float(item.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        raw_evidence = item.get("evidence_refs", [])
+        evidence = (
+            "、".join(str(value) for value in raw_evidence)
+            if isinstance(raw_evidence, list)
+            else ""
+        )
+        table.add_row(
+            str(index),
+            kind,
+            Text(str(item.get("title", "") or "（未命名）")),
+            f"{confidence:.0%}",
+            Text(evidence or "—"),
+            Text(str(item.get("ref", ""))),
+        )
+    console.print(table)
+    _print_status_panel(
+        "info",
+        f"共 {snapshot['count']} 条",
+        "此命令只读；请在插件或桌面端的对话确认入口继续处理。",
     )
 
 
@@ -6313,6 +6628,8 @@ async def _fetch_bilibili_init_data(
     Favorites/following limits are resolved by the caller; history uses
     ``_INIT_BILIBILI_HISTORY_LIMIT`` unless a caller passes an override.
     """
+    from openbiliclaw.bilibili.api import favorite_item_is_dead
+
     hist = await client.get_user_history(max_items=history_limit)
 
     favs: list[dict[str, Any]] = []
@@ -6334,11 +6651,38 @@ async def _fetch_bilibili_init_data(
                 upper = item.get("upper", {}) if isinstance(item, dict) else {}
                 if not isinstance(upper, dict):
                     upper = {}
+                raw = item if isinstance(item, dict) else {}
+                if favorite_item_is_dead(raw):
+                    # Taken-down videos come back with the literal title
+                    # "已失效视频" (6% of a real 200-item sample). Keeping them
+                    # told the analyzer the user is into "已失效视频" and put
+                    # that string in the ledger as a favourite signal. We know
+                    # nothing about what the video was, so it is not a signal.
+                    continue
+                raw_cnt = raw.get("cnt_info")
+                cnt_info: dict[str, Any] = raw_cnt if isinstance(raw_cnt, dict) else {}
                 favs.append(
                     {
-                        "title": item.get("title", "") if isinstance(item, dict) else str(item),
+                        "title": raw.get("title", "") if raw else str(item),
                         "upper": str(upper.get("name", "")).strip(),
                         "folder": folder_title,
+                        # Identity, time and reach: carried for the event
+                        # ledger, not for prompts (stripped before _favorites
+                        # below). A favourited video must never be recommended
+                        # back, dedup needs a bvid, and play count is what tells
+                        # a niche-digger apart from a trend-follower.
+                        "bvid": str(raw.get("bvid", "") or "").strip(),
+                        "fav_time": raw.get("fav_time"),
+                        "duration": raw.get("duration"),
+                        "pubtime": raw.get("pubtime"),
+                        "play_count": cnt_info.get("play"),
+                        # Kept in the ledger, deliberately out of prompts: on a
+                        # real 200-item sample 154 entries had an intro, median
+                        # 105 chars, but a large share is 充电 / 大会员 promo
+                        # boilerplate. Storing it means a later pass can use it
+                        # without re-fetching; feeding it to the portrait now
+                        # would spend ~20k chars per init to dilute the signal.
+                        "intro": str(raw.get("intro", "") or "").strip()[:200],
                     }
                 )
             if len(favs) >= favorite_limit:
@@ -7231,42 +7575,11 @@ async def run_guided_init(
 
     # Build events from all data sources via the unified event_format
     # builder so B站 / 小红书 / future-source events share one shape.
-    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
-
-    events = [_history_item_to_event(item) for item in history]
-    for fav in favorites_data:
-        folder = str(fav.get("folder", "")).strip()
-        upper = str(fav.get("upper", "")).strip()
-        events.append(
-            build_event(
-                event_type="favorite",
-                source_platform=SOURCE_BILIBILI,
-                title=str(fav.get("title", "")),
-                author=upper,
-                metadata={
-                    "folder": folder,
-                    "upper": upper,
-                },
-            )
-        )
-    for user in following_data:
-        sign = str(user.get("sign", "")).strip()
-        name = str(user.get("name", ""))
-        events.append(
-            build_event(
-                event_type="follow",
-                source_platform=SOURCE_BILIBILI,
-                title=name,
-                author=name,
-                context=(
-                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
-                ),
-                metadata={
-                    "up_name": name,
-                    "sign": sign,
-                },
-            )
-        )
+    events = _build_bilibili_init_events(
+        history=history,
+        favorites_data=favorites_data,
+        following_data=following_data,
+    )
     bilibili_event_count = len(events)
     # X likes/bookmarks are direct-fetched here (no extension task handler to
     # propagate them), so — like B站 — they must be persisted in this run.
@@ -7338,6 +7651,17 @@ async def run_guided_init(
                 "reddit": len(reddit_events),
                 "bangumi": len(bangumi_events),
             }
+        )
+    # Re-running init re-fetches the same snapshot; without this the ledger
+    # counts every one of those rows a second time (measured: 56% duplicates).
+    events_to_persist, already_imported = _drop_events_already_imported(
+        getattr(memory, "_database", None),
+        events_to_persist,
+    )
+    if already_imported:
+        console.print(
+            f"  [dim]跳过账本里已有的 {already_imported} 条信号"
+            f"（重跑 init 不会把同一次行为记两遍）[/dim]"
         )
     propagate_events = getattr(memory, "propagate_events", None)
     if callable(propagate_events):
@@ -7491,10 +7815,23 @@ async def run_guided_init(
     )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
+        # One favourite is one signal, so each becomes its own history row
+        # alongside the views. They used to be collapsed into a single
+        # "[收藏夹汇总]" item whose ``_favorites`` list nothing ever read — the
+        # portrait saw the sentence "共 200 个收藏，涵盖: 默认收藏夹" and not a
+        # single title. Deliberately choosing to save something is the
+        # strongest signal a user emits, and the whole of it was invisible.
+        #
+        # ``event_type`` is what earns them the strong-signal weight and the
+        # reserved share of the sample in ProfileBuilder, and what makes their
+        # context line read "收藏了" rather than "看了".
+        combined_history.extend(_favorites_to_history_rows(favorites_data))
+        # The folder names stay as one aggregate line: they are the user's own
+        # labels for what they save ("AI Agent", "学习"), which no per-item
+        # field carries.
         combined_history.append(
             {
                 "title": "[收藏夹汇总]",
-                "_favorites": favorites_data,
                 "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
                 + "涵盖: "
                 + ", ".join(

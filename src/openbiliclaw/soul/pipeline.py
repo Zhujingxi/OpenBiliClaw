@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from openbiliclaw.memory.manager import MemoryManager
@@ -142,15 +143,31 @@ class LayerBuffer:
         now: datetime,
         *,
         has_strong_signal: bool = False,
+        feedback_priority_threshold: int = 0,
     ) -> bool:
         """Check if this buffer has enough signals and enough time has passed.
 
         If *has_strong_signal* is True the min_signals gate is reduced to 1,
         so feedback and dialogue signals update the profile immediately.
+
+        *feedback_priority_threshold* > 0 enables the unified-interest-line
+        priority rule (spec 2026-07-27 invariant 1): once the buffer holds that
+        many FEEDBACK signals the update fires immediately, bypassing
+        ``min_interval_seconds``. The threshold is the old feedback batch's
+        ``feedback_batch_threshold`` (default 3, calibrated 2026-03-09 by
+        ``fcbde4a2``; the value is carried over unchanged, only its trigger site
+        moved). 0 (the default, and what the flag-off path passes) keeps today's
+        behaviour byte-identical.
         """
         effective_min = 1 if has_strong_signal else threshold.min_signals
         if len(self.signals) < effective_min:
             return False
+        if feedback_priority_threshold > 0:
+            feedback_signals = sum(
+                1 for s in self.signals if s.get("signal_type") == SignalType.FEEDBACK.value
+            )
+            if feedback_signals >= feedback_priority_threshold:
+                return True
         if self.last_updated_at:
             try:
                 last = datetime.fromisoformat(self.last_updated_at)
@@ -215,6 +232,30 @@ class LayerUpdateResult:
     trigger: str = ""
     evidence: str = ""
     timestamp: str = ""
+    # Set by the INTEREST updater when the consumed batch carried FEEDBACK
+    # signals (unified interest line). The pipeline runs the feedback-batch
+    # post-write privileges (gated soul rebuild + held replay) from it AFTER
+    # the profile save, so a rebuild is never clobbered by the layer write.
+    feedback_context: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class FeedbackConsumerHooks:
+    """Feedback-batch privileges the unified interest line inherits.
+
+    Wired by the SoulEngine only when ``scheduler.unified_interest_line`` is on;
+    ``None`` hooks mean the pipeline behaves exactly as it does today.
+
+    - ``archive_dislikes(updated_preference, newly_added)`` runs BEFORE the
+      preference write so newly disliked topics are archived (not deleted) in
+      the same snapshot the profile is populated from.
+    - ``after_update(...)`` runs AFTER the profile write: gated soul rebuild
+      (access point ③, trigger ``feedback_batch``) plus the held-replay
+      consumer.
+    """
+
+    archive_dislikes: Callable[[dict[str, Any], list[str]], None]
+    after_update: Callable[..., Awaitable[None]]
 
 
 @dataclass
@@ -838,6 +879,8 @@ class ProfileUpdatePipeline:
         cognition_cycle: Any | None = None,
         speculator_idle_interval_minutes: int = 30,
         profile_consolidator: Any | None = None,
+        unified_interest_line: bool = False,
+        feedback_batch_threshold: int = 3,
     ) -> None:
         self._memory = memory
         self._preference_analyzer = preference_analyzer
@@ -871,6 +914,14 @@ class ProfileUpdatePipeline:
         # Phase 3 posture gate over VALUES/CORE layer writes (access point ②).
         # None until the SoulEngine wires it in; None ⇒ no gating (byte-identical).
         self._posture_gate: Any | None = None
+        # Unified interest line (spec 2026-07-27) feedback-priority rule. 0 ⇒ the
+        # rule is off and every readiness check is byte-identical to today.
+        self._feedback_priority_threshold = (
+            max(1, feedback_batch_threshold) if unified_interest_line else 0
+        )
+        # Feedback-batch privileges for the consuming side. None until the
+        # SoulEngine wires them in (only when the unified line is on).
+        self._feedback_hooks: FeedbackConsumerHooks | None = None
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or replace the embedding service for semantic operations."""
@@ -879,6 +930,10 @@ class ProfileUpdatePipeline:
     def set_posture_gate(self, posture_gate: Any) -> None:
         """Attach the posture gate for VALUES/CORE deep-layer writes (Phase 3)."""
         self._posture_gate = posture_gate
+
+    def set_feedback_hooks(self, hooks: FeedbackConsumerHooks | None) -> None:
+        """Attach the feedback-batch privileges (unified interest line)."""
+        self._feedback_hooks = hooks
 
     def set_cognition_cycle(self, cognition_cycle: Any) -> None:
         """Attach or replace the cognition cycle runner."""
@@ -942,13 +997,28 @@ class ProfileUpdatePipeline:
             has_strong = buf is not None and any(
                 s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
             )
-            if buf and threshold and buf.is_ready(threshold, now, has_strong_signal=has_strong):
+            if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
                 update_result = await self._update_layer(layer, buf)
                 if update_result:
                     result.layers_updated.append(update_result)
 
         self._save_state()
         return result
+
+    def _buffer_ready(
+        self,
+        buf: LayerBuffer,
+        threshold: LayerThreshold,
+        now: datetime,
+        has_strong: bool,
+    ) -> bool:
+        """Readiness check shared by ``ingest_batch`` and ``tick``."""
+        return buf.is_ready(
+            threshold,
+            now,
+            has_strong_signal=has_strong,
+            feedback_priority_threshold=self._feedback_priority_threshold,
+        )
 
     def _preprocess_retractions(self, signals: list[ProfileSignal]) -> None:
         """Discount positives undone by a retraction, atomically at batch entry.
@@ -1045,7 +1115,7 @@ class ProfileUpdatePipeline:
             has_strong = buf is not None and any(
                 s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
             )
-            if buf and threshold and buf.is_ready(threshold, now, has_strong_signal=has_strong):
+            if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
                 update_result = await self._update_layer(layer, buf)
                 if update_result:
                     result.layers_updated.append(update_result)
@@ -1212,6 +1282,7 @@ class ProfileUpdatePipeline:
                 embedding_service=self._embedding_service,
                 llm_service=getattr(self._preference_analyzer, "registry", None),
                 posture_gate=self._posture_gate,
+                feedback_hooks=self._feedback_hooks,
             )
         except Exception:
             logger.exception("Failed to update layer %s", layer.value)
@@ -1229,6 +1300,18 @@ class ProfileUpdatePipeline:
             # Trigger portrait regeneration if deep layers changed
             if layer in _PORTRAIT_TRIGGER_LAYERS:
                 await self._regenerate_portrait(profile)
+
+        # Feedback-batch post-write privileges. Deliberately AFTER
+        # ``_save_profile``: a gated soul rebuild rewrites the whole soul layer
+        # and must not be overwritten by this layer's own profile snapshot.
+        # Runs whether or not the layer reported ``changed`` — the old batch
+        # gated the rebuild on ``_preference_changed_significantly``, not on the
+        # rendered change list. Best-effort: never breaks the layer update.
+        if update_result.feedback_context and self._feedback_hooks is not None:
+            try:
+                await self._feedback_hooks.after_update(**update_result.feedback_context)
+            except Exception:
+                logger.exception("Feedback-batch post-update hook failed")
 
         return update_result
 

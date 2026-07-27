@@ -109,7 +109,7 @@
 | 多源 bootstrap 去重状态 | ✅ | `source_bootstrap_state.json` 记录 XHS / 抖音 / YouTube 已进入事件路径的 bootstrap identity key，避免跨任务重放旧画像信号 |
 | 用户画像覆盖层 | ✅ | `profile_overrides.json` 存用户对画像的手动编辑（文本/标量固定 + 列表/兴趣树增删）；`load/save_profile_overrides` 读写，`sync_profile_files` 渲染人类可读镜像前叠加覆盖层，确保编辑在画像重建后仍反映在 `soul_profile.md/.json` |
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
-| JSON 状态原子更新 | ✅ | `memory/json_state.py` 提供带进程内锁、跨进程文件锁和 `os.replace` 的 `update_json_state()`；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈 |
+| JSON 状态原子读写 | ✅ | `memory/json_state.py` 提供共享同一进程内锁/跨进程文件锁的 `read_json_state()` 与 `update_json_state()`，写侧再以 `os.replace` 发布；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈。对话锚在 LLM 返回后的 ref+generation 二次校验使用锁内读，因此不会观察到写到一半的代次。 |
 
 > `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。storage 会在同一事务内把 `view` 的 canonical identity upsert 到 `seen_items`，这是推荐去重索引，不是画像推断。批量版本把整批初始化事件交给 storage 的单事务接口，并通过 `asyncio.to_thread` 避免 SQLite 阻塞 API loop。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
 

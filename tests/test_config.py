@@ -1044,6 +1044,68 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     assert loaded.scheduler.avoidance_speculation_max_active == 5
 
 
+def test_save_config_round_trips_feedback_batch_threshold(tmp_path: Path) -> None:
+    """A user-set feedback batch threshold survives a settings save.
+
+    Regression (found in unified-interest-line Wave A): ``_render_config_toml``
+    never emitted ``scheduler.feedback_batch_threshold``, so the extension popup
+    and desktop settings inputs were write-only — every save silently reverted a
+    user-tuned value back to the default 3 on the next load. The unified line
+    reuses this key as its priority-flush threshold, so a silent revert would
+    also silently change the interest-layer cadence.
+    """
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.feedback_batch_threshold = 5
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.scheduler.feedback_batch_threshold == 5
+
+
+def test_save_config_round_trips_profile_consolidation_scheduler_fields(tmp_path: Path) -> None:
+    """All ProfileConsolidator scheduler knobs survive a full config rewrite."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.profile_consolidation_enabled = False
+    config.scheduler.profile_consolidation_interval_hours = 23
+    config.scheduler.profile_consolidation_like_target_upper = 321
+    config.scheduler.profile_consolidation_like_target_soft = 234
+    config.scheduler.profile_consolidation_archive_enabled = False
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.scheduler.profile_consolidation_enabled is False
+    assert loaded.scheduler.profile_consolidation_interval_hours == 23
+    assert loaded.scheduler.profile_consolidation_like_target_upper == 321
+    assert loaded.scheduler.profile_consolidation_like_target_soft == 234
+    assert loaded.scheduler.profile_consolidation_archive_enabled is False
+
+
+def test_settings_save_path_preserves_feedback_batch_threshold(tmp_path: Path) -> None:
+    """The exact sequence the settings API runs: load → mutate → save → reload.
+
+    ``/api/settings`` loads the on-disk config, applies the submitted scheduler
+    fields onto the dataclass, and calls ``save_config``. Before the renderer
+    fix, the reload dropped the threshold even though the save request carried
+    it.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[scheduler]\nfeedback_batch_threshold = 7\n", encoding="utf-8")
+
+    cfg = load_config(config_path)
+    assert cfg.scheduler.feedback_batch_threshold == 7
+    # The settings endpoint mutates in place and re-saves the whole config.
+    cfg.scheduler.discovery_limit = 21
+    save_config(cfg, config_path)
+
+    reloaded = load_config(config_path)
+    assert reloaded.scheduler.discovery_limit == 21
+    assert reloaded.scheduler.feedback_batch_threshold == 7
+
+
 def test_scheduler_pool_source_shares_override(tmp_path: Path) -> None:
     toml_path = tmp_path / "c.toml"
     toml_path.write_text(
@@ -3148,3 +3210,162 @@ def test_legacy_refresh_hours_keys_convert_to_minutes_without_crashing() -> None
 
     # Absent keys land on the aligned 3-minute default.
     assert _build_config({"scheduler": {}}).scheduler.trending_refresh_minutes == 3
+
+
+class TestUnknownConfigKeysAreTolerated:
+    """A config.toml written by a newer build must not brick an older one.
+
+    Real incident: a worktree config carried ``[scheduler].source_incremental_hours``
+    (a field that only exists on another branch). ``SchedulerConfig(**sched_raw)``
+    splatted it straight into the dataclass, so ``load_config()`` died with a bare
+    ``TypeError: unexpected keyword argument`` and every code path that loads config
+    went down with it — including 74 unrelated tests. Downgrading after an upgrade
+    wrote new fields is the same failure in production.
+    """
+
+    def test_unknown_scheduler_key_is_ignored_instead_of_crashing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[scheduler]
+source_incremental_hours = 24
+discovery_limit = 17
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING"):
+            config = load_config(config_path)
+
+        # Known siblings keep working — the unknown key is dropped, not the section.
+        assert config.scheduler.discovery_limit == 17
+        assert not hasattr(config.scheduler, "source_incremental_hours")
+        assert "source_incremental_hours" in caplog.text
+        assert "scheduler" in caplog.text
+
+    def test_unknown_keys_are_tolerated_across_provider_and_plain_sections(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Coverage must not be scheduler-only — every ``**raw`` splat is a hazard."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[llm]
+default_provider = "ollama"
+
+[llm.ollama]
+model = "llama3"
+future_provider_field = "v9"
+
+[storage]
+unknown_storage_key = 7
+
+[logging]
+unknown_logging_key = "loud"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING"):
+            config = load_config(config_path)
+
+        assert config.llm.ollama.model == "llama3"
+        for section, key in (
+            ("llm.ollama", "future_provider_field"),
+            ("storage", "unknown_storage_key"),
+            ("logging", "unknown_logging_key"),
+        ):
+            assert key in caplog.text, f"{key} should be reported"
+            assert section in caplog.text, f"{section} should be named in the warning"
+
+    def test_known_scheduler_values_survive_alongside_unknown_keys(self, tmp_path: Path) -> None:
+        """The filter must not silently reset neighbours to their defaults."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[scheduler]
+enabled = false
+source_incremental_hours = 24
+refresh_check_interval_seconds = 75
+trending_refresh_minutes = 5
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        assert config.scheduler.enabled is False
+        assert config.scheduler.refresh_check_interval_seconds == 75
+        assert config.scheduler.trending_refresh_minutes == 5
+
+
+class TestUnifiedInterestLineFlag:
+    """统一兴趣更新线回退开关（scheduler.unified_interest_line）。
+
+    2026-07-28 经真实 A/B 三道门与 A/A 噪声控制后默认开启；显式 false
+    仍逐字节回退旧反馈批线。
+    """
+
+    def test_absent_key_loads_as_true_through_load_config(self, tmp_path: Path) -> None:
+        """真实安装的 config.toml 没有这个键——必须经 load_config 得 True。
+
+        2026-07-28 真机 E2E 抓到 dataclass 默认与加载路径 _coerce_bool 默认漂移：
+        直构 SchedulerConfig() 是 True，真实加载却是 False，统一线在真后端从未启用。
+        """
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[scheduler]\ndiscovery_limit = 10\n", encoding="utf-8")
+
+        config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is True
+
+    def test_defaults_on(self) -> None:
+        assert Config().scheduler.unified_interest_line is True
+
+    def test_toml_true_survives_the_dataclass_filter(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            "[scheduler]\nunified_interest_line = true\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING", logger="openbiliclaw.config"):
+            config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is True
+        assert "unified_interest_line" not in caplog.text, (
+            "开关必须是 SchedulerConfig 的已知字段，否则 _filter_dataclass_kwargs 会静默丢掉它"
+        )
+
+    def test_non_bool_value_is_coerced(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[scheduler]\nunified_interest_line = "false"\n',
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is False
+        assert type(config.scheduler.unified_interest_line) is bool
+
+    def test_explicit_false_survives_a_save_round_trip(self, tmp_path: Path) -> None:
+        """回退开关必须能落盘：任何一次设置保存都会整份重写 config.toml。"""
+        config = Config()
+        config.scheduler.unified_interest_line = False
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        assert load_config(config_path).scheduler.unified_interest_line is False
+
+    def test_example_config_ships_the_switch_on(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["scheduler"]["unified_interest_line"] is True

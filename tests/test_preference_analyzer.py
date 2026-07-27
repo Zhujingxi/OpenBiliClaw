@@ -938,10 +938,17 @@ async def test_analyze_events_count_chunking_avoids_whole_batch_prompt_build(
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> list[dict[str, str]]:
         if len(events) > 1:
             raise AssertionError("count-based chunking must not build a whole-batch prompt")
-        return original_build_prompt(events=events, existing_preference=existing_preference)
+        return original_build_prompt(
+            events=events,
+            existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
+        )
 
     monkeypatch.setattr(
         analyzer_module,
@@ -1304,10 +1311,17 @@ async def test_single_event_is_skipped_when_compact_prompt_still_exceeds_budget(
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> list[dict[str, str]]:
         if len(events) == 1 and events[0].get("title"):
             compact_prompt_events.append(dict(events[0]))
-        return original_build_prompt(events=events, existing_preference=existing_preference)
+        return original_build_prompt(
+            events=events,
+            existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
+        )
 
     monkeypatch.setattr(
         analyzer_module,
@@ -1762,3 +1776,108 @@ async def test_engine_analyze_events_forwards_progress_callback() -> None:
     await engine.analyze_events([{"event_type": "view", "title": "x"}], progress_callback=_cb)
     kwargs = engine._preference_analyzer.analyze_events.await_args.kwargs
     assert kwargs["progress_callback"] is _cb
+
+
+class TestInitCognitionCandidatesSpreadAcrossChunks:
+    """Init's awareness/insight drafts must not be monopolised by recent chunks.
+
+    `_merge_init_cognition_contexts` walked chunk results in order and broke on
+    the cap (12 awareness / 8 insights). Chunks are `events[i:i+200]` and the
+    fetch returns newest first, so the newest one or two chunks filled the quota
+    and every older period contributed nothing — the same "first arrival wins"
+    failure the history summary had.
+    """
+
+    @staticmethod
+    def _raw(era: str, count: int = 6) -> dict[str, object]:
+        return {
+            "awareness_candidates": [
+                {"observation": f"{era}观察{i}", "trend": "t", "emotion_guess": "e"}
+                for i in range(count)
+            ],
+            "insight_candidates": [
+                {"hypothesis": f"{era}假设{i}", "confidence": 0.7, "evidence": ["x"]}
+                for i in range(count)
+            ],
+        }
+
+    def _analyzer(self):
+        from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+        class _Stub:
+            async def complete_structured_task(self, **_kwargs: object) -> object:
+                raise AssertionError("merging must not call the LLM")
+
+        return PreferenceAnalyzer(registry=_Stub())
+
+    def test_every_chunk_contributes_awareness(self) -> None:
+        analyzer = self._analyzer()
+        chunks = [self._raw("最近"), self._raw("中期"), self._raw("早期")]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        eras = {str(item["observation"])[:2] for item in merged["awareness"]}
+
+        assert eras == {"最近", "中期", "早期"}, f"每个时期都应有觉察代表，实际只有 {sorted(eras)}"
+
+    def test_every_chunk_contributes_insights(self) -> None:
+        analyzer = self._analyzer()
+        chunks = [self._raw("最近"), self._raw("中期"), self._raw("早期")]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        eras = {str(item["hypothesis"])[:2] for item in merged["insights"]}
+
+        assert eras == {"最近", "中期", "早期"}, f"每个时期都应有洞察代表，实际只有 {sorted(eras)}"
+
+    def test_caps_are_still_respected(self) -> None:
+        from openbiliclaw.soul.preference_analyzer import (
+            _INIT_AWARENESS_CANDIDATES_CAP,
+            _INIT_INSIGHT_CANDIDATES_CAP,
+        )
+
+        analyzer = self._analyzer()
+        chunks = [self._raw(f"期{i}", count=20) for i in range(8)]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+
+        assert len(merged["awareness"]) == _INIT_AWARENESS_CANDIDATES_CAP
+        assert len(merged["insights"]) == _INIT_INSIGHT_CANDIDATES_CAP
+
+    def test_a_thin_chunk_does_not_waste_the_budget(self) -> None:
+        """分片产出不均时，空出的名额要回流，而不是浪费。"""
+        from openbiliclaw.soul.preference_analyzer import _INIT_AWARENESS_CANDIDATES_CAP
+
+        analyzer = self._analyzer()
+        chunks = [self._raw("多", count=10), self._raw("少", count=1)]
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+
+        assert len(merged["awareness"]) == min(11, _INIT_AWARENESS_CANDIDATES_CAP)
+        assert any(str(i["observation"]).startswith("少") for i in merged["awareness"])
+
+    def test_duplicates_across_chunks_are_still_collapsed(self) -> None:
+        analyzer = self._analyzer()
+        same = self._raw("同", count=3)
+        merged = analyzer._merge_init_cognition_contexts([same, dict(same), dict(same)])
+
+        observations = [str(i["observation"]) for i in merged["awareness"]]
+        assert len(observations) == len(set(observations)) == 3
+
+    def test_lopsided_chunk_counts_still_reach_the_earliest_period(self) -> None:
+        """真实历史的分片数量并不均衡——一次刷屏就能占掉大部分分片。
+
+        纯轮转在这种形状下仍然偏向最近：洞察只有 8 个名额，而最近的刷屏
+        占了十几个分片中的前八个，最早期照样一条都进不去。真机 A/B 就是
+        这么暴露出来的（修复前洞察里木工/摄影各 1 条，纯轮转后变成 0 条）。
+        """
+        analyzer = self._analyzer()
+        # 10 个"最近刷屏"分片 + 1 个中期 + 1 个最早期，模拟真实的倾斜。
+        # 每片内容必须各不相同——若各片重复，去重会替纯轮转把名额腾出来，
+        # 测试就守不住了（这个坑第一版踩过，突变能存活）。
+        chunks = [self._raw(f"刷屏{i}", count=6) for i in range(10)]
+        chunks.append(self._raw("中期", count=6))
+        chunks.append(self._raw("早期", count=6))
+
+        merged = analyzer._merge_init_cognition_contexts(chunks)
+        insight_eras = {str(i["hypothesis"])[:2] for i in merged["insights"]}
+
+        assert "早期" in insight_eras, f"最早期必须进入洞察草稿，实际只有 {sorted(insight_eras)}"

@@ -61,6 +61,10 @@ _POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS = 8192
 _GATE_CALLER = "soul.posture_gate"
 
 
+class _GateOutputError(RuntimeError):
+    """The provider returned content but no valid gate judgement."""
+
+
 def _is_reasoning_budget_exhausted(exc: Exception) -> bool:
     """Provider burned the output budget on reasoning with no final content."""
     message = str(exc).lower()
@@ -189,9 +193,17 @@ class PostureGate:
         # verdict from ``_judge`` leaves it False so the caller clears pending.
         try:
             verdict, reason = await self._judge(snapshot)
-        except Exception:
-            logger.warning("posture gate enforce judgement errored; downgrading conservatively")
-            return GateDecision(verdict=DOWNGRADE, reason="llm error", enforced=True, is_error=True)
+        except Exception as exc:
+            logger.warning(
+                "posture gate enforce judgement errored; downgrading conservatively: %s",
+                exc,
+            )
+            return GateDecision(
+                verdict=DOWNGRADE,
+                reason="judgement error",
+                enforced=True,
+                is_error=True,
+            )
         return GateDecision(verdict=verdict, reason=reason, enforced=True)
 
     # -- shadow side-channel ---------------------------------------------------
@@ -231,14 +243,14 @@ class PostureGate:
     async def _judge(self, snapshot: _GateSnapshot) -> tuple[str, str]:
         """Run the gate LLM over the snapshot; return ``(verdict, reason)``.
 
-        Only ever consumes the immutable snapshot — never live state. A parse /
-        bad-verdict result maps to ``downgrade`` (a conservative judgement); a
-        provider **exception** propagates so the shadow path can record a
-        ``shadow_error`` row while enforce fails closed to downgrade.
+        Only ever consumes the immutable snapshot — never live state. Provider
+        failures, missing/invalid JSON and non-whitelisted verdicts all raise:
+        shadow records ``shadow_error`` and enforce returns a conservative
+        downgrade with ``is_error=True``. Only an explicit valid LLM verdict is
+        a genuine non-error judgement.
         """
         if self._registry is None:
-            logger.warning("posture gate has no LLM registry; downgrading conservatively")
-            return DOWNGRADE, "no registry"
+            raise RuntimeError("posture gate has no LLM registry")
         messages = build_posture_gate_prompt(
             change=snapshot.change,
             core_memory=snapshot.core_memory,
@@ -279,12 +291,12 @@ class PostureGate:
                 raise
         parsed = parse_llm_json_tolerant(getattr(response, "content", "") or "")
         if not isinstance(parsed, dict):
-            logger.warning("posture gate returned non-dict; downgrading conservatively")
-            return DOWNGRADE, "unparseable"
+            logger.warning("posture gate returned non-dict JSON")
+            raise _GateOutputError("unparseable gate response")
         verdict = str(parsed.get("verdict", "")).strip().lower()
         if verdict not in _VALID_VERDICTS:
-            logger.warning("posture gate verdict %r not whitelisted; downgrading", verdict)
-            return DOWNGRADE, "bad verdict"
+            logger.warning("posture gate verdict %r not whitelisted", verdict)
+            raise _GateOutputError(f"invalid gate verdict: {verdict!r}")
         return verdict, str(parsed.get("reason", ""))
 
     def _record(

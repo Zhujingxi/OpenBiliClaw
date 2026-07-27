@@ -104,12 +104,14 @@ async def test_enforce_parse_failure_downgrades() -> None:
     gate = PostureGate(mode="enforce", registry=_FakeRegistry("not json at all"))
     decision = await gate.evaluate(write_point="wp", change={"k": 1})
     assert decision.verdict == DOWNGRADE
+    assert decision.is_error is True
 
 
 async def test_enforce_bad_verdict_downgrades() -> None:
     gate = PostureGate(mode="enforce", registry=_FakeRegistry('{"verdict": "explode"}'))
     decision = await gate.evaluate(write_point="wp", change={"k": 1})
     assert decision.verdict == DOWNGRADE
+    assert decision.is_error is True
 
 
 async def test_enforce_llm_exception_downgrades() -> None:
@@ -214,6 +216,12 @@ async def test_shadow_records_verdict_and_error_rows() -> None:
     await gate2.evaluate(write_point="wp", change={"k": 1})
     await gate2.drain_shadow()
     assert ledger2.rows[0]["gate_verdict"] == "shadow_error"
+
+    ledger3 = _FakeLedger()
+    gate3 = PostureGate(mode="shadow", registry=_FakeRegistry("not json"), ledger=ledger3)
+    await gate3.evaluate(write_point="wp", change={"k": 1})
+    await gate3.drain_shadow()
+    assert ledger3.rows[0]["gate_verdict"] == "shadow_error"
 
 
 # --------------------------------------------------------------------------

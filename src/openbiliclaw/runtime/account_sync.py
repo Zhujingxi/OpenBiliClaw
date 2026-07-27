@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 import httpx
 
-from openbiliclaw.bilibili.api import BilibiliAPIError, BilibiliAuthExpiredError
+from openbiliclaw.bilibili.api import (
+    BilibiliAPIError,
+    BilibiliAuthExpiredError,
+    favorite_item_is_dead,
+)
 from openbiliclaw.llm.base import (
     classify_llm_failure_kind,
     classify_llm_unavailability,
@@ -35,7 +39,7 @@ from openbiliclaw.sources.x_client import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +138,8 @@ class SupportsRecentEventUrls(Protocol):
         limit: int = ...,
     ) -> set[str]: ...
 
+    def mark_items_seen(self, source_platform: str, content_ids: Iterable[str]) -> int: ...
+
 
 class SupportsXClient(Protocol):
     async def likes(self, *, limit: int) -> list[dict[str, Any]]: ...
@@ -200,7 +206,12 @@ class AccountSyncService:
     # and follows 101+ used to silently never sync. ``max_total_items`` bounds
     # the worst case at ~1 + ceil(500/20) requests instead of 200×3.
     max_folders: int = 200
-    max_items_per_folder: int = 50
+    # Per-folder cap matches the total budget, as init's does. At 50 a user
+    # whose 默认收藏夹 holds 800 videos had 750 of them invisible to the seen
+    # ledger no matter how often sync ran — the comment above claimed parity
+    # with init while the numbers said otherwise. ``max_total_items`` still
+    # bounds the worst case (~1 + 500/20 requests), so depth costs nothing.
+    max_items_per_folder: int = 500
     max_total_items: int = 500
     following_page_size: int = 100
     following_max_pages: int = 5
@@ -378,6 +389,14 @@ class AccountSyncService:
             current_signature = self._favorite_signature(favorites)
             previous_signature = str(state.get("favorite_signature", ""))
             previous_bvids = self._favorite_bvids_from_state(state)
+            # Everything in the folder is content the user has seen, whether or
+            # not this sync turns it into an event. Only *newly added*
+            # favourites become events, so without this the entire back
+            # catalogue — favourited before install, or before favourites
+            # carried an identity — would stay recommendable forever. Marking
+            # from the snapshot is idempotent and adds no preference signal, so
+            # it can't double-count what the events already recorded.
+            self._mark_favorites_seen(self._favorite_bvids(favorites))
             if current_signature and current_signature != previous_signature:
                 new_favorites = self._filter_favorite_folders(favorites, previous_bvids)
                 events.extend(self._favorite_events(new_favorites))
@@ -1540,6 +1559,25 @@ class AccountSyncService:
         }
         return sorted(bvids)
 
+    def _mark_favorites_seen(self, bvids: list[str]) -> None:
+        """Best-effort: record the favourites snapshot in the seen ledger."""
+        database = self.database
+        if database is None or not bvids:
+            return
+        mark = getattr(database, "mark_items_seen", None)
+        if not callable(mark):
+            return
+        try:
+            added = int(mark("bilibili", bvids) or 0)
+        except Exception:
+            logger.debug("marking favourites as seen failed", exc_info=True)
+            return
+        if added:
+            logger.info(
+                "account sync: %d favourited video(s) joined the seen ledger",
+                added,
+            )
+
     def _favorite_bvids_from_state(self, state: dict[str, object]) -> set[str]:
         stored = self._string_set(state.get("favorite_bvids", []))
         if stored:
@@ -1578,23 +1616,40 @@ class AccountSyncService:
             for item in getattr(folder, "items", []):
                 if not isinstance(item, dict):
                     continue
+                if favorite_item_is_dead(item):
+                    # Taken-down videos stay in the folder with the literal
+                    # title "已失效视频". Their content is gone, so they carry
+                    # no preference signal — only noise the analyzer would read
+                    # as an interest in "已失效视频".
+                    continue
                 bvid = str(item.get("bvid", "")).strip()
                 upper = item.get("upper", {})
                 if not isinstance(upper, dict):
                     upper = {}
+                metadata: dict[str, Any] = {
+                    "bvid": bvid,
+                    "folder_id": folder_id,
+                    "folder_title": folder_title,
+                    "up_name": str(upper.get("name", "")).strip(),
+                    "source": "account_sync",
+                    "signal_strength": 1.0,
+                }
+                raw_cnt = item.get("cnt_info")
+                cnt_info: dict[str, Any] = raw_cnt if isinstance(raw_cnt, dict) else {}
+                for value, key in (
+                    (item.get("fav_time"), "fav_time"),
+                    (item.get("pubtime"), "pubtime"),
+                    (cnt_info.get("play"), "play_count"),
+                    (item.get("duration"), "video_duration_seconds"),
+                ):
+                    if isinstance(value, (int, float)) and value > 0:
+                        metadata[key] = int(value)
                 events.append(
                     {
                         "event_type": "favorite",
                         "title": str(item.get("title", "")).strip(),
                         "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
-                        "metadata": {
-                            "bvid": bvid,
-                            "folder_id": folder_id,
-                            "folder_title": folder_title,
-                            "up_name": str(upper.get("name", "")).strip(),
-                            "source": "account_sync",
-                            "signal_strength": 1.0,
-                        },
+                        "metadata": metadata,
                     }
                 )
         return events

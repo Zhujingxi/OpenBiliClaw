@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+    from datetime import tzinfo
 
     from openbiliclaw.llm.service import LLMService, ModuleOverride, SupportsComplete
+    from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
     from openbiliclaw.soul.engine import SoulEngine
 
 logger = logging.getLogger(__name__)
@@ -32,13 +36,54 @@ logger = logging.getLogger(__name__)
 DIALOGUE_WINDOW_TURNS = 20
 
 
+class DialogueLearningMode(StrEnum):
+    """Explicit ownership mode for learning after an interactive reply."""
+
+    QUEUED = "queued"
+    REPLY_ONLY_TEST = "reply_only_test"
+    LEGACY_DIRECT = "legacy_direct"
+
+
+class DialogueLearningConfigurationError(RuntimeError):
+    """Raised when queued dialogue learning has no settlement queue."""
+
+
+def _default_turn_timestamp() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def format_dialogue_turn_timestamp(
+    timestamp: str,
+    *,
+    local_timezone: tzinfo,
+) -> str:
+    """Render a recorded turn timestamp without consulting the current clock.
+
+    SQLite ``CURRENT_TIMESTAMP`` values are unmarked UTC. In-memory turns are
+    recorded with an explicit local offset. Both pass through this single,
+    injectable conversion point before becoming stable prompt bytes.
+    """
+    normalized = timestamp.strip().replace("Z", "+00:00")
+    if not normalized:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        logger.warning("Ignoring invalid dialogue turn timestamp %r", timestamp)
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone(local_timezone)
+    return f"[{local:%m-%d %H:%M}]"
+
+
 @dataclass
 class DialogueTurn:
     """A single turn in a dialogue."""
 
     role: str  # "user" | "agent"
     content: str
-    timestamp: str = ""
+    timestamp: str = field(default_factory=_default_turn_timestamp)
     extracted_insights: list[str] | None = None
 
 
@@ -65,30 +110,40 @@ class SocraticDialogue:
         tools: list[dict[str, Any]] | None = None,
         tool_dispatcher: Any | None = None,
         module_overrides: Mapping[str, ModuleOverride] | None = None,
-        learn_queue: Any | None = None,
         database: Any | None = None,
+        local_timezone: tzinfo | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+        *,
+        learning_mode: DialogueLearningMode | str,
+        settlement_queue: DialogueSettlementQueue | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        default_timezone = datetime.now().astimezone().tzinfo
+        self._local_timezone = local_timezone or default_timezone or UTC
+        self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         # Phase 1 durable-history regurgitation: after a restart the in-process
         # history is empty, but the durable popup ``chat_turns`` table holds the
         # completed exchanges. Lazily reload them once so a popup session keeps
-        # its thread across restarts. Only popup + scope='chat' + completed rows
-        # qualify (CLI has no DB; probe/confusion scopes carry prefixed context).
+        # its thread across restarts. Completed chat/hypothesis/confusion rows
+        # from every UI session qualify; session remains display ownership only
+        # (CLI has no DB and probe scopes remain excluded).
         self._database = database
         self._history_loaded = False
         self._respond_lock = asyncio.Lock()
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
-        # Phase 1: when provided, background learning is serialized through this
-        # single-worker queue instead of a per-turn ``asyncio.create_task``. CLI
-        # / OpenClaw sessions inject no queue and keep the detached-task path
-        # (process-internal, not durable — no popup regurgitation).
-        self._learn_queue = learn_queue
+        self._learning_mode = DialogueLearningMode(learning_mode)
+        self._settlement_queue = settlement_queue
+
+    @property
+    def learning_mode(self) -> DialogueLearningMode:
+        """Return the explicit post-reply learning ownership mode."""
+        return self._learning_mode
 
     async def respond(
         self,
@@ -96,6 +151,7 @@ class SocraticDialogue:
         *,
         scope: str = "chat",
         turn_id: str = "",
+        session: str = "",
     ) -> str:
         """Generate a Socratic response to a user message.
 
@@ -109,27 +165,39 @@ class SocraticDialogue:
         Args:
             user_message: The user's message.
             scope: Chat scope threaded to ``learn_from_dialogue`` — only
-                ``"chat"`` runs settles; probe / confusion scopes are settled
-                by the durable side-effect path (single ownership).
+                unanchored ``"chat"`` runs inventory settles. Probe settlement
+                stays in its durable side effect; confusion settlement belongs
+                exclusively to the serialized dialogue-anchor processor.
             turn_id: Durable chat-turn id (idempotency observation key).
+            session: UI ownership label for this request. The cognitive history
+                remains shared across sessions.
 
         Returns:
             Agent's response.
         """
+        if self._learning_mode is DialogueLearningMode.QUEUED and self._settlement_queue is None:
+            raise DialogueLearningConfigurationError(
+                "queued dialogue learning requires DialogueSettlementQueue"
+            )
+
         async with self._respond_lock:
             self._ensure_history_loaded()
             history_length = len(self._history)
-            self._history.append(DialogueTurn(role="user", content=user_message))
+            turn_timestamp = self._local_now().isoformat()
+            self._history.append(
+                DialogueTurn(role="user", content=user_message, timestamp=turn_timestamp)
+            )
 
             try:
                 service = self._llm_service or self._build_service()
+                prompt_user_message = self._user_prompt_with_current_time(user_message)
 
                 # If tools are configured, try tool-calling path first
                 if self._tools and self._tool_dispatcher:
-                    reply = await self._respond_with_tools(service, user_message)
+                    reply = await self._respond_with_tools(service, prompt_user_message)
                 else:
                     response = await service.complete_socratic_dialogue(
-                        user_message=user_message,
+                        user_message=prompt_user_message,
                         history=self._history_to_messages(),
                         caller="soul.dialogue",
                     )
@@ -139,32 +207,42 @@ class SocraticDialogue:
                 logger.exception("Failed to generate Socratic dialogue response.")
                 raise
 
-            self._history.append(DialogueTurn(role="agent", content=reply))
-            learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
-            if callable(learn_fn):
-                payload = {
-                    "user_message": user_message,
-                    "assistant_reply": reply,
-                    "session": self._session,
-                    "scope": scope,
-                    "turn_id": turn_id,
-                }
-                if self._learn_queue is not None:
-                    # Serialized path: append to the single-worker queue so
-                    # adjacent turns can't interleave read/merge/write.
-                    await self._learn_queue.submit(payload)
-                else:
+            self._history.append(
+                DialogueTurn(
+                    role="agent",
+                    content=reply,
+                    timestamp=self._local_now().isoformat(),
+                )
+            )
+            payload = {
+                "user_message": user_message,
+                "assistant_reply": reply,
+                "session": session.strip() or self._session,
+                "scope": scope,
+                "turn_id": turn_id,
+            }
+            if self._learning_mode is DialogueLearningMode.QUEUED:
+                from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+
+                queue = self._settlement_queue
+                assert queue is not None
+                # ``submit`` synchronously freezes the queue-global logical
+                # anchor head before the immutable learn envelope is put.
+                admitted = queue.submit(DialogueJobKind.LEARN, payload)
+                if admitted is None:
+                    raise DialogueLearningConfigurationError(
+                        "dialogue settlement queue is not accepting learn jobs"
+                    )
+            elif self._learning_mode is DialogueLearningMode.LEGACY_DIRECT:
+                learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
+                if callable(learn_fn):
 
                     async def _background_learn() -> None:
                         try:
-                            # This chain was initiated by an interactive user
-                            # turn. It must keep running even when background
-                            # admission is parked because canonical inventory is
-                            # empty; otherwise the user's explicit correction
-                            # cannot repair the very recommendation state that
-                            # triggered it. The bypass only skips background
-                            # admission — every provider call still respects the
-                            # runtime-wide total concurrency gate.
+                            # This explicitly named compatibility path is owned
+                            # only by CLI/OpenClaw. It preserves their baseline
+                            # detached learning semantics without joining the
+                            # API settlement queue or worker guard.
                             from openbiliclaw.llm.service import _background_admission_bypass
 
                             with _background_admission_bypass():
@@ -255,34 +333,65 @@ class SocraticDialogue:
         self._history.clear()
 
     def _ensure_history_loaded(self) -> None:
-        """Regurgitate durable popup chat history once (spec Phase 1, r1 #3).
-
-        No-op unless this is a fresh popup session with a database and an empty
-        in-process history. Loads only completed ``scope='chat'`` turns, keeping
-        the last ``DIALOGUE_WINDOW_TURNS`` exchanges.
-        """
+        """Regurgitate the one durable cognition history across UI sessions."""
         if self._history_loaded:
             return
         self._history_loaded = True
-        if self._session != "popup" or self._database is None or self._history:
-            return
-        lister = getattr(self._database, "list_chat_turns", None)
-        if not callable(lister):
+        if self._session == "cli" or self._database is None or self._history:
             return
         try:
-            rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
+            history_lister = getattr(self._database, "list_dialogue_history", None)
+            if callable(history_lister):
+                rows = history_lister(
+                    scopes=("chat", "hypothesis", "confusion"),
+                    limit=DIALOGUE_WINDOW_TURNS,
+                )
+            else:
+                lister = getattr(self._database, "list_chat_turns", None)
+                if not callable(lister):
+                    return
+                rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
         except Exception:
             logger.debug("Failed to regurgitate durable chat history", exc_info=True)
             return
         for row in rows:
             if str(row.get("status", "")) != "completed":
                 continue
+            scope = str(row.get("scope", "chat")).strip()
+            payload = row.get("payload", {})
+            if scope == "hypothesis" and isinstance(payload, dict):
+                title = str(payload.get("title", "") or row.get("subject_title", "")).strip()
+                if title:
+                    self._history.append(
+                        DialogueTurn(
+                            role="agent",
+                            content=title,
+                            timestamp=str(row.get("created_at", "") or ""),
+                        )
+                    )
+                continue
+            if (
+                scope == "confusion"
+                and isinstance(payload, dict)
+                and payload.get("type") == "question"
+            ):
+                question = str(row.get("reply", "")).strip()
+                if question:
+                    self._history.append(
+                        DialogueTurn(
+                            role="agent",
+                            content=question,
+                            timestamp=str(row.get("created_at", "") or ""),
+                        )
+                    )
+                continue
             message = str(row.get("message", "")).strip()
             reply = str(row.get("reply", "")).strip()
             if not message or not reply:
                 continue
-            self._history.append(DialogueTurn(role="user", content=message))
-            self._history.append(DialogueTurn(role="agent", content=reply))
+            timestamp = str(row.get("created_at", "") or "")
+            self._history.append(DialogueTurn(role="user", content=message, timestamp=timestamp))
+            self._history.append(DialogueTurn(role="agent", content=reply, timestamp=timestamp))
 
     def _history_to_messages(self) -> list[dict[str, str]]:
         """Convert prior dialogue turns to chat messages for the LLM.
@@ -296,13 +405,32 @@ class SocraticDialogue:
         window_messages = DIALOGUE_WINDOW_TURNS * 2
         if len(prior) > window_messages:
             prior = prior[-window_messages:]
-        return [
-            {
-                "role": "assistant" if turn.role == "agent" else turn.role,
-                "content": turn.content,
-            }
-            for turn in prior
-        ]
+        messages: list[dict[str, str]] = []
+        for turn in prior:
+            prefix = format_dialogue_turn_timestamp(
+                turn.timestamp,
+                local_timezone=self._local_timezone,
+            )
+            content = f"{prefix} {turn.content}" if prefix else turn.content
+            messages.append(
+                {
+                    "role": "assistant" if turn.role == "agent" else turn.role,
+                    "content": content,
+                }
+            )
+        return messages
+
+    def _local_now(self) -> datetime:
+        current = self._now_provider()
+        if current.tzinfo is None:
+            return current.replace(tzinfo=self._local_timezone)
+        return current.astimezone(self._local_timezone)
+
+    def _user_prompt_with_current_time(self, user_message: str) -> str:
+        current = self._local_now()
+        raw_offset = current.strftime("%z")
+        offset = f"{raw_offset[:3]}:{raw_offset[3:]}" if len(raw_offset) == 5 else raw_offset
+        return f"{user_message}\n\n当前时间:{current:%Y-%m-%d %H:%M} {offset}".rstrip()
 
     def _build_service(self) -> LLMService:
         """Create the shared LLM service when one is not injected."""

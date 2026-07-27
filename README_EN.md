@@ -591,6 +591,13 @@ guided init: signals → preferences → full profile commit → discover → ev
 
 config draft → /api/config/discover-models → exact instance GET /models (no write)
              → editable model combobox + local effort advisory (not a protocol capability)
+durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
+confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
+                          ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
+                          ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
+                          │                                                └→ publication-only retry → projection / exact release
+                          ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
+                          └→ confusion FIFO≤5 / head fencing / 12h recovery
 ```
 
 ```
@@ -610,8 +617,11 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Interest: events/dialogue/feedback(priority) → │
+│ ProfileUpdatePipeline → single INTEREST line   │
+│ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Soul cognition discipline: 3 write lines · ledger audit · confusions · deep posture gate (shadow) │
+│ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
 │ Config draft → exact-instance /models → editable selection (no write) │
@@ -636,9 +646,13 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
-                                      │                      └new dislike: shared purge → content_cache
-                                      └failure/timeout: rollback provisional history → safe error / failed turn
+Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[all declared entries] → one in-line worker
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
+learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
+failure/timeout → rollback provisional history → safe error / failed turn
+durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
+                                                  └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
+card action → synchronous 200 fast path | 202 processing → popup/desktop poll; mobile/CLI have no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

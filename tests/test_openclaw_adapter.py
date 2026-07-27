@@ -319,6 +319,8 @@ class _FakeSoulEngine:
         self._speculator = _FakeSpeculator()
         self._avoidance_speculator = _FakeAvoidanceSpeculator()
         self._llm = None  # Socratic dialogue falls through to llm_service
+        self.dialogue_learn_calls: list[dict[str, object]] = []
+        self.dialogue_learned = asyncio.Event()
 
     async def get_profile(self) -> SoulProfile:
         return self.profile
@@ -329,8 +331,19 @@ class _FakeSoulEngine:
         user_message: str,
         assistant_reply: str,
         session: str,
+        scope: str = "chat",
+        turn_id: str = "",
     ) -> None:
-        pass  # no-op for tests
+        self.dialogue_learn_calls.append(
+            {
+                "user_message": user_message,
+                "assistant_reply": assistant_reply,
+                "session": session,
+                "scope": scope,
+                "turn_id": turn_id,
+            }
+        )
+        self.dialogue_learned.set()
 
     def record_immediate_feedback_cognition(
         self,
@@ -737,6 +750,77 @@ async def test_get_delight_returns_none_when_no_candidate() -> None:
     result = await adapter.get_delight()
 
     assert result.item is None
+
+
+class _StopAfterSoulEngineError(Exception):
+    """Sentinel: abort the bootstrap once the SoulEngine has been constructed."""
+
+
+def test_build_openclaw_adapter_services_forwards_soul_engine_config_and_database(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The OpenClaw surface matches the API's SoulEngine construction contract.
+
+    Regression (found in unified-interest-line Wave A): the bootstrap never
+    passed ``feedback_batch_threshold`` (so the adapter's feedback batch always
+    ran at the hardcoded default 3) and Wave A only plumbed
+    ``unified_interest_line`` through ``api/runtime_context.py``, which would
+    have left OpenClaw on the legacy line after the flag flip. It also omitted
+    the shared database and satisfaction filter, splitting persistence and event
+    filtering semantics from the API runtime.
+
+    The bootstrap is aborted with a sentinel right after ``SoulEngine`` is built
+    (``LLMService`` is the very next construction) so the test needs no fakes for
+    the discovery/recommendation half of the service bundle.
+    """
+    import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.data_dir = str(tmp_path)
+    cfg.scheduler.feedback_batch_threshold = 6
+    cfg.scheduler.unified_interest_line = True
+    cfg.soul.preference.satisfaction_filter_enabled = False
+
+    captured: dict[str, object] = {}
+
+    class FakeDatabase:
+        def __init__(self, path: object) -> None:
+            self.path = path
+
+        def initialize(self) -> None:
+            return None
+
+    class FakeMemoryManager:
+        def __init__(self, data_path: object, database: object = None) -> None:
+            self.data_path = data_path
+            self.database = database
+
+        def initialize(self) -> None:
+            return None
+
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    def _stop(**_kwargs: object) -> None:
+        raise _StopAfterSoulEngineError
+
+    monkeypatch.setattr(bootstrap_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda _cfg: object())
+    monkeypatch.setattr(bootstrap_module, "Database", FakeDatabase)
+    monkeypatch.setattr(bootstrap_module, "MemoryManager", FakeMemoryManager)
+    monkeypatch.setattr(bootstrap_module, "SoulEngine", FakeSoulEngine)
+    monkeypatch.setattr(bootstrap_module, "LLMService", _stop)
+
+    with pytest.raises(_StopAfterSoulEngineError):
+        build_openclaw_adapter_services()
+
+    assert captured["feedback_batch_threshold"] == 6
+    assert captured["unified_interest_line"] is True
+    assert captured["satisfaction_filter_enabled"] is False
+    memory = captured["memory"]
+    assert captured["database"] is memory.database
 
 
 def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> None:
@@ -1656,14 +1740,17 @@ def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_delegates_to_socratic_dialogue() -> None:
+async def test_openclaw_chat_legacy_direct_mode_still_learns_without_queue() -> None:
     adapter, soul_engine, *_ = _build_adapter()
 
     result = await adapter.chat(ChatRequest(message="我最近对建筑很感兴趣", session="test"))
+    await asyncio.wait_for(soul_engine.dialogue_learned.wait(), timeout=1)
 
     assert isinstance(result, ChatResponse)
     assert "底层结构" in result.reply
     assert result.session == "test"
+    assert len(soul_engine.dialogue_learn_calls) == 1
+    assert soul_engine.dialogue_learn_calls[0]["session"] == "test"
 
 
 @pytest.mark.asyncio

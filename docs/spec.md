@@ -226,6 +226,21 @@ guided init: signals → preferences → full profile commit
 
 config UI draft → /api/config/discover-models → exact instance GET /models
                 → editable model list + local effort advisory (no config write)
+durable dialogue → confirmation entry(pending list / cards)
+                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → typed settlement queue[all 11 declared kinds] → one actual worker + guard
+                 → pending≤3 → user open(no cooldown) | system 12h+object 72h
+                   → confirmation INSERT → attached user INSERT (created_at,rowid)
+                 → anchor snapshot(kind + ref + generation) → existing insight extraction
+                 → kind×relation matrix ┐
+                 → hypothesis card action ┴→ frozen snapshot → worker-only apply
+                   action≤1s: completed → 200 | blocked → 202 processing
+                              └→ popup/desktop GET poll 1/2/5s, deadline 30s
+                   confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
+                   → lightweight ref winner receipt
+                   → event → object → derived → rebuild-marker → applied
+                   → publication-only retry → cross-session projection → exact-generation release
+                   → stable-key audit observer (failure does not block applied)
 
 degraded registry → provider-free ping(degraded) → static /web | /setup | /m
                   ├─ GET/PUT config → restart runtime
@@ -244,16 +259,32 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
-下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；用户主动学习任务使用 task-local bypass 跳过 background admission、保留 total gate，避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享 dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
+下图的对话/反馈入口共享同一失败原子链路，但学习所有权显式分开：Web/API
+durable runtime 使用 `SocraticDialogue(queued)`，成功写入 user+agent 历史后同步
+提交 typed `learn`，由唯一 `DialogueSettlementQueue` worker 在线内 await
+`learn_from_dialogue`；CLI/OpenClaw 只在两个兼容构造点使用 `legacy_direct`，保持
+既有 detached direct learning，位于 queue/guard 外。其余 10 个 typed kind 的
+卡片四动作、锚建立/释放/恢复、普通 chat settles、探针/疑惑 reply/open/replay、
+GET reconcile 与 legacy façade 也已全部接入同一个 production dispatcher/worker；
+protected mutation 只允许 actual worker Task；嵌套 settle 沿该 task 的调用栈直调
+`_apply_*`，不 submit、不 inline dispatcher，也不存在 child 临时授权。继承 context
+的 active/detached child 对 mutation 与递归 admission 均 fail closed。
+队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/桌面在 30 秒内读取
+durable turn，重启丢 job 时允许同 action 重新提交；不增加 job table 或恢复 scanner。
+两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
+避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享
+dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时
+用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、
+runtime 与次级 hydration 是独立分支。
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐    │
-│  │ 统一行为采集   │  │ 推荐展示 UI   │  │ 对话/反馈/探针   │    │
+│  │ 统一行为采集   │  │ 推荐展示 UI   │  │ 对话/确认入口    │    │
 │  │ Adapter: B/XHS│  │ (LUI 界面)   │  │ (durable turn) │    │
 │  │ +DY/YT/X/ZH   │  │ +真实可换数   │  │                │    │
-│  │ +停留满意度   │  │ +文字卡渲染   │  │                │    │
+│  │ +停留满意度   │  │ +文字卡渲染   │  │ 待聊列表/卡片   │    │
 │  └──────────────┘  └──────────────┘  └─────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ bili/xhs/dy/yt/zhihu/reddit 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
@@ -265,7 +296,9 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │ 扩展捕捉 E2E：run -> runtime-stream -> 入口归位 -> DOM 操作 -> /api/events │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 普通 /api/events：accepted -> memory -> ProfileUpdatePipeline -> request_replenishment │ │
+│  │/api/events: accepted → memory → request_replenishment│   │
+│  │兴趣：事件/对话/反馈(priority) → ProfileUpdatePipeline│   │
+│  │ → 单一 INTEREST 线；旧反馈批仅由 false 回退          │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ delight / interest.probe / avoidance.probe 主动推送（含probe_mode）│ │
@@ -337,8 +370,10 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
-│  │     Cognitive profile pipeline: 深层线归一(深层唯一模式:假设→门控下 soul 重建) + 台账 │ │
-│  │       + confusions 疑惑「看不懂」(澄清/冻结/held 重放) + PostureGate 深层门控 │ │
+│  │     Cognitive profile pipeline: 单对话锚(ref+generation) + 归属矩阵 + 台账 │ │
+│  │       + 待聊≤3/主动零冷却/系统12h+对象72h/attached_to 去重             │ │
+│  │       + frozen admission / worker-only apply / 轻量 ref winner / applied 投影 │ │
+│  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
 │  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi producers: 按平台缺口独立补池 │ │
@@ -435,11 +470,11 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │ (JSON)     │ │ (SQLite +   │ │ (知识图谱/  │ │ (内存)  │  │
 │  │ Soul+偏好   │ │  向量索引)   │ │  JSON)     │ │         │  │
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
-│  SQLite: events(inferred_satisfaction) / seen_items(canonical all-time views) │
+│  SQLite: events(inferred_satisfaction) / seen_items(views+saves+snapshot)   │
 │          discovery_candidates                                      │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache(item_key: nonblank partial unique + legacy blank repair)              │
-│          recommendations(item_key) / chat_turns / avoidance_state                             │
+│          recommendations(item_key) / chat_turns / card_settlements / avoidance_state          │
 │          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```

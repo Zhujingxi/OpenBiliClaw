@@ -15,12 +15,14 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史 `view` 事件，不受旧版 2000 条窗口限制。 |
+| 观看完播判定（2026-07-27+） | ✅ | `events.inferred_satisfaction` 现在也覆盖 `view`：`sources/event_format._classify_view_completion` **只判正向**——完播 ≥`_FINISHED_WATCH_MIN_RATIO`（0.8）且观看 ≥15 秒记 `positive/finished_watch`，其余保持 `unknown/fallback`。低完播刻意不判负（自动播放 / 误点 / 预告 / 重看进度重置都长这样），否则会污染 `recent_negative_exemplars` 并影响内容评估。阈值校准见常量注释；改动 `watch_seconds` 来源后需重新校准 |
+| SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史「已消费」事件（`view` / `favorite` / `like` / `coin`），不受旧版 2000 条窗口限制；类型集扩大时按 `scanned_event_types_version` 自动倒回重扫一次。 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
-| 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error)` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）;`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回(newest-first,`source_refs` 解码回列表)。字段:`write_point`(写点名)、`source`、before/after 摘要、`diff`(≤2000 字符)、`turn_id`(对话/结算幂等观察键)、`gate_verdict`(Phase 3 shadow_*,预留)、`held_id`(Phase 2,预留)。索引:`(timestamp)` 与 `(write_point, timestamp)`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 幂等迁移双路径建表。写点挂钩清单见 `docs/modules/soul.md`。 |
+| 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error, effect_key='')` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）；空 `effect_key` 保持普通 append，结算 worker 传入固定形状 `dialogue:<ref-sha256>:ledger` / `dialogue:<ref-sha256>:derived:<content-sha256>` 时由 partial unique index + `INSERT OR IGNORE` 保证 observer effect 至多一行。`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回（newest-first，`source_refs` 解码回列表，并带回 `effect_key`）。其余字段：`write_point`、`source`、before/after 摘要、`diff`（≤2000 字符）、`turn_id`、`gate_verdict`、`held_id`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 会幂等补列和索引。写点挂钩清单见 `docs/modules/soul.md`。 |
+| Durable chat payload + 单 worker 对象结算收据（v0.3.182+） | ✅ | `chat_turns.payload` 承载结构化卡片/疑惑提问，列表以 `(created_at,rowid)` 稳定排序。`create_chat_confirmation_turn()` 在 `BEGIN IMMEDIATE` 内先查 `attached_to_turn_id`、再查 `(ref,session)`、最后插入 completed turn，保证并发 open 与“卡片先于用户消息”crash gap 均不重复；跨 session 各自产 turn。卡片 discussion payload 只保存 `state`：worker 直接执行 `pending→discussing`，建锚失败补偿回 `pending`，GET 提交的 reconcile 会校正无活锚 orphan；没有 `attempt_token/discussing_at`、三段 discuss CAS 或 stale scanner。`card_settlements` 只保存 hypothesis/confusion/speculation 的 immutable winner `payload`、`applied/result`、稳定 `event_id` 与时间戳，不再保存 claim lease/token 或三段 CAS。`_migrate_card_settlements_to_wave_2()` 以 table rebuild 保留最早表与旧 claim 表的 winner；旧 `seg_event=1` 或 `applied=1` 仅在 migration 中映射为已记录 event identity，runtime schema 不再暴露这些列。`record_card_settlement_event_once()` 在一个 `BEGIN IMMEDIATE` 事务内插入 event 并标记 receipt；`complete_card_settlement()` 无 token，`project_applied_card_settlement()` 仍只消费 `applied=1` 并批量刷新所有 session。`applied=1` 是对象语义终点：显式同 ref retry 只补跑 ledger observer、projection 与精确 generation 解锚，不再重做 object/derived/rebuild。进程内 `DialogueSettlementQueue` 不落这层 job/inbox 表，重启恢复依赖显式 action 重试或 GET reconcile。 |
 | 态势门控 shadow 采数 + 代理折价（v0.3.176+） | ✅ | 认知画像流水线 Phase 3 / Wave B 遗留。`posture_gate_shadow_stats()` 从 `profile_update_ledger` 汇总 enforce save-time 校验所需的 shadow 判定统计：最早**有效**判定时间（`gate_verdict IN (shadow_accept, shadow_downgrade, shadow_reject)`，不含 `shadow_error`）+ 近 14 天 / 近 7 天有效判定数。`discount_events_by_confusion(evidence_refs)` 对可解析为事件 id 的 `evidence_refs` 关联 events 行 patch `metadata.discounted_by_confusion=true` + `signal_strength` 折至 0.2（`sources/event_format.apply_confusion_discount`，幂等）；非 id ref 跳过，不删行、不改其它列。供疑惑 `proxy_behavior` 出口调用。 |
-| 疑惑对象表（`confusions`，v0.3.175+） | ✅ | 认知画像流水线 Phase 2 的「看不懂」对象存储。DAO：`insert_confusion(*, source, topic, observation, interpretation, interpretation_confidence, evidence_refs, status='open', expires_at='')`、`get_confusion(id)`、`list_confusions(*, statuses, limit)`、`claim_confusion_clarifying(id, *, ask_turn_id, asked_at)`（原子 claim：单 `UPDATE ... WHERE status='open'`，被 partial unique index 拒即返 False）、`update_confusion(id, **fields)`（列白名单，`held_updates` 自动 JSON 编码）。列含 `status`(open\|clarifying\|resolved\|dismissed\|expired)、`source`、`topic`(冻结键)、`observation`/`interpretation`、`evidence_refs`(JSON)、`resolution`、`asked_at`(72h 冷却)、`defer_count`、`expires_at`(wait TTL)、`held_updates`(JSON,冻结搁置项 + 重放状态机)。**partial unique index `WHERE status='clarifying'` 跨连接保证至多 1 条 clarifying**（打扰预算）；`(status, updated_at)` 辅助索引。fresh schema + `_ensure_confusions_table()` 幂等迁移双路径。 |
+| 疑惑对象表 + 归属重放队列（`confusions`，v0.3.182+） | ✅ | 原有状态、72h ask 冷却、partial unique `clarifying≤1` 与 `held_updates` 保持；新增幂等迁移列 `replay_queue TEXT NOT NULL DEFAULT '[]'`。`release_orphan_confusion_claim()` 同时要求 status/`expected_ask_turn_id` 匹配、claim 的 `updated_at` 已超过调用方给定最小年龄、且同一原子 UPDATE 内 `NOT EXISTS(chat_turns.turn_id)`，才把真 crash-gap 孤儿恢复为 open 并清除未实际提问的 `ask_turn_id/asked_at`；活跃 claim→create 窗口和已有 live turn 都不会被回收。`enqueue_confusion_replay()` 在独立 `BEGIN IMMEDIATE` 中去重入尾、上限 5、返回最旧逐出项；`pop_confusion_replay_head(expected_id=...)` 只允许精确队头出队（顺序 fencing）；`clear_confusion_replay_queue()` 原子返回并清空。`list_pending_confusion_dialogue_replays()` **优先扫描任意 status 的非空 replay_queue**（覆盖 resolve commit→pop 之间崩溃后已 terminal 的行），剩余额度再查 `clarifying` 且 completed、晚于 `asked_at`、尚无 turn payload receipt 的 classification gap。`mark_confusion_dialogue_replay_processed()` 可在 turn 仍 pending 时先写幂等 receipt，完成后扫描不会重复计数。 |
 | Retraction 事件折价（离线重读面） | ✅ | `mark_positive_events_retracted(identity_urls, retracted_action, *, retraction_at)` 在独立短连接的一次事务中，对 `event_type == retracted_action` 且 URL 归一化 identity key（`sources/identity_keys.dedup_key`：tweet_id / bvid / mid / xhs note_id）命中、**且事件时间早于 `retraction_at`** 的行 patch `metadata.retracted=true` + `signal_strength=min(现值,0.2)`；事件时间不可得的行保守不标。无时间窗口（identity key 全局唯一），覆盖 `openbiliclaw init` 全量重建与 12h 认知整理等重读 events 表路径；不删行、不改 `event_type`/`url`。`latest_retraction_time_for(url, action)` 返回该 identity + action 最新的已存 retraction 事件时间，供落库路径对账迟到正向事件（account_sync 回填）。`retracted_action` 越界返回 0/None。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、`seen_items`、self-XHS 与 delight guards。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
@@ -47,6 +49,45 @@
 
 ## 公开 API
 
+### 对象结算 winner 收据
+
+```python
+created = db.try_create_card_settlement(
+    ref=ref,
+    verdict=verdict,
+    turn_id=turn_id,
+    payload=frozen_winner_payload,
+)
+winner = db.get_card_settlement(ref)
+db.record_card_settlement_event_once(ref=ref, event=event)
+db.complete_card_settlement(ref=ref, result=result)
+```
+
+同 ref 的 `INSERT OR IGNORE` 只产生一个 winner；retry 始终读取该行的 payload。事件 key 由内部对规范化 ref 做 SHA-256 后构造，调用方不能传 SQL 列名或 effect 名。对象、派生与 rebuild marker 的故障恢复幂等由 Soul worker 在 Wave 2 apply 层负责；SQLite 不再承担第二 executor 的 claim/lease/fencing。结算 audit key 同样只接受上述固定 hash 形状，拒绝 raw ref、控制字符或任意调用方 key。
+
+### 对话锚与疑惑重放持久化
+
+```python
+dropped = db.enqueue_confusion_replay(confusion_id, classifier_output, max_items=5)
+head_applied = db.pop_confusion_replay_head(confusion_id, expected_id=turn_id)
+pending = db.list_pending_confusion_dialogue_replays(limit=50)
+db.mark_confusion_dialogue_replay_processed(turn_id)
+released = db.release_orphan_confusion_claim(
+    confusion_id,
+    expected_ask_turn_id=missing_turn_id,
+    minimum_age_seconds=30.0,
+)
+```
+
+入队、队头出队与清空都使用独立短连接的 `BEGIN IMMEDIATE`，不会发生
+read-modify-write 丢更新。`pop_confusion_replay_head()` 的 `expected_id` 是 FIFO
+fencing token：T2 不能越过 T1。orphan claim 释放同时校验 claim identity、
+`julianday(updated_at)` 超龄和 `NOT EXISTS(chat_turns.turn_id)`；默认 runtime 使用
+30 秒最小年龄，避免 recovery 撞进本地 claim→create 活跃窗口，也不会把已经补建成功
+或被 retarget 的提问回滚。完成回复的恢复查询只读 `scope='confusion'`，并用
+`julianday` 比较 ask receipt；畸形 legacy payload 按未处理对待，不会让
+`json_extract` 使扫描失败。
+
 ### 持久化已看身份
 
 ```python
@@ -55,8 +96,18 @@ seen_bvids = db.get_seen_bvids()        # B 站兼容集合
 ```
 
 `seen_items` 是 discovery 与 recommendation 的已看硬去重来源。它记录首次/最近事件 ID
-与时间；再次观看只更新同一 canonical 行。升级旧库时会增量回填所有历史 `view` 事件，
-因此第 2001 条以前的已看内容也不会重新进入候选。旧的
+与时间；再次观看只更新同一 canonical 行。升级旧库时会增量回填所有历史事件，
+因此第 2001 条以前的已看内容也不会重新进入候选。
+
+派生它的事件类型由 `_SEEN_ITEM_EVENT_TYPES` 决定：2026-07-26 起为 `view` /
+`favorite` / `like` / `coin`——收藏、点赞、投币同样证明用户消费过这条内容，此前只认
+`view`，于是用户明确收藏过的视频照样能被当新内容推荐。`follow` 不在其中（关注 UP
+不等于看过某条内容）。这个集合每次扩大都要同步抬 `_SEEN_ITEM_EVENT_TYPES_VERSION`：
+老库的回填游标停在最新事件上，不倒回就永远扫不到新纳入的类型；`initialize()` 比对
+`seen_items_backfill_state.scanned_event_types_version` 后会自动倒回重扫一次。
+注意倒回只能救回**带身份**的旧事件：2026-07-26 之前 init 写下的 `favorite` 行没有 `bvid` / url，回填扫到也认不出是哪条内容（实测老库倒回后 `seen_items` 数量不变）。这些收藏由 `mark_items_seen(source_platform, content_ids)` 补：account sync 每 6 小时拿到完整收藏快照后直接把 bvid upsert 进账本（不产生事件，因此不会重复计入偏好信号）。快照行 `first_event_id = 0`（没有单一事件产生它），冲突时保留既有真实事件的溯源与时间；由于 seen 状态缓存键是 `MAX(last_event_id)`，快照写入必须显式失效缓存，否则新身份要等下一条真实事件才可见。
+
+旧的
 `get_recent_viewed_content_keys()` / `get_recent_viewed_bvids()` 保留为兼容 API，
 但返回同一个无界账本。
 

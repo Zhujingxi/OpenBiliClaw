@@ -1,11 +1,13 @@
 """CLI tests for configuration guidance behavior."""
 
+import asyncio
 import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 import typer
 from rich.console import Console
@@ -68,6 +70,39 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     assert captured["speculation_max_primary_interests"] == 17
     assert captured["speculation_max_secondary_interests"] == 66
     assert captured["speculator_idle_interval_minutes"] == 11
+
+
+def test_build_soul_engine_forwards_feedback_batch_config(monkeypatch) -> None:
+    """The CLI surface reads the same feedback knobs the API surface does.
+
+    Regression (found in unified-interest-line Wave A): ``_build_soul_engine``
+    never passed ``feedback_batch_threshold`` — the CLI feedback command always
+    ran the batch at the hardcoded default of 3 no matter what the user
+    configured — and Wave A only plumbed ``unified_interest_line`` through
+    ``api/runtime_context.py``, so ``openbiliclaw feedback`` would have stayed
+    on the legacy line after the flag flip.
+    """
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.scheduler.feedback_batch_threshold = 6
+    cfg.scheduler.unified_interest_line = True
+
+    captured: dict[str, object] = {}
+
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object())
+    monkeypatch.setattr("openbiliclaw.soul.engine.SoulEngine", FakeSoulEngine)
+
+    cli_module._build_soul_engine()
+
+    assert captured["feedback_batch_threshold"] == 6
+    assert captured["unified_interest_line"] is True
 
 
 def _write_example_config(project_root: Path) -> None:
@@ -210,6 +245,112 @@ def test_ledger_write_point_filter(
     assert result.exit_code == 0
     assert "feedback_preference_overwrite" in result.output
     assert "dialogue_preference_overwrite" not in result.output
+
+
+def test_questions_command_lists_pending_confirmations_read_only(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "_fetch_pending_confirmation_snapshot",
+        lambda: {
+            "count": 2,
+            "items": [
+                {
+                    "kind": "hypothesis",
+                    "ref": "hyp-ref",
+                    "title": "你可能更看重一手证据",
+                    "confidence": 0.83,
+                    "evidence_refs": ["event-7", "event-9"],
+                },
+                {
+                    "kind": "confusion",
+                    "ref": "42",
+                    "title": "为什么最近跳过熟悉主题",
+                    "confidence": 0.61,
+                    "evidence_refs": [],
+                },
+            ],
+        },
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["questions"])
+
+    assert result.exit_code == 0
+    assert "待聊确认" in result.output
+    assert "猜测" in result.output
+    assert "疑惑" in result.output
+    assert "你可能更看重一手证据" in result.output
+    assert "为什么最近跳过熟悉主题" in result.output
+    assert "83%" in result.output
+    assert "event-7、event-9" in result.output
+    assert "确认" in result.output
+    assert "不准" not in result.output
+
+
+def test_questions_command_reports_empty_pending_list(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "_fetch_pending_confirmation_snapshot",
+        lambda: {"count": 0, "items": []},
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["questions"])
+
+    assert result.exit_code == 0
+    assert "暂无待聊确认" in result.output
+
+
+def test_fetch_pending_confirmation_snapshot_uses_configured_local_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            calls.append(("raise_for_status", None))
+
+        def json(self) -> dict[str, object]:
+            return {"count": 1, "items": [{"kind": "hypothesis", "ref": "h1"}]}
+
+    class FakeClient:
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> FakeResponse:
+            calls.append(("get", url))
+            return FakeResponse()
+
+    def fake_client(**kwargs: object) -> FakeClient:
+        calls.append(("client", kwargs))
+        return FakeClient()
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        lambda: SimpleNamespace(api=SimpleNamespace(port=8433)),
+    )
+    monkeypatch.setattr(httpx, "Client", fake_client)
+
+    snapshot = cli_module._fetch_pending_confirmation_snapshot()
+
+    assert snapshot == {"count": 1, "items": [{"kind": "hypothesis", "ref": "h1"}]}
+    assert calls == [
+        ("client", {"timeout": 5.0, "trust_env": False}),
+        ("get", "http://127.0.0.1:8433/api/chat/pending-confirmations"),
+        ("raise_for_status", None),
+    ]
 
 
 def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
@@ -1648,6 +1789,8 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             profile_consolidation_like_target_upper=512,
             profile_consolidation_like_target_soft=450,
             profile_consolidation_archive_enabled=True,
+            feedback_batch_threshold=3,
+            unified_interest_line=False,
         ),
     )
 
@@ -2428,6 +2571,46 @@ def test_chat_prints_init_guidance_when_profile_missing(
     assert result.exit_code == 1
     assert "尚未初始化" in result.stdout
     assert "openbiliclaw init" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_cli_dialogue_legacy_direct_mode_still_learns_without_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.soul.dialogue import DialogueLearningMode
+
+    learned = asyncio.Event()
+
+    class FakeService:
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str = "",
+        ) -> LLMResponse:
+            return LLMResponse(content="CLI reply", provider="test")
+
+    class FakeSoulEngine:
+        def __init__(self) -> None:
+            self._llm_service = FakeService()
+            self.learn_calls: list[dict[str, object]] = []
+
+        async def learn_from_dialogue(self, **payload: object) -> None:
+            self.learn_calls.append(dict(payload))
+            learned.set()
+
+    monkeypatch.setattr(cli_module, "_build_registry", object)
+    soul_engine = FakeSoulEngine()
+    dialogue = cli_module._build_dialogue(soul_engine)
+
+    assert dialogue.learning_mode is DialogueLearningMode.LEGACY_DIRECT
+    assert dialogue._settlement_queue is None
+    assert await dialogue.respond("CLI direct learning") == "CLI reply"
+    await asyncio.wait_for(learned.wait(), timeout=1)
+    assert len(soul_engine.learn_calls) == 1
+    assert soul_engine.learn_calls[0]["user_message"] == "CLI direct learning"
 
 
 def test_chat_runs_single_turn_and_prints_reply(
@@ -3405,9 +3588,13 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
     assert len([event for event in analyzed if event["event_type"] == "follow"]) == 100
     assert len(fake_memory.events) == 601
     built_history = fake_soul.built_history[0]
-    assert len(built_history) == 3
-    assert str(built_history[1]["_favorites_summary"]).startswith("共 500 个收藏")
-    assert str(built_history[2]["_following_summary"]).startswith("共关注 100 人")
+    # 1 条历史 + 500 条收藏各自成行 + 收藏夹/关注两条汇总。收藏曾经整体塌成
+    # 那一条汇总，于是 500 个用户主动存下的信号在画像里一个都看不见。
+    favorite_rows = [row for row in built_history if row.get("event_type") == "favorite"]
+    assert len(favorite_rows) == 500, "一个收藏就是一个信号，不能塌成汇总里的一个数字"
+    assert len(built_history) == 503
+    assert str(built_history[-2]["_favorites_summary"]).startswith("共 500 个收藏")
+    assert str(built_history[-1]["_following_summary"]).startswith("共关注 100 人")
 
 
 def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
@@ -8429,3 +8616,240 @@ def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch)
     assert "BV号" in out
     assert "BV1LEGACY" in out
     assert "内容 ID" not in out
+
+
+class TestInitSignalsAreDeduplicable:
+    """init 拉到的内容必须能被去重链路认出来，否则会被当新内容推回去。
+
+    历史事件一直是入库的（stage 1 结尾 propagate_events），但收藏事件既不带 bvid
+    也不带 url——没有身份就进不了 seen_items，用户明确收藏过的视频照样能被推荐。
+    历史事件也缺完播元数据，于是每条观看在账本里都是"满意度未知"。
+    """
+
+    @staticmethod
+    def _history_item(bvid: str = "BV1", *, progress: int = 100) -> dict:
+        return {
+            "title": "标题",
+            "history": {"bvid": bvid},
+            "author_name": "UP",
+            "view_at": 1_785_000_000,
+            "progress": progress,
+            "duration": 200,
+            "tag_name": "科技",
+        }
+
+    def test_history_events_carry_watch_metrics(self) -> None:
+        """完播信息决定 classify_event_satisfaction 怎么读这条事件。"""
+        from openbiliclaw.cli import _history_item_to_event
+
+        event = _history_item_to_event(self._history_item(progress=180))
+        metadata = event["metadata"]
+
+        assert metadata["content_id"] == "BV1"
+        assert metadata["watch_seconds"] == 180
+        assert metadata["video_duration_seconds"] == 200
+        assert metadata["category"] == "科技"
+
+    def test_history_event_without_metrics_still_builds(self) -> None:
+        from openbiliclaw.cli import _history_item_to_event
+
+        event = _history_item_to_event({"title": "无进度", "history": {"bvid": "BV2"}})
+
+        assert event["metadata"]["content_id"] == "BV2"
+        assert "watch_seconds" not in event["metadata"]
+
+    def test_favorite_events_carry_identity(self) -> None:
+        """收藏没有身份就进不了 seen_items——收藏过的视频会被再推一遍。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {
+                    "title": "收藏的视频",
+                    "upper": "UP",
+                    "folder": "默认收藏夹",
+                    "bvid": "BV3",
+                    "fav_time": 1_785_000_001,
+                    "duration": 300,
+                }
+            ],
+            following_data=[],
+        )
+
+        assert len(events) == 1
+        favorite = events[0]
+        assert favorite["url"] == "https://www.bilibili.com/video/BV3"
+        assert favorite["metadata"]["content_id"] == "BV3"
+        assert favorite["metadata"]["fav_time"] == 1_785_000_001
+        assert favorite["metadata"]["folder"] == "默认收藏夹"
+
+    def test_favorite_without_bvid_degrades_quietly(self) -> None:
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[], favorites_data=[{"title": "老数据", "upper": "UP"}], following_data=[]
+        )
+
+        assert events[0].get("url", "") == ""
+        assert "content_id" not in events[0]["metadata"]
+
+    def test_dead_favorites_never_become_signals(self) -> None:
+        """失效视频的标题字面就是「已失效视频」，进画像就是噪声。"""
+        from openbiliclaw.bilibili.api import favorite_item_is_dead
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        assert favorite_item_is_dead({"attr": 1, "title": "已失效视频"})
+        assert favorite_item_is_dead({"title": "已失效视频"}), "没有 attr 时按标题兜底"
+        assert not favorite_item_is_dead({"attr": 0, "title": "正常视频"})
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {"title": "正常视频", "upper": "UP", "bvid": "BV5"},
+            ],
+            following_data=[],
+        )
+        assert [event["title"] for event in events] == ["正常视频"]
+
+    def test_favorite_reach_reaches_the_ledger(self) -> None:
+        """播放量 / 发布时间是「爱挖冷门还是追热门」的判据，别在拉取时丢掉。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        events = _build_bilibili_init_events(
+            history=[],
+            favorites_data=[
+                {
+                    "title": "冷门视频",
+                    "upper": "UP",
+                    "bvid": "BV6",
+                    "play_count": 431,
+                    "pubtime": 1_780_000_000,
+                }
+            ],
+            following_data=[],
+        )
+
+        assert events[0]["metadata"]["play_count"] == 431
+        assert events[0]["metadata"]["pubtime"] == 1_780_000_000
+
+    def test_intro_is_stored_but_never_reaches_the_prompt(self) -> None:
+        """简介信噪比差（大量恰饭文案），入库备用但不花画像的 token。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+
+        favorites = [
+            {"title": "视频", "upper": "UP", "bvid": "BV7", "intro": "简" * 400},
+            {"title": "无简介", "upper": "UP", "bvid": "BV8", "intro": "-"},
+        ]
+        events = _build_bilibili_init_events(
+            history=[], favorites_data=favorites, following_data=[]
+        )
+
+        assert len(events[0]["metadata"]["intro"]) == 200, "长简介要截断，别把账本撑爆"
+        assert "intro" not in events[1]["metadata"], "占位符「-」不算简介"
+        prompt_keys = {"title", "upper", "folder"}
+        assert not (set(favorites[0]) & {"intro"}) <= prompt_keys, (
+            "intro 不在画像 prompt 的白名单里"
+        )
+
+    def test_reimporting_the_same_snapshot_does_not_double_count(self, tmp_path: Path) -> None:
+        """重跑 init 会重新拉同一份账号快照。
+
+        实测：重跑一次后账本 56% 是重复行，699 个键连观看时间戳都一模一样——
+        那不是二次观看，是同一次行为被记了两遍，凭事件条数算出来的权重全部虚高。
+        """
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+
+        def _event(event_type: str, bvid: str, stamp: int) -> dict:
+            return {
+                "event_type": event_type,
+                "url": f"https://www.bilibili.com/video/{bvid}",
+                "title": "标题",
+                "metadata": {"bvid": bvid, "content_id": bvid, "view_at": stamp},
+            }
+
+        snapshot = [_event("view", "BV1", 100), _event("favorite", "BV1", 300)]
+        kept, skipped = _drop_events_already_imported(db, snapshot)
+        assert (len(kept), skipped) == (2, 0), "第一次导入不该跳过任何东西"
+        for event in kept:
+            payload = dict(event)
+            db.insert_event(payload.pop("event_type"), **payload)
+
+        kept, skipped = _drop_events_already_imported(db, snapshot)
+        assert (len(kept), skipped) == (0, 2), "同一份快照第二次导入应全部跳过"
+
+    def test_a_genuine_rewatch_still_lands(self, tmp_path: Path) -> None:
+        """键里带时间戳正是为了这个：重看是新行为，不能被去重吃掉。"""
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        first = {
+            "event_type": "view",
+            "url": "https://www.bilibili.com/video/BV1",
+            "title": "标题",
+            "metadata": {"bvid": "BV1", "content_id": "BV1", "view_at": 100},
+        }
+        db.insert_event("view", url=first["url"], title="标题", metadata=first["metadata"])
+
+        rewatch = {**first, "metadata": {**first["metadata"], "view_at": 999}}
+        kept, skipped = _drop_events_already_imported(db, [first, rewatch])
+
+        assert skipped == 1
+        assert [e["metadata"]["view_at"] for e in kept] == [999]
+
+    def test_rows_without_identity_are_kept(self, tmp_path: Path) -> None:
+        """认不出来 ≠ 重复。没有身份的行宁可留着，也不能默默丢信号。"""
+        from openbiliclaw.cli import _drop_events_already_imported
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        faceless = {"event_type": "search", "url": "", "title": "搜索了什么", "metadata": {}}
+
+        kept, skipped = _drop_events_already_imported(db, [faceless, faceless])
+
+        assert (len(kept), skipped) == (2, 0)
+
+    def test_missing_database_imports_everything(self) -> None:
+        from openbiliclaw.cli import _drop_events_already_imported
+
+        events = [{"event_type": "view", "metadata": {"bvid": "BV1"}}]
+        assert _drop_events_already_imported(None, events) == (events, 0)
+
+    def test_favorites_become_individual_history_rows(self) -> None:
+        """一个收藏就是一个信号，不是汇总行里的一个数字。"""
+        from openbiliclaw.cli import _favorites_to_history_rows
+
+        rows = _favorites_to_history_rows(
+            [
+                {"title": "收藏的视频", "upper": "UP", "folder": "AI", "fav_time": 1_785_000_000},
+                {"title": "   ", "upper": "UP"},
+            ]
+        )
+
+        assert len(rows) == 1, "没有标题的行进画像只会变成噪声"
+        assert rows[0]["event_type"] == "favorite", "event_type 决定强信号权重和「收藏了」语境"
+        assert rows[0]["author_name"] == "UP"
+        assert rows[0]["fav_time"] == 1_785_000_000
+
+    def test_a_favorited_video_lands_in_the_seen_ledger(self, tmp_path: Path) -> None:
+        """端到端：收藏事件写库后必须出现在 seen_items 里。"""
+        from openbiliclaw.cli import _build_bilibili_init_events
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "t.db")
+        db.initialize()
+        for event in _build_bilibili_init_events(
+            history=[],
+            favorites_data=[{"title": "收藏的视频", "upper": "UP", "bvid": "BV4"}],
+            following_data=[],
+        ):
+            db.insert_event(**event)
+
+        assert "BV4" in db.get_seen_bvids(), "收藏过的内容不该再被推荐"

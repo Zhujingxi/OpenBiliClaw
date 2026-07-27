@@ -82,6 +82,30 @@ class InsightAnalyzer:
         payload = self._parse_response(response.content)
         return [self._build_hypothesis(item) for item in payload if isinstance(item, dict)]
 
+    @staticmethod
+    def _merge_confidence(
+        current: InsightHypothesis,
+        incoming: InsightHypothesis,
+        verdict: str,
+    ) -> float:
+        """Combine an existing score with a fresh pass, respecting user verdicts.
+
+        - ``rejected``: the user said 不准. A later pass is the same model
+          re-reading the same kind of behaviour, so it must not talk the score
+          back up — that silently undid the rejection and re-queued the
+          hypothesis in the 待聊 list. The score may still fall further.
+        - ``confirmed``: the user said 准. One weak pass should not demote it
+          below the confirm floor, but it can still rise.
+        - never judged: track the latest evidence in *both* directions. The old
+          ``max()`` meant a hypothesis that scored high once stayed high forever
+          no matter how the behaviour changed.
+        """
+        if verdict == "rejected":
+            return round(min(current.confidence, incoming.confidence), 4)
+        if verdict == "confirmed":
+            return round(max(current.confidence, incoming.confidence), 4)
+        return round(incoming.confidence, 4)
+
     def merge_insights(
         self,
         existing: list[InsightHypothesis],
@@ -95,12 +119,14 @@ class InsightAnalyzer:
             if current is None:
                 merged[key] = item
                 continue
+            verdict = current.user_verdict or item.user_verdict
             merged[key] = InsightHypothesis(
                 hypothesis=current.hypothesis or item.hypothesis,
                 evidence=sorted({*current.evidence, *item.evidence}),
-                confidence=max(current.confidence, item.confidence),
+                confidence=self._merge_confidence(current, item, verdict),
                 validated=current.validated or item.validated,
                 created_at=current.created_at or item.created_at,
+                user_verdict=verdict,
             )
         return list(merged.values())
 
