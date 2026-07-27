@@ -368,6 +368,18 @@ def test_reconcile_disabled_removes_even_unreported_legacy_entry(
     assert unregister_calls == ["unregister"]
 
 
+def test_autostart_env_guard_ignores_internal_selftest_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime.autostart.guards import active_env_managed_inputs
+
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", "/isolated/profile")
+    monkeypatch.setenv("OPENBILICLAW_SELFTEST", "1")
+    monkeypatch.setenv("OPENBILICLAW_API_HOST", "127.0.0.1")
+
+    assert active_env_managed_inputs(Config()) == ["OPENBILICLAW_API_HOST"]
+
+
 def test_linux_xdg_register_writes_desktop_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -191,6 +191,7 @@ def test_real_frozen_bundle_covers_enabled_and_disabled_legacy_upgrade(tmp_path:
     assert executable.exists()
     profile = tmp_path / "profile"
     env = os.environ.copy()
+    env.pop(_FROZEN_EXE_ENV, None)
     env["OPENBILICLAW_PROJECT_ROOT"] = str(profile)
     env["OPENBILICLAW_SELFTEST"] = "1"
 
