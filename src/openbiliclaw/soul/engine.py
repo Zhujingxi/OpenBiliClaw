@@ -61,8 +61,12 @@ from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
 from .pipeline import (
     FeedbackConsumerHooks,
+    OnionLayer,
+    ProfileSignal,
     ProfileUpdatePipeline,
+    SignalType,
     migrate_pipeline_deep_buffers,
+    signal_from_feedback,
 )
 from .posture_gate import ACCEPT, GateDecision, PostureGate
 from .preference_analyzer import (
@@ -340,6 +344,11 @@ class SoulEngine:
         # default) keeps feedback on the legacy batch only — turning both on
         # would let the same feedback be counted twice.
         self._unified_interest_line = bool(unified_interest_line)
+        # Monotonic count of gated soul rebuilds driven by a pipeline feedback
+        # batch. The shim snapshots it around a tick so its ``profile_rebuilt``
+        # return key keeps the legacy meaning without threading a result object
+        # back out through the pipeline's best-effort hook boundary.
+        self._pipeline_feedback_rebuilds = 0
         self._feedback_batch_lock = asyncio.Lock()
         # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
         # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
@@ -2574,7 +2583,34 @@ class SoulEngine:
         )
 
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
-        """Reanalyze preference/profile after enough new feedback has accumulated."""
+        """Reanalyze preference/profile after enough new feedback has accumulated.
+
+        Wave B shim (spec 2026-07-27 Phase 3). The method name is the coupling
+        point for all three external callers (``runtime/feedback_scheduler.py``,
+        the CLI feedback command, ``integrations/openclaw/operations.py``), so
+        they stay zero-change across the merge:
+
+        - ``unified_interest_line`` OFF → the legacy feedback batch verbatim.
+        - ON → a one-shot idempotent migration of everything after the legacy
+          cursor into the pipeline, then a pipeline tick so a
+          threshold-satisfying INTEREST buffer consumes now instead of waiting
+          out ``min_interval_seconds``.
+
+        None of the three callers reads the returned dict (each awaits and
+        discards it), but the legacy keys are preserved anyway so the shape
+        stays a stable contract.
+        """
+        if self._unified_interest_line:
+            return await self._process_feedback_via_unified_line()
+        return await self._process_feedback_batch_legacy()
+
+    async def _process_feedback_batch_legacy(self) -> dict[str, object]:
+        """The pre-unified-line feedback batch, unchanged.
+
+        Reached whenever ``scheduler.unified_interest_line`` is false — the
+        rollback path. Byte-identical to what ``process_feedback_batch_if_needed``
+        did before the shim, so ``TestFeedbackBatchContract`` still pins it.
+        """
         if self._feedback_batch_lock.locked():
             return {
                 "triggered": False,
@@ -2601,6 +2637,165 @@ class SoulEngine:
         except Exception:
             logger.debug("pending rebuild trigger (feedback batch) failed", exc_info=True)
         return result
+
+    async def _process_feedback_via_unified_line(self) -> dict[str, object]:
+        """The unified interest line's replacement for the feedback batch.
+
+        Two steps, in order: (1) a one-shot migration of everything the legacy
+        cursor never consumed, (2) a pipeline tick so a buffer that already
+        satisfies the FEEDBACK priority threshold consumes NOW rather than
+        waiting out ``min_interval_seconds`` (spec invariant 1). Live feedback
+        is already ingested by ``/api/feedback``; this path exists so the
+        debounce scheduler still has something to drive and so restarts don't
+        strand a buffer that filled just before shutdown.
+        """
+        if self._feedback_batch_lock.locked():
+            return {
+                "triggered": False,
+                "feedback_count": 0,
+                "preference_updated": False,
+                "profile_rebuilt": False,
+                "skipped": True,
+                "reason": "feedback_batch_in_progress",
+            }
+        rebuilds_before = self._pipeline_feedback_rebuilds
+        updates: list[Any] = []
+        async with self._feedback_batch_lock:
+            migrated, migration_updates = await self._migrate_legacy_feedback_cursor_if_needed()
+            updates.extend(migration_updates)
+            # Measured AFTER the migration ingest: the pre-existing strong-signal
+            # bypass means that ingest may already have consumed what it just
+            # buffered, and those rows are counted by ``migrated`` instead.
+            buffered = self._buffered_feedback_signal_count()
+            flush = await self._pipeline.tick()
+            updates.extend(getattr(flush, "layers_updated", []))
+        interest_updates = [
+            update
+            for update in updates
+            if getattr(getattr(update, "layer", None), "value", "") == OnionLayer.INTEREST.value
+        ]
+        # A periodic hook for the debounced confirmed-hypotheses rebuild (spec
+        # invariant 4). Best-effort — never breaks feedback processing. The
+        # held-replay consumer is NOT re-run here: on the unified line it is a
+        # feedback-batch privilege that already ran inside
+        # ``_after_pipeline_feedback_interest`` if (and only if) the drained
+        # batch actually carried FEEDBACK signals.
+        try:
+            await self.run_pending_rebuild_if_due()
+        except Exception:
+            logger.debug("pending rebuild trigger (unified line) failed", exc_info=True)
+        return {
+            "triggered": bool(interest_updates),
+            # FEEDBACK signals this call actually put in play: the migrated rows
+            # plus whatever the live buffer was still holding. Disjoint by
+            # construction — ``buffered`` is read after the migration ingest.
+            "feedback_count": migrated + buffered,
+            # Legacy meaning: "the preference layer was rewritten", which the
+            # batch reported unconditionally once it fired. A consumed INTEREST
+            # batch is exactly that. Whether the rewrite produced visible changes
+            # is the separate ``preference_changed`` key.
+            "preference_updated": bool(interest_updates),
+            "preference_changed": any(getattr(u, "changed", False) for u in interest_updates),
+            "profile_rebuilt": self._pipeline_feedback_rebuilds > rebuilds_before,
+            "unified_interest_line": True,
+            "migrated_feedback_events": migrated,
+        }
+
+    def _buffered_feedback_signal_count(self) -> int:
+        """How many FEEDBACK signals the INTEREST buffer is holding right now.
+
+        The unified line's analogue of the legacy batch's ``feedback_count``:
+        the number the priority-flush threshold is compared against.
+        """
+        try:
+            buffers = self._pipeline._buffers  # noqa: SLF001 - same-package read
+            buf = buffers.get(OnionLayer.INTEREST.value)
+            if buf is None:
+                return 0
+            return sum(
+                1 for sig in buf.signals if sig.get("signal_type") == SignalType.FEEDBACK.value
+            )
+        except Exception:
+            return 0
+
+    async def _migrate_legacy_feedback_cursor_if_needed(self) -> tuple[int, list[Any]]:
+        """One-shot: hand the pipeline every feedback row the legacy cursor left.
+
+        Returns ``(migrated_count, layer_updates)`` — the ingest can consume the
+        buffer on the spot (the pre-existing strong-signal bypass), so the shim
+        needs those updates to report ``triggered`` honestly.
+
+        Signals are built with ``signal_from_feedback``, NOT ``signals_from_events``:
+        the latter never emits ``SignalType.FEEDBACK`` (it only ever produces
+        BEHAVIOR_EVENT / ENGAGEMENT_EVENT), so migrated rows would silently lose
+        every feedback privilege — the priority flush, dislike archiving, the
+        gated soul rebuild, and the ``source="feedback"`` ledger provenance.
+
+        **Retractions are skipped.** The legacy batch excluded them from both the
+        threshold count and the analysis input (they are neutralizations, not
+        preference-learning input) and they have already had their effect on the
+        rows they retracted at the time they were recorded. Ingesting historical
+        retractions now would replay a discount against a preference layer that
+        was computed without the corresponding positives — the retraction
+        semantics change (exclude → discount) is a *forward* change for live
+        signals only, and the A/B gate 3 covers it there. The cursor still
+        advances past them so they are never rescanned.
+
+        **Ordering: persist the cursor + marker FIRST, ingest second.** Both live
+        in one JSON file, so there is no window where the marker exists without
+        the advanced cursor. The remaining crash window (state written, process
+        dies before the buffer is durable) loses at most the un-migrated tail —
+        bounded, and those rows stay in the event ledger forever. The opposite
+        ordering would re-ingest real user feedback on every crashed restart,
+        double-counting it into the preference layer: exactly the harm the Wave A
+        dark launch existed to prevent, and unbounded in how often it can repeat.
+        """
+        state = self._memory.load_feedback_state()
+        if str(state.get("unified_interest_line_migrated_at", "")).strip():
+            return 0, []
+        last_processed_id = self._to_int(state.get("last_processed_feedback_event_id", 0))
+        scanned = [
+            self._deserialize_event(event)
+            for event in self._memory.query_events_since(
+                after_event_id=last_processed_id,
+                event_types=["feedback"],
+            )
+        ]
+        pending = [event for event in scanned if not self._is_retraction_feedback(event)]
+        last_scanned_id = max(
+            (self._to_int(event.get("id", 0)) for event in scanned),
+            default=0,
+        )
+        self._memory.save_feedback_state(
+            {
+                "last_processed_feedback_event_id": max(last_scanned_id, last_processed_id),
+                # Not a re-analysis — leave the legacy timestamp alone.
+                "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
+                "unified_interest_line_migrated_at": datetime.now().isoformat(),
+            }
+        )
+        if not pending:
+            return 0, []
+        signals = [self._feedback_event_to_signal(event) for event in pending]
+        ingest_result = await self._pipeline.ingest_batch(signals)
+        logger.info(
+            "Unified interest line: migrated %d unconsumed feedback event(s) "
+            "past legacy cursor %d into the pipeline",
+            len(signals),
+            last_processed_id,
+        )
+        return len(signals), list(getattr(ingest_result, "layers_updated", []))
+
+    @staticmethod
+    def _feedback_event_to_signal(event: dict[str, Any]) -> ProfileSignal:
+        """Rebuild the FEEDBACK signal ``/api/feedback`` would have emitted."""
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return signal_from_feedback(
+            str(metadata.get("feedback_type") or "").strip(),
+            str(event.get("title") or ""),
+            str(metadata.get("feedback_note") or ""),
+        )
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
         """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
@@ -2790,13 +2985,14 @@ class SoulEngine:
         """
         existing_profile = dict(self._memory.get_layer("soul").data)
         try:
-            await self._gated_feedback_soul_rebuild(
+            if await self._gated_feedback_soul_rebuild(
                 existing_preference=existing_preference,
                 updated_preference=updated_preference,
                 existing_profile=existing_profile,
                 source_refs=source_refs,
                 feedback_count=feedback_count,
-            )
+            ):
+                self._pipeline_feedback_rebuilds += 1
         except Exception:
             logger.exception("Gated soul rebuild after a pipeline feedback batch failed")
         # Consume any held updates left ``replaying`` by a resolved real-interest

@@ -1001,6 +1001,48 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     assert loaded.scheduler.avoidance_speculation_max_active == 5
 
 
+def test_save_config_round_trips_feedback_batch_threshold(tmp_path: Path) -> None:
+    """A user-set feedback batch threshold survives a settings save.
+
+    Regression (found in unified-interest-line Wave A): ``_render_config_toml``
+    never emitted ``scheduler.feedback_batch_threshold``, so the extension popup
+    and desktop settings inputs were write-only — every save silently reverted a
+    user-tuned value back to the default 3 on the next load. The unified line
+    reuses this key as its priority-flush threshold, so a silent revert would
+    also silently change the interest-layer cadence.
+    """
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.feedback_batch_threshold = 5
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.scheduler.feedback_batch_threshold == 5
+
+
+def test_settings_save_path_preserves_feedback_batch_threshold(tmp_path: Path) -> None:
+    """The exact sequence the settings API runs: load → mutate → save → reload.
+
+    ``/api/settings`` loads the on-disk config, applies the submitted scheduler
+    fields onto the dataclass, and calls ``save_config``. Before the renderer
+    fix, the reload dropped the threshold even though the save request carried
+    it.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[scheduler]\nfeedback_batch_threshold = 7\n", encoding="utf-8")
+
+    cfg = load_config(config_path)
+    assert cfg.scheduler.feedback_batch_threshold == 7
+    # The settings endpoint mutates in place and re-saves the whole config.
+    cfg.scheduler.discovery_limit = 21
+    save_config(cfg, config_path)
+
+    reloaded = load_config(config_path)
+    assert reloaded.scheduler.discovery_limit == 21
+    assert reloaded.scheduler.feedback_batch_threshold == 7
+
+
 def test_scheduler_pool_source_shares_override(tmp_path: Path) -> None:
     toml_path = tmp_path / "c.toml"
     toml_path.write_text(

@@ -18861,3 +18861,29 @@ class TestUnifiedInterestLineFeedbackIngestion:
         assert signal.payload["note"] == "太浅了"
         assert signal.target_layers == frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE})
         assert schedules == 1, "Wave A 旧批线仍照常调度"
+
+
+class TestSoulEngineFeedbackConfigPlumbing:
+    """三个 SoulEngine 构造点必须读同一套 config（三面契约）。
+
+    Wave A 只给 ``api/runtime_context.py`` 接了 ``unified_interest_line``，
+    而 ``feedback_batch_threshold`` 从来只有这一面在传——CLI 与 OpenClaw
+    两面都在用硬编码默认值 3。对应的 CLI/OpenClaw 断言分别在
+    ``tests/test_cli.py`` 与 ``tests/test_openclaw_adapter.py``。
+    """
+
+    def test_runtime_context_forwards_feedback_batch_config(self, tmp_path: Path) -> None:
+        from openbiliclaw.api.runtime_context import build_runtime_context
+        from openbiliclaw.config import Config
+
+        config = Config(data_dir=str(tmp_path / "data"))
+        config.llm.default_provider = "ollama"
+        config.llm.ollama.model = "llama3"
+        config.scheduler.feedback_batch_threshold = 6
+        config.scheduler.unified_interest_line = True
+
+        ctx = build_runtime_context(config)
+
+        assert ctx.soul_engine is not None
+        assert ctx.soul_engine.unified_interest_line_enabled is True
+        assert ctx.soul_engine._feedback_batch_threshold == 6

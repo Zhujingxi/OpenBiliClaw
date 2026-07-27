@@ -752,6 +752,71 @@ async def test_get_delight_returns_none_when_no_candidate() -> None:
     assert result.item is None
 
 
+class _StopAfterSoulEngineError(Exception):
+    """Sentinel: abort the bootstrap once the SoulEngine has been constructed."""
+
+
+def test_build_openclaw_adapter_services_forwards_feedback_batch_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The OpenClaw surface reads the same feedback knobs the API surface does.
+
+    Regression (found in unified-interest-line Wave A): the bootstrap never
+    passed ``feedback_batch_threshold`` (so the adapter's feedback batch always
+    ran at the hardcoded default 3) and Wave A only plumbed
+    ``unified_interest_line`` through ``api/runtime_context.py``, which would
+    have left OpenClaw on the legacy line after the flag flip.
+
+    The bootstrap is aborted with a sentinel right after ``SoulEngine`` is built
+    (``LLMService`` is the very next construction) so the test needs no fakes for
+    the discovery/recommendation half of the service bundle.
+    """
+    import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.data_dir = str(tmp_path)
+    cfg.scheduler.feedback_batch_threshold = 6
+    cfg.scheduler.unified_interest_line = True
+
+    captured: dict[str, object] = {}
+
+    class FakeDatabase:
+        def __init__(self, path: object) -> None:
+            self.path = path
+
+        def initialize(self) -> None:
+            return None
+
+    class FakeMemoryManager:
+        def __init__(self, data_path: object, database: object = None) -> None:
+            self.data_path = data_path
+            self.database = database
+
+        def initialize(self) -> None:
+            return None
+
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    def _stop(**_kwargs: object) -> None:
+        raise _StopAfterSoulEngineError
+
+    monkeypatch.setattr(bootstrap_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda _cfg: object())
+    monkeypatch.setattr(bootstrap_module, "Database", FakeDatabase)
+    monkeypatch.setattr(bootstrap_module, "MemoryManager", FakeMemoryManager)
+    monkeypatch.setattr(bootstrap_module, "SoulEngine", FakeSoulEngine)
+    monkeypatch.setattr(bootstrap_module, "LLMService", _stop)
+
+    with pytest.raises(_StopAfterSoulEngineError):
+        build_openclaw_adapter_services()
+
+    assert captured["feedback_batch_threshold"] == 6
+    assert captured["unified_interest_line"] is True
+
+
 def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> None:
     import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
 

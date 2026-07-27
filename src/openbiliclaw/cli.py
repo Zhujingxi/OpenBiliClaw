@@ -921,6 +921,13 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        # Feedback line config, three-surface contract with
+        # ``api/runtime_context.py`` and the OpenClaw bootstrap: the CLI
+        # feedback command runs the same batch (and, once the unified interest
+        # line is on, the same pipeline fast line), so it must read the same
+        # knobs instead of falling back to the constructor defaults.
+        feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
+        unified_interest_line=cfg.scheduler.unified_interest_line,
         database=_get_runtime_database(),
     )
 

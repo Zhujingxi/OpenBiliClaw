@@ -170,6 +170,12 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         profile_consolidation_archive_enabled=bool(
             getattr(config.scheduler, "profile_consolidation_archive_enabled", True)
         ),
+        # Feedback line config, three-surface contract with
+        # ``api/runtime_context.py`` and ``cli._build_soul_engine``: the adapter
+        # calls ``process_feedback_batch_if_needed`` itself, so it must read the
+        # same knobs instead of falling back to the constructor defaults.
+        feedback_batch_threshold=int(getattr(config.scheduler, "feedback_batch_threshold", 3)),
+        unified_interest_line=bool(getattr(config.scheduler, "unified_interest_line", False)),
     )
     llm_service = LLMService(
         registry=llm_registry,

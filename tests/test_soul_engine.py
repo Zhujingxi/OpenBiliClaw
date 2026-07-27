@@ -5490,3 +5490,266 @@ class TestFeedbackBatchContract:
         assert (
             memory.load_feedback_state()["last_processed_feedback_event_id"] == cursor_after_first
         )
+
+
+class TestUnifiedInterestLineShim:
+    """统一兴趣更新线 Wave B：``process_feedback_batch_if_needed`` 变 shim。
+
+    开关关 → 旧批线逐字节不变（``TestFeedbackBatchContract`` 六条契约仍在钉它）。
+    开关开 → 一次性幂等迁移旧游标之后的反馈 + 触发 pipeline flush。
+    """
+
+    _NEUTRAL_PREFERENCE: dict[str, object] = {
+        "interests": [],
+        "style": {},
+        "context": {},
+        "exploration_openness": 0.4,
+        "disliked_topics": [],
+        "favorite_up_users": [],
+    }
+
+    @staticmethod
+    async def _seed_feedback(memory: MemoryManager, rows: list[tuple[str, str]]) -> None:
+        for feedback_type, title in rows:
+            await memory.propagate_event(
+                {
+                    "event_type": "feedback",
+                    "title": title,
+                    "metadata": {"feedback_type": feedback_type, "feedback_note": "备注"},
+                }
+            )
+
+    @classmethod
+    def _stub_analyzer(
+        cls,
+        monkeypatch: pytest.MonkeyPatch,
+        engine: SoulEngine,
+        analyzed: list[list[dict[str, object]]],
+    ) -> None:
+        async def fake_analyze_events(
+            *,
+            events: list[dict[str, object]],
+            existing_preference: dict[str, object],
+            event_chunk_size: int = 0,
+            awareness_notes: list[dict[str, object]] | None = None,
+            active_insights: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            del existing_preference, event_chunk_size, awareness_notes, active_insights
+            analyzed.append(list(events))
+            return dict(cls._NEUTRAL_PREFERENCE)
+
+        monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    @staticmethod
+    def _spy_ingest(engine: SoulEngine, batches: list[list[object]]) -> None:
+        """Record every ingest_batch call, then delegate to the real pipeline."""
+        real = engine._pipeline.ingest_batch
+
+        async def spy(signals: list[object]) -> object:
+            batches.append(list(signals))
+            return await real(signals)  # type: ignore[arg-type]
+
+        engine._pipeline.ingest_batch = spy  # type: ignore[method-assign, assignment]
+
+    @pytest.mark.asyncio
+    async def test_cursor_behind_migrates_every_row_as_a_feedback_signal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """不变量③：旧游标之后未消费的反馈一条不丢，且带 FEEDBACK 特权入线。
+
+        必须用 ``signal_from_feedback`` 而非 ``signals_from_events``——后者永远
+        不产 ``SignalType.FEEDBACK``，迁移行会静默丢掉全部反馈特权。
+        """
+        from openbiliclaw.soul.pipeline import SignalType
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_ingest(engine, batches)
+
+        await self._seed_feedback(
+            memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["unified_interest_line"] is True
+        assert result["migrated_feedback_events"] == 3
+        # 返回形状与旧批线兼容：迁移当轮就被消费，triggered/feedback_count 必须
+        # 如实反映（迁移 ingest 触发的消费也算，不能只看 tick 的结果）。
+        assert result["triggered"] is True
+        assert result["feedback_count"] == 3
+        assert result["preference_updated"] is True
+        # 桩分析器返回的偏好与现状等价，所以「写了」为真而「变了」为假——两个语义
+        # 分开报，`preference_updated` 保持旧批线含义（偏好层被重写过）。
+        assert result["preference_changed"] is False
+        assert len(batches) == 1
+        assert len(batches[0]) == 3
+        assert all(sig.signal_type is SignalType.FEEDBACK for sig in batches[0])  # type: ignore[attr-defined]
+        assert [sig.payload["title"] for sig in batches[0]] == [  # type: ignore[attr-defined]
+            "旧反馈 0",
+            "旧反馈 1",
+            "旧反馈 2",
+        ]
+        # 迁移必须触发消费（不再等 600s 最短间隔）
+        assert analyzed, "迁移后缓冲达阈值必须立即消费"
+        state = memory.load_feedback_state()
+        assert state["last_processed_feedback_event_id"] == 3
+        assert str(state["unified_interest_line_migrated_at"]).strip()
+
+    @pytest.mark.asyncio
+    async def test_second_run_migrates_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """不变量③：重复迁移幂等——二次启动零重复。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_ingest(engine, batches)
+
+        await self._seed_feedback(
+            memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
+        )
+
+        first = await engine.process_feedback_batch_if_needed()
+        second = await engine.process_feedback_batch_if_needed()
+
+        assert first["migrated_feedback_events"] == 3
+        assert second["migrated_feedback_events"] == 0
+        assert len(batches) == 1, "第二次不得再次入线"
+
+    @pytest.mark.asyncio
+    async def test_marker_stops_live_feedback_from_being_migrated_again(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """迁移只跑一次——之后的实时反馈由 /api/feedback 直接入线，迁移绝不重扫。
+
+        游标本身挡不住这一条：迁移后新落账的反馈行 id 在游标之后，没有标记就会
+        被第二次 shim 调用当成「未消费」再入线一遍，而它们早已由端点喂过 pipeline
+        ——正是 Wave A 暗发所要防的双计。
+        """
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_ingest(engine, batches)
+
+        await self._seed_feedback(memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1")])
+        first = await engine.process_feedback_batch_if_needed()
+        assert first["migrated_feedback_events"] == 2
+        migrated_batches = len(batches)
+
+        # /api/feedback 落账 + 直接入线（这里只落账，入线由端点负责）。
+        await self._seed_feedback(memory, [("dislike", "实时反馈 0"), ("like", "实时反馈 1")])
+
+        second = await engine.process_feedback_batch_if_needed()
+
+        assert second["migrated_feedback_events"] == 0
+        assert len(batches) == migrated_batches, "实时反馈绝不能被迁移路径二次入线"
+
+    @pytest.mark.asyncio
+    async def test_retractions_are_skipped_but_the_cursor_clears_them(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """迁移跳过 retraction（与旧批线一致），游标仍越过它们。
+
+        历史 retraction 早已在写入当时抵消过对应正向行；此刻补一次折价只会对着
+        一个「从未含那些正向行」的偏好层重放，纯粹是噪声。折价语义只对**将来**
+        的实时信号生效，由 A/B 门 3 把关。
+        """
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_ingest(engine, batches)
+
+        await self._seed_feedback(
+            memory,
+            [("dislike", "真反馈 0"), ("retraction", "撤回 0"), ("dislike", "真反馈 1")],
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["migrated_feedback_events"] == 2
+        assert [sig.payload["title"] for sig in batches[0]] == ["真反馈 0", "真反馈 1"]  # type: ignore[attr-defined]
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 3
+
+    @pytest.mark.asyncio
+    async def test_crash_mid_migration_does_not_double_ingest(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """选定顺序（先落游标+标记，后入线）在崩溃后不会双计。
+
+        游标与标记同处一个 JSON 文件，一次写入原子落盘，所以「标记写了但游标没
+        推进」的分裂态在结构上不存在。剩下的窗口（状态已落盘、进程在缓冲持久化
+        前死掉）最多丢掉未迁移的尾巴——有界，且这些行永远留在事件账本里；反向
+        顺序则会在每次崩溃重启时把真实用户反馈重新计入偏好层，无界重复。
+        """
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+
+        await self._seed_feedback(
+            memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
+        )
+
+        async def boom(signals: list[object]) -> object:
+            raise RuntimeError("crash mid-migration")
+
+        engine._pipeline.ingest_batch = boom  # type: ignore[method-assign, assignment]
+        with pytest.raises(RuntimeError, match="crash mid-migration"):
+            await engine.process_feedback_batch_if_needed()
+
+        # 状态已原子落盘：标记与游标同时在位，没有半截态。
+        state = memory.load_feedback_state()
+        assert state["last_processed_feedback_event_id"] == 3
+        assert str(state["unified_interest_line_migrated_at"]).strip()
+
+        batches: list[list[object]] = []
+        engine2 = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        self._stub_analyzer(monkeypatch, engine2, analyzed)
+        self._spy_ingest(engine2, batches)
+
+        replayed = await engine2.process_feedback_batch_if_needed()
+
+        assert replayed["migrated_feedback_events"] == 0
+        assert batches == [], "重启后绝不能把同一批反馈二次入线"
+
+    @pytest.mark.asyncio
+    async def test_flag_off_runs_the_legacy_batch_and_writes_no_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """开关关 = 旧批线原样（回退路径）；迁移标记绝不落盘。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_ingest(engine, batches)
+
+        await self._seed_feedback(
+            memory, [("dislike", "反馈 0"), ("dislike", "反馈 1"), ("dislike", "反馈 2")]
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["triggered"] is True
+        assert result["feedback_count"] == 3
+        assert result["preference_updated"] is True
+        assert "unified_interest_line" not in result
+        assert batches == [], "开关关时反馈绝不进 pipeline"
+        assert len(analyzed) == 1
+        assert memory.load_feedback_state()["unified_interest_line_migrated_at"] == ""

@@ -3038,6 +3038,11 @@ def _render_config_toml(
             f"{config.scheduler.avoidance_speculation_confirmation_threshold}",
             "avoidance_speculation_max_active = "
             f"{config.scheduler.avoidance_speculation_max_active}",
+            # User-tunable from the extension popup and the desktop settings
+            # page; omitting it here made those inputs write-only (every save
+            # silently reverted the value to the default 3). It doubles as the
+            # unified interest line's priority-flush threshold.
+            f"feedback_batch_threshold = {config.scheduler.feedback_batch_threshold}",
             f"unified_interest_line = {_toml_bool(config.scheduler.unified_interest_line)}",
             f"auto_update_enabled = {_toml_bool(config.scheduler.auto_update_enabled)}",
             "auto_update_check_interval_hours = "

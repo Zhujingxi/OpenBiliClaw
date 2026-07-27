@@ -174,6 +174,7 @@ scheduler.schedule()
 - 多个 `/api/feedback` 请求在 debounce 窗口内只会合并成一次批处理。
 - 批处理执行中再次收到反馈，会把 dirty 标志重新置位；当前处理结束后再等待一个 debounce 窗口并补跑一次。
 - 该调度器只解决 API 层的 burst coalesce；Soul 层仍有 `process_feedback_batch_if_needed()` single-flight，防止其它入口绕过 API 时并发重放同一游标。
+- **`scheduler.unified_interest_line=true` 后调度器本身不变，它驱动的东西变了**：`process_feedback_batch_if_needed()` 已是 shim——debounce 窗口结束后不再跑「游标批 + 全量 `analyze_events`」，而是（首次）一次性迁移旧游标之后未消费的 feedback 事件进认知流水线，然后触发 `pipeline.tick()` 让已达 FEEDBACK 优先级阈值的 INTEREST 缓冲立刻消费。实时反馈本就由 `/api/feedback` 直接入线，所以这条 debounce 路径的职责收窄成「兜底 flush + 迁移」：它保证攒够阈值的缓冲不必等满 `min_interval_seconds`，也保证重启前刚填满的缓冲不会被搁置。开关关时调度器行为逐字节回到上面几条。详见 [soul 模块文档](soul.md) 的「`unified_interest_line=true` 时这一节换成什么」。
 
 ### InitCoordinator + InitPrereqs（引导初始化）
 

@@ -72,6 +72,39 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     assert captured["speculator_idle_interval_minutes"] == 11
 
 
+def test_build_soul_engine_forwards_feedback_batch_config(monkeypatch) -> None:
+    """The CLI surface reads the same feedback knobs the API surface does.
+
+    Regression (found in unified-interest-line Wave A): ``_build_soul_engine``
+    never passed ``feedback_batch_threshold`` — the CLI feedback command always
+    ran the batch at the hardcoded default of 3 no matter what the user
+    configured — and Wave A only plumbed ``unified_interest_line`` through
+    ``api/runtime_context.py``, so ``openbiliclaw feedback`` would have stayed
+    on the legacy line after the flag flip.
+    """
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.scheduler.feedback_batch_threshold = 6
+    cfg.scheduler.unified_interest_line = True
+
+    captured: dict[str, object] = {}
+
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object())
+    monkeypatch.setattr("openbiliclaw.soul.engine.SoulEngine", FakeSoulEngine)
+
+    cli_module._build_soul_engine()
+
+    assert captured["feedback_batch_threshold"] == 6
+    assert captured["unified_interest_line"] is True
+
+
 def _write_example_config(project_root: Path) -> None:
     (project_root / "config.example.toml").write_text(
         """
@@ -1660,6 +1693,8 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             profile_consolidation_like_target_upper=512,
             profile_consolidation_like_target_soft=450,
             profile_consolidation_archive_enabled=True,
+            feedback_batch_threshold=3,
+            unified_interest_line=False,
         ),
     )
 
