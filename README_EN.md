@@ -617,6 +617,9 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Interest: events/dialogue/feedback(priority) → │
+│ ProfileUpdatePipeline → single INTEREST line   │
+│ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │

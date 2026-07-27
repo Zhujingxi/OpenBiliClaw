@@ -123,10 +123,15 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     # convention below: test doubles (SimpleNamespace configs) may omit the
     # top-level [soul] section entirely.
     soul_cfg = getattr(config, "soul", None)
+    preference_cfg = getattr(soul_cfg, "preference", None) if soul_cfg else None
     soul_engine = SoulEngine(
         llm=llm_registry,
         memory=memory_manager,
+        database=database,
         usage_recorder=usage_recorder,
+        satisfaction_filter_enabled=bool(
+            getattr(preference_cfg, "satisfaction_filter_enabled", True)
+        ),
         posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
         posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
         module_overrides=module_overrides,

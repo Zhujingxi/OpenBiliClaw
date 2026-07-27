@@ -588,7 +588,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `delight_queue_limit` | int | `20` | 惊喜推荐队列默认加载数量；允许范围 `1..100`。桌面 Web、移动 Web 和浏览器插件默认调用 `/api/delight/pending-batch` 时共享该值，显式 query `limit` 可临时覆盖 |
 | `proactive_push_interval_seconds` | int | `120` | 主动推荐 / probe 推送循环间隔；小于 `30` 时回退默认值 |
 | `speculator_idle_interval_minutes` | int | `30` | `ProfileUpdatePipeline` 空闲时检查猜测兴趣生命周期的间隔；小于 `5` 时回退默认值 |
-| `profile_consolidation_enabled` | bool | `true` | 是否启用 12 小时画像整理（LLM 合并重复的喜欢 / 讨厌主题，见 soul 模块 `ProfileConsolidator`） |
+| `profile_consolidation_enabled` | bool | `true` | 是否启用 12 小时画像整理（LLM 合并重复的喜欢 / 讨厌主题，见 soul 模块 `ProfileConsolidator`）。五个 `profile_consolidation_*` 字段都会由 `_render_config_toml` 写回，设置保存后不会回落默认值 |
 | `profile_consolidation_interval_hours` | int | `12` | 画像整理的最小间隔（小时）；输入未变化（digest 相同）且 active likes 未超过库存上限时该轮零 LLM 调用 |
 | `profile_consolidation_like_target_upper` | int | `512` | active likes 目标上限；超过该值时整理会临时使用 full boundary，并在合并后尝试归档低权重长尾 |
 | `profile_consolidation_like_target_soft` | int | `450` | active likes 整理水位；归档开启时会尽量把 active likes 降到该值（实际使用 `min(soft, upper)`） |
@@ -606,7 +606,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `avoidance_speculation_confirmation_threshold` | int | `3` | 自动确认不喜欢领域所需显式负向信号数；用户直接确认不受此阈值限制 |
 | `avoidance_speculation_max_active` | int | `5` | 最多同时活跃的不喜欢领域探针数，不占 `speculation_max_active` |
 | `feedback_batch_threshold` | int | `3` | 累计多少条推荐反馈后重算偏好。旧反馈批线用它做游标批的阈值；开启 `unified_interest_line` 后同一个值改在认知流水线里计数（INTEREST 缓冲里的 FEEDBACK 信号数达到它即立即消费）。**v0.3.18x 修复：此前 `_render_config_toml` 不 emit 这一行**，插件与桌面设置页的「反馈分析积累阈值」是只写不读——任何一次保存都会把用户调过的值静默复位成 3（并因此静默改掉兴趣层节奏）。现已随保存落盘。三面构造点（`api/runtime_context.py`、`cli._build_soul_engine`、OpenClaw bootstrap）也已全部透传，此前只有 API 一面在传 |
-| `unified_interest_line` | bool | `false` | 统一兴趣更新线开关（`docs/plans/2026-07-27-unified-interest-line-spec.md`）。`true` 时：① `/api/feedback` 把反馈作为 FEEDBACK 信号喂进 `ProfileUpdatePipeline`，含反馈的 INTEREST 缓冲达到 `feedback_batch_threshold` 即绕过最短间隔立即消费（消费侧继承 dislike 归档、接入点③门控重建、held-replay 与 `source=feedback` 台账）；② **Wave B**：`process_feedback_batch_if_needed()` 变 shim——首次调用把旧游标 `last_processed_feedback_event_id` 之后未消费的 feedback 事件一次性幂等迁移进流水线（`signal_from_feedback` 还原 FEEDBACK 特权，retraction 跳过，标记 `unified_interest_line_migrated_at` 与游标一次原子写盘），随后触发 `pipeline.tick()`；③ 台账写点 `feedback_preference_overwrite` 停写（只停写不删读，历史行仍可 `openbiliclaw ledger` 查）。**默认仍为 `false`**：翻转默认值是发版前由真实 LLM A/B 三道门（`scripts/run_unified_interest_ab.py`）决定的动作，门不过就停在这里，`false` 是逐字节回退路径 |
+| `unified_interest_line` | bool | `true` | 统一兴趣更新线开关（`docs/plans/2026-07-27-unified-interest-line-spec.md`）。`true` 时：① `/api/feedback` 把反馈作为 FEEDBACK 优先信号喂进 `ProfileUpdatePipeline`，含反馈的 INTEREST 缓冲达到 `feedback_batch_threshold` 即绕过最短间隔立即消费（消费侧继承 dislike 归档、接入点③门控重建、held-replay 与 `source=feedback` 台账）；② `process_feedback_batch_if_needed()` 作为 shim，首次调用把旧游标之后未消费的 feedback 事件一次性幂等迁移进流水线，随后 `pipeline.tick()` 兜底 flush；③ 已退役写点 `feedback_preference_overwrite` 默认停写，但历史行仍可由 `openbiliclaw ledger` 查询。**2026-07-28 默认翻为 `true`**：真实 LLM A/B 三道门配套 A/A control；相同输入的 A/A 曾产生 6 个无关新增兴趣，证明门 3 的全局冻结是在量 LLM 抖动，因此门 3 收窄为只检查撤回目标（目标匹配的新 dislike 为零、目标匹配兴趣不得涨权）。`false` 保留为逐字节恢复旧反馈批线的回退开关 |
 | `auto_update_enabled` | bool | `false` | 是否启用后端自动检查并应用新版本；默认关闭，只影响后端源码，不更新浏览器插件 |
 | `auto_update_check_interval_hours` | int | `6` | 后端自动更新检查间隔（小时），最小 `1`；TOML 中的 `0` / 负数 / 非整数字符串加载时回退安全默认值 `6`，`PUT /api/config` 与 `save_config()` 对非整数或 `<1` 的值直接拒绝且不落盘；手动检查不受该间隔限制 |
 | `auto_update_allow_prerelease` | bool | `false` | 是否允许 `backend-vX.Y.Z-rc/beta/dev` 预发布 tag 被后端自动更新选择；默认忽略 |

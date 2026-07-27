@@ -469,8 +469,8 @@ feedback_batch_threshold = 3             # Recommendation feedbacks accumulated 
 # true 时推荐反馈直接进认知流水线快线：反馈信号攒够 feedback_batch_threshold
 # （默认 3）就立即重算兴趣，不等 INTEREST 缓冲的最短间隔；并且
 # process_feedback_batch_if_needed() 变 shim（一次性迁移旧游标 + 触发 flush）。
-# 默认 false —— 旧的反馈批线仍在跑，两条线同时开会把同一条反馈算两次。
-unified_interest_line = false
+# 2026-07-28 经 A/B 三道门与 A/A 噪声控制后默认 true；false 仅用于回退旧反馈批。
+unified_interest_line = true
 # --- 画像整理（ProfileConsolidator）库存水位 ---
 profile_consolidation_enabled = true
 profile_consolidation_interval_hours = 12

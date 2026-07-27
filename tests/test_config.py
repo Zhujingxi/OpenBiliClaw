@@ -1021,6 +1021,26 @@ def test_save_config_round_trips_feedback_batch_threshold(tmp_path: Path) -> Non
     assert loaded.scheduler.feedback_batch_threshold == 5
 
 
+def test_save_config_round_trips_profile_consolidation_scheduler_fields(tmp_path: Path) -> None:
+    """All ProfileConsolidator scheduler knobs survive a full config rewrite."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.profile_consolidation_enabled = False
+    config.scheduler.profile_consolidation_interval_hours = 23
+    config.scheduler.profile_consolidation_like_target_upper = 321
+    config.scheduler.profile_consolidation_like_target_soft = 234
+    config.scheduler.profile_consolidation_archive_enabled = False
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.scheduler.profile_consolidation_enabled is False
+    assert loaded.scheduler.profile_consolidation_interval_hours == 23
+    assert loaded.scheduler.profile_consolidation_like_target_upper == 321
+    assert loaded.scheduler.profile_consolidation_like_target_soft == 234
+    assert loaded.scheduler.profile_consolidation_archive_enabled is False
+
+
 def test_settings_save_path_preserves_feedback_batch_threshold(tmp_path: Path) -> None:
     """The exact sequence the settings API runs: load → mutate → save → reload.
 
@@ -3214,14 +3234,27 @@ trending_refresh_hours = 5
 
 
 class TestUnifiedInterestLineFlag:
-    """统一兴趣更新线 Wave A 回退开关（scheduler.unified_interest_line）。
+    """统一兴趣更新线回退开关（scheduler.unified_interest_line）。
 
-    Wave A 默认 false：反馈仍只走旧批线。打开会让 /api/feedback 同时喂
-    pipeline，与仍在跑的旧批线双计——所以合入时必须默认关。
+    2026-07-28 经真实 A/B 三道门与 A/A 噪声控制后默认开启；显式 false
+    仍逐字节回退旧反馈批线。
     """
 
-    def test_defaults_off(self) -> None:
-        assert Config().scheduler.unified_interest_line is False
+    def test_absent_key_loads_as_true_through_load_config(self, tmp_path: Path) -> None:
+        """真实安装的 config.toml 没有这个键——必须经 load_config 得 True。
+
+        2026-07-28 真机 E2E 抓到 dataclass 默认与加载路径 _coerce_bool 默认漂移：
+        直构 SchedulerConfig() 是 True，真实加载却是 False，统一线在真后端从未启用。
+        """
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[scheduler]\ndiscovery_limit = 10\n", encoding="utf-8")
+
+        config = load_config(config_path)
+
+        assert config.scheduler.unified_interest_line is True
+
+    def test_defaults_on(self) -> None:
+        assert Config().scheduler.unified_interest_line is True
 
     def test_toml_true_survives_the_dataclass_filter(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -3252,19 +3285,19 @@ class TestUnifiedInterestLineFlag:
         assert config.scheduler.unified_interest_line is False
         assert type(config.scheduler.unified_interest_line) is bool
 
-    def test_switch_survives_a_save_round_trip(self, tmp_path: Path) -> None:
+    def test_explicit_false_survives_a_save_round_trip(self, tmp_path: Path) -> None:
         """回退开关必须能落盘：任何一次设置保存都会整份重写 config.toml。"""
         config = Config()
-        config.scheduler.unified_interest_line = True
+        config.scheduler.unified_interest_line = False
         config_path = tmp_path / "config.toml"
         save_config(config, config_path)
 
-        assert load_config(config_path).scheduler.unified_interest_line is True
+        assert load_config(config_path).scheduler.unified_interest_line is False
 
-    def test_example_config_ships_the_switch_off(self) -> None:
+    def test_example_config_ships_the_switch_on(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 
         with example_path.open("rb") as handle:
             example = tomllib.load(handle)
 
-        assert example["scheduler"]["unified_interest_line"] is False
+        assert example["scheduler"]["unified_interest_line"] is True

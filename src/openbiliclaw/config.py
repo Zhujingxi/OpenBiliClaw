@@ -477,8 +477,9 @@ class SchedulerConfig:
     # 统一兴趣更新线（docs/plans/2026-07-27-unified-interest-line-spec.md）。
     # true 时 /api/feedback 把反馈喂进认知流水线快线，并让含 FEEDBACK 信号的
     # INTEREST 缓冲在达到 ``feedback_batch_threshold`` 时绕过最短间隔立即消费。
-    # Wave A 默认 false：旧反馈批线仍在跑，同时打开会让同一条反馈被双计。
-    unified_interest_line: bool = False
+    # 2026-07-28 经真实 A/B 三道门与 A/A 噪声控制后默认开启；false 保留为
+    # 逐字节回退到旧反馈批线的紧急开关。
+    unified_interest_line: bool = True
     # Default off. The auto-updater pulls from GitHub releases and
     # restarts the backend when a newer version is detected, but it has
     # historically caused restart loops when the local
@@ -1511,7 +1512,12 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     ),
                     "unified_interest_line": _coerce_bool(
                         sched_raw.get("unified_interest_line"),
-                        default=False,
+                        # Must match the dataclass default. The E2E on
+                        # 2026-07-28 caught them drifting: the dataclass said
+                        # True but every real config.toml (no key) loaded
+                        # through here and got False, so the unified line
+                        # never engaged on a live backend.
+                        default=True,
                     ),
                     "auto_update_enabled": _coerce_bool(
                         sched_raw.get("auto_update_enabled"),
@@ -3044,6 +3050,16 @@ def _render_config_toml(
             # unified interest line's priority-flush threshold.
             f"feedback_batch_threshold = {config.scheduler.feedback_batch_threshold}",
             f"unified_interest_line = {_toml_bool(config.scheduler.unified_interest_line)}",
+            "profile_consolidation_enabled = "
+            f"{_toml_bool(config.scheduler.profile_consolidation_enabled)}",
+            "profile_consolidation_interval_hours = "
+            f"{config.scheduler.profile_consolidation_interval_hours}",
+            "profile_consolidation_like_target_upper = "
+            f"{config.scheduler.profile_consolidation_like_target_upper}",
+            "profile_consolidation_like_target_soft = "
+            f"{config.scheduler.profile_consolidation_like_target_soft}",
+            "profile_consolidation_archive_enabled = "
+            f"{_toml_bool(config.scheduler.profile_consolidation_archive_enabled)}",
             f"auto_update_enabled = {_toml_bool(config.scheduler.auto_update_enabled)}",
             "auto_update_check_interval_hours = "
             f"{config.scheduler.auto_update_check_interval_hours}",

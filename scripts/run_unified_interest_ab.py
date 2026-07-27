@@ -8,9 +8,16 @@ three gates from ``docs/plans/2026-07-27-unified-interest-line-spec.md`` §Phase
          must not be lost by the merge).
   gate2  top-10 interest-name Jaccard >= 0.8 — the existing interest picture must
          survive the input-shape change (compact feedback rows -> full signals).
-  gate3  retraction non-amplification — the deliberate ``exclude -> discount``
-         change for retractions must not produce a new dislike or push any
-         interest weight UP.
+  gate3  targeted retraction non-amplification — the deliberate
+         ``exclude -> discount`` change must neither add a dislike matching the
+         retracted topic nor raise an interest matching that topic.
+
+``--aa-control`` runs Path B twice over the same feedback set, with no
+retraction in either run, then applies gate 3's targeted comparison. The
+2026-07-28 synthetic A/A control produced six unrelated introduced interests
+from identical inputs, proving that global interest freeze measured
+independent-LLM run noise rather than retraction amplification. Unrelated drift
+is therefore diagnostic only and explicitly outside gate 3.
 
 Path A is the legacy ``_process_feedback_batch_if_needed_locked`` driven through
 its own cursor. Path B builds ``SignalType.FEEDBACK`` signals with
@@ -24,7 +31,8 @@ including by ``--synthetic``, which appends its clearly-labelled rows to a copy.
 
 Usage:
     OPENBILICLAW_PROJECT_ROOT=/path/to/isolated/root \\
-        .venv/bin/python scripts/run_unified_interest_ab.py [--limit N] [--synthetic]
+        .venv/bin/python scripts/run_unified_interest_ab.py \
+        [--limit N] [--synthetic] [--aa-control]
 
 Exit codes: 0 all gates passed, 1 a gate failed, 2 bad input (sample too small,
 missing root, ...).
@@ -39,9 +47,10 @@ import os
 import shutil
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT / "src") not in sys.path:
@@ -123,6 +132,22 @@ def interest_weights(preference: dict[str, Any]) -> dict[str, float]:
     return weights
 
 
+def topic_matches_target(text: str, target: str) -> bool:
+    """Whether ``text`` names ``target`` via normalized containment.
+
+    Retraction probes carry the original item's topic when available and fall
+    back to its title. Interest/dislike labels are often shorter than a content
+    title (for example ``Rust 编程`` inside ``Rust 编程异步实战``), so matching
+    is deliberately bidirectional rather than exact.
+    """
+
+    normalized_text = " ".join(text.casefold().split())
+    normalized_target = " ".join(target.casefold().split())
+    if not normalized_text or not normalized_target:
+        return False
+    return normalized_text in normalized_target or normalized_target in normalized_text
+
+
 def top_interest_names(preference: dict[str, Any], top_n: int = DEFAULT_TOP_N) -> list[str]:
     """The ``top_n`` interest names by weight, heaviest first (name-stable ties)."""
     weights = interest_weights(preference)
@@ -195,40 +220,57 @@ def gate3_retraction_not_amplified(
     *,
     baseline_after: dict[str, Any],
     retraction_after: dict[str, Any],
+    retraction_target: str,
 ) -> GateResult:
-    """Gate 3: adding one retraction to B must add no dislike and lift no weight.
+    """Gate 3: a retraction must not amplify its own matching topic.
 
     Both inputs are unified-line runs over the same feedback set; the second one
     also carries a synthetic retraction. The legacy batch dropped retractions
-    entirely, so this is the one deliberate semantic change in the merge and it
-    has to be shown to be non-amplifying in both directions that matter.
+    entirely, so this deliberate semantic change must not (a) create a dislike
+    whose text names/matches ``retraction_target`` or (b) increase any matching
+    interest's weight (including introducing one from an implicit zero).
+
+    Unrelated dislikes, weight drift, and introduced interests are outside this
+    causal gate. On 2026-07-28, an identical-input synthetic A/A control produced
+    six unrelated introduced interests, proving a global freeze measures LLM
+    run-to-run noise rather than retraction amplification.
     """
     added_dislikes = new_dislikes(baseline_after, retraction_after)
+    targeted_added_dislikes = {
+        dislike for dislike in added_dislikes if topic_matches_target(dislike, retraction_target)
+    }
     base_weights = interest_weights(baseline_after)
     retr_weights = interest_weights(retraction_after)
-    raised = {
-        name: [base_weights[name], weight]
+    targeted_raised = {
+        name: [base_weights.get(name, 0.0), weight]
         for name, weight in retr_weights.items()
-        if name in base_weights and weight > base_weights[name]
+        if topic_matches_target(name, retraction_target) and weight > base_weights.get(name, 0.0)
     }
-    introduced = sorted(set(retr_weights) - set(base_weights))
-    passed = not added_dislikes and not raised and not introduced
+    unrelated_added_dislikes = sorted(added_dislikes - targeted_added_dislikes)
+    unrelated_raised = {
+        name: [base_weights.get(name, 0.0), weight]
+        for name, weight in retr_weights.items()
+        if not topic_matches_target(name, retraction_target)
+        and weight > base_weights.get(name, 0.0)
+    }
+    passed = not targeted_added_dislikes and not targeted_raised
     parts: list[str] = []
-    if added_dislikes:
-        parts.append(f"新增dislike {sorted(added_dislikes)}")
-    if raised:
-        parts.append(f"权重上调 {sorted(raised)}")
-    if introduced:
-        parts.append(f"新增兴趣 {introduced}")
+    if targeted_added_dislikes:
+        parts.append(f"目标新增dislike {sorted(targeted_added_dislikes)}")
+    if targeted_raised:
+        parts.append(f"目标权重上调 {sorted(targeted_raised)}")
     return GateResult(
         name="gate3_retraction_not_amplified",
         passed=passed,
-        observed="；".join(parts) if parts else "无新增dislike、无权重上调",
-        threshold="no new dislike AND no interest weight increase",
+        observed="；".join(parts) if parts else "目标无新增dislike、无权重上调",
+        threshold="targeted new dislikes = 0 AND targeted weight gains = 0",
         detail={
-            "added_dislikes": sorted(added_dislikes),
-            "raised_weights": raised,
-            "introduced_interests": introduced,
+            "scope": "retraction_target",
+            "retraction_target": retraction_target,
+            "targeted_added_dislikes": sorted(targeted_added_dislikes),
+            "targeted_raised_weights": targeted_raised,
+            "ignored_unrelated_added_dislikes": unrelated_added_dislikes,
+            "ignored_unrelated_raised_weights": unrelated_raised,
         },
     )
 
@@ -240,6 +282,7 @@ def evaluate_gates(
     unified_before: dict[str, Any],
     unified_after: dict[str, Any],
     unified_retraction_after: dict[str, Any],
+    retraction_target: str,
     top_n: int = DEFAULT_TOP_N,
     floor: float = DEFAULT_JACCARD_FLOOR,
 ) -> list[GateResult]:
@@ -260,24 +303,46 @@ def evaluate_gates(
         gate3_retraction_not_amplified(
             baseline_after=unified_after,
             retraction_after=unified_retraction_after,
+            retraction_target=retraction_target,
         ),
     ]
 
 
 def render_table(gates: list[GateResult]) -> str:
     """Human-readable gate table (the JSON summary is the machine contract)."""
-    rows = [("门", "结果", "观测值", "门槛")]
+    rows = [("门", "范围", "结果", "观测值", "门槛")]
     rows += [
-        (gate.name, "PASS" if gate.passed else "FAIL", gate.observed, gate.threshold)
+        (
+            gate.name,
+            (
+                f"撤回目标：{gate.detail['retraction_target']}"
+                if gate.detail.get("scope") == "retraction_target"
+                else "全局"
+            ),
+            "PASS" if gate.passed else "FAIL",
+            gate.observed,
+            gate.threshold,
+        )
         for gate in gates
     ]
-    widths = [max(len(str(row[i])) for row in rows) for i in range(4)]
+    widths = [max(_display_width(str(row[i])) for row in rows) for i in range(5)]
     lines = []
     for index, row in enumerate(rows):
-        lines.append("  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+        lines.append(
+            "  ".join(_pad_display(str(cell), widths[i]) for i, cell in enumerate(row)).rstrip()
+        )
         if index == 0:
             lines.append("  ".join("-" * width for width in widths))
     return "\n".join(lines)
+
+
+def _display_width(value: str) -> int:
+    """Terminal width with CJK wide/full-width characters counted as two."""
+    return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in value)
+
+
+def _pad_display(value: str, width: int) -> str:
+    return value + " " * max(0, width - _display_width(value))
 
 
 def build_summary(
@@ -287,12 +352,14 @@ def build_summary(
     synthetic_added: int,
     source_root: str,
     baseline_commit: str,
+    mode: str = "ab",
 ) -> dict[str, Any]:
     """The machine-readable summary printed last on stdout."""
     return {
         "schema": "unified_interest_line_ab/1",
         "source_root": source_root,
         "baseline_commit": baseline_commit,
+        "mode": mode,
         "sample_size": sample_size,
         "synthetic_feedback_added": synthetic_added,
         "all_gates_passed": all(gate.passed for gate in gates),
@@ -375,6 +442,17 @@ def _is_retraction(event: dict[str, Any]) -> bool:
     return str(metadata.get("feedback_type") or "").strip().lower() == "retraction"
 
 
+def _retraction_target(event: dict[str, Any]) -> str:
+    """Best available topic label for gate 3, falling back to item title."""
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("topic_label", "topic_key", "topic_group"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+    return str(event.get("title") or "").strip()
+
+
 async def _append_synthetic_feedback(memory: Any, count: int) -> None:
     """Top the sample up with clearly-labelled synthetic rows (copy only)."""
     kinds = ["dislike", "like"]
@@ -392,7 +470,7 @@ async def _append_synthetic_feedback(memory: Any, count: int) -> None:
         )
 
 
-async def _append_synthetic_retraction(memory: Any, title: str) -> None:
+async def _append_synthetic_retraction(memory: Any, title: str, topic: str) -> None:
     """One synthetic retraction of an existing positive (gate 3's probe)."""
     await memory.propagate_event(
         {
@@ -401,6 +479,7 @@ async def _append_synthetic_retraction(memory: Any, title: str) -> None:
             "metadata": {
                 "feedback_type": "retraction",
                 "feedback_note": f"{SYNTHETIC_PREFIX} 门3 撤回探针",
+                "topic_label": topic,
                 "synthetic": True,
             },
         }
@@ -434,6 +513,17 @@ async def _run_unified(
     engine = _build_engine(root, unified=True, threshold=threshold)
     memory = engine._memory
     before = dict(memory.get_layer("preference").data)
+    analyzer = engine.pipeline._preference_analyzer
+    original_analyze_events = analyzer.analyze_events
+    completed_llm_runs = 0
+
+    async def _tracked_analyze_events(**kwargs: Any) -> dict[str, Any]:
+        nonlocal completed_llm_runs
+        result = await original_analyze_events(**kwargs)
+        completed_llm_runs += 1
+        return cast("dict[str, Any]", result)
+
+    analyzer.analyze_events = _tracked_analyze_events
     signals: list[Any] = []
     for row in rows:
         metadata = row.get("metadata")
@@ -450,6 +540,11 @@ async def _run_unified(
     # consumption the scheduler's shim would trigger.
     await engine.pipeline.tick()
     await engine.wait_for_pending_edits()
+    if completed_llm_runs == 0:
+        raise RuntimeError(
+            "Unified interest run completed without a successful PreferenceAnalyzer "
+            "LLM result; refusing to report a quality-gate verdict."
+        )
     return before, dict(memory.get_layer("preference").data)
 
 
@@ -466,6 +561,12 @@ async def _amain(argv: list[str]) -> int:
         action="store_true",
         help=f"top the sample up to {MIN_FEEDBACK_SAMPLE} with clearly-labelled "
         "synthetic feedback appended to a COPY (never the source root)",
+    )
+    parser.add_argument(
+        "--aa-control",
+        action="store_true",
+        help="run the unified baseline path twice without a retraction and apply "
+        "gate 3's targeted comparison to measure independent-LLM run noise",
     )
     parser.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
     parser.add_argument("--jaccard-floor", type=float, default=DEFAULT_JACCARD_FLOOR)
@@ -521,8 +622,20 @@ async def _amain(argv: list[str]) -> int:
         # with the sample instead of hand-feeding it a different set.
         first_id = int(real_rows[0].get("id", 0))
         legacy_cursor = max(0, first_id - 1)
-        # One retraction of the newest positive drives gate 3.
-        retraction_title = str(real_rows[-1].get("title") or "")
+        # One retraction of the newest positive drives gate 3. Prefer a real
+        # ``like`` row; synthetic top-up can otherwise leave a trailing dislike.
+        positive_rows = [
+            row
+            for row in real_rows
+            if isinstance(row.get("metadata"), dict)
+            and str(row["metadata"].get("feedback_type") or "").strip().lower() == "like"
+        ]
+        retraction_row = positive_rows[-1] if positive_rows else real_rows[-1]
+        retraction_title = str(retraction_row.get("title") or "")
+        retraction_target = _retraction_target(retraction_row)
+        if not retraction_target:
+            print("Gate 3 retraction probe has no usable topic or title.", file=sys.stderr)
+            return EXIT_BAD_INPUT
 
         threshold = max(1, len(real_rows))
         print(
@@ -530,6 +643,37 @@ async def _amain(argv: list[str]) -> int:
             f"游标 {legacy_cursor}，源根 {source_root}",
             file=sys.stderr,
         )
+
+        if args.aa_control:
+            _, unified_first_after = await _run_unified(
+                _clone_root(sample_root, workdir / "unified-aa-first"),
+                real_rows,
+                threshold=threshold,
+            )
+            _, unified_second_after = await _run_unified(
+                _clone_root(sample_root, workdir / "unified-aa-second"),
+                real_rows,
+                threshold=threshold,
+            )
+            gates = [
+                gate3_retraction_not_amplified(
+                    baseline_after=unified_first_after,
+                    retraction_after=unified_second_after,
+                    retraction_target=retraction_target,
+                )
+            ]
+            print("A/A control：两次统一线基线运行，均无 retraction。", file=sys.stderr)
+            print(render_table(gates), file=sys.stderr)
+            summary = build_summary(
+                gates=gates,
+                sample_size=len(real_rows),
+                synthetic_added=synthetic_added,
+                source_root=str(source_root),
+                baseline_commit=_git_head(PROJECT_ROOT),
+                mode="aa_control",
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+            return EXIT_OK if summary["all_gates_passed"] else EXIT_GATE_FAILED
 
         legacy_before, legacy_after = await _run_legacy(
             _clone_root(sample_root, workdir / "legacy"),
@@ -547,7 +691,11 @@ async def _amain(argv: list[str]) -> int:
         # drops retractions) so the report can show both sides of the change.
         retraction_root = _clone_root(sample_root, workdir / "unified-retraction")
         _, retraction_memory, _ = _open_root(retraction_root)
-        await _append_synthetic_retraction(retraction_memory, retraction_title)
+        await _append_synthetic_retraction(
+            retraction_memory,
+            retraction_title,
+            retraction_target,
+        )
         retraction_rows = [
             *real_rows,
             *[
@@ -566,6 +714,7 @@ async def _amain(argv: list[str]) -> int:
             unified_before=unified_before,
             unified_after=unified_after,
             unified_retraction_after=unified_retraction_after,
+            retraction_target=retraction_target,
             top_n=args.top_n,
             floor=args.jaccard_floor,
         )

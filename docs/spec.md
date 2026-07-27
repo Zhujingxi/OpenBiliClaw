@@ -294,7 +294,9 @@ runtime 与次级 hydration 是独立分支。
 │  │ 扩展捕捉 E2E：run -> runtime-stream -> 入口归位 -> DOM 操作 -> /api/events │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 普通 /api/events：accepted -> memory -> ProfileUpdatePipeline -> request_replenishment │ │
+│  │/api/events: accepted → memory → request_replenishment│   │
+│  │兴趣：事件/对话/反馈(priority) → ProfileUpdatePipeline│   │
+│  │ → 单一 INTEREST 线；旧反馈批仅由 false 回退          │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ delight / interest.probe / avoidance.probe 主动推送（含probe_mode）│ │

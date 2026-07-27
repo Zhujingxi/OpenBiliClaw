@@ -620,6 +620,9 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ 兴趣：事件/对话/反馈(priority) → 统一管线      │
+│       ProfileUpdatePipeline → INTEREST         │
+│ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

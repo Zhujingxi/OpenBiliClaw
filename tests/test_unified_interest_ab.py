@@ -29,6 +29,7 @@ from scripts.run_unified_interest_ab import (
     new_dislikes,
     render_table,
     top_interest_names,
+    topic_matches_target,
 )
 
 if TYPE_CHECKING:
@@ -87,6 +88,10 @@ class TestPrimitives:
         assert jaccard(set(), set()) == 1.0
         assert jaccard({"a"}, set()) == 0.0
         assert jaccard({"a", "b"}, {"b", "c"}) == 1 / 3
+
+    def test_topic_match_uses_bidirectional_normalized_containment(self) -> None:
+        assert topic_matches_target("Rust 编程", "  RUST   编程异步实战  ") is True
+        assert topic_matches_target("并发编程", "Rust 编程异步实战") is False
 
 
 class TestGate1NewDislikeSuperset:
@@ -186,47 +191,78 @@ class TestGate3RetractionNotAmplified:
         baseline = _pref([_interest("城市建筑", 0.9)], dislikes=["标题党"])
         after = _pref([_interest("城市建筑", 0.7)], dislikes=["标题党"])
 
-        gate = gate3_retraction_not_amplified(baseline_after=baseline, retraction_after=after)
+        gate = gate3_retraction_not_amplified(
+            baseline_after=baseline,
+            retraction_after=after,
+            retraction_target="城市建筑纪录片",
+        )
 
         assert gate.passed is True
-        assert gate.detail == {
-            "added_dislikes": [],
-            "raised_weights": {},
-            "introduced_interests": [],
-        }
+        assert gate.detail["targeted_added_dislikes"] == []
+        assert gate.detail["targeted_raised_weights"] == {}
 
-    def test_fails_when_the_retraction_produces_a_new_dislike(self) -> None:
+    def test_fails_when_the_retraction_produces_a_new_targeted_dislike(self) -> None:
         baseline = _pref([_interest("城市建筑", 0.9)])
-        after = _pref([_interest("城市建筑", 0.9)], dislikes=["城市建筑"])
+        after = _pref([_interest("城市建筑", 0.9)], dislikes=["城市建筑美学"])
 
-        gate = gate3_retraction_not_amplified(baseline_after=baseline, retraction_after=after)
+        gate = gate3_retraction_not_amplified(
+            baseline_after=baseline,
+            retraction_after=after,
+            retraction_target="城市建筑美学纪录片",
+        )
 
         assert gate.passed is False
-        assert gate.detail["added_dislikes"] == ["城市建筑"]
+        assert gate.detail["targeted_added_dislikes"] == ["城市建筑美学"]
 
-    def test_fails_when_the_retraction_raises_an_interest_weight(self) -> None:
+    def test_fails_when_the_retraction_raises_a_targeted_interest_weight(self) -> None:
         baseline = _pref([_interest("城市建筑", 0.6)])
         after = _pref([_interest("城市建筑", 0.8)])
 
-        gate = gate3_retraction_not_amplified(baseline_after=baseline, retraction_after=after)
+        gate = gate3_retraction_not_amplified(
+            baseline_after=baseline,
+            retraction_after=after,
+            retraction_target="城市建筑纪录片",
+        )
 
         assert gate.passed is False
-        assert gate.detail["raised_weights"] == {"城市建筑": [0.6, 0.8]}
+        assert gate.detail["targeted_raised_weights"] == {"城市建筑": [0.6, 0.8]}
 
-    def test_fails_when_the_retraction_introduces_a_brand_new_interest(self) -> None:
-        baseline = _pref([_interest("城市建筑", 0.6)])
-        after = _pref([_interest("城市建筑", 0.6), _interest("凭空冒出", 0.5)])
+    def test_ignores_unrelated_interest_and_dislike_drift(self) -> None:
+        baseline = _pref(
+            [_interest("Rust 编程", 0.6), _interest("城市建筑", 0.4)],
+            dislikes=["旧避雷"],
+        )
+        after = _pref(
+            [
+                _interest("Rust 编程", 0.5),
+                _interest("城市建筑", 0.9),
+                _interest("异步编程", 0.7),
+            ],
+            dislikes=["旧避雷", "标题党"],
+        )
 
-        gate = gate3_retraction_not_amplified(baseline_after=baseline, retraction_after=after)
+        gate = gate3_retraction_not_amplified(
+            baseline_after=baseline,
+            retraction_after=after,
+            retraction_target="Rust 编程教程",
+        )
 
-        assert gate.passed is False
-        assert gate.detail["introduced_interests"] == ["凭空冒出"]
+        assert gate.passed is True
+        assert gate.detail["ignored_unrelated_added_dislikes"] == ["标题党"]
+        assert gate.detail["ignored_unrelated_raised_weights"] == {
+            "城市建筑": [0.4, 0.9],
+            "异步编程": [0.0, 0.7],
+        }
 
     def test_an_archived_interest_is_not_read_as_a_weight_change(self) -> None:
         baseline = _pref([_interest("标题党", 0.6)])
         after = _pref([_interest("标题党", 0.6, state="archived")])
 
-        gate = gate3_retraction_not_amplified(baseline_after=baseline, retraction_after=after)
+        gate = gate3_retraction_not_amplified(
+            baseline_after=baseline,
+            retraction_after=after,
+            retraction_target="标题党",
+        )
 
         assert gate.passed is True
 
@@ -241,6 +277,7 @@ class TestReportAssembly:
             unified_before=_pref(),
             unified_after=unified_after,
             unified_retraction_after=unified_after,
+            retraction_target="城市建筑",
         )
 
     def test_evaluate_gates_returns_the_three_gates_in_spec_order(self) -> None:
@@ -276,6 +313,7 @@ class TestReportAssembly:
             unified_before=_pref(),
             unified_after=_pref(),
             unified_retraction_after=_pref(),
+            retraction_target="城市建筑",
         )
 
         summary = build_summary(
@@ -297,6 +335,7 @@ class TestReportAssembly:
         assert len(lines) == 2 + 3
         assert "PASS" in table
         assert "gate2_top_interest_jaccard" in table
+        assert "撤回目标：城市建筑" in table
 
 
 class TestSourceIsolation:

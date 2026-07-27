@@ -756,16 +756,18 @@ class _StopAfterSoulEngineError(Exception):
     """Sentinel: abort the bootstrap once the SoulEngine has been constructed."""
 
 
-def test_build_openclaw_adapter_services_forwards_feedback_batch_config(
+def test_build_openclaw_adapter_services_forwards_soul_engine_config_and_database(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """The OpenClaw surface reads the same feedback knobs the API surface does.
+    """The OpenClaw surface matches the API's SoulEngine construction contract.
 
     Regression (found in unified-interest-line Wave A): the bootstrap never
     passed ``feedback_batch_threshold`` (so the adapter's feedback batch always
     ran at the hardcoded default 3) and Wave A only plumbed
     ``unified_interest_line`` through ``api/runtime_context.py``, which would
-    have left OpenClaw on the legacy line after the flag flip.
+    have left OpenClaw on the legacy line after the flag flip. It also omitted
+    the shared database and satisfaction filter, splitting persistence and event
+    filtering semantics from the API runtime.
 
     The bootstrap is aborted with a sentinel right after ``SoulEngine`` is built
     (``LLMService`` is the very next construction) so the test needs no fakes for
@@ -778,6 +780,7 @@ def test_build_openclaw_adapter_services_forwards_feedback_batch_config(
     cfg.data_dir = str(tmp_path)
     cfg.scheduler.feedback_batch_threshold = 6
     cfg.scheduler.unified_interest_line = True
+    cfg.soul.preference.satisfaction_filter_enabled = False
 
     captured: dict[str, object] = {}
 
@@ -815,6 +818,9 @@ def test_build_openclaw_adapter_services_forwards_feedback_batch_config(
 
     assert captured["feedback_batch_threshold"] == 6
     assert captured["unified_interest_line"] is True
+    assert captured["satisfaction_filter_enabled"] is False
+    memory = captured["memory"]
+    assert captured["database"] is memory.database
 
 
 def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> None:

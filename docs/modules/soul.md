@@ -56,7 +56,7 @@
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
 | SoulEngine.update_from_feedback() | ✅ | compatibility facade 仍按 feedback event → 假设对象 → rebuild marker 的历史顺序工作；三段分别提取为 `apply_feedback_object()`（confirm→validated+置信度≥0.75，reject→未验证+≤0.35）、`mark_feedback_rebuild()` 与只读 `feedback_result()`。对话结算公开 admission façade `submit_hypothesis_settlement()` / `submit_confusion_answer_settlement()` / `submit_confusion_settlement()` 只构造 immutable payload 并等待唯一 queue worker；仅实际 worker Task 可调用 `_apply_*`。内部层先校验受理时冻结的 `AnchorAdmissionSnapshot`，再读取/创建 immutable ref winner。旧 `settle_*` direct executor、执行期 current-anchor 补抓、claim/lease/segment CAS 与恢复 scanner 均已删除；`applied=1` 才发布对象与全端投影。卡片四动作、legacy、锚建立/释放/恢复、普通 chat settles、探针与疑惑归属重放均已接入同一队列。 |
-| SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致。**v0.3.18x+：该方法已是 shim**——`scheduler.unified_interest_line=false` 走上述旧批线（回退路径，逐字节不变，`TestFeedbackBatchContract` 6 条契约钉死）；`true` 时先做一次幂等的旧游标迁移（`signal_from_feedback` 还原 FEEDBACK 信号，retraction 跳过，标记 + 游标一次原子写盘），再 `pipeline.tick()` 让满足 FEEDBACK 优先级阈值的 INTEREST 缓冲立即消费。三个调用方（`FeedbackBatchScheduler` / CLI 反馈命令 / OpenClaw 适配）零改动 |
+| SoulEngine.process_feedback_batch_if_needed() | ✅ | **默认是统一兴趣线 shim**：`scheduler.unified_interest_line=true` 时先做一次幂等的旧游标迁移（`signal_from_feedback` 还原 FEEDBACK 信号，retraction 跳过，标记 + 游标一次原子写盘），再 `pipeline.tick()` 让满足 FEEDBACK 优先级阈值的 INTEREST 缓冲立即消费；不再运行独立的反馈全量分析。`false` 才回到旧批线（逐字节回退，`TestFeedbackBatchContract` 6 条契约钉死）。三个调用方（`FeedbackBatchScheduler` / CLI 反馈命令 / OpenClaw 适配）零改动 |
 | SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
 | 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
@@ -314,7 +314,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 | 1b | 对话学习整份重建 | `dialogue_soul_rebuild` | `engine.learn_from_dialogue` |
 | 2 | dislike 清池 | `dislike_purge` | `engine.learn_from_dialogue`（调度时记录） |
 | 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（SURFACE/INTEREST/ROLE 快线层 changed 时，每层一行；VALUES/CORE 已封死不写）。`source` 通常是 `pipeline:<层名>`；当本批含 FEEDBACK 信号（统一兴趣更新线）时改记 `source="feedback"`，保住反馈线在台账里的连续性——`unified_interest_line=true` 后这一行就是 #4a 退役写点的接班人，反馈线的偏好写入全部在此可查 |
-| 4a | 反馈批偏好覆写（**退役中**） | `feedback_preference_overwrite` | `engine._process_feedback_batch_legacy → _process_feedback_batch_if_needed_locked`。**`unified_interest_line=true` 时停写**：反馈的偏好写入改由 `pipeline_layer_update(source="feedback")`（#3）承担。只停写不删读——`openbiliclaw ledger` 查询该写点仍能显示历史行 |
+| 4a | 反馈批偏好覆写（**已退役**） | `feedback_preference_overwrite` | 默认统一兴趣线已停写，反馈偏好改由 `pipeline_layer_update(source="feedback")`（#3）承担。历史行只读保留，`openbiliclaw ledger` 仍可查询；仅显式设置 `unified_interest_line=false` 回退旧批线时才会恢复写入 |
 | 4b | 反馈批整份重建（P2 已过门控③） | `feedback_soul_rebuild` | `engine._gated_feedback_soul_rebuild`（旧反馈批与统一兴趣更新线共用，写点与 trigger=`feedback_batch` 不变） |
 | 1c | 确认假设攒批整份重建 | `hypotheses_soul_rebuild` | `engine._execute_pending_rebuild`（rebuild_pending 状态机） |
 | — | P1 退役深层缓冲迁移（一次性） | `pipeline_deep_migration` | `pipeline.migrate_pipeline_deep_buffers`（构造时幂等运行） |
@@ -563,12 +563,11 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 10. 同时生成聚合层的 cognition updates
 11. 最后更新 `feedback_state.json` 的游标和处理时间
 
-##### `unified_interest_line=true` 时这一节换成什么
+##### 默认统一兴趣线如何取代旧反馈批
 
-`process_feedback_batch_if_needed()` 变成一层 shim（`soul/engine.py`），方法名不变——`FeedbackBatchScheduler`、CLI 反馈命令、OpenClaw 适配三个调用方零改动：
+`feedback_preference_overwrite` 已退役：默认开启统一兴趣线后不再写新行，历史行仍可由 `openbiliclaw ledger` 查询。写点清单中的接班人是 `pipeline_layer_update(source="feedback")`。`process_feedback_batch_if_needed()` 变成一层 shim（`soul/engine.py`），方法名不变——`FeedbackBatchScheduler`、CLI 反馈命令、OpenClaw 适配三个调用方零改动：
 
-- **开关关**：逐字回到上面的 1–11（`_process_feedback_batch_legacy`），这是回退路径。
-- **开关开**：
+- **默认（开关开）**：
   1. **一次性幂等迁移**：读旧游标之后尚未消费的 feedback 事件，逐条经 `signal_from_feedback` 还原成 `SignalType.FEEDBACK` 信号喂进 `ProfileUpdatePipeline`。**不能用 `signals_from_events`**——它永远不产 FEEDBACK 类型，迁移行会静默丢掉全部反馈特权（优先级消费、dislike 归档、门控重建、`source="feedback"` 台账）。
      - **retraction 跳过**：旧批线本就把它排除在阈值与分析输入之外，且它们早已在写入当时抵消过对应的正向行；此刻补一次折价只是对着一个从未含那些正向行的偏好层重放噪声。游标仍越过它们，不会每轮重扫。「排除→折价」的语义变更只对**将来**的实时信号生效，由 A/B 门 3 把关。
      - **顺序：先落游标+标记，后入线**。两者同处 `feedback_state.json` 一次原子写入，所以「标记写了但游标没推进」的分裂态在结构上不存在。剩下的崩溃窗口（状态已落盘、进程在缓冲持久化前死掉）最多丢掉未迁移的尾巴——有界，且这些行永远留在事件账本里可查；反向顺序会在每次崩溃重启时把真实用户反馈重新计入偏好层，无界重复。
@@ -576,6 +575,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
   2. **触发一次 `pipeline.tick()`**，让已满足 FEEDBACK 优先级阈值的 INTEREST 缓冲**立刻**消费，而不是等满 `min_interval_seconds`。
   - 返回形状保留 `triggered / feedback_count / preference_updated / profile_rebuilt`（三个调用方都不读返回值，但形状仍是稳定契约），另加 `unified_interest_line: True`、`migrated_feedback_events` 与 `preference_changed`。语义对齐：`feedback_count` = 本次真正投入的 FEEDBACK 信号数（迁移条数 + 迁移后仍留在 INTEREST 缓冲里的条数，两者互斥）；`preference_updated` 沿用旧批线含义「偏好层被重写过」（= 有 INTEREST 批被消费），「重写后是否产生可见变化」另记在 `preference_changed`。迁移那一次 `ingest_batch` 可能因既有的强信号旁路当场就消费掉缓冲，所以 `triggered` 同时看迁移与 `tick()` 两处的层更新，不能只看后者。
   - held-replay 不在 shim 里重跑：统一线上它是反馈批特权，已经在 `_after_pipeline_feedback_interest` 里、且仅当被消费的批真的含 FEEDBACK 信号时运行过。
+- **显式回退（开关关）**：逐字回到上面的 1–11（`_process_feedback_batch_legacy`），并恢复旧写点；这是应急回滚路径，不是默认数据流。
 
 #### 什么叫“变化明显”
 
