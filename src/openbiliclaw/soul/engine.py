@@ -102,6 +102,30 @@ _REBUILD_WRITE_POINT: dict[str, str] = {
 # (spec invariant 3 / r3/F1). Rejected or unvalidated hypotheses are invisible
 # to every rebuild, so a reject's next rebuild squeezes an old conclusion out.
 _REBUILD_MIN_CONFIDENCE = 0.75
+# Autonomous deep influence (2026-07-27, user decision): a hypothesis the user
+# never ruled on may shape a gated soul rebuild WITHOUT explicit confirmation,
+# once behaviour has corroborated it long enough. The bar is deliberately
+# higher than the user-confirmed path on every axis:
+# - confidence >= 0.8 (vs 0.75): on real cognition output fresh hypotheses land
+#   at 0.5-0.75; only repeated cross-cycle corroboration pushes one to 0.8+.
+# - age >= 7 days: one enthusiastic afternoon must not rewrite the deep layer;
+#   seven days spans multiple cognition cycles and usage moods.
+# - evidence >= 3: a hypothesis resting on a single observation stays a guess.
+# A user rejection (user_verdict == "rejected") blocks autonomy permanently,
+# and every autonomous rebuild still passes the posture gate. Recalibrate the
+# confidence bar after any provider/model swap (pitfall rule 3).
+_AUTO_VALIDATE_MIN_CONFIDENCE = 0.8
+_AUTO_VALIDATE_MIN_AGE_DAYS = 7
+_AUTO_VALIDATE_MIN_EVIDENCE = 3
+# Fast tier (user decision 2026-07-27, "置信度非常高的话可以直接更新"): near-
+# certainty waives the tenure bar, nothing else. On real cognition output a
+# fresh hypothesis lands at 0.5-0.75 and 0.8+ already takes repeated cross-
+# cycle corroboration, so 0.95 is only reachable when the model is essentially
+# certain across many corroborating merges. The evidence floor, the untouched-
+# by-the-user requirement, the posture gate and the rejection veto all still
+# apply — speed is the only thing this tier buys.
+_AUTO_VALIDATE_FAST_MIN_CONFIDENCE = 0.95
+_AUTO_HYPOTHESIS_REF_PREFIX = "auto_hypothesis:"
 # How many of the events init just recorded may be cited by a persisted draft.
 # Attribution here is per-round (the model was never asked which note came from
 # which event), so the notes are flagged approximate; the cap only keeps the
@@ -2326,6 +2350,19 @@ class SoulEngine:
         # ``enforce`` drops rejected candidates and demotes downgraded ones to
         # insight hypotheses (confidence × 0.6).
         gated_candidates = await self._gate_dialogue_candidates(eligible_candidates)
+        # Dialogue fast lane (user decision 2026-07-27): a gate-accepted deep
+        # candidate is the user's own first-person statement — that IS the
+        # confirmation the deep unique mode asks for. Persist it as a validated
+        # hypothesis so it becomes a durable rebuild input instead of vanishing
+        # after one preference prompt, and force a same-turn rebuild below even
+        # when no interest weight moved (a pure self-statement often doesn't).
+        accepted_deep_candidates = [
+            item
+            for item in gated_candidates
+            if str(item.get("kind", "")).strip() in _DEEP_CANDIDATE_KINDS
+        ]
+        if accepted_deep_candidates:
+            self._persist_confirmed_deep_candidates(accepted_deep_candidates, turn_id=turn_id)
         if not gated_candidates:
             return self._with_anchor_outcome(
                 {
@@ -2434,16 +2471,16 @@ class SoulEngine:
         profile_rebuilt = False
         rebuild_gate_ok = (
             self._preference_changed_significantly(existing_preference, updated_preference)
-            and not (
-                await self._gate_soul_rebuild(
-                    trigger=_REBUILD_TRIGGER_DIALOGUE,
-                    existing_preference=existing_preference,
-                    updated_preference=updated_preference,
-                    source_refs=candidate_refs,
-                    context={"candidate_refs": candidate_refs},
-                )
-            ).blocks
-        )
+            or bool(accepted_deep_candidates)
+        ) and not (
+            await self._gate_soul_rebuild(
+                trigger=_REBUILD_TRIGGER_DIALOGUE,
+                existing_preference=existing_preference,
+                updated_preference=updated_preference,
+                source_refs=candidate_refs,
+                context={"candidate_refs": candidate_refs},
+            )
+        ).blocks
         if rebuild_gate_ok:
             # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
             try:
@@ -3000,17 +3037,50 @@ class SoulEngine:
         layer.data.update({"hypotheses": [insight_hypothesis_to_dict(item) for item in insights]})
         layer.save()
 
+    @staticmethod
+    def _hypothesis_auto_validated(item: InsightHypothesis, *, now: datetime | None = None) -> bool:
+        """Whether behaviour alone has earned this hypothesis deep influence.
+
+        See the ``_AUTO_VALIDATE_*`` constants for the bar and its calibration.
+        A user verdict of any kind disqualifies: "rejected" blocks permanently,
+        and "confirmed" already travels the validated path.
+        """
+        if item.validated or item.user_verdict:
+            return False
+        if item.confidence < _AUTO_VALIDATE_MIN_CONFIDENCE:
+            return False
+        if len([e for e in item.evidence if str(e).strip()]) < _AUTO_VALIDATE_MIN_EVIDENCE:
+            return False
+        try:
+            created = datetime.fromisoformat(str(item.created_at))
+        except (TypeError, ValueError):
+            return False  # undated == unproven tenure
+        if item.confidence >= _AUTO_VALIDATE_FAST_MIN_CONFIDENCE:
+            # Near-certainty skips the tenure wait; every other guard above
+            # (evidence, no user verdict) has already been enforced.
+            return True
+        reference = now or datetime.now()
+        if created.tzinfo is not None and reference.tzinfo is None:
+            reference = reference.astimezone(created.tzinfo)
+        elif created.tzinfo is None and reference.tzinfo is not None:
+            created = created.astimezone(reference.tzinfo)
+        age = reference - created
+        return age >= timedelta(days=_AUTO_VALIDATE_MIN_AGE_DAYS)
+
     def _rebuild_active_insights(self) -> list[dict[str, object]]:
         """Insight dicts eligible to shape a soul rebuild (spec invariant 3 / F1).
 
-        Only validated hypotheses with confidence >= 0.75 are visible to a
-        rebuild; rejected/unvalidated ones are filtered out, so a reject's next
-        rebuild squeezes the old conclusion out instead of leaving it forever.
+        Two doors in: user-confirmed (validated, confidence >= 0.75) and
+        behaviour-earned autonomy (``_hypothesis_auto_validated`` — stricter
+        bar, never available to anything the user rejected). Everything else is
+        filtered out, so a reject's next rebuild squeezes the old conclusion
+        out instead of leaving it forever.
         """
         return [
             insight_hypothesis_to_dict(item)
             for item in self._load_insights()
-            if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
+            if (item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE)
+            or self._hypothesis_auto_validated(item)
         ]
 
     # -- Pending confirmed-hypotheses rebuild state machine (spec r3/F3) -------
@@ -3073,12 +3143,30 @@ class SoulEngine:
                 if isinstance(existing, dict) and isinstance(existing.get("trigger_refs"), list)
                 else []
             )
+            seen_auto_refs = (
+                [
+                    ref
+                    for ref in state.get("auto_hypothesis_trigger_refs", [])
+                    if isinstance(ref, str) and ref.startswith(_AUTO_HYPOTHESIS_REF_PREFIX)
+                ]
+                if isinstance(state.get("auto_hypothesis_trigger_refs"), list)
+                else []
+            )
             has_new_trigger = False
+            has_new_auto_ref = False
             for ref in trigger_refs:
+                if ref.startswith(_AUTO_HYPOTHESIS_REF_PREFIX):
+                    if ref in seen_auto_refs:
+                        continue
+                    seen_auto_refs.append(ref)
+                    has_new_auto_ref = True
                 if ref and ref not in refs:
                     refs.append(ref)
                     has_new_trigger = True
             if isinstance(existing, dict) and not has_new_trigger:
+                if has_new_auto_ref:
+                    state["auto_hypothesis_trigger_refs"] = seen_auto_refs
+                    self._save_rebuild_state(state)
                 return
             if not refs:
                 return
@@ -3087,6 +3175,8 @@ class SoulEngine:
                 "trigger_refs": refs,
                 "retry_count": 0,
             }
+            if has_new_auto_ref:
+                state["auto_hypothesis_trigger_refs"] = seen_auto_refs
             self._save_rebuild_state(state)
 
     async def run_pending_rebuild_if_due(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -3108,6 +3198,22 @@ class SoulEngine:
         intact rather than clobbered by this run's outcome.
         """
         current = now or datetime.now()
+        # Behaviour-earned hypotheses join the same debounced pending machine
+        # user confirmations use — same gate, same ledger, same retry bounds.
+        # _mark_rebuild_pending is idempotent for already-known refs, so
+        # re-scanning at every checkpoint cannot extend the debounce.
+        try:
+            auto_refs = sorted(
+                f"{_AUTO_HYPOTHESIS_REF_PREFIX}"
+                f"{hashlib.sha1(item.hypothesis.encode('utf-8')).hexdigest()[:12]}"
+                for item in self._load_insights()
+                if self._hypothesis_auto_validated(item, now=current)
+            )
+            if auto_refs:
+                await self._mark_rebuild_pending(auto_refs)
+        except Exception:
+            logger.debug("auto-validated hypothesis scan failed", exc_info=True)
+
         async with self._rebuild_pending_lock:
             if self._rebuild_running:
                 return {"ran": False, "reason": "in_progress"}
@@ -3168,13 +3274,18 @@ class SoulEngine:
         """
         preference = dict(self._memory.get_layer("preference").data)
         existing_profile = dict(self._memory.get_layer("soul").data)
-        validated = [
+        insights = self._load_insights()
+        confirmed = [
             item
-            for item in self._load_insights()
+            for item in insights
             if item.validated and item.confidence >= _REBUILD_MIN_CONFIDENCE
         ]
+        auto_validated = [item for item in insights if self._hypothesis_auto_validated(item)]
         context: dict[str, object] = {
-            "confirmed_hypotheses": [item.hypothesis for item in validated][
+            "confirmed_hypotheses": [item.hypothesis for item in confirmed][
+                :_REBUILD_CONTEXT_HYPOTHESIS_CAP
+            ],
+            "auto_validated_hypotheses": [item.hypothesis for item in auto_validated][
                 :_REBUILD_CONTEXT_HYPOTHESIS_CAP
             ],
             "trigger_refs": trigger_refs,
@@ -4251,6 +4362,53 @@ class SoulEngine:
             evidence=[evidence_text] if evidence_text else [],
             confidence=round(max(0.0, min(1.0, confidence)) * 0.6, 4),
         )
+
+    def _persist_confirmed_deep_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        """Persist gate-accepted deep self-statements as validated hypotheses.
+
+        First-person statements carry ``user_verdict="confirmed"`` — the user
+        said it themselves, in their own words, and the posture gate already
+        judged it consistent. Merged through ``merge_insights`` so a repeated
+        statement reinforces one row instead of duplicating.
+        """
+        hypotheses: list[InsightHypothesis] = []
+        for item in candidates:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            evidence_text = str(item.get("evidence", "")).strip()
+            hypotheses.append(
+                InsightHypothesis(
+                    hypothesis=content,
+                    evidence=[evidence_text] if evidence_text else [],
+                    confidence=_clamp_init_draft_confidence(item.get("confidence", 0.8)),
+                    validated=True,
+                    created_at=datetime.now().date().isoformat(),
+                    user_verdict="confirmed",
+                )
+            )
+        if not hypotheses:
+            return
+        try:
+            merged = self._insight_analyzer.merge_insights(self._load_insights(), hypotheses)
+            self._save_insights(merged)
+            self._ledger.record(
+                write_point="dialogue_deep_selfstatement",
+                source="chat",
+                after={
+                    "count": len(hypotheses),
+                    "kinds": sorted({str(c.get("kind", "")) for c in candidates}),
+                },
+                source_refs=[h.hypothesis[:60] for h in hypotheses],
+                turn_id=turn_id or "",
+            )
+        except Exception:
+            logger.warning("deep self-statement persistence failed", exc_info=True)
 
     def _persist_downgraded_insights(self, insights: list[InsightHypothesis]) -> None:
         existing = self._load_insights()

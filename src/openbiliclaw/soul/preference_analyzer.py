@@ -162,6 +162,8 @@ class PreferenceAnalyzer:
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
         progress_callback: ProgressCallback | None = None,
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Run structured extraction and merge the result with existing preference state.
 
@@ -182,11 +184,15 @@ class PreferenceAnalyzer:
                 existing_preference=existing_preference,
                 chunk_size=event_chunk_size,
                 progress_callback=progress_callback,
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
 
         whole_batch_prompt = build_preference_analysis_prompt(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         prompt_chars = self._prompt_char_count(whole_batch_prompt)
         should_chunk_by_budget = self.max_prompt_chars > 0 and prompt_chars > self.max_prompt_chars
@@ -204,10 +210,14 @@ class PreferenceAnalyzer:
                 existing_preference=existing_preference,
                 chunk_size=initial_chunk_size,
                 progress_callback=progress_callback,
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
         result = await self._analyze_events_single(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         # Un-chunked path has a single natural completion point.
         await self._emit_progress(progress_callback, 1, 1)
@@ -262,10 +272,14 @@ class PreferenceAnalyzer:
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         messages = build_preference_analysis_prompt(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         try:
             response = await self._complete_cacheable_preference_task(
@@ -424,6 +438,8 @@ class PreferenceAnalyzer:
         existing_preference: dict[str, object],
         chunk_size: int,
         progress_callback: ProgressCallback | None = None,
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Split events into bounded concurrent chunk batches, then fold."""
         import asyncio as _asyncio
@@ -449,6 +465,8 @@ class PreferenceAnalyzer:
             messages = build_preference_analysis_prompt(
                 events=chunk,
                 existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
             response: LLMResponse | None = None
             max_tokens = PREFERENCE_CHUNK_MAX_TOKENS
@@ -532,6 +550,8 @@ class PreferenceAnalyzer:
             safe_messages = build_preference_analysis_prompt(
                 events=[safe_event],
                 existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
             if not self._prompt_fits_budget(safe_messages):
                 logger.warning(
@@ -563,6 +583,8 @@ class PreferenceAnalyzer:
                 compact_messages = build_preference_analysis_prompt(
                     events=[compact],
                     existing_preference={},
+                    awareness_notes=awareness_notes,
+                    active_insights=active_insights,
                 )
                 if not self._prompt_fits_budget(compact_messages):
                     logger.warning(
@@ -588,7 +610,12 @@ class PreferenceAnalyzer:
         async def _run_chunk_resilient(
             chunk: list[dict[str, object]],
         ) -> list[tuple[dict[str, object], dict[str, object]]]:
-            messages = build_preference_analysis_prompt(events=chunk, existing_preference={})
+            messages = build_preference_analysis_prompt(
+                events=chunk,
+                existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
+            )
             if not self._prompt_fits_budget(messages):
                 return await _split_or_compact_chunk(chunk)
             try:

@@ -3267,3 +3267,61 @@ async def test_update_layer_seals_values_and_core(tmp_path: Path) -> None:
         assert result.changed is False
     assert profile.values_layer.values == []
     assert profile.core.core_traits == []
+
+
+@pytest.mark.asyncio
+async def test_update_interest_passes_the_recent_cognition_tail(tmp_path: Path) -> None:
+    """快线的兴趣更新要带上近期觉察/洞察，让小批事件不在真空里被解读。"""
+    from openbiliclaw.soul.layer_updaters import _update_interest
+    from openbiliclaw.soul.profile import AwarenessNote, InsightHypothesis
+
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    profile = OnionProfile()
+    profile.recent_awareness = [AwarenessNote(observation="最近在深挖 Rust 底层")]
+    profile.active_insights = [InsightHypothesis(hypothesis="可能是系统编程从业者")]
+
+    captured: dict[str, object] = {}
+
+    class _CapturingAnalyzer:
+        async def analyze_events(self, **kwargs: object) -> dict[str, object]:
+            captured.update(kwargs)
+            return dict(memory.get_layer("preference").data)
+
+    result = await _update_interest(
+        signals=[{"payload": {"event_type": "view", "title": "Rust 异步运行时精读"}}],
+        profile=profile,
+        memory=memory,
+        preference_analyzer=_CapturingAnalyzer(),  # type: ignore[arg-type]
+        profile_builder=None,  # type: ignore[arg-type]
+    )
+
+    assert result.layer == OnionLayer.INTEREST
+    notes = captured.get("awareness_notes")
+    insights = captured.get("active_insights")
+    assert notes and notes[0]["observation"] == "最近在深挖 Rust 底层"
+    assert insights and insights[0]["hypothesis"] == "可能是系统编程从业者"
+
+
+async def test_preference_chunks_keep_the_recent_cognition_context() -> None:
+    """预算或显式分片不能把快线传入的认知语境静默丢掉。"""
+    service = _RichFakeService()
+    analyzer = PreferenceAnalyzer(registry=service, max_prompt_chars=0)
+
+    await analyzer.analyze_events(
+        events=[
+            {"event_type": "view", "title": "Rust 异步运行时（一）"},
+            {"event_type": "view", "title": "Rust 异步运行时（二）"},
+        ],
+        existing_preference={"interests": []},
+        event_chunk_size=1,
+        awareness_notes=[{"observation": "最近在深挖 Rust 底层"}],
+        active_insights=[{"hypothesis": "可能是系统编程从业者"}],
+    )
+
+    assert len(service.calls) == 2
+    for call in service.calls:
+        assert "<recent_awareness>" in call["user_input"]
+        assert "最近在深挖 Rust 底层" in call["user_input"]
+        assert "<active_insights>" in call["user_input"]
+        assert "可能是系统编程从业者" in call["user_input"]

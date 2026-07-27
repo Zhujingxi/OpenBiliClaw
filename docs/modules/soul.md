@@ -92,6 +92,7 @@
 | 桌面 Web 探针即时反馈与撤销 | ✅ | 正向兴趣和避雷探针的 `confirm / reject / defer` 在消息抽屉与画像页复用同一稳定 action key，先即时隐藏或更新卡片，再保留 10 秒撤销窗口；撤销不调用 respond API，提交失败恢复原卡。`chat` 需要对话回复和情绪分类，继续直接调用后端，不进入可撤销屏障。 |
 | 短期探索 buffer | ✅ | `exploration_buffer.py` 把弱正向聊天、推荐喜欢、惊喜喜欢、普通点击和负反馈汇总到 `discovery_runtime_state["short_term_exploration_buffer"]`；7 天内显式弱证据累计到阈值后以 `buffer_promoted` 写回兴趣，负向反馈会进入 48h 冷却并抵消分数 |
 | 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
+| INTEREST 更新带认知语境（2026-07-27+） | ✅ | `_update_interest` 把近期认知尾巴（`profile.recent_awareness[-5:]` / `active_insights[-5:]`，与 `regenerate_portrait` 同窗口）经 `analyze_events(awareness_notes=…, active_insights=…)` 传入偏好分析 prompt 的 `<recent_awareness>` / `<active_insights>` 段——小批事件不再在真空里被解读。init 分片与反馈批刻意不传（init 无认知、反馈按字面判断），不传时 prompt 逐字节等于旧版（`TestPreferencePromptCognitionContext` 钉死）。真实 LLM A/B：top-8 兴趣保持不变，带语境版把同主题事件归并进既有兴趣而非另立条目 |
 | ROLE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）；ROLE 是最深的快线层，仍由 pipeline 增量更新 |
 | ~~VALUES/CORE 增量更新器~~（P1 已退役） | ⛔ | `_update_values` / `_update_core` 仍作为 delta-prompt 库函数保留（直接工具/潜在重建输入复用），但**已从 pipeline dispatch 摘除**：`update_layer` 对 VALUES/CORE 封死 no-op + WARNING。深层变更改由「假设确认 → 门控下 soul 重建」唯一模式驱动，见下文「深层影响唯一模式」 |
 | v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
@@ -309,6 +310,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 | # | 写点 | write_point | 实现位置 |
 |---|------|-------------|----------|
 | 1a | 对话学习偏好覆写 | `dialogue_preference_overwrite` | `engine.learn_from_dialogue` |
+| 1a′ | 对话深层自述落库 | `dialogue_deep_selfstatement` | `engine._persist_confirmed_deep_candidates`（过门的 goal/value/state 候选落成 `validated=True / user_verdict="confirmed"` 假设——用户第一人称自述即确认；同轮强制门控重建，纯深层自述不动兴趣权重也当轮生效） |
 | 1b | 对话学习整份重建 | `dialogue_soul_rebuild` | `engine.learn_from_dialogue` |
 | 2 | dislike 清池 | `dislike_purge` | `engine.learn_from_dialogue`（调度时记录） |
 | 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（SURFACE/INTEREST/ROLE 快线层 changed 时，每层一行；VALUES/CORE 已封死不写） |
@@ -332,9 +334,9 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 - **P2 补门控**：反馈批显著变化的整份重建此前**绕过所有门控**，现已接入接入点③（`feedback_soul_rebuild` 写点）；enforce downgrade/reject 会放弃本次重建。
 - **P3 对话深层 candidates**（接入点①）：保留，行为不变。
 
-**重建输入过滤**：所有 soul 重建（dialogue / feedback_batch / confirmed_hypotheses）只纳入 `validated=True 且 confidence>=0.75` 的假设（`_rebuild_active_insights`）——rejected/未验证假设对重建不可见，因此一次 reject 的下一次重建会把旧结论**挤出**。
+**重建输入过滤**：所有 soul 重建（dialogue / feedback_batch / confirmed_hypotheses）经 `_rebuild_active_insights` 过滤，有两扇门进得来：①用户确认路径 `validated=True 且 confidence>=0.75`；②**行为挣来的自主资格**（2026-07-27，用户决策「给模型一些自由度」）——`_hypothesis_auto_validated`：置信度 ≥0.8 且创建 ≥7 天且证据 ≥3 条且用户从未裁决（`user_verdict==""`）。自主门槛每一项都严于确认路径，`rejected` 一票否决且永久（0.99 也不行），`confirmed` 走 ①。置信度 ≥0.95 走快速档：免 7 天资历等待，其余守卫（证据/未裁决/门控/拒绝否决）全部照旧。自主达标的假设由 `run_pending_rebuild_if_due` 开头的扫描标进**同一台** pending 状态机（同去抖 / 同门控 / 同台账，refs 前缀 `auto_hypothesis:`），幂等重扫不延长去抖。rejected/未达标假设对重建不可见，因此一次 reject 的下一次重建会把旧结论**挤出**。
 
-**rebuild_pending 状态机**（`engine.py`，持久化于 `memory/rebuild_pending_state.json`）：`update_from_feedback` 是 confirm/reject 的单一入口，两者都置 `rebuild_pending {set_at, trigger_refs, retry_count}`。已有 pending 收到相同 trigger ref 时完全幂等，不写盘、不改变 `set_at/retry_count`，避免重复请求无限延长 debounce 或抹掉有界重试；只有未见过的新 trigger ref 才按「新证据重开」合并 refs、重置 retry 并重新置时。去抖 `_DEEP_REBUILD_DEBOUNCE_HOURS=6` 后由 12h 认知循环 / 下一次对话学习 / 反馈批触发门控重建（trigger=`confirmed_hypotheses`）。清标语义：门控 accept+重建成功→清标；真实 downgrade/reject（`is_error=False`）→清标 + 记 `last_gate_refusal`（本批放弃，新 confirm/reject 重开，无无限重试）；LLM/解析异常或重建异常（`is_error=True`）→保留 pending、`retry_count+1`，达 `_REBUILD_MAX_RETRIES=2` 后清标 + WARNING（有界）。构建期间释放锁允许并发 re-mark，用 `set_at` compare-and-swap 对账；重启后 `_rebuild_running` 复位、marker 持久化自动恢复。marker 写盘使用同目录 `.tmp`、`flush+fsync` 与原子替换；序列化或文件系统失败会 WARNING 并向上传播，临时文件在 `finally` 清理。Wave 2 不再保存 `seg_marker`/claim 进度；未 applied receipt 的显式同 ref retry 依赖 marker 的 set-union 幂等继续完成，稳定 effect 故障注入由 Task 2.3 覆盖。
+**rebuild_pending 状态机**（`engine.py`，持久化于 `memory/rebuild_pending_state.json`）：`update_from_feedback` 是 confirm/reject 的单一入口，两者都置 `rebuild_pending {set_at, trigger_refs, retry_count}`。已有 pending 收到相同 trigger ref 时完全幂等，不写盘、不改变 `set_at/retry_count`，避免重复请求无限延长 debounce 或抹掉有界重试；只有未见过的新 trigger ref 才按「新证据重开」合并 refs、重置 retry 并重新置时。自主假设 ref 在首次入队时与 pending 原子写入 `auto_hypothesis_trigger_refs` 消费集，成功、拒绝或耗尽重试后都不会被后续扫描重新排队；门控 context 同时携带 `confirmed_hypotheses` 与 `auto_validated_hypotheses`，不会只看到哈希 ref。去抖 `_DEEP_REBUILD_DEBOUNCE_HOURS=6` 后由 12h 认知循环 / 下一次对话学习 / 反馈批触发门控重建（trigger=`confirmed_hypotheses`）。清标语义：门控 accept+重建成功→清标；真实 downgrade/reject（`is_error=False`）→清标 + 记 `last_gate_refusal`（本批放弃，新 confirm/reject 重开，无无限重试）；LLM/解析异常或重建异常（`is_error=True`）→保留 pending、`retry_count+1`，达 `_REBUILD_MAX_RETRIES=2` 后清标 + WARNING（有界）。构建期间释放锁允许并发 re-mark，用 `set_at` compare-and-swap 对账；重启后 `_rebuild_running` 复位、marker 持久化自动恢复。marker 写盘使用同目录 `.tmp`、`flush+fsync` 与原子替换；序列化或文件系统失败会 WARNING 并向上传播，临时文件在 `finally` 清理。Wave 2 不再保存 `seg_marker`/claim 进度；未 applied receipt 的显式同 ref retry 依赖 marker 的 set-union 幂等继续完成，稳定 effect 故障注入由 Task 2.3 覆盖。
 
 ## 画像更新逻辑详解
 

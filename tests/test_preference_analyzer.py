@@ -938,10 +938,17 @@ async def test_analyze_events_count_chunking_avoids_whole_batch_prompt_build(
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> list[dict[str, str]]:
         if len(events) > 1:
             raise AssertionError("count-based chunking must not build a whole-batch prompt")
-        return original_build_prompt(events=events, existing_preference=existing_preference)
+        return original_build_prompt(
+            events=events,
+            existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
+        )
 
     monkeypatch.setattr(
         analyzer_module,
@@ -1304,10 +1311,17 @@ async def test_single_event_is_skipped_when_compact_prompt_still_exceeds_budget(
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> list[dict[str, str]]:
         if len(events) == 1 and events[0].get("title"):
             compact_prompt_events.append(dict(events[0]))
-        return original_build_prompt(events=events, existing_preference=existing_preference)
+        return original_build_prompt(
+            events=events,
+            existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
+        )
 
     monkeypatch.setattr(
         analyzer_module,

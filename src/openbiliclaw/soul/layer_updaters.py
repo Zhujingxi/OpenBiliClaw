@@ -269,10 +269,23 @@ async def _update_interest(
 
     pre_update_profile = deepcopy(profile)
 
+    # A small event batch is ambiguous on its own — three woodworking videos
+    # could be a new interest or an old one resurfacing. Passing the recent
+    # cognition tail (same window regenerate_portrait uses) lets the analyzer
+    # interpret the batch against what the system already believes instead of
+    # in a vacuum. Init chunks and the feedback batch deliberately do NOT pass
+    # this: init has no cognition yet, and feedback is judged on its own words.
+    from .profile import awareness_note_to_dict, insight_hypothesis_to_dict
+
+    awareness_notes = [awareness_note_to_dict(n) for n in profile.recent_awareness[-5:]]
+    active_insights = [insight_hypothesis_to_dict(i) for i in profile.active_insights[-5:]]
+
     try:
         updated_preference = await preference_analyzer.analyze_events(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes or None,
+            active_insights=active_insights or None,
         )
     except Exception:
         logger.exception("PreferenceAnalyzer failed during interest update")

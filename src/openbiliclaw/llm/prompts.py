@@ -314,25 +314,50 @@ def build_preference_analysis_prompt(
     *,
     events: list[dict[str, object]],
     existing_preference: dict[str, object],
+    awareness_notes: list[dict[str, object]] | None = None,
+    active_insights: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for extracting user preferences from events."""
+    """Build a structured prompt for extracting user preferences from events.
+
+    ``awareness_notes`` / ``active_insights`` are optional cognition context —
+    the incremental interest line passes its recent tail so a batch of events
+    is interpreted against what the system already believes about the user,
+    not in a vacuum. ``None`` keeps the prompt byte-identical to the
+    pre-context builder, which is what every other caller (init chunks,
+    feedback batch) still sends: their replay invariance is preserved by
+    construction. Sections are ordered stable → variable so the provider-side
+    prompt cache keeps its prefix.
+    """
     from openbiliclaw.sources.event_format import render_retraction_marked_events
 
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
-    user_prompt = "\n\n".join(
-        [
-            "<existing_preference>",
-            json.dumps(existing_preference, ensure_ascii=False, indent=2),
-            "</existing_preference>",
-            "<event_batch>",
-            json.dumps(
-                render_retraction_marked_events(events),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            "</event_batch>",
+    sections = [
+        "<existing_preference>",
+        json.dumps(existing_preference, ensure_ascii=False, indent=2),
+        "</existing_preference>",
+    ]
+    if awareness_notes:
+        sections += [
+            "<recent_awareness>",
+            json.dumps(awareness_notes, ensure_ascii=False, indent=2, sort_keys=True),
+            "</recent_awareness>",
         ]
-    )
+    if active_insights:
+        sections += [
+            "<active_insights>",
+            json.dumps(active_insights, ensure_ascii=False, indent=2, sort_keys=True),
+            "</active_insights>",
+        ]
+    sections += [
+        "<event_batch>",
+        json.dumps(
+            render_retraction_marked_events(events),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "</event_batch>",
+    ]
+    user_prompt = "\n\n".join(sections)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
