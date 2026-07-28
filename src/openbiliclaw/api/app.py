@@ -3675,10 +3675,10 @@ def create_app(
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
             if bool(run["partial_success"]):
-                # Profile creation succeeded but the first discovery pass did
-                # not. Preserve the terminal cause written by complete() so
-                # setup / desktop / popup can explain the degraded result and
-                # offer a safe way forward instead of appearing stuck at 95%.
+                # Preserve the terminal cause written by complete() so setup /
+                # desktop / popup can distinguish discovery degradation from a
+                # partial source import instead of collapsing both into the old
+                # "stuck at 95%" explanation.
                 reason = str(run.get("reason") or "discovery_partial")
                 detail = str(
                     run.get("detail")
@@ -3924,11 +3924,27 @@ def create_app(
                 coordinator=coord,
                 run_id=run_id,
             )
+            discovery_partial = bool(result.discovery_error)
+            dy_status = str(getattr(result, "dy_status", "skipped") or "skipped")
+            dy_degraded = dy_status == "degraded"
+            partial_success = discovery_partial or dy_degraded
+            reason = getattr(result, "discovery_reason", None)
+            detail = str(getattr(result, "discovery_detail", "") or "").strip()
+            if dy_degraded:
+                dy_event_count = len(getattr(result, "dy_events", []) or [])
+                dy_detail = (
+                    "抖音采集状态 dy_status=degraded："
+                    f"已保留并用于画像建模 {dy_event_count} 条已采事件，"
+                    "但至少一个范围未能证明分页完整。"
+                )
+                detail = " ".join(part for part in (detail, dy_detail) if part)
+                if not discovery_partial:
+                    reason = "douyin_degraded"
             await coord.complete(
                 run_id,
-                partial_success=result.discovery_error,
-                reason=getattr(result, "discovery_reason", None),
-                detail=getattr(result, "discovery_detail", None),
+                partial_success=partial_success,
+                reason=reason,
+                detail=detail or None,
             )
         except asyncio.CancelledError:
             # Cancel was requested via /api/init/cancel — shield the terminal
@@ -12031,10 +12047,12 @@ def create_app(
     async def dy_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a Douyin task result from the extension dispatcher.
 
-        Status semantics mirror XHS (``ok`` = final, ``partial`` = keep
-        pending, ``failed`` = mark failed) but the result schema uses
-        ``videos`` instead of ``notes`` and propagation goes through
-        ``dy_bootstrap_videos_to_events``. No self-author filtering yet
+        ``ok`` and ``degraded`` are terminal, while ``partial`` keeps the
+        task pending and ``failed`` marks it failed. ``degraded`` means the
+        extension preserved valid DOM/API items but could not prove the
+        bootstrap was complete. The result schema uses ``videos`` instead of
+        ``notes`` and propagation goes through ``dy_bootstrap_videos_to_events``.
+        No self-author filtering yet
         (Douyin has its own posts in ``dy_post`` scope which we treat as
         a weak ``view`` signal — they're meant to count as input).
         """
@@ -12068,14 +12086,24 @@ def create_app(
             raise HTTPException(status_code=409, detail="task_result_conflict")
         task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            # Extension callbacks may race or be retried out of order.  Keep a
+            # terminal result immutable and acknowledge the retry so the
+            # dispatcher does not enter a resend loop.
+            return {"ok": True, "ignored": True}
 
-        if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
-            is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
+        if status in {"partial", "ok", "degraded"} or (
+            status == "empty" and task_type == "bootstrap_profile"
+        ):
+            is_final = status in {"ok", "degraded"} or (
+                status == "empty" and task_type == "bootstrap_profile"
+            )
             added_videos = legacy_queue.merge_result(
                 task_id,
                 videos=videos if videos else None,
                 scope_counts=scope_counts,
                 debug=debug,
+                completion_status=str(status) if is_final else None,
                 complete=is_final,
             )
             # gui-init D1: persist the result (above) for init's own collector;

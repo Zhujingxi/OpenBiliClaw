@@ -14,13 +14,87 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyDouyinScopeCompletion,
   createScrollRoundController,
   douyinDiscoveryExecutionPolicy,
   filterDiscoveryItemsForScope,
   isDouyinSearchResultUrl,
+  isSameWindowSameOriginDouyinMessage,
   isValidFeedExecuteMessage,
   isValidScopeExecuteMessage,
 } from "../src/content/douyin.ts";
+
+test("Douyin bridge messages require the same Window and page origin", () => {
+  const target = {
+    location: { origin: "https://www.douyin.com" },
+  } as unknown as Window;
+  assert.equal(
+    isSameWindowSameOriginDouyinMessage(
+      {
+        source: target,
+        origin: "https://www.douyin.com",
+      } as MessageEvent,
+      target,
+    ),
+    true,
+  );
+  assert.equal(
+    isSameWindowSameOriginDouyinMessage(
+      {
+        source: {} as Window,
+        origin: "https://www.douyin.com",
+      } as MessageEvent,
+      target,
+    ),
+    false,
+  );
+  assert.equal(
+    isSameWindowSameOriginDouyinMessage(
+      {
+        source: target,
+        origin: "https://attacker.example",
+      } as MessageEvent,
+      target,
+    ),
+    false,
+  );
+});
+
+test("classifyDouyinScopeCompletion marks missing identity and API errors degraded", () => {
+  assert.deepEqual(
+    classifyDouyinScopeCompletion({
+      itemCount: 8,
+      secUid: "",
+      apiError: "",
+      identityError: "identity_unavailable",
+    }),
+    { status: "degraded", error: "identity_unavailable" },
+  );
+  assert.deepEqual(
+    classifyDouyinScopeCompletion({
+      itemCount: 18,
+      secUid: "MS4wUser",
+      apiError: "HTTP 429",
+    }),
+    { status: "degraded", error: "HTTP 429" },
+  );
+  assert.deepEqual(
+    classifyDouyinScopeCompletion({
+      itemCount: 18,
+      secUid: "MS4wUser",
+      apiError: "",
+    }),
+    { status: "ok" },
+  );
+  assert.deepEqual(
+    classifyDouyinScopeCompletion({
+      itemCount: 0,
+      secUid: "MS4wUser",
+      apiError: "",
+    }),
+    { status: "empty" },
+  );
+});
 
 test("isValidScopeExecuteMessage accepts a well-formed scope payload", () => {
   assert.equal(

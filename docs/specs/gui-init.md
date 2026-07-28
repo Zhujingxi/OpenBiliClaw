@@ -213,10 +213,10 @@ CLI init 独占进程;API init 跑在**活后端**里,后台有连续 refresh、
 
 ## Status Values & Reasons（契约的一部分）
 
-稳定 `reason` 还包括 `collection_timeout`（阶段 1 总预算耗尽且无信号）、`empty_signals`、`analyze_failed`、`profile_failed`、`discovery_timeout`、`interrupted` 与 `cancelled`；原有 `none` / `local_only` / `bilibili_not_logged_in` / `llm_not_ready` / `already_running` / `already_initialized` / `unsupported_runtime` / `init_failed` / `init_running` / `discovery_partial` / `not_running` 保持兼容。
+稳定 `reason` 还包括 `collection_timeout`（阶段 1 总预算耗尽且无信号）、`empty_signals`、`analyze_failed`、`profile_failed`、`discovery_timeout`、`douyin_degraded`、`interrupted` 与 `cancelled`；原有 `none` / `local_only` / `bilibili_not_logged_in` / `llm_not_ready` / `already_running` / `already_initialized` / `unsupported_runtime` / `init_failed` / `init_running` / `discovery_partial` / `not_running` 保持兼容。
 `current_stage`:`0`(未开始)/`1`拉数据/`2`分析/`3`画像/`4`发现池。
 每个 stage 的 `status`:`pending` / `running` / `ok` / `warning`(部分成功,如收藏/关注拉取失败但历史够)/ `failed`。
-`partial_success`:任一 stage 为 `warning`,或画像已生成但发现池「部分完成」时为 `true`(此时 `initialized=true`,推荐池后续靠常规 refresh 补)。
+`partial_success`:任一 stage 为 `warning`,或画像已生成但发现池「部分完成」时为 `true`（此时 `initialized=true`）。`reason=douyin_degraded` 表示抖音已采事件已用于画像、但至少一个 scope 未证明分页完整，下一次 bootstrap 会重新入队；discovery 类 reason 才表示推荐池后续靠常规 refresh 补齐。
 `bilibili_check`:`ok` / `failed` / `checking`(缓存未命中、正在校验)。
 
 ## Boundaries

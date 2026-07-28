@@ -22,6 +22,10 @@ DISCOVERY_TIMEOUT_DETAIL = (
     "画像已生成，但首轮内容池等待内容发现超过 10 分钟仍未完成，本次初始化为部分完成。"
     "系统会在后台继续补池；请检查平台登录与网络/代理。"
 )
+DOUYIN_DEGRADED_DETAIL = (
+    "抖音采集状态 dy_status=degraded：已保留并用于画像建模 57 条已采事件，"
+    "但至少一个范围未能证明分页完整。"
+)
 
 
 def _status(
@@ -200,6 +204,21 @@ class GuidedInitStub:
                     "status": "warning",
                     "reason": "discovery_timeout",
                 },
+            ],
+        )
+
+    def set_douyin_degraded(self) -> None:
+        self.current_status = _status(
+            initialized=True,
+            can_start=False,
+            reason="douyin_degraded",
+            detail=DOUYIN_DEGRADED_DETAIL,
+            partial_success=True,
+            stages=[
+                {"n": 1, "label": "拉取数据", "status": "warning", "reason": "douyin_degraded"},
+                {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
+                {"n": 3, "label": "生成并保存完整画像", "status": "ok", "reason": None},
+                {"n": 4, "label": "生成首轮可用推荐", "status": "ok", "reason": None},
             ],
         )
 
@@ -1045,10 +1064,54 @@ def test_setup_wizard_e2e_partial_success_enters_completion_screen(
 
     chromium_page.wait_for_selector('[data-panel="3"].active')
     chromium_page.wait_for_function(
-        "() => document.querySelector('#doneTitle')?.innerText.includes('画像已就绪')"
+        "() => document.querySelector('#doneTitle')?.innerText.includes('初始化部分完成')"
     )
     assert "后台继续补池" in chromium_page.locator("#doneInit").inner_text()
     assert chromium_page.locator("#finish").is_enabled()
+
+
+def test_setup_wizard_e2e_douyin_partial_uses_source_specific_detail(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+    stub.set_douyin_degraded()
+    stub.runtime_status.update({"initialized": True, "pool_available_count": 12})
+
+    chromium_page.goto(f"{base_url}/setup/")
+
+    chromium_page.wait_for_selector('[data-panel="3"].active')
+    assert "初始化部分完成" in chromium_page.locator("#doneTitle").inner_text()
+    assert "dy_status=degraded" in chromium_page.locator("#doneInit").inner_text()
+    assert "57 条" in chromium_page.locator("#doneInit").inner_text()
+    assert "后台继续补池" not in chromium_page.locator("#doneSummary").inner_text()
+    assert "未知初始化状态" not in chromium_page.locator("#doneInit").inner_text()
+
+
+def test_desktop_web_e2e_douyin_partial_toast_uses_source_specific_detail(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+
+    chromium_page.goto(f"{base_url}/web/")
+    chromium_page.wait_for_selector(".init-onboarding", state="attached")
+    chromium_page.locator('[data-init-action="start"]').click()
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+
+    stub.set_douyin_degraded()
+    stub.runtime_status.update({"initialized": True, "pool_available_count": 12})
+    chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
+
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#toastContainer')?.innerText.includes('dy_status=degraded')"
+    )
+    toast_text = chromium_page.locator("#toastContainer").inner_text()
+    assert "57 条" in toast_text
+    assert "后台继续补池" not in toast_text
+    assert "未知初始化状态" not in toast_text
 
 
 def _open_init_sources(page: Any, base_url: str, surface: str) -> tuple[Any, Any]:

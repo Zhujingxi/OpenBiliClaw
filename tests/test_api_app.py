@@ -14904,6 +14904,46 @@ class TestGuidedInitEndpoints:
         assert captured["include_reddit"] is True
         assert db.get_latest_init_run() is not None
 
+    def test_init_records_douyin_degraded_as_partial_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A usable-but-incomplete Douyin bootstrap must not become a fully
+        successful API init terminal state."""
+        import time
+
+        from fastapi.testclient import TestClient
+
+        async def _fake_init(**kwargs: object) -> object:
+            return SimpleNamespace(
+                discovery_error=False,
+                discovery_reason=None,
+                discovery_detail="",
+                dy_status="degraded",
+                dy_events=[{"event_type": "favorite"}],
+            )
+
+        monkeypatch.setattr("openbiliclaw.cli.run_guided_init", _fake_init)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["douyin"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+
+        latest = None
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["douyin"]})
+            assert response.status_code == 202
+            for _ in range(100):
+                latest = db.get_latest_init_run()
+                if latest is not None and latest["status"] == "completed":
+                    break
+                client.get("/api/init-status")
+                time.sleep(0.02)
+
+        assert latest is not None
+        assert latest["status"] == "completed"
+        assert bool(latest["partial_success"]) is True
+        assert latest["error_reason"] == "douyin_degraded"
+        assert "dy_status=degraded" in str(latest["error_detail"])
+        assert "已保留并用于画像建模 1 条已采事件" in str(latest["error_detail"])
+
     def test_init_rejects_bangumi_only_without_public_username(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 

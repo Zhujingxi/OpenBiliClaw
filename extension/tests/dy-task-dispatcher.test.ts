@@ -18,7 +18,9 @@ import {
   buildDyTaskUrl,
   buildDyExecuteMessageData,
   computeDyTaskTimeoutMs,
+  dyScopeDegradedReason,
   executeTask,
+  finalizeDyBootstrapStatus,
   isValidDyTask,
   onTabReady,
   postDyNativeSaveResult,
@@ -41,6 +43,45 @@ const nativeTask: NativeSaveTask = {
   resolved_action: "favorite",
   target_label: "抖音收藏",
 };
+
+test("finalizeDyBootstrapStatus preserves terminal degraded scope health", () => {
+  assert.equal(
+    finalizeDyBootstrapStatus({
+      dy_post: "ok",
+      dy_collect: "empty",
+      dy_like: "ok",
+      dy_follow: "ok",
+    }),
+    "ok",
+  );
+  assert.equal(
+    finalizeDyBootstrapStatus({
+      dy_post: "ok",
+      dy_collect: "degraded",
+      dy_like: "ok",
+      dy_follow: "ok",
+    }),
+    "degraded",
+  );
+  assert.equal(
+    finalizeDyBootstrapStatus({
+      dy_post: "failed",
+      dy_collect: "empty",
+    }),
+    "degraded",
+  );
+  assert.equal(
+    dyScopeDegradedReason({
+      task_id: "task-1",
+      scope: "dy_collect",
+      items: [],
+      scope_count: 0,
+      status: "degraded",
+      error: "pagination_cursor_not_advanced",
+    }),
+    "dy_collect:pagination_cursor_not_advanced",
+  );
+});
 
 test("dy task native_save union and dispatcher close through the exact authenticated result contract", async () => {
   assert.equal(isValidDyTask(nativeTask), true);

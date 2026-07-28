@@ -14,8 +14,10 @@ import assert from "node:assert/strict";
 
 import {
   decodeRenderData,
+  extractDouyinSecUidFromRenderData,
   extractDouyinSecUidFromState,
   extractDouyinLoginState,
+  reconcileDouyinSelfIdentity,
 } from "../src/content/dy/bootstrap.ts";
 
 test("decodeRenderData decodes URL-encoded JSON", () => {
@@ -57,9 +59,19 @@ test("extractDouyinSecUidFromState handles malformed input", () => {
   assert.equal(extractDouyinSecUidFromState({}), "");
 });
 
+test("extractDouyinSecUidFromRenderData decodes and resolves the account identity", () => {
+  const raw = encodeURIComponent(
+    JSON.stringify({
+      app: { user: { userInfo: { sec_uid: "MS4wRenderUser", isLogin: true } } },
+    }),
+  );
+  assert.equal(extractDouyinSecUidFromRenderData(raw), "MS4wRenderUser");
+  assert.equal(extractDouyinSecUidFromRenderData("malformed"), "");
+});
+
 test("extractDouyinLoginState detects logged-in users", () => {
-  // Logged-in: presence of secUid is the strongest signal we have
-  // from RENDER_DATA alone (cookie-level flags are not in JSON).
+  // Logged-in requires an explicit positive flag; secUid is an identity
+  // claim only and cannot establish the session state.
   assert.equal(
     extractDouyinLoginState({
       app: { user: { userInfo: { secUid: "abc", isLogin: true } } },
@@ -77,4 +89,52 @@ test("extractDouyinLoginState detects logged-in users", () => {
   // state. Better to skip the bootstrap than corrupt the soul profile.
   assert.equal(extractDouyinLoginState({ app: {} }), false);
   assert.equal(extractDouyinLoginState(null), false);
+});
+
+test("RENDER_DATA rejects secUid when the page explicitly says logged out", () => {
+  const state = {
+    app: { user: { userInfo: { secUid: "MS4wGuestDevice", isLogin: false } } },
+  };
+  assert.equal(extractDouyinSecUidFromState(state), "MS4wGuestDevice");
+  assert.equal(extractDouyinLoginState(state), false);
+  assert.equal(
+    extractDouyinSecUidFromRenderData(encodeURIComponent(JSON.stringify(state))),
+    "",
+  );
+
+  const missingLoginFlag = {
+    app: { user: { userInfo: { secUid: "MS4wUnverifiedClaim" } } },
+  };
+  assert.equal(extractDouyinLoginState(missingLoginFlag), false);
+  assert.equal(
+    extractDouyinSecUidFromRenderData(encodeURIComponent(JSON.stringify(missingLoginFlag))),
+    "",
+  );
+});
+
+test("profile/self is authoritative when RENDER_DATA identity conflicts", () => {
+  assert.deepEqual(
+    reconcileDouyinSelfIdentity({
+      renderDataSecUid: "MS4wRenderUser",
+      profileSelfSecUid: "MS4wProfileUser",
+    }),
+    {
+      secUid: "MS4wProfileUser",
+      source: "profile_self",
+      conflict: true,
+    },
+  );
+  assert.deepEqual(
+    reconcileDouyinSelfIdentity({
+      renderDataSecUid: "MS4wRenderUser",
+      profileSelfSecUid: "",
+      profileError: "identity_unavailable",
+    }),
+    {
+      secUid: "",
+      source: "",
+      conflict: false,
+      error: "identity_unavailable",
+    },
+  );
 });

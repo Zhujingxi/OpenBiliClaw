@@ -331,6 +331,7 @@
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
       discovery_partial: "画像已生成，但首轮内容池本次未完成。",
+      douyin_degraded: "抖音已采数据已用于画像，但至少一个账号范围的分页未完整完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -678,6 +679,7 @@
         "profile_failed",
         "discovery_timeout",
         "discovery_partial",
+        "douyin_degraded",
       ];
       if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
         return detail;
@@ -928,12 +930,13 @@
 
     function showInitCompletion(status = null) {
       const partial = Boolean(status?.partial_success);
-      $("#doneTitle").textContent = partial ? "画像已就绪" : "就绪 🎉";
+      $("#doneTitle").textContent = partial ? "初始化部分完成" : "就绪 🎉";
       $("#doneSummary").textContent = partial
-        ? "完整画像已经保存；首轮可用推荐本次未能完成，后台会继续补齐，你现在可以先进入应用。"
+        ? "已采数据已经保留并用于本次初始化；请按下方提示稍后补齐未完成的来源或步骤。"
         : "基础配置、完整画像和首轮可用推荐均已完成，本地引擎可以开始为你工作了。";
       $("#doneInit").textContent = partial
-        ? initStatusReasonText(status) || "完整画像已就绪，首轮推荐将在后台继续补齐"
+        ? initStatusReasonText(status) ||
+          "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
         : "完整画像和首轮可用推荐均已就绪";
       const row = $("#initDoneRow");
       row.classList.toggle("pending", partial);
@@ -951,7 +954,13 @@
       const reason = String(status?.reason || "");
       if (
         detail &&
-        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+        ([
+          "analyze_failed",
+          "profile_failed",
+          "discovery_timeout",
+          "discovery_partial",
+          "douyin_degraded",
+        ].includes(reason) ||
           detail.startsWith("画像分析失败："))
       ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)

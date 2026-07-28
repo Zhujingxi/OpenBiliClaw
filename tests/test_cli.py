@@ -5446,6 +5446,43 @@ def test_enqueue_dy_bootstrap_task_reuses_recent_task_by_default(
     assert _enqueue_dy_bootstrap_task() == "recent-dy-task-id"
 
 
+def test_enqueue_dy_bootstrap_task_retries_recent_degraded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_dy_bootstrap_task
+
+    captured: dict[str, object] = {}
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def find_recent_task(self, task_type: str, *, recent_hours: float, statuses=None):
+            assert task_type == "bootstrap_profile"
+            assert recent_hours > 0
+            return {
+                "id": "recent-degraded-dy-task",
+                "status": "completed",
+                "result_json": json.dumps({"status": "degraded"}),
+            }
+
+        def enqueue_with_id(self, task_type: str, payload: dict, *, daily_budget: int) -> str:
+            captured["task_type"] = task_type
+            captured["payload"] = payload
+            captured["daily_budget"] = daily_budget
+            return "fresh-dy-task"
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.dy_tasks.DyTaskQueue", FakeQueue)
+    monkeypatch.setattr(cli_module, "_kick_task_dispatcher", lambda _source: None)
+
+    assert _enqueue_dy_bootstrap_task() == "fresh-dy-task"
+    assert captured["task_type"] == "bootstrap_profile"
+
+
 def test_enqueue_dy_bootstrap_task_returns_none_when_db_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5581,6 +5618,49 @@ def test_collect_dy_bootstrap_events_extracts_videos_from_completed_task(
     assert counts["dy_like"] == 1
     assert counts["dy_post"] == 0
     assert counts["dy_follow"] == 0
+
+
+def test_collect_dy_bootstrap_events_surfaces_terminal_degraded_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from openbiliclaw.cli import _collect_dy_bootstrap_events
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def get(self, task_id: str) -> dict:
+            return {
+                "id": task_id,
+                "status": "completed",
+                "result_json": json.dumps(
+                    {
+                        "status": "degraded",
+                        "videos": [
+                            {
+                                "scope": "dy_collect",
+                                "title": "首屏收藏",
+                                "url": "https://www.douyin.com/video/a",
+                                "aweme_id": "a",
+                            }
+                        ],
+                        "scope_counts": {"dy_collect": 1},
+                    }
+                ),
+            }
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.dy_tasks.DyTaskQueue", FakeQueue)
+
+    events, counts, status = _collect_dy_bootstrap_events("task-degraded", max_wait_seconds=0)
+    assert status == "degraded"
+    assert len(events) == 1
+    assert counts["dy_collect"] == 1
 
 
 def test_collect_dy_bootstrap_events_returns_timeout_when_task_pending(
@@ -8421,6 +8501,93 @@ def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -
     assert captured["include_bili"] is False
     assert captured["include_reddit"] is True
     assert "Reddit" in result.output
+
+
+def test_init_summary_marks_douyin_degraded_without_dropping_collected_events(
+    monkeypatch,
+) -> None:
+    """Usable partial Douyin events still feed the profile, while the final
+    summary remains explicitly degraded instead of claiming full success."""
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
+    monkeypatch.setattr(
+        cli_module, "_get_runtime_database", lambda: SimpleNamespace(max_llm_usage_id=lambda: None)
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: (_ for _ in ()).throw(AssertionError("client must not be built")),
+    )
+    monkeypatch.setattr(cli_module, "_ask_network_binding", lambda: False)
+    monkeypatch.setattr(cli_module, "_persist_api_host_choice", lambda **kwargs: None)
+    monkeypatch.setattr(cli_module, "_maybe_setup_password_in_init", lambda **kwargs: None)
+    monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
+    monkeypatch.setattr(cli_module, "_print_init_cost_summary", lambda *args, **kwargs: None)
+
+    captured: dict[str, object] = {}
+    dy_event = {
+        "event_type": "favorite",
+        "title": "已采到的收藏",
+        "metadata": {"source_platform": "douyin"},
+    }
+
+    async def _fake_init(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            history=[],
+            favorites_data=[],
+            following_data=[],
+            events=[dy_event],
+            bilibili_event_count=0,
+            xhs_events=[],
+            xhs_scope_counts={},
+            xhs_status="skipped",
+            dy_events=[dy_event],
+            dy_scope_counts={"dy_collect": 1},
+            dy_status="degraded",
+            yt_events=[],
+            yt_scope_counts={},
+            yt_status="skipped",
+            zhihu_events=[],
+            zhihu_scope_counts={},
+            zhihu_status="skipped",
+            reddit_events=[],
+            reddit_scope_counts={},
+            reddit_status="skipped",
+            profile_data={"ok": True},
+            discovered_count=3,
+            discovery_error=False,
+            discover_exc=None,
+            discovery_detail="",
+        )
+
+    monkeypatch.setattr(cli_module, "run_guided_init", _fake_init)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--no-bilibili",
+            "--no-xhs",
+            "--yes-douyin",
+            "--no-youtube",
+            "--no-x",
+            "--no-zhihu",
+            "--no-reddit",
+            "--no-bangumi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["include_dy"] is True
+    assert "抖音采集部分完成" in result.output
+    assert "已采到的抖音事件仍已用于画像建模" in result.output
+    assert "初始化部分完成" in result.output
+    assert "dy_status" in result.output
+    assert "degraded" in result.output
+    assert "初始化完成" not in result.output
 
 
 @pytest.mark.asyncio

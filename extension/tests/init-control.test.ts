@@ -372,8 +372,21 @@ test("timeout and account-sync details explain cause and recovery without machin
   });
   const partialButton = initStartButtonState(partial);
   assert.equal(describeInitStatusReason(partial), partialDetail);
-  assert.equal(partialButton.label, "画像已生成");
+  assert.equal(partialButton.label, "初始化部分完成");
   assert.equal(partialButton.reason, partialDetail);
+
+  const douyinDetail =
+    "抖音采集状态 dy_status=degraded：已保留并用于画像建模 57 条已采事件，但至少一个范围未能证明分页完整。";
+  const douyinPartial = statusWith({
+    initialized: true,
+    partial_success: true,
+    reason: "douyin_degraded",
+    detail: douyinDetail,
+  });
+  assert.ok(describeInitReason("douyin_degraded").includes("抖音"));
+  assert.equal(describeInitStatusReason(douyinPartial), douyinDetail);
+  assert.equal(initStartButtonState(douyinPartial).label, "初始化部分完成");
+  assert.equal(initStartButtonState(douyinPartial).reason, douyinDetail);
 });
 
 // ── Per-run platform source selection ──────────────────────────────────────

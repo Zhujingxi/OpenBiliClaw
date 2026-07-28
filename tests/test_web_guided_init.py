@@ -125,6 +125,23 @@ def test_typed_timeout_reasons_prefer_backend_detail_in_web_surfaces() -> None:
         assert "initStatusReasonText(status)" in source
 
 
+def test_douyin_degraded_reason_is_mapped_without_promising_background_pool_fill() -> None:
+    """A partial Douyin import is not a discovery-pool failure."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    popup_control = Path("extension/popup/popup-init-control.js").read_text(encoding="utf-8")
+    popup_js = Path("extension/popup/popup.js").read_text(encoding="utf-8")
+
+    for source in (setup_html, app_js, popup_control):
+        assert "douyin_degraded" in source
+        assert "抖音已采数据已用于画像" in source
+    for source in (setup_html, app_js, popup_js):
+        assert "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。" in source
+
+    assert '"画像已就绪，后台补池中"' not in app_js
+    assert '"完整画像已就绪；首轮推荐将在后台继续补齐"' not in app_js
+
+
 def test_web_surfaces_no_longer_block_reddit_only_init() -> None:
     """Reddit bootstrap events are valid init signals."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
@@ -520,6 +537,7 @@ class _RecordingCoordinator:
         self.stage_progress_calls: list[dict] = []
         self.started_stages: list[int] = []
         self.done_stages: list[int] = []
+        self.done_stage_calls: list[dict[str, object | None]] = []
         self.events: list[tuple[str, int]] = []
 
     async def stage_started(self, run_id: str, n: int) -> None:
@@ -528,6 +546,7 @@ class _RecordingCoordinator:
 
     async def stage_done(self, run_id: str, n: int, *, status: str = "ok", reason=None) -> None:
         self.done_stages.append(n)
+        self.done_stage_calls.append({"stage": n, "status": status, "reason": reason})
         self.events.append(("done", n))
 
     async def stage_progress(
@@ -708,6 +727,47 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
 
     # Stages all completed (Task 1 clears any progress residue on stage_done).
     assert coord.done_stages == [1, 2, 3, 4]
+
+
+async def test_run_guided_init_marks_douyin_degraded_collection_as_warning(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=0)
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    monkeypatch.setattr(cli, "_enqueue_dy_bootstrap_task", lambda **kwargs: "task-dy")
+    monkeypatch.setattr(
+        cli,
+        "_collect_dy_bootstrap_events",
+        lambda task_id: (
+            [{"event_type": "favorite", "title": "dy-partial"}],
+            {"dy_collect": 1},
+            "degraded",
+        ),
+    )
+    coord = _RecordingCoordinator()
+
+    result = await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=True,
+        include_yt=False,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=coord,
+        run_id="run-douyin-degraded",
+    )
+
+    assert result.dy_status == "degraded"
+    assert coord.done_stage_calls[0] == {
+        "stage": 1,
+        "status": "warning",
+        "reason": "douyin_degraded",
+    }
 
 
 async def test_run_guided_init_cli_path_uses_console_progress_callback(monkeypatch) -> None:

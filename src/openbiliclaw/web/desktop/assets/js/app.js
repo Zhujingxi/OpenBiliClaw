@@ -168,6 +168,7 @@
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
       discovery_partial: "画像已生成，但首轮内容池本次未完成。",
+      douyin_degraded: "抖音已采数据已用于画像，但至少一个账号范围的分页未完整完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -1388,7 +1389,8 @@
         "analyze_failed",
         "profile_failed",
         "discovery_timeout",
-        "discovery_partial"
+        "discovery_partial",
+        "douyin_degraded"
       ]);
       // account-sync keeps llm_not_ready while the live probe is still red,
       // but its detail contains the actual profile-analysis failure.
@@ -1690,7 +1692,13 @@
       const reason = String(status?.reason || "");
       if (
         detail &&
-        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+        ([
+          "analyze_failed",
+          "profile_failed",
+          "discovery_timeout",
+          "discovery_partial",
+          "douyin_degraded"
+        ].includes(reason) ||
           detail.startsWith("画像分析失败："))
       ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
@@ -1852,10 +1860,10 @@
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
-        : isRunning
+          : isRunning
           ? "初始化进行中…"
           : alreadyInitialized
-            ? status?.partial_success ? "画像已就绪，后台补池中" : "已初始化"
+            ? status?.partial_success ? "初始化部分完成" : "已初始化"
             : displayProgress.failed
               ? "重试初始化"
               : "开始初始化";
@@ -2002,7 +2010,8 @@
             scheduleBackendHydration();
             showToast(
               status?.partial_success
-                ? "完整画像已就绪；首轮推荐将在后台继续补齐"
+                ? initStatusReasonText(status) ||
+                  "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
                 : "初始化完成，正在加载推荐"
             );
           }

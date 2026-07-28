@@ -3125,15 +3125,34 @@ def _enqueue_dy_bootstrap_task(*, kick: bool = True) -> str | None:
                 statuses=("pending", "in_progress", "completed", "failed"),
             )
             if recent is not None:
-                task_id = str(recent.get("id", "")).strip()
-                if task_id:
-                    status = str(recent.get("status", "unknown"))
+                raw_result = recent.get("result_json")
+                if isinstance(raw_result, dict):
+                    parsed_result = raw_result
+                elif isinstance(raw_result, (str, bytes, bytearray)):
+                    try:
+                        parsed_result = json.loads(raw_result)
+                    except (TypeError, ValueError):
+                        parsed_result = None
+                else:
+                    parsed_result = None
+                recent_is_degraded = (
+                    isinstance(parsed_result, dict)
+                    and str(parsed_result.get("status", "")).strip().lower() == "degraded"
+                )
+                if recent_is_degraded:
                     console.print(
-                        "  [dim]复用最近的抖音 bootstrap 任务"
-                        f"({status})；需要重新拉取可设 "
-                        "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        "  [dim]最近的抖音 bootstrap 任务仅部分完成；本次重新入队以补齐分页。[/dim]"
                     )
-                    return task_id
+                else:
+                    task_id = str(recent.get("id", "")).strip()
+                    if task_id:
+                        status = str(recent.get("status", "unknown"))
+                        console.print(
+                            "  [dim]复用最近的抖音 bootstrap 任务"
+                            f"({status})；需要重新拉取可设 "
+                            "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        )
+                        return task_id
         task_id = queue.enqueue_with_id(
             "bootstrap_profile",
             {
@@ -3165,6 +3184,8 @@ def _collect_dy_bootstrap_events(
     Returns ``(events, scope_counts, status_label)`` where
     ``status_label`` is one of:
       - ``"ok"``         — task completed with videos
+      - ``"degraded"``   — task completed with usable videos, but at least
+        one scope could not prove pagination completeness
       - ``"empty"``      — task completed but extension returned 0 videos
         (typical when the user is not logged in to douyin.com — the
         soft anti-bot returns HTTP 200 + empty body, see design-doc
@@ -3246,7 +3267,8 @@ def _collect_dy_bootstrap_events(
                 short = key.removeprefix("dy_") if key.startswith("dy_") else key
                 if source == f"dy_bootstrap_{short}":
                     scope_counts[key] += 1
-    status_label = "ok" if events else "empty"
+    result_status = str(result.get("status", "")).strip()
+    status_label = "degraded" if result_status == "degraded" else ("ok" if events else "empty")
     return events, scope_counts, status_label
 
 
@@ -7392,6 +7414,11 @@ async def run_guided_init(
             f" / 点赞 [green]{dy_scope_counts.get('dy_like', 0)}[/green] 个"
             f" / 关注 [green]{dy_scope_counts.get('dy_follow', 0)}[/green] 人"
         )
+    elif dy_status == "degraded":
+        console.print(
+            "  [yellow]抖音已导入部分信号，但至少一个范围未完成 API 分页；"
+            "本次结果按不完整处理，请检查扩展日志后重试。[/yellow]"
+        )
     elif dy_status == "empty":
         console.print(
             "  [yellow]抖音任务跑通但 0 条 videos —— "
@@ -7669,7 +7696,11 @@ async def run_guided_init(
     else:
         for event in events_to_persist:
             await memory.propagate_event(event)
-    await _stage_done(1)
+    await _stage_done(
+        1,
+        status="warning" if dy_status == "degraded" else "ok",
+        reason="douyin_degraded" if dy_status == "degraded" else None,
+    )
 
     # ── Stage 2: analyze preferences ──
     await _stage_started(2)
@@ -8496,6 +8527,7 @@ def init(
     xhs_status = result.xhs_status
     dy_events = result.dy_events
     dy_scope_counts = result.dy_scope_counts
+    dy_status = result.dy_status
     yt_events = result.yt_events
     yt_scope_counts = result.yt_scope_counts
     yt_status = result.yt_status
@@ -8510,6 +8542,8 @@ def init(
     bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
+    dy_degraded = dy_status == "degraded"
+    partial_success = discovery_error or dy_degraded
 
     if result.discover_exc is not None:
         _print_status_panel(
@@ -8517,10 +8551,17 @@ def init(
             "部分完成",
             result.discovery_detail + " 也可稍后手动执行 `openbiliclaw discover`。",
         )
+    if dy_degraded:
+        _print_status_panel(
+            "warning",
+            "抖音采集部分完成",
+            "dy_status=degraded：已采到的抖音事件仍已用于画像建模，"
+            "但至少一个范围未能证明分页完整；请检查扩展日志后重试补齐。",
+        )
 
     _print_status_panel(
-        "success" if not discovery_error else "warning",
-        "初始化完成" if not discovery_error else "初始化部分完成",
+        "success" if not partial_success else "warning",
+        "初始化完成" if not partial_success else "初始化部分完成",
         "初始化摘要",
     )
 
@@ -8572,6 +8613,10 @@ def init(
         ("🎵 抖音 点赞", f"{dy_like} 个"),
         ("🎵 抖音 关注", f"{dy_follow} 人"),
         ("🌐 抖音 入库事件", f"{len(dy_events)} 条"),
+        (
+            "🎵 抖音 采集状态(dy_status)",
+            "部分完成 (degraded)" if dy_degraded else dy_status,
+        ),
         ("▶ YouTube 观看历史", f"{yt_history_count} 条"),
         ("▶ YouTube 订阅频道", f"{yt_subs_count} 个"),
         ("▶ YouTube 点赞", f"{yt_likes_count} 个"),
@@ -9131,6 +9176,12 @@ def fetch_douyin(
                 f" / 关注 [green]{scope_counts.get('dy_follow', 0)}[/green] 人"
             )
             console.print(f"  共 [green]{event_count}[/green] 条事件已由 daemon 写入 memory。")
+        elif status_label == "degraded":
+            console.print(
+                "  [yellow]抖音已导入部分信号，但至少一个范围未完成 API 分页；"
+                "任务已标记为不完整，请检查扩展日志后重试。[/yellow]"
+            )
+            console.print(f"  已保留 [yellow]{event_count}[/yellow] 条有效事件。")
         elif status_label == "empty":
             console.print(
                 "  [yellow]抖音任务跑通但 0 条 videos —— 未登录抖音(常见,"

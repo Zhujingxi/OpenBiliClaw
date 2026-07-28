@@ -645,7 +645,7 @@ $ openbiliclaw init
 
 小红书导入依赖浏览器插件在用户已登录的小红书网页里执行 `bootstrap_profile` 任务。后端只入队任务并短暂等待结果，不直接登录或爬取小红书。插件会先定位当前用户 profile，再读取 profile state 里的收藏 / 赞过分组；这里的“浏览记录”指小红书网页自己明确暴露的浏览记录/足迹 state，不是读取 Chrome 浏览器历史，也不会把普通推荐流当成浏览记录。如果后端任务显式设置 `max_scroll_rounds`，插件会按任务 payload 中的 `scroll_wait_ms` 和 `max_stagnant_scroll_rounds` 做有限滚动和停滞判断。如果插件未连接、未登录或页面没有暴露对应 scope，`init` 会继续使用已有 B 站数据完成初始化。
 
-抖音导入同样依赖浏览器插件在用户已登录的 `https://www.douyin.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `dy_tasks`，插件依次访问 `dy_post / dy_collect / dy_like / dy_follow` 四个 scope，content script 结合 DOM、MAIN-world fetch tap 和 API harvester 采集发布 / 收藏 / 点赞 / 关注条目，以 `partial` 批次回写 `/api/sources/dy/task-result`。后端会转换为统一事件：发布 → `view`，收藏 → `favorite`，点赞 → `like`，关注 → `follow`，并带 `metadata.source_platform="douyin"`。`init --yes-douyin` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；插件未连接、未登录或抖音风控返回空数据时，初始化继续使用已有信号完成。后台会复用 6 小时内近期抖音 bootstrap 任务，并用 `source_bootstrap_state.json` 跳过跨任务旧视频 / 关注 identity key。
+抖音导入同样依赖浏览器插件在用户已登录的 `https://www.douyin.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `dy_tasks`，插件依次访问 `dy_post / dy_collect / dy_like / dy_follow` 四个 scope，content script 结合 DOM、MAIN-world fetch tap 和 API harvester 采集发布 / 收藏 / 点赞 / 关注条目，以 `partial` 批次回写 `/api/sources/dy/task-result`。bootstrap 所需的当前账号 `sec_uid` 只接受同源只读 `/aweme/v1/web/user/profile/self/` 的正面确认或同一 tab 已确认缓存；页面 `#RENDER_DATA` 只有显式 `isLogin=true` 时才作未确认候选，避免把登出残留当成当前账号。常驻 fetch / XHR tap 不从被动请求 URL 提取或记录 `sec_user_id`，因此浏览推荐流或他人主页不会把作者 ID 送入后端诊断。后端会转换为统一事件：发布 → `view`，收藏 → `favorite`，点赞 → `like`，关注 → `follow`，并带 `metadata.source_platform="douyin"`。`init --yes-douyin` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；插件未连接、未登录或抖音风控返回空数据时，初始化继续使用已有信号完成。如果缺少权威 `sec_uid`、API 返回失败业务状态，或分页游标缺失 / 非法 / 停滞 / 成环 / 触顶，已采集的 `partial` 仍会保留，但任务终态会明确标记为 `degraded`。CLI 阶段提示、最终摘要和 API init 终态都会显示“部分完成”及 `dy_status=degraded`，已采事件仍参与画像建模；终态后的迟到回调不会覆盖该状态。后台会复用 6 小时内近期正常 / 在途抖音 bootstrap 任务，但不会复用已 `degraded` 的 completed 结果，下一次会重新入队补齐分页；`source_bootstrap_state.json` 继续跳过跨任务旧视频 / 关注 identity key。
 
 YouTube 导入依赖浏览器插件在用户已登录的 `https://www.youtube.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `yt_tasks`，插件依次访问 `/feed/history`、`/feed/channels`、`/playlist?list=LL` 三个 scope，读取观看历史、订阅频道和点赞视频，以 `partial` 批次回写 `/api/sources/yt/task-result`。后端会转换为统一事件：观看历史 → `view`，订阅 → `follow`，点赞 → `like`，并带 `metadata.source_platform="youtube"`。`init --yes-youtube` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；非交互式终端默认跳过，`OPENBILICLAW_NO_YOUTUBE=1` 会压过 `--yes-youtube`，避免脚本环境误触发浏览器前台 tab。后台会复用 6 小时内近期 YouTube bootstrap 任务，并用 `source_bootstrap_state.json` 跳过跨任务旧条目。
 
@@ -672,7 +672,7 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
-- `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
+- `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；抖音已 `degraded` 的 completed 结果不参与复用；设为 `0` 可关闭复用。
 - `OPENBILICLAW_ZHIHU_BOOTSTRAP_DEDUPE_HOURS`：知乎 `bootstrap_events` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_ZHIHU_BOOTSTRAP_MAX_ITEMS` / `OPENBILICLAW_ZHIHU_BOOTSTRAP_MAX_COLLECTIONS`：控制 `fetch-zhihu` 每个数据分支最多读取的条目数和最多扫描收藏夹数，默认分别为 `300` / `20`。知乎当前分支是浏览历史、收藏夹条目、动态点赞、动态收藏；动态点赞和动态收藏各自独立使用 300 条上限，不共享额度。
 
@@ -866,7 +866,7 @@ $ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点�
 
 ### `openbiliclaw fetch-douyin`
 
-`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
+`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。抖音还可能返回 `degraded`：命令会保留并打印已经写入的事件，同时给出“结果不完整”警告；它属于完成但降级的部分成功，退出码仍为 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
 
 单独触发抖音 `bootstrap_profile` 拉取，适合 smoke 测试扩展和补拉抖音信号。它只执行“入队 → 唤醒扩展 → 等结果 → 打印 scope counts”，不跑 B 站认证检查、不跑 `analyze_events()` / `build_initial_profile()` / discovery。事件由 daemon 在接收 `/api/sources/dy/task-result` partial 时写入 memory，CLI 自身不会再传播一次，避免重复入库。
 
@@ -877,7 +877,7 @@ $ openbiliclaw fetch-douyin
   共 50 条事件已由 daemon 写入 memory。
 ```
 
-默认最多等待扩展回传 `180s`；需要更长排查窗口时可显式加 `--wait-seconds 240`。命令默认复用 6 小时内已有的 pending / in-progress / completed / failed 抖音 `bootstrap_profile` 任务，避免反复打开前台抖音 tab 全量拉发布 / 收藏 / 点赞 / 关注；需要重新拉取时可设 `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0`。
+默认最多等待扩展回传 `180s`；需要更长排查窗口时可显式加 `--wait-seconds 240`。命令默认复用 6 小时内已有的 pending / in-progress / 非降级 completed / failed 抖音 `bootstrap_profile` 任务，避免反复打开前台抖音 tab 全量拉发布 / 收藏 / 点赞 / 关注；已 `degraded` 的 completed 结果会自动重新入队补齐分页。需要无条件重新拉取时可设 `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0`。
 
 前提：
 

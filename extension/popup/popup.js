@@ -1590,7 +1590,7 @@ function renderInitProgress(status) {
       elements.initProgressLabel.textContent = progress.failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
         : progress.partial
-          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
+          ? `部分完成：${describeInitStatusReason(status) || "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"}`
         : progress.active
           ? progress.indeterminate
             ? progress.stageLabel || "正在初始化"
@@ -1668,7 +1668,8 @@ async function pollInitProgress() {
     state.profileLoaded = false;
     setHint(
       status.partial_success
-        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        ? describeInitStatusReason(status) ||
+          "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
         : "初始化完成！正在加载画像和推荐…",
       status.partial_success ? "warning" : "success",
     );
@@ -2284,7 +2285,10 @@ function connectRuntimeStream() {
         state.profileLoaded = false;
         setHint(
           event.partial_success
-            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            ? String(
+                event.detail ||
+                  "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。",
+              )
             : "初始化完成！正在加载画像和推荐…",
           event.partial_success ? "warning" : "success",
         );
