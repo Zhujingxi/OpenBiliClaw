@@ -8613,7 +8613,7 @@ def create_app(
         speculator = getattr(ctx.soul_engine, "_speculator", None)
         if receipt is None:
             sentiment, classifier = await _classify_probe_sentiment(message, reply, domain)
-            metadata = (
+            metadata: dict[str, object] = (
                 _probe_metadata_from_active_speculation(speculator, domain)
                 if speculator is not None
                 else {"domain": domain}
