@@ -11,7 +11,7 @@
 
 - 四阶段严格串行：采集并批量落库 → 分析偏好 → 生成、校验并保存完整画像 → 基于该画像做内容发现、个性化评估、推荐文案与 canonical 可用性校验。`profile_ready=true` 可能在阶段 4 期间出现，但 UI 必须以 `running=true` 优先，不能提前进入完成页。
 - 桌面 Web 在上述 `initialized=true && running=true` 窗口转入终态时必须重新读取一次 runtime snapshot，替换初始化前的顶部连接徽标与侧栏库存；这次补水只同步展示，不能成为 `init_completed` 之后的第二完成门槛。
-- 阶段 1 全来源共享 600 秒预算，B 站 240 秒、X 180 秒单来源上限；扩展轮询 collector 支持协作取消。阶段 2 默认按事件分片数和有效 LLM 并发自适应（每个并发执行波次 300 秒 + 固定 300 秒恢复预留；1100 条 B 站启动信号拆成 6 批，在并发 1 / 2 / 3 下分别为 2100 / 1200 / 900 秒，最小单波预算 600 秒），阶段 3 为 360 秒，阶段 4 为 600 秒。阶段 1 总预算耗尽且无信号返回 `collection_timeout`，阶段 4 超时仍按画像已完成的部分成功处理。
+- 阶段 1 全来源共享 1800 秒预算，B 站 600 秒、X 480 秒单来源上限；扩展轮询 collector 支持协作取消。阶段 2 使用 1500 秒（25 分钟）无完整分片进展期限与至少 2700 秒（45 分钟）绝对上限：idle 高于 1200 秒单请求超时并容纳有界 429 cooldown，不会先于 Provider 请求将其取消。阶段 3 为 1800 秒绝对上限，阶段 4 为 900 秒无进展 / 2700 秒绝对上限。阶段 1 总预算耗尽且无信号返回 `collection_timeout`，阶段 4 超时仍按画像已完成的部分成功处理。
 - 状态分为 owner liveness 与业务 progress：`last_heartbeat_at` 证明后台任务仍在，`last_progress_at/progress_sequence` 只在业务里程碑推进；`last_activity` 仅作旧客户端 heartbeat 别名。任务退出但终态写失败会由 done callback / 状态端点立即 reconcile；无 owner 且 heartbeat 超过 120 秒的租约也会回收。
 - `stages[].progress` 支持 `{mode, done, total, note, elapsed_seconds, max_seconds}`。只有 `mode=determinate` 才显示百分比；无法量化的画像 / discovery 调用使用 indeterminate 动画和用时，不伪造“49%”。
 - popup、`/web`、`/setup` 均提供运行中取消、明确的网络错误和有限请求 deadline。轮询失败保留最后已知进度；heartbeat 新鲜但 progress 未变时说明“后台在线，仍在等待当前步骤”，heartbeat 也停止才提示可能断开。
