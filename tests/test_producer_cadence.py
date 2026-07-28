@@ -10,7 +10,7 @@ failed loudly — a live backend just kept bypassing its own floor on restart.
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,6 +25,9 @@ from openbiliclaw.runtime.x_producer import XDiscoveryProducer
 from openbiliclaw.runtime.youtube_producer import YoutubeDiscoveryProducer
 from openbiliclaw.runtime.zhihu_producer import ZhihuDiscoveryProducer
 from openbiliclaw.storage.database import Database
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Every producer whose floor moved off the in-process attribute.
 LEDGER_BACKED_PRODUCERS = (

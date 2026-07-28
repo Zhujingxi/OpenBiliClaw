@@ -197,6 +197,30 @@ class OpenAIProvider(LLMProvider):
                 response = await self._request_with_retry(**kwargs)
                 choice = response.choices[0]
                 content = choice.message.content or ""
+            if (
+                not content.strip()
+                and self._provider_name == "openai_compatible"
+                and reasoning_effort is not None
+                and not effective_reasoning_effort
+                and self._reasoning_like_content(getattr(choice, "message", None))
+            ):
+                # Generic OpenAI-compatible gateways do not share one
+                # portable switch for disabling thinking. Omitting
+                # ``reasoning_effort`` is wire-compatible, but some DeepSeek
+                # relays interpret omission as "use the model default" and
+                # can spend the whole output budget on reasoning. Only after
+                # observing that exact failure for an explicit no-reasoning
+                # call, retry once with DeepSeek's disable body.
+                logger.warning(
+                    "%s ignored explicit no-reasoning request; retrying with thinking disabled",
+                    self._provider_name,
+                )
+                retry_extra_body = dict(kwargs.get("extra_body") or {})
+                retry_extra_body["thinking"] = {"type": "disabled"}
+                kwargs["extra_body"] = retry_extra_body
+                response = await self._request_with_retry(**kwargs)
+                choice = response.choices[0]
+                content = choice.message.content or ""
             if not content.strip():
                 raise self._empty_content_error(choice)
 

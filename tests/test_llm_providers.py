@@ -518,6 +518,56 @@ async def test_openai_provider_reports_reasoning_only_response(
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_retries_explicit_no_reasoning_with_disabled_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway that ignores an omitted effort gets one explicit disable retry."""
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="deepseek-v4-flash",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) < 3:
+            return SimpleNamespace(
+                model="deepseek-v4-flash",
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(
+                            content="",
+                            reasoning_content="reasoning exhausted the output budget",
+                        ),
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=4096,
+                    total_tokens=4106,
+                ),
+            )
+        return _openai_response('{"keywords":["并发控制"]}')
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    response = await provider.complete(
+        [{"role": "user", "content": "return json"}],
+        json_mode=True,
+        reasoning_effort="",
+    )
+
+    assert response.content == '{"keywords":["并发控制"]}'
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in calls[1]
+    assert calls[2]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in calls[2]
+
+
+@pytest.mark.asyncio
 async def test_claude_provider_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = ClaudeProvider(api_key="test-key")
 

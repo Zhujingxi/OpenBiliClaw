@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -210,6 +211,27 @@ class TestDatabase:
             assert events[0]["event_type"] == "click"
             assert events[0]["url"] == "https://www.bilibili.com/video/BV1234"
 
+            db.close()
+
+    def test_concurrent_event_inserts_use_isolated_transactions(self) -> None:
+        """API/background writers must not share one SQLite transaction."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            def insert(index: int) -> int:
+                return db.insert_event(
+                    "view",
+                    url=f"https://www.bilibili.com/video/BVCONCURRENT{index}",
+                    metadata={"bvid": f"BVCONCURRENT{index}"},
+                )
+
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                row_ids = list(executor.map(insert, range(120)))
+
+            assert len(set(row_ids)) == 120
+            assert db.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 120
+            assert db.conn.execute("SELECT COUNT(*) FROM seen_items").fetchone()[0] == 120
             db.close()
 
     def test_cache_content(self) -> None:

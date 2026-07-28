@@ -682,3 +682,91 @@ def test_recover_suppressed_allows_over_quota_source_to_fill_global_gap(
         ]
         == "fresh"
     )
+
+
+def test_recover_suppressed_does_not_oscillate_on_topic_window_misses(
+    tmp_path: Path,
+) -> None:
+    """Recovery must only keep rows that actually grow canonical availability.
+
+    The production failure behind this case alternated forever between
+    restoring suppressed rows and trimming the same rows back out. Rows from a
+    topic already at the public three-item window can only displace an existing
+    item, while a low-ranked row from an apparently underfilled topic may still
+    miss the SQL top-three window because a viewed row occupies a higher rank.
+    Neither shape can fill the one-item global deficit.
+    """
+    db = _database(tmp_path)
+    for index, score in enumerate((0.93, 0.92, 0.91)):
+        _seed_ready(
+            db,
+            f"BV_SATURATED_FRESH_{index}",
+            topic_group="saturated",
+            relevance_score=score,
+        )
+    for index, score in enumerate((0.99, 0.98, 0.97)):
+        _seed_ready(
+            db,
+            f"BV_WINDOW_FRESH_{index}",
+            topic_group="windowed",
+            relevance_score=score,
+        )
+    db.insert_event(
+        "view",
+        url="https://www.bilibili.com/video/BV_WINDOW_FRESH_2",
+        metadata={"bvid": "BV_WINDOW_FRESH_2", "source_platform": "bilibili"},
+    )
+
+    suppressed_ids: list[str] = []
+    for index in range(10):
+        bvid = f"BV_SATURATED_SUPPRESSED_{index}"
+        suppressed_ids.append(bvid)
+        _seed_ready(
+            db,
+            bvid,
+            topic_group="saturated",
+            relevance_score=0.96 - index * 0.001,
+        )
+        _suppress(db, bvid)
+    suppressed_ids.append("BV_WINDOW_TOO_LOW")
+    _seed_ready(
+        db,
+        "BV_WINDOW_TOO_LOW",
+        topic_group="windowed",
+        relevance_score=0.70,
+    )
+    _suppress(db, "BV_WINDOW_TOO_LOW")
+
+    before_statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute(
+            "SELECT bvid, pool_status FROM content_cache ORDER BY bvid"
+        ).fetchall()
+    }
+    assert db.count_pool_candidates() == 5
+    assert db.count_pool_raw_material_candidates() == 5
+
+    results = [
+        db.maintain_pool_inventory(
+            target=6,
+            raw_ceiling=6,
+            source_share_quotas={"bilibili": 6},
+            raw_source_share_quotas={"bilibili": 6},
+            max_per_topic_group=3,
+        )
+        for _ in range(2)
+    ]
+
+    after_statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute(
+            "SELECT bvid, pool_status FROM content_cache ORDER BY bvid"
+        ).fetchall()
+    }
+    assert all(result.available_before == result.available_after == 5 for result in results)
+    assert all(result.raw_before == result.raw_after == 5 for result in results)
+    assert all(result.recovered_suppressed == 0 for result in results)
+    assert all(result.mutation_count == 0 for result in results)
+    assert all(result.has_more is False for result in results)
+    assert after_statuses == before_statuses
+    assert all(after_statuses[bvid] == "suppressed" for bvid in suppressed_ids)

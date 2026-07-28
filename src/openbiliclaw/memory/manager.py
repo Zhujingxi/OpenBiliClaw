@@ -934,7 +934,8 @@ class MemoryManager:
                 event_type, str(event.get("url", "")), metadata
             )
 
-        self._database.insert_event(
+        await asyncio.to_thread(
+            self._database.insert_event,
             event_type,
             url=event.get("url", ""),
             title=event.get("title", ""),

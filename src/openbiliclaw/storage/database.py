@@ -1875,43 +1875,46 @@ class Database:
         """
         params = self._event_insert_params(event_type, kwargs)
         attempts = _LOCK_RETRY_ATTEMPTS
-        self._ensure_fresh_read()
-        while True:
-            try:
-                cursor = self.conn.execute(
-                    "INSERT INTO events "
-                    "(event_type, url, title, context, metadata, "
-                    " inferred_satisfaction, satisfaction_reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params,
-                )
-                event_id = int(cursor.lastrowid or 0)
-                seen_changed = False
-                if event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
-                    seen_changed = self._upsert_seen_items_from_view_event_on(
-                        self.conn,
-                        event_id=event_id,
-                        row={"url": params[1], "metadata": params[4]},
+        conn = self.open_connection()
+        try:
+            while True:
+                try:
+                    cursor = conn.execute(
+                        "INSERT INTO events "
+                        "(event_type, url, title, context, metadata, "
+                        " inferred_satisfaction, satisfaction_reason) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        params,
                     )
-                self._advance_seen_items_cursor_on(self.conn, event_id)
-                self.conn.commit()
-                if seen_changed:
-                    self._invalidate_seen_state_cache()
-                return event_id
-            except sqlite3.OperationalError as exc:
-                self.conn.rollback()
-                message = str(exc).lower()
-                if "database is locked" not in message or attempts <= 1:
+                    event_id = int(cursor.lastrowid or 0)
+                    seen_changed = False
+                    if event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
+                        seen_changed = self._upsert_seen_items_from_view_event_on(
+                            conn,
+                            event_id=event_id,
+                            row={"url": params[1], "metadata": params[4]},
+                        )
+                    self._advance_seen_items_cursor_on(conn, event_id)
+                    conn.commit()
+                    if seen_changed:
+                        self._invalidate_seen_state_cache()
+                    return event_id
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    message = str(exc).lower()
+                    if "database is locked" not in message or attempts <= 1:
+                        raise
+                    attempts -= 1
+                    logger.warning(
+                        "SQLite event+seen write locked, retrying (%s attempts left)",
+                        attempts,
+                    )
+                    time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+                except Exception:
+                    conn.rollback()
                     raise
-                attempts -= 1
-                logger.warning(
-                    "SQLite event+seen write locked, retrying (%s attempts left)",
-                    attempts,
-                )
-                time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
-            except Exception:
-                self.conn.rollback()
-                raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -6552,8 +6555,9 @@ class Database:
         The former implementation re-ran the full servability window after
         every restored row. A 300-row recovery therefore performed hundreds
         of window-function scans while holding ``BEGIN IMMEDIATE``. We model
-        the availability/source counters in memory and let a later bounded
-        maintenance batch pick up any topic-cap displacement edge case.
+        the availability/source counters in memory; the caller then validates
+        the batch against one canonical availability scan and reverts any
+        speculative rows that did not produce net-new inventory.
         """
         clean_deficit = max(0, int(deficit))
         clean_limit = max(0, int(max_restore))
@@ -6619,8 +6623,16 @@ class Database:
             and len(restored_ids) < clean_limit
             and simulated_available < desired_available
         ):
+            fillable_rows = [
+                row
+                for row in remaining_rows
+                if current_topic_count[str(row.get("topic_group", "") or "").strip().lower()]
+                < availability_topic_cap
+            ]
+            if not fillable_rows:
+                break
             row = min(
-                remaining_rows,
+                fillable_rows,
                 key=lambda candidate: (
                     0
                     if current_family_count[
@@ -6653,13 +6665,11 @@ class Database:
             if cursor.rowcount:
                 restored_ids.append(bvid)
                 topic = str(row.get("topic_group", "") or "").strip().lower()
-                if not topic or current_topic_count[topic] < availability_topic_cap:
-                    simulated_available += 1
-                    if topic:
-                        current_topic_count[topic] += 1
-                    current_family_count[
-                        _pool_source_family(row.get("source"), row.get("source_platform"))
-                    ] += 1
+                simulated_available += 1
+                current_topic_count[topic] += 1
+                current_family_count[
+                    _pool_source_family(row.get("source"), row.get("source_platform"))
+                ] += 1
         return restored_ids
 
     def maintain_pool_inventory(
@@ -6750,11 +6760,40 @@ class Database:
                     _viewed_content_keys=viewed_content_keys,
                 )
                 recovered_set = set(recovered_ids)
-                protected_ids.update(
+                visible_recovered = {
                     str(row["bvid"])
                     for row in recovered_available_rows
                     if str(row["bvid"]) in recovered_set
-                )
+                }
+                net_available_gain = max(0, len(recovered_available_rows) - available_before)
+                # The in-memory recovery planner deliberately avoids a full
+                # ranked-window scan per row. Its estimate can still be wrong
+                # when a viewed/unlinkable row occupies a higher SQL topic
+                # rank: restoring a lower-ranked suppressed row then changes
+                # no canonical availability at all. Never let that speculative
+                # write escape the transaction. A kept recovery must map
+                # one-for-one to net-new canonical inventory; ambiguous
+                # displacement is reverted as a batch and retried only after
+                # the external pool fingerprint changes.
+                if len(visible_recovered) != net_available_gain:
+                    reverted_ids = recovered_set
+                    visible_recovered = set()
+                    recovered_available_rows = before_rows
+                else:
+                    reverted_ids = recovered_set - visible_recovered
+                if reverted_ids:
+                    self._apply_content_status_on(
+                        conn,
+                        sorted(reverted_ids),
+                        status="suppressed",
+                    )
+                    logger.debug(
+                        "pool maintenance reverted %s speculative recovery row(s) "
+                        "that did not grow canonical availability",
+                        len(reverted_ids),
+                    )
+                recovered_ids = [bvid for bvid in recovered_ids if bvid in visible_recovered]
+                protected_ids.update(visible_recovered)
             initial_raw_rows = {
                 str(row["bvid"]): row
                 for row in self._load_pool_raw_material_rows_on(
