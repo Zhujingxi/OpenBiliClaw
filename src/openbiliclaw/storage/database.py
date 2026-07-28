@@ -10308,6 +10308,38 @@ class Database:
         latest = row["latest"] if row is not None else None
         return str(latest) if latest is not None else ""
 
+    def get_feedback_covers(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """All feedback rows with a joinable cover_url, regardless of score.
+
+        ``rebuild_visual_profile`` needs EVERY liked/disliked cover to build
+        taste centroids — including feedback on low-relevance items the user
+        still took the time to react to. ``get_recommendations`` cannot serve
+        this: it applies the pool admission predicate (``confidence >=
+        min_score``), which silently drops low-confidence feedback rows, so a
+        rebuild via that path saw only a fraction of the feedback and built
+        too few / empty centroids. This query bypasses admission and orders
+        by feedback time so the most recent reactions win deduplication.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT r.feedback_type, r.bvid,
+                   COALESCE(c.cover_url, '') AS cover_url
+            FROM recommendations AS r
+            LEFT JOIN content_cache AS c
+                   ON c.bvid = COALESCE(
+                        (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                        (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+                   )
+            WHERE r.feedback_type IS NOT NULL
+              AND r.feedback_type != ''
+              AND COALESCE(c.cover_url, '') != ''
+            ORDER BY r.feedback_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def _ensure_saved_sync_tables(self) -> None:
         """Create normalized saved-content tables and import legacy saved rows once."""
         self.conn.executescript("""

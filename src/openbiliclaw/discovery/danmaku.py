@@ -54,11 +54,42 @@ _MIN_COLLAPSED_LENGTH = 6
 # (whitespace-stripped, repeats collapsed) as a whole string.
 _STOPWORD_DANMAKU: frozenset[str] = frozenset(
     {
-        "难说", "已取餐", "懂你意思", "遥遥领先", "前排", "沙发", "打卡",
-        "火钳刘明", "awsl", "666", "牛逼", "牛批", "爆了", "爽", "保护",
-        "哈", "草", "顶", "支持", "第一", "来了", "签到", "早",
-        "泪目", "破防", "笑死", "绝了", "好家伙", "蚌埠住了", "典",
-        "有一说一", "不明觉厉", "мама", "awa", "qwq", "yyds",
+        "难说",
+        "已取餐",
+        "懂你意思",
+        "遥遥领先",
+        "前排",
+        "沙发",
+        "打卡",
+        "火钳刘明",
+        "awsl",
+        "666",
+        "牛逼",
+        "牛批",
+        "爆了",
+        "爽",
+        "保护",
+        "哈",
+        "草",
+        "顶",
+        "支持",
+        "第一",
+        "来了",
+        "签到",
+        "早",
+        "泪目",
+        "破防",
+        "笑死",
+        "绝了",
+        "好家伙",
+        "蚌埠住了",
+        "典",
+        "有一说一",
+        "不明觉厉",
+        "мама",
+        "awa",
+        "qwq",
+        "yyds",
     }
 )
 
@@ -79,6 +110,28 @@ _PUNCT_RUN_RE = re.compile(r"([^\w\s])\1{1,}", re.UNICODE)
 # — both appear in real battery-review danmaku), and collapsing them silently
 # corrupts the number.
 _CHAR_RUN_RE = re.compile(r"(\D)\1{2,}", re.UNICODE)
+
+# A short unit (1-6 chars) repeated 3+ times ANYWHERE in the string collapses
+# to one copy. This is the multi-char generalisation of _CHAR_RUN_RE, needed
+# for the real-data wish-spam shape that defeated the original collapse:
+# ``许愿蕾米埃尔1+1不歪 求你了求你了…求你了`` (a 3-char wish suffix ×12 behind a
+# short semantic prefix). _CHAR_RUN_RE can't see it ("求你了" is not one char),
+# and _collapse_repeated_unit can't see it (the prefix breaks whole-string
+# periodicity), so the spam tail survived at full length, ranked high by
+# collapsed length, and polluted the embedding with "求你了"×12.
+#
+# Two guards, both learned from real data:
+#  * ``(?=\D)`` — the unit must START on a non-digit. Repeated digits are
+#    load-bearing ("5000电池", "10000mah", "2026年"); without this guard the
+#    regex collapsed the "000" inside "5000" to "0", corrupting the number
+#    (the same class of bug _CHAR_RUN_RE's digit exemption exists for).
+#  * ``.{1,6}?`` lazy — pick the SMALLEST repeating unit so "求你了"×12 collapses
+#    to one "求你了", not to a 6-char double ("求你了求你了") that a greedy
+#    quantifier leaves behind. Unit length is capped at 6: spam units are short
+#    (保护×2, 求你了×3, 已取餐×3), and a higher cap risks collapsing legitimate
+#    varied text. Run AFTER _CHAR_RUN_RE so genuine doubles it preserves
+#    (走走, 哈哈 — only 2 copies, below the 3+ threshold here) are untouched.
+_UNIT_RUN_RE = re.compile(r"(?=\D)(.{1,6}?)\1{2,}", re.UNICODE)
 
 # Whitespace runs collapse to one space.
 _SPACE_RUN_RE = re.compile(r"\s+")
@@ -117,6 +170,7 @@ def collapse_repeats(text: str) -> str:
         return ""
     normalized = _PUNCT_RUN_RE.sub(r"\1", normalized)
     normalized = _CHAR_RUN_RE.sub(r"\1\1", normalized)
+    normalized = _UNIT_RUN_RE.sub(r"\1", normalized)
     return _collapse_repeated_unit(normalized).strip()
 
 

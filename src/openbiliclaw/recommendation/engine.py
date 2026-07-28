@@ -48,20 +48,37 @@ _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
 # Cover visual alignment → delight bonus (opt-in, only when
 # [llm.embedding].multimodal_enabled + a multimodal embedding model are active).
 #
-# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Cross-modal image↔text
-# cosine in shared-space embedders (qwen3-vl-embedding / gemini-embedding-2)
-# runs much lower and more model-specific than same-modal text↔text cosine, so
-# the floor/ceil below are conservative guesses, NOT tuned against a deployed
-# model. Deliberately kept small + additive + one-directional so a mis-guess
-# can only slightly re-rank already-qualifying delight candidates, never demote
-# them, and never touches text-only users (bonus is exactly 0 when image embed
-# is inactive). Reopen calibration after choosing a real multimodal model:
-# raise logging to INFO and read the emitted max_sim distribution, then move the
-# floor/ceil so the bonus spreads across the observed range. See CLAUDE.md
-# pitfall rule 3 (document threshold calibration) and the quality-first rule.
+# CALIBRATION PROVENANCE: MEASURED 2026-07-27 against dashscope
+# qwen3-vl-embedding (dim=1024). The measured quantity is exactly what this
+# bonus computes — per-cover MAX cosine over the text interest anchors.
+#
+# Two passes, both rule-3 documented:
+#  1. GENERIC-ANCHOR pass (scripts/calibrate_visual_thresholds.py, 452 real
+#     covers vs 8 generic interest strings): p5=0.183 p25=0.259 p50=0.302
+#     p75=0.347 p95=0.403 p99=0.443 p100=0.448. This retired the original
+#     0.15/0.45 guess (floor below p5 → ~97% earned bonus; ceil above p100 →
+#     none reached full).
+#  2. LIVE-ANCHOR pass (the production pool, 834 covers vs the user's ACTUAL
+#     soul-profile interest anchors): p5=0.195 p25=0.292 p50=0.350
+#     p75=0.408 p95=0.479 p99=0.541 p100=0.598. The distribution sits ~0.05
+#     higher than the generic pass because the user's own interest anchors are
+#     more on-style for a pool discovered for that user than 8 generic strings.
+#     The constants below come from THIS pass — the live distribution is what
+#     serve() actually computes, so it is the ground truth, not the generic
+#     proxy.
+#
+# Floor at p50 means ~50% of covers earn some bonus and ~5% reach the cap,
+# restoring the discrimination the generic-pass constants (0.30/0.40) had lost
+# on the live pool: with those, 71% of covers earned a bonus and 28% were
+# pinned at the 0.05 cap, so the top of the ranking collapsed into a flat band
+# of 0.88-rel + 0.05-cover ties. Kept small + additive + one-directional;
+# exactly 0 when image embedding is inactive. Reopen after any embedding
+# provider/model swap (CLAUDE.md pitfall rule 3): rerun the script with
+# --reset, and re-derive floor/ceil from the live pool's percentiles once it
+# has grown.
 _VISUAL_COVER_BONUS_MAX = 0.05  # hard cap on the additive nudge to delight_score
-_VISUAL_COVER_SIM_FLOOR = 0.15  # cross-modal cosine at/below → zero bonus
-_VISUAL_COVER_SIM_CEIL = 0.45  # cross-modal cosine at/above → full bonus
+_VISUAL_COVER_SIM_FLOOR = 0.35  # live p50 of per-cover max anchor cosine
+_VISUAL_COVER_SIM_CEIL = 0.48  # live p95 of per-cover max anchor cosine
 _VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
 # Fairness guard for the serve() hot path: right after a user enables
 # multimodal, pool content admitted BEFORE the switch has no warmed cover
@@ -80,17 +97,34 @@ _VISUAL_COVER_MIN_COVERAGE = 0.6
 # centroids (same-modal image↔image cosine), not text interest anchors. Runs in
 # parallel and is added on top of the cover↔text bonus in serve().
 #
-# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Same-modal image↔image
-# cosine runs higher than the cross-modal 0.15-0.45 above, so this has its own
-# floor/ceil — do NOT reuse _VISUAL_COVER_SIM_*. Kept small + additive +
-# one-directional (the negative penalty only subtracts from this signal's own
-# positive, never below zero, never demotes below the base relevance) so a
-# mis-guess can only slightly re-rank already-qualifying candidates. Reopen
-# after choosing a real multimodal model: read the pos/neg max_sim distribution
-# from the A/B harness, then move floor/ceil so the bonus spreads (rule 3).
+# CALIBRATION PROVENANCE: MEASURED 2026-07-27 against dashscope
+# qwen3-vl-embedding (dim=1024). Two distinct quantities were measured:
+#
+#  1. COVER-PAIR cosine (random pairs of real covers, 452 covers / 101,926
+#     pairs via scripts/calibrate_visual_thresholds.py): p50=0.219 p95=0.409
+#     p99=0.497. This is the *spread* of covers in the space — it sets the
+#     CLUSTER threshold in visual_profile.py (whether two liked covers merge
+#     into one taste peak), NOT this bonus's floor/ceil.
+#  2. CANDIDATE-vs-CENTROID cosine (834 pool candidates vs the user's liked
+#     cover centroids, measured on the live pool): p50=0.310 p75=0.481
+#     p90=0.561 p95=0.609 p99=0.732 p100=0.889. This is what this bonus
+#     actually computes — a candidate's max cosine against the user's taste
+#     peaks — so THIS is the distribution the floor/ceil come from. It sits
+#     higher than the cover-pair spread because a centroid is the mean of
+#     liked covers and candidates are discovered for this user, so both sides
+#     are already on-style versus a random pair.
+#
+# The earlier 0.22/0.41 (cover-pair p50/p95) was the wrong distribution: it
+# made 70% of candidates earn a bonus and 38% hit the 0.05 cap on the live
+# pool, collapsing the top of the ranking into a flat band of ties — the same
+# saturation symptom the cover bonus had before its own live recalibration.
+# Floor at p50 means ~50% of candidates earn some bonus; ceil at p95 means ~5%
+# reach the cap. Reopen after any embedding provider/model swap OR once the
+# centroid set grows (more liked covers shift the candidate-vs-centroid
+# distribution): rerun the live measurement and re-derive (rule 3).
 _VISUAL_PROFILE_BONUS_MAX = 0.05  # hard cap on the additive nudge
-_VISUAL_PROFILE_SIM_FLOOR = 0.55  # same-modal image cosine at/below → zero
-_VISUAL_PROFILE_SIM_CEIL = 0.80  # same-modal image cosine at/above → full
+_VISUAL_PROFILE_SIM_FLOOR = 0.31  # live p50 of candidate-vs-centroid cosine
+_VISUAL_PROFILE_SIM_CEIL = 0.61  # live p95 of candidate-vs-centroid cosine
 _VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
 
 
@@ -102,16 +136,33 @@ _VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
 # taste" is the right question for recall, and max is more sensitive to that
 # than a mean that washes out a single strong match.
 #
-# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Same-modal image↔image like
-# _VISUAL_PROFILE_*, but keyframes are 160x90/480x270 downscaled video stills
-# whose vector distribution differs from full-size covers — so they get their
-# own floor/ceil rather than reusing P1's. Kept small + additive +
-# one-directional (the negative penalty only zeroes this signal, never demotes
-# below base relevance). Reopen after choosing a real multimodal model: read the
-# frame max_sim distribution, then move floor/ceil so the bonus spreads (rule 3).
+# CALIBRATION PROVENANCE: MEASURED 2026-07-28 against dashscope
+# qwen3-vl-embedding (dim=1024) — 99 Bilibili pool candidates with real
+# videoshot sprite crops (160x90/480x270 stills), max-pooled best cosine
+# against the SAME P1 pos/neg centroids this bonus reads:
+#   pos best sim: p50=0.397  p75=0.491  p90=0.557  p95=0.639  p99=0.697
+#   neg best sim: p50=0.395  p75=0.481  p90=0.566  p95=0.597  p99=0.648
+#   net (pos-neg): p50=+0.022  p95=+0.093   overlap(neg>pos)=41%
+# Floor/ceil = p50/p95 of pos best sim, mirroring the P1 cover convention
+# (candidate-vs-centroid cosine). The earlier borrowed 0.22/0.41 was the
+# cover-PAIR distribution and saturates here: p50 is 0.397, so a 0.22 floor
+# puts nearly every candidate's positive term at the cap.
+#
+# NOTE on the pos/neg overlap: P3 reuses P1's centroids and the same
+# ``positive - penalty`` formula, so it inherits P1's neg-cancellation
+# tendency. P3 is MARGINALLY better than P1 (net p50 +0.022 vs P1's -0.024;
+# overlap 41% vs P1's >50%) — keyframes separate liked/disliked taste a
+# little better than covers, but not enough to cure the cancellation: pos
+# and neg distributions still nearly coincide (both p50≈0.396, p95≈0.62),
+# so the median candidate's net bonus is ~0 and only the tail (net p95=
+# 0.093) earns a visible nudge. This is the same structural limit P1 hit
+# (cover is a weak visual proxy + binary feedback doesn't separate visual
+# taste); P3 softens it without removing it. Reopen after any embedding
+# provider/model swap (rule 3): rerun
+# scripts/prewarm_and_measure_keyframes.py and re-derive from the fresh p50/p95.
 _KEYFRAME_BONUS_MAX = 0.05  # hard cap on the additive nudge
-_KEYFRAME_SIM_FLOOR = 0.55  # same-modal image cosine at/below → zero
-_KEYFRAME_SIM_CEIL = 0.80  # same-modal image cosine at/above → full
+_KEYFRAME_SIM_FLOOR = 0.40  # measured p50 of keyframe-vs-centroid pos best sim
+_KEYFRAME_SIM_CEIL = 0.64  # measured p95 of keyframe-vs-centroid pos best sim
 _KEYFRAME_PENALTY_MAX = 0.05  # hard cap on the disliked-style penalty
 _KEYFRAME_DEFAULT_MAX_FRAMES = 4  # frames sampled per video
 
@@ -2211,9 +2262,18 @@ class RecommendationEngine:
         from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
         from openbiliclaw.recommendation.visual_profile import build_centroids
 
-        # feedback rows: {bvid, cover_url, feedback_type, ...}
-        rows = self._database.get_recommendations(
-            limit=200, exclude_processed=False
+        # feedback rows: {bvid, cover_url, feedback_type, ...}. Use the
+        # dedicated feedback-cover query, NOT get_recommendations — that one
+        # applies the pool admission predicate (confidence >= min_score) and
+        # silently dropped low-confidence feedback rows, so a rebuild saw
+        # only a fraction of the feedback and built too few centroids.
+        fetch_covers = getattr(self._database, "get_feedback_covers", None)
+        rows = (
+            fetch_covers(limit=500)
+            if callable(fetch_covers)
+            else self._database.get_recommendations(
+                limit=500, exclude_processed=False
+            )
         )
         pos_urls: list[str] = []
         neg_urls: list[str] = []

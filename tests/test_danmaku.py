@@ -36,6 +36,15 @@ from openbiliclaw.storage.database import Database
         ("许愿予愿安洁丽娜，出必还愿！" * 5, "许愿予愿安洁丽娜，出必还愿！"),
         ("走走", "走走"),  # genuine double survives
         ("哈哈", "哈哈"),
+        # Real-data wish-spam: a short semantic prefix + a 3-char unit ×12.
+        # The prefix defeats whole-string periodicity and the unit is multi-char
+        # so the single-char run rule can't see it — without _UNIT_RUN_RE the
+        # spam tail survived at full length and dominated the embedding.
+        (
+            "许愿蕾米埃尔1+1不歪 " + "求你了" * 12,
+            "许愿蕾米埃尔1+1不歪 求你了",
+        ),
+        ("看我看我看我", "看我"),  # embedded 2-char unit ×3
     ],
 )
 def test_collapse_repeats_shapes(raw: str, expected: str) -> None:
@@ -80,7 +89,7 @@ def test_condense_prefers_long_low_frequency_content() -> None:
 
 
 def test_condense_excludes_spam_even_when_long() -> None:
-    """"保护"x30 is 60 chars but one word of meaning — must not outrank real text."""
+    """ "保护"x30 is 60 chars but one word of meaning — must not outrank real text."""
     real = "苹果上市后系统优化导致零售机强于媒体机，这个结论挺反直觉的"
     texts = ["保护" * 30] * 5 + [real]
     out = condense_danmaku(texts)
@@ -201,8 +210,15 @@ def _profile() -> SoulProfile:
 
 def _seed(db: Database, bvid: str) -> None:
     db.cache_content(
-        bvid=bvid, title="t", cover_url="", relevance_score=0.8, source="search",
-        pool_expression="e", pool_topic_label="t", topic_group="g", style_key="s",
+        bvid=bvid,
+        title="t",
+        cover_url="",
+        relevance_score=0.8,
+        source="search",
+        pool_expression="e",
+        pool_topic_label="t",
+        topic_group="g",
+        style_key="s",
     )
 
 
@@ -240,7 +256,9 @@ async def test_danmaku_bonus_positive_for_on_topic() -> None:
         emb = _TextEmb()
         await emb.embed(text)  # simulate prewarm
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=emb,  # type: ignore[arg-type]
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
             danmaku_enabled=True,
         )
         cand = DiscoveredContent(bvid="BV1", title="t", relevance_score=0.8)
@@ -259,7 +277,9 @@ async def test_danmaku_bonus_empty_when_disabled() -> None:
         emb = _TextEmb()
         await emb.embed("电池寿命衰减曲线")
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=emb,  # type: ignore[arg-type]
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
             danmaku_enabled=False,
         )
         cand = DiscoveredContent(bvid="BV1", title="t", relevance_score=0.8)
@@ -274,7 +294,9 @@ async def test_danmaku_bonus_empty_without_stored_text() -> None:
         db.initialize()
         _seed(db, "BV1")
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=_TextEmb(),  # type: ignore[arg-type]
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextEmb(),  # type: ignore[arg-type]
             danmaku_enabled=True,
         )
         cand = DiscoveredContent(bvid="BV1", title="t", relevance_score=0.8)
@@ -289,7 +311,9 @@ async def test_danmaku_prewarm_noops_without_client() -> None:
         db.initialize()
         _seed(db, "BV1")
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=_TextEmb(),  # type: ignore[arg-type]
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextEmb(),  # type: ignore[arg-type]
             danmaku_enabled=True,  # no bilibili_client injected
         )
         assert await engine.prewarm_pool_danmaku(limit=10) == 0
@@ -319,8 +343,11 @@ async def test_danmaku_prewarm_stamps_and_embeds() -> None:
         emb = _TextEmb()
         client = _FakeClient()
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=emb,  # type: ignore[arg-type]
-            danmaku_enabled=True, bilibili_client=client,
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=client,
         )
         processed = await engine.prewarm_pool_danmaku(limit=10)
         assert processed == 1

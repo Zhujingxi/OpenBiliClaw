@@ -100,7 +100,7 @@ async def test_ab_bonus_matches_real_formula() -> None:
     bonus = _compute_bonus_map(specs, contents, emb)
     expected = RecommendationEngine._cover_bonus_from_vec(cover_vec, [anchor])
     assert bonus.get("BVX", 0.0) == pytest.approx(expected, abs=1e-9)
-    # And it's > 0 at cos=0.40 (above the 0.15 floor, below 0.45 ceil).
+    # And it's > 0 at cos=0.40 (above the production floor).
     assert expected > 0.0
 
 

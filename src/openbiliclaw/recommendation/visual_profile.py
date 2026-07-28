@@ -34,9 +34,20 @@ DEFAULT_MAX_CLUSTERS = 5
 # cover does not establish a taste peak).
 DEFAULT_MIN_CLUSTER_MEMBERS = 2
 # Cosine at/above which a new vector joins an existing cluster (same-modal
-# image↔image, so higher than the cross-modal 0.15 used by the cover↔text
-# anchor path). PROVISIONAL — reopen after real-model calibration.
-DEFAULT_CLUSTER_THRESHOLD = 0.80
+# image↔image). CALIBRATION PROVENANCE: MEASURED 2026-07-27 against dashscope
+# qwen3-vl-embedding (dim=1024) — 452 real Bilibili covers, 101,926 pairs:
+#   p50=0.219  p75=0.295  p90=0.365  p95=0.409  p99=0.497  p100=0.929
+# The original 0.80 inherited the same "same-modal cosine runs high" intuition
+# that made the cover/keyframe bonuses inert, and is provably unreachable
+# here: p99 is 0.497, so 0.80 meant NO two real covers ever joined a cluster —
+# every liked cover became a singleton and was pruned by min_members, leaving
+# zero centroids and a silently no-op feature. 0.50 sits just above p99, so
+# only genuinely visually-similar covers (the rare tail) merge into a taste
+# peak; unrelated covers stay separate rather than polluting a centroid.
+# Reopen after any embedding provider/model swap (CLAUDE.md pitfall rule 3):
+# rerun scripts/calibrate_visual_thresholds.py --report and re-derive from the
+# fresh p99.
+DEFAULT_CLUSTER_THRESHOLD = 0.50
 
 
 @dataclass(frozen=True)

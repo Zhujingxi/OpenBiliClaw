@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Offline A/B harness: does the cover-visual bonus actually move ranking?
 
-The cover-visual bonus (``_VISUAL_COVER_BONUS_MAX=0.05``, floor/ceil 0.15/0.45)
-is marked PROVISIONAL / UNMEASURED in ``recommendation/engine.py``. This script
+The cover-visual bonus (``_VISUAL_COVER_BONUS_MAX=0.05``; floor/ceil now
+calibrated from real covers — see ``recommendation/engine.py``). This script
 answers two questions with a synthetic candidate pool whose cover↔anchor cosine
 is controlled exactly (no real multimodal model needed):
 
