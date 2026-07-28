@@ -189,12 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.186 (2026-07-29)**
+📌 Latest: **v0.3.187 (2026-07-29)**
 
-- **Mobile LAN access now supports IPv6** — the default server listens on both IPv4 and IPv6, and QR codes use valid bracketed IPv6 URLs.
-- **Concurrent event writes are more reliable** — `/api/events` now uses independent atomic SQLite transactions, preventing intermittent 500s under multi-threaded writes.
-- **Candidate-pool maintenance now converges** — it no longer restores and trims the same invisible items around the target inventory level.
-- **OpenAI-compatible no-reasoning requests self-heal** — if a gateway ignores the setting and returns reasoning without content, OpenBiliClaw retries with thinking disabled.
+- **First-time setup no longer gets trapped by a stale placeholder instance** — degraded startup can discover, test, and save a replacement endpoint, then resume automatically after restart without misleading 503s in extension settings.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -591,8 +588,10 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-config draft → /api/config/discover-models → exact instance GET /models (no write)
-             → editable model combobox + local effort advisory (not a protocol capability)
+config recovery draft (normal or degraded; business APIs remain gated)
+             ├→ /api/config/probe-service → temporary registry → total gate
+             └→ /api/config/discover-models → exact instance GET /models (no write)
+                                           → editable model list + local effort advisory
 durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
@@ -626,7 +625,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
-│ Config draft → exact-instance /models → editable selection (no write) │
+│ Config recovery draft (normal/degraded) → temp probe / exact /models (no write) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │

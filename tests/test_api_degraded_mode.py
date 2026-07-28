@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -228,6 +230,117 @@ def test_degraded_mode_allows_llm_independent_repair_surfaces(
     # degraded guard's 503 envelope.
     assert verify_response.status_code != 503
     assert repair_status_response.status_code != 503
+
+
+def test_degraded_mode_allows_draft_llm_recovery_probes_and_model_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A broken active registry must not block testing its replacement draft.
+
+    The setup wizard and both full settings surfaces submit an unsaved v2
+    instance to these endpoints.  They are control-plane recovery operations:
+    they build from the submitted draft and do not need the failed active
+    registry.
+    """
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    app = create_app()
+
+    assert app.state.runtime_context.degraded is True
+
+    class FakeRegistry:
+        default_provider = "sensenova-main"
+
+        def is_chat_capable(self, instance_id: str) -> bool:
+            return instance_id == "sensenova-main"
+
+        def provider_type(self, instance_id: str) -> str:
+            assert instance_id == "sensenova-main"
+            return "openai_compatible"
+
+        def get(self, instance_id: str) -> SimpleNamespace:
+            assert instance_id == "sensenova-main"
+            return SimpleNamespace(_model="sensenova-6.7-flash-lite")
+
+        async def complete_provider(
+            self,
+            instance_id: str,
+            messages: list[dict[str, str]],
+            **kwargs: object,
+        ) -> SimpleNamespace:
+            assert instance_id == "sensenova-main"
+            assert messages
+            assert kwargs["model"] == "sensenova-6.7-flash-lite"
+            return SimpleNamespace(
+                content="OK",
+                instance_id=instance_id,
+                provider="openai_compatible",
+                model="sensenova-6.7-flash-lite",
+            )
+
+    class FakeDiscoveryProvider:
+        async def list_models(self) -> list[str]:
+            return ["sensenova-6.7-flash-lite"]
+
+    import openbiliclaw.llm.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "build_llm_registry", lambda cfg: FakeRegistry())
+    monkeypatch.setattr(
+        registry_module,
+        "_build_instance_provider",
+        lambda cfg, provider, instance: FakeDiscoveryProvider(),
+    )
+
+    submitted_config = {
+        "llm": {
+            "routing_version": 2,
+            "instances": {
+                "sensenova-main": {
+                    "name": "SenseNova",
+                    "provider_type": "openai_compatible",
+                    "enabled": True,
+                    "api_key": "sk-sensenova-test",
+                    "model": "sensenova-6.7-flash-lite",
+                    "base_url": "https://token.sensenova.cn/v1",
+                }
+            },
+            "default_chain": ["sensenova-main"],
+            "routes": {},
+        }
+    }
+    client = TestClient(app)
+
+    # The degraded context still owns the shared gate needed by a real draft
+    # probe; it intentionally does not construct any business LLM service.
+    assert app.state.runtime_context.llm_concurrency_gate is not None
+
+    probe = client.post(
+        "/api/config/probe-service",
+        json={
+            "kind": "llm_instance",
+            "instance_id": "sensenova-main",
+            "config": submitted_config,
+        },
+    )
+    discovery = client.post(
+        "/api/config/discover-models",
+        json={
+            "instance_id": "sensenova-main",
+            "config": submitted_config,
+        },
+    )
+    source_share = client.get("/api/config/source-share-suggestion")
+    business_api = client.get("/api/recommendations")
+
+    assert probe.status_code == 200
+    assert probe.json()["ok"] is True
+    assert probe.json()["instance_id"] == "sensenova-main"
+    assert discovery.status_code == 200
+    assert discovery.json()["ok"] is True
+    assert discovery.json()["models"] == ["sensenova-6.7-flash-lite"]
+    assert source_share.status_code == 200
+    assert business_api.status_code == 503
 
 
 def test_degraded_update_status_is_reachable(

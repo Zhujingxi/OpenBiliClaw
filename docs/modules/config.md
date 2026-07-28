@@ -915,12 +915,13 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 - `saved_sync.auto_sync_enabled` 只接受 JSON 布尔值；省略整个段表示“不更新”，但段或字段显式传 `null`、字符串或数字等非布尔输入都由 Pydantic 返回 422，不做 truthy / null 转换。
 - v2 实例编辑器只有在用户显式勾选“清除已保存密钥”时才会给该实例发送空 `api_key`；留空会保留现有密钥，masked echo 也不会被写盘。`reset_fields` 继续服务旧 Provider 分段和独立 embedding 配置；未知字段返回 400。
 - 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后，guided init 先严格生成完整画像和首轮可用推荐，init 终态后恢复后台循环并调度兴趣 / 避雷探针。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
+- 首次启动的模板包含一个等待填写 Key 的 DeepSeek 占位实例；若用户在 `/setup/` 改选其他 Provider，向导会读取 `GET /api/config.issues`，只把其中明确指向 `llm.instances.<id>.*` 的 blocking 旧实例设为 `enabled=false` 并从全局链移除。被显式自定义模块链引用的实例不会被自动改写，正常或仅 warning 的既有实例也会保留；完整多实例整理仍由桌面/插件设置页负责。校验 400 会按 `ConfigUpdateResponse.config.issues` 展示具体原因，不再把响应 JSON 截成一段不可读文本。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。
 
 ## 模型列表发现（不写配置）
 
-`POST /api/config/discover-models` 接收 `instance_id` 和当前页面的 `config.llm` 草稿，在内存副本中精确构建该实例，并调用其 OpenAI-compatible `GET /models`。它不会调用 `save_config()`、不会创建迁移备份，也不会改变默认链；masked API Key 继续复用已保存密钥。PC Web、插件和 `/setup/` 都把结果填入可编辑的模型下拉框，失败时保留用户手填值。
+`POST /api/config/discover-models` 接收 `instance_id` 和当前页面的 `config.llm` 草稿，在内存副本中精确构建该实例，并调用其 OpenAI-compatible `GET /models`。它不会调用 `save_config()`、不会创建迁移备份，也不会改变默认链；masked API Key 继续复用已保存密钥。PC Web、插件和 `/setup/` 都把结果填入可编辑的模型下拉框，失败时保留用户手填值。该端点与 `POST /api/config/probe-service` 都属于降级恢复控制面：即使 active registry 因旧配置无法构建，也会精确使用新草稿执行，而不是被降级 guard 提前返回 503；普通业务 API 仍不放行。
 
 OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；接口返回的 Effort 候选是按 Provider / 模型生成的 `local_advisory`。用户可以继续手填，最终是否接受由具体服务在真实请求时决定。
 
@@ -935,7 +936,7 @@ OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；�
 | `config` | 保存后或回滚后的配置快照，API Key 仍默认 masked。 |
 | `message` | 给 UI 展示的人类可读状态。 |
 
-当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues；`PUT /api/config` 会保存修复配置但不尝试热重载，返回 `restart_required=true`，要求用户重启 daemon。
+当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues；`PUT /api/config` 会保存修复配置但不尝试热重载，返回 `restart_required=true`，要求用户重启 daemon。`/setup/` 不会在旧降级进程上直接进入初始化：它保存一个不含凭据、24 小时过期的本地续接标记，提示重启并轮询 `/api/ping`；新进程报告非 degraded 后自动 reload、清除标记并进入账号连接步骤。插件和桌面设置页继续展示同一 `restart_required` 指引。
 
 ## 环境变量
 

@@ -209,12 +209,9 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.186（2026-07-29）**
+📌 最新版本：**v0.3.187（2026-07-29）**
 
-- **手机端支持 IPv6 局域网访问** —— 默认同时监听 IPv4 与 IPv6，二维码也会正确生成带方括号的 IPv6 地址。
-- **行为事件并发写更稳定** —— `/api/events` 的 SQLite 写入改为独立原子事务，避免多线程写入偶发 500。
-- **候选池维护能够稳定收敛** —— 不再在目标库存附近反复恢复、裁剪同一批不可见内容。
-- **OpenAI-compatible 关闭推理可自动自愈** —— 网关忽略 no-reasoning 并返回空正文时，会自动以禁用 thinking 重试。
+- **首次配置不再被旧占位实例卡死** —— 降级启动时仍可获取模型、测试并保存新端点，重启后自动续到下一步，插件设置也不再误报 503。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -595,8 +592,10 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-配置草稿 → /api/config/discover-models → 精确实例 GET /models（不写配置）
-         → 可编辑模型下拉 + 本地 Effort 建议（协议不提供能力枚举）
+配置恢复草稿（正常或降级；业务 API 仍阻断）
+         ├→ /api/config/probe-service → 临时 registry → 总并发 gate
+         └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
+                                      → 可编辑模型下拉 + 本地 Effort 建议
 持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
@@ -629,7 +628,7 @@ background ─ background admission (default 3) ──────┘
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
-│   配置草稿 → 精确实例 /models → 可编辑选择（不写盘）      │
+│   配置恢复草稿（正常/降级）→ 临时探测 / 精确实例 /models（不写盘）│
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │

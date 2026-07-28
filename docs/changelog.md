@@ -4,6 +4,10 @@
 
 ---
 
+## v0.3.187：初始化与模型配置自救修复（2026-07-29）
+
+- **修复首次初始化与插件模型配置互相锁死**：新装默认配置会带一个启用但尚未填写 Key 的 DeepSeek 占位实例，后端因此以 `llm_registry_unavailable` 降级启动来提供修复界面；此前降级保护层却把设置页自己的 `/api/config/probe-service` 与 `/api/config/discover-models` 也拦成 503，`/setup/` 切到 SenseNova 等新服务商时又把旧占位实例继续作为启用 fallback 提交，最终先出现“获取模型 503”，再以“DeepSeek 缺 API Key”返回 400，插件读取未写入的旧配置后继续显示同一 503。现在降级模式精确放行无写入的草稿探测、模型发现与来源比例建议接口，推荐/画像等业务 API 仍保持 503；首启向导只会停用诊断明确标为 blocking、且未被自定义模块链引用的旧占位实例，并把它从默认链移除（不删除正常实例或改写用户自定义链）。400 改为展示结构化 blocking issue，不再截断整段 JSON；降级保存返回 `restart_required=true` 时向导停在模型步骤，写入不含 Key 的 24 小时续接标记并轮询 liveness，重启成功后自动进入账号连接步骤，避免对旧降级进程直接启动初始化。新增真实降级 FastAPI 回归与 Chromium E2E，覆盖插件/桌面共用探测、SenseNova 替换占位、可诊断 400 和重启续接。
+
 ## v0.3.186：移动端 IPv6 与生产稳定性修复（2026-07-29）
 
 - **手机端支持 IPv6 局域网访问（[#130](https://github.com/whiteguo233/OpenBiliClaw/issues/130)）**：默认 `host = "0.0.0.0"` 过去只让 uvicorn 创建 IPv4 socket，IPv6 地址即使存在也没有 listener；`/api/qr-info` 同时只枚举 IPv4，两个二维码生成器直接把含冒号的地址拼进 URL 还会得到非法 authority。现在源码 CLI、Docker 入口和 Windows/macOS 桌面包在默认 wildcard 配置下共用独立的 IPv4 `0.0.0.0` + IPv6 `[::]` listener，避免依赖各系统不一致的 IPv4-mapped IPv6 默认值；IPv6 不可用时 warning 后保留原 IPv4 行为。局域网地址探测继续优先 RFC1918 IPv4，在 IPv4 不可用时回退 ULA / global IPv6 并排除 loopback、link-local、multicast 与 IPv4-mapped 地址；插件和桌面 Web 的二维码统一生成 `http://[IPv6]:port/m/` 合法链接。

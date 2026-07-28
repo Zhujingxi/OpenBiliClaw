@@ -2077,6 +2077,20 @@ def create_app(
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            # Draft-only config helpers are part of the recovery control
+            # plane, not business LLM traffic.  Each builds from the submitted
+            # form (or config + DB for source shares), so blocking it here made
+            # the setup wizard and both settings UIs unable to validate the
+            # replacement for the registry that failed during startup.
+            or (
+                path
+                in {
+                    "/api/config/probe-service",
+                    "/api/config/discover-models",
+                }
+                and method == "POST"
+            )
+            or (path == "/api/config/source-share-suggestion" and method in {"GET", "POST"})
             # LLM-independent repair/config surfaces (degraded ctx has config +
             # database, which is all these handlers touch). Blocking them made
             # the settings 平台源 tab and the embedding banner fail with

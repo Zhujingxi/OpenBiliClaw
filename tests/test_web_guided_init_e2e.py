@@ -78,6 +78,8 @@ class GuidedInitStub:
         self.init_posts: list[dict[str, Any]] = []
         self.cancel_posts = 0
         self.config_puts: list[dict[str, Any]] = []
+        self.config_put_status = 200
+        self.config_put_response: dict[str, Any] = {"ok": True, "config": {}}
         self.current_status = _status()
         self.post_init_error: tuple[int, dict[str, Any]] | None = None
         self.fail_next_status = False
@@ -92,6 +94,10 @@ class GuidedInitStub:
             "pool_source_shares": {"bilibili": 1.0},
             "configured_sources": {"bilibili": {"enabled": True}},
             "unread_count": 0,
+        }
+        self.ping_response: dict[str, Any] = {
+            "status": "ok",
+            "service": "openbiliclaw-api",
         }
 
     def status(self) -> dict[str, Any]:
@@ -298,6 +304,8 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                         }
                     },
                 )
+            if path == "/api/ping":
+                return _json_response(self, state.ping_response)
             if path == "/api/init-status":
                 if state.fail_next_status:
                     state.fail_next_status = False
@@ -375,7 +383,11 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                 payload = {}
             if path == "/api/config":
                 state.config_puts.append(payload)
-                return _json_response(self, {"ok": True, "config": {}})
+                return _json_response(
+                    self,
+                    state.config_put_response,
+                    state.config_put_status,
+                )
             return _json_response(self, {"ok": True})
 
         def _serve_file(self, path: Path, content_type: str | None = None) -> None:
@@ -618,6 +630,196 @@ def test_setup_wizard_e2e_save_llm_does_not_start_guided_init(
     assert stub.init_posts == []
     assert len(stub.config_puts) == 1
     assert stub.config_puts[0]["suppress_background_llm_work"] is True
+
+
+def test_setup_wizard_e2e_replaces_invalid_first_run_placeholder(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """Picking another provider repairs, rather than preserves, the fresh
+    enabled/keyless DeepSeek placeholder that forced the backend degraded."""
+    base_url, stub = guided_init_server
+    stub.config_override = {
+        "language": "zh",
+        "degraded": True,
+        "degraded_reason": "llm_registry_unavailable",
+        "issues": [
+            {
+                "field": "llm.instances.deepseek.api_key",
+                "message": "启用的 `deepseek` 实例缺少 API Key。",
+                "severity": "blocking",
+            }
+        ],
+        "llm": {
+            "routing_version": 2,
+            "instances": {
+                "deepseek": {
+                    "name": "DeepSeek 官方",
+                    "provider_type": "deepseek",
+                    "enabled": True,
+                    "api_key": "",
+                    "model": "deepseek-v4-flash",
+                    "base_url": "https://api.deepseek.com",
+                },
+                "openrouter-backup": {
+                    "name": "已有正常备选",
+                    "provider_type": "openrouter",
+                    "enabled": True,
+                    "api_key": "sk-o************test",
+                    "model": "openai/gpt-5-nano",
+                    "base_url": "https://openrouter.ai/api/v1",
+                },
+            },
+            "default_chain": ["deepseek", "openrouter-backup"],
+            "routes": {},
+        },
+        "sources": {"bilibili": {"enabled": True}},
+    }
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.locator("#provider").select_option("openai_compatible")
+    chromium_page.locator("#apiKey").fill("sk-sensenova-test")
+    chromium_page.locator("#baseUrl").fill("https://token.sensenova.cn/v1")
+    chromium_page.locator("#model").fill("sensenova-6.7-flash-lite")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+
+    assert len(stub.config_puts) == 1
+    llm = stub.config_puts[0]["llm"]
+    assert llm["instances"]["deepseek"]["enabled"] is False
+    assert llm["instances"]["openrouter-backup"]["enabled"] is True
+    assert llm["instances"]["openai-compatible-main"]["enabled"] is True
+    assert llm["default_chain"] == ["openai-compatible-main", "openrouter-backup"]
+
+
+def test_setup_wizard_e2e_renders_structured_config_validation_error(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A validation response should name the actual blocking field instead of
+    dumping/truncating the JSON response body."""
+    base_url, stub = guided_init_server
+    stub.config_put_status = 400
+    stub.config_put_response = {
+        "ok": False,
+        "message": "配置校验失败，未写入 config.toml。",
+        "config": {
+            "issues": [
+                {
+                    "field": "llm.instances.deepseek.api_key",
+                    "message": "启用的 `deepseek` 实例缺少 API Key。",
+                    "severity": "blocking",
+                }
+            ]
+        },
+    }
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.wait_for_function("document.querySelector('#model').value === 'compat-model'")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.locator("#msg0").wait_for(state="visible")
+
+    text = chromium_page.locator("#msg0").inner_text()
+    assert "配置校验失败" in text
+    assert "deepseek" in text
+    assert "API Key" in text
+    assert '{"ok":' not in text
+
+
+def test_setup_wizard_e2e_waits_for_degraded_restart_then_resumes(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A save-only degraded recovery must not advance into init against the
+    old process; after restart, the non-secret marker resumes at account setup."""
+    base_url, stub = guided_init_server
+    chromium_page.add_init_script("window.__OBC_TEST_RESTART_POLL_MS = 30;")
+    degraded_config = {
+        "language": "zh",
+        "degraded": True,
+        "degraded_reason": "llm_registry_unavailable",
+        "issues": [
+            {
+                "field": "llm.instances.deepseek.api_key",
+                "message": "启用的 `deepseek` 实例缺少 API Key。",
+                "severity": "blocking",
+            }
+        ],
+        "llm": {
+            "routing_version": 2,
+            "instances": {
+                "deepseek": {
+                    "name": "DeepSeek 官方",
+                    "provider_type": "deepseek",
+                    "enabled": True,
+                    "api_key": "",
+                    "model": "deepseek-v4-flash",
+                }
+            },
+            "default_chain": ["deepseek"],
+            "routes": {},
+        },
+        "sources": {"bilibili": {"enabled": True}},
+    }
+    recovered_config = {
+        "language": "zh",
+        "degraded": False,
+        "issues": [],
+        "llm": {
+            "routing_version": 2,
+            "instances": {
+                "deepseek": {
+                    "name": "DeepSeek 官方",
+                    "provider_type": "deepseek",
+                    "enabled": True,
+                    "api_key": "sk-t************test",
+                    "model": "deepseek-v4-flash",
+                }
+            },
+            "default_chain": ["deepseek"],
+            "routes": {},
+        },
+        "sources": {"bilibili": {"enabled": True}},
+    }
+    stub.config_override = degraded_config
+    stub.ping_response = {
+        "status": "ok",
+        "service": "openbiliclaw-api",
+        "degraded": True,
+        "degraded_reason": "llm_registry_unavailable",
+    }
+    stub.config_put_response = {
+        "ok": True,
+        "config": recovered_config,
+        "message": "配置已保存，请重启后端。",
+        "reloaded": False,
+        "rollback_applied": False,
+        "restart_required": True,
+    }
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.locator("#apiKey").fill("sk-test")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#msg0')?.innerText.includes('请重启')"
+    )
+
+    assert chromium_page.locator('[data-panel="0"].active').count() == 1
+    marker = chromium_page.evaluate(
+        "() => localStorage.getItem('openbiliclaw.setup.resume_after_restart')"
+    )
+    assert marker
+
+    # Simulate the daemon restart: both liveness and authoritative config now
+    # come from the rebuilt, non-degraded process.
+    stub.config_override = recovered_config
+    stub.ping_response = {"status": "ok", "service": "openbiliclaw-api"}
+
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+    marker_after = chromium_page.evaluate(
+        "() => localStorage.getItem('openbiliclaw.setup.resume_after_restart')"
+    )
+    assert marker_after is None
 
 
 def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(

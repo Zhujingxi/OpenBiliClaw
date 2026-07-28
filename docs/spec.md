@@ -224,8 +224,10 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
-config UI draft → /api/config/discover-models → exact instance GET /models
-                → editable model list + local effort advisory (no config write)
+config recovery control plane (normal or degraded; business APIs stay gated)
+                ├─ draft → /api/config/probe-service → temporary registry → total gate
+                └─ draft → /api/config/discover-models → exact instance GET /models
+                          → editable model list + local effort advisory (no config write)
 durable dialogue → confirmation entry(pending list / cards)
                  → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
                  → typed settlement queue[all 11 declared kinds] → one actual worker + guard
@@ -454,7 +456,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
 │      模块路由 → LLM 实例链 → Provider 适配 + Embedding（独立双层缓存） │
-│  配置草稿 → discover-models → 精确实例 GET /models（不写盘；Effort 本地建议）│
+│  配置恢复草稿（正常/降级）→ probe 临时 registry / 精确实例 GET /models（不写盘）│
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
 │  │ OpenAI / Claude / Gemini │  │ EmbeddingService       │   │
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │

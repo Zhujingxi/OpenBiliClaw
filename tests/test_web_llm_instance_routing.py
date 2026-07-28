@@ -81,9 +81,14 @@ def test_instance_editor_never_prefills_a_masked_secret_and_can_explicitly_clear
 def test_guided_setup_writes_or_updates_one_native_instance() -> None:
     assert "let savedLlmInstances = {}" in SETUP_HTML
     assert "routing_version: 2" in SETUP_HTML
-    assert "instances: { ...savedLlmInstances, [instanceId]: instance }" in SETUP_HTML
-    assert "default_chain:" in SETUP_HTML
+    assert "function buildSetupLlmRouting(instanceId, instance)" in SETUP_HTML
+    assert "savedBlockingLlmInstanceIds" in SETUP_HTML
+    assert "enabled: false" in SETUP_HTML
+    assert "!demotedIds.has(id)" in SETUP_HTML
     assert "routes: savedLlmRoutes" in SETUP_HTML
+    assert "restart_required" in SETUP_HTML
+    assert "SETUP_RESTART_MARKER" in SETUP_HTML
+    assert "blockingConfigMessages" in SETUP_HTML
 
 
 def test_extension_manages_native_instances_and_preserves_module_routes() -> None:
