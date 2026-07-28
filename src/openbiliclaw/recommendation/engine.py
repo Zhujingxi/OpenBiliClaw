@@ -183,6 +183,17 @@ _DANMAKU_BONUS_MAX = 0.05  # hard cap on the additive nudge
 _DANMAKU_SIM_FLOOR = 0.30  # text↔text cosine at/below → zero bonus
 _DANMAKU_SIM_CEIL = 0.65  # text↔text cosine at/above → full bonus
 
+# Sum of every per-signal bonus cap — the ceiling the stacked combined_bonus
+# can reach before per-platform normalization. Normalization rescales each
+# platform's combined_bonus to [0, this], so a platform missing signals
+# (bangumi/xhs) still reaches the same height as Bilibili at its top.
+_COMBINED_BONUS_CAP = (
+    _VISUAL_COVER_BONUS_MAX
+    + _VISUAL_PROFILE_BONUS_MAX
+    + _KEYFRAME_BONUS_MAX
+    + _DANMAKU_BONUS_MAX
+)
+
 
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
@@ -829,6 +840,19 @@ class RecommendationEngine:
         for extra in (visual_profile_bonus, keyframe_bonus, danmaku_bonus):
             for bvid, bonus in extra.items():
                 combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
+
+        # Cross-platform fairness: normalize the stacked bonus within each
+        # platform's own pool to [0, _COMBINED_BONUS_CAP]. Without this, a
+        # platform that lacks a signal (bangumi/xhs have no danmaku or
+        # keyframes) is structurally shorter than Bilibili on combined_bonus
+        # and gets squeezed out of the top — observed: enabling P2 dropped
+        # bangumi in the top-25 from 3 to 1 purely on height. Per-platform
+        # min-max normalization means a platform only loses *intra-platform*
+        # discrimination for a missing signal, not *cross-platform* height:
+        # the strongest bangumi candidate still reaches the same bonus height
+        # as the strongest Bilibili candidate. No-op when combined_bonus is
+        # empty (all signals off / no centroids) — ranking stays byte-identical.
+        combined_bonus = self._normalize_bonus_per_platform(candidates, combined_bonus)
 
         (
             ranked,
@@ -2449,6 +2473,78 @@ class RecommendationEngine:
     def _keyframe_active(self) -> bool:
         """True only when the flag is on AND image embedding is active."""
         return self._keyframe_enabled and self._cover_embedding_active()
+
+    @staticmethod
+    def _normalize_bonus_per_platform(
+        candidates: list[DiscoveredContent],
+        combined_bonus: dict[str, float],
+    ) -> dict[str, float]:
+        """Rescale the stacked bonus per-platform to [0, _COMBINED_BONUS_CAP].
+
+        Without this, platforms missing a signal (bangumi/xhs have no danmaku
+        or keyframes) are structurally shorter on combined_bonus than Bilibili
+        and get squeezed out of the top purely on height — observed when P2
+        opened: bangumi dropped from 3 to 1 in the top-25, not because its
+        candidates were worse but because Bilibili rows gained a +0.05 channel
+        they could never match.
+
+        Per-platform min-max normalization fixes the height: within each
+        platform's own pool, the strongest candidate's bonus is stretched to
+        ``_COMBINED_BONUS_CAP`` and the weakest to 0. A platform that lacks a
+        signal only loses *intra-platform* discrimination for it (its rows
+        still spread across the same [0, cap] range by their remaining
+        signals), not *cross-platform* height.
+
+        A platform group whose max bonus is 0 (no signal at all, e.g. a
+        platform with neither covers nor danmaku) is left at 0 — stretching a
+        zero range would NaN the bonuses. Empty input returns empty, so the
+        all-signals-off / no-centroids case stays byte-identical (no bonus
+        keys -> no normalization -> empty dict).
+        """
+        if not combined_bonus:
+            return combined_bonus
+        # bvid -> platform, defaulting bilibili (the historical single-platform
+        # behavior) so a missing/blank platform never forms its own singleton
+        # group and change the ranking for pre-existing rows.
+        platform_of: dict[str, str] = {}
+        for cand in candidates:
+            bvid = str(getattr(cand, "bvid", "") or "")
+            if not bvid:
+                continue
+            platform = str(getattr(cand, "source_platform", "") or "").strip() or "bilibili"
+            platform_of[bvid] = platform
+
+        # Group bonus values by platform (only bvids present in combined_bonus;
+        # a 0-bonus candidate that isn't a key contributes nothing to min/max).
+        groups: dict[str, list[float]] = {}
+        for bvid, bonus in combined_bonus.items():
+            if bonus <= 0.0:
+                continue
+            groups.setdefault(platform_of.get(bvid, "bilibili"), []).append(bonus)
+
+        if not groups:
+            return combined_bonus
+
+        cap = _COMBINED_BONUS_CAP
+        normalized: dict[str, float] = dict(combined_bonus)
+        for platform, vals in groups.items():
+            g_max = max(vals)
+            g_min = min(vals)
+            span = g_max - g_min
+            if span <= 0.0:
+                # All nonzero bonuses in this platform are equal — give them
+                # the full cap (they tie intra-platform regardless).
+                for bvid, bonus in combined_bonus.items():
+                    if platform_of.get(bvid, "bilibili") == platform and bonus > 0.0:
+                        normalized[bvid] = cap
+                continue
+            for bvid, bonus in combined_bonus.items():
+                if platform_of.get(bvid, "bilibili") != platform:
+                    continue
+                if bonus <= 0.0:
+                    continue
+                normalized[bvid] = cap * (bonus - g_min) / span
+        return normalized
 
     def _keyframe_bonus_from_vecs(
         self,

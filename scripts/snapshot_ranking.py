@@ -71,7 +71,7 @@ def _load_pool_candidates(db: Database) -> list[DiscoveredContent]:
     return items
 
 
-async def _snapshot(limit: int, out_override: str) -> dict[str, Any]:
+async def _snapshot(limit: int, out_override: str, full: bool = False) -> dict[str, Any]:
     engine = _build_recommendation_engine()
     soul_engine = _build_soul_engine()
     try:
@@ -107,6 +107,23 @@ async def _snapshot(limit: int, out_override: str) -> dict[str, Any]:
         "cover_embedding_active": bool(engine._cover_embedding_active()),
     }
 
+    # Mirror serve()'s per-platform normalization of the stacked bonus, so the
+    # snapshot's combined_bonus matches what serve() actually feeds the MMR
+    # selector. Without this, the snapshot would show un-normalized heights and
+    # misrepresent the cross-platform ranking.
+    combined_bonus_raw: dict[str, float] = {}
+    for c in candidates:
+        bvid = c.bvid
+        combined_bonus_raw[bvid] = (
+            cover_bonus.get(bvid, 0.0)
+            + visual_profile_bonus.get(bvid, 0.0)
+            + keyframe_bonus.get(bvid, 0.0)
+            + danmaku_bonus.get(bvid, 0.0)
+        )
+    combined_bonus_norm = engine._normalize_bonus_per_platform(  # type: ignore[attr-defined]
+        candidates, combined_bonus_raw
+    )
+
     rows: list[dict[str, Any]] = []
     for c in candidates:
         bvid = c.bvid
@@ -114,7 +131,7 @@ async def _snapshot(limit: int, out_override: str) -> dict[str, Any]:
         vp = visual_profile_bonus.get(bvid, 0.0)
         kf = keyframe_bonus.get(bvid, 0.0)
         dm = danmaku_bonus.get(bvid, 0.0)
-        combined = cb + vp + kf + dm
+        combined = combined_bonus_norm.get(bvid, 0.0)
         rows.append(
             {
                 "bvid": bvid,
@@ -149,7 +166,7 @@ async def _snapshot(limit: int, out_override: str) -> dict[str, Any]:
             "keyframe": _stats("keyframe_bonus"),
             "danmaku": _stats("danmaku_bonus"),
         },
-        "top": rows[:limit],
+        "top": rows if full else rows[:limit],
     }
 
     # Default output reflects the danmaku flag so baseline and P2 runs don't
@@ -179,16 +196,19 @@ def _print_summary(snap: dict[str, Any]) -> None:
         )
     print()
     print(f"top {len(snap['top'])} by final_score:")
-    print(
-        f"  {'#':>2}  {'final':>7}  {'rel':>6}  {'cover':>6}  {'vp':>6}  {'kf':>6}  {'dm':>6}  bvid  title"
-    )
-    for i, r in enumerate(snap["top"], 1):
-        title = r["title"][:30]
+    if len(snap["top"]) > 60:
+        print("  (full-pool dump — rows in JSON file, not printed)")
+    else:
         print(
-            f"  {i:>2}  {r['final_score']:7.4f}  {r['relevance_score']:6.3f}  "
-            f"{r['cover_bonus']:6.4f}  {r['visual_profile_bonus']:6.4f}  "
-            f"{r['keyframe_bonus']:6.4f}  {r['danmaku_bonus']:6.4f}  {r['bvid']}  {title}"
+            f"  {'#':>2}  {'final':>7}  {'rel':>6}  {'cover':>6}  {'vp':>6}  {'kf':>6}  {'dm':>6}  bvid  title"
         )
+        for i, r in enumerate(snap["top"], 1):
+            title = r["title"][:30]
+            print(
+                f"  {i:>2}  {r['final_score']:7.4f}  {r['relevance_score']:6.3f}  "
+                f"{r['cover_bonus']:6.4f}  {r['visual_profile_bonus']:6.4f}  "
+                f"{r['keyframe_bonus']:6.4f}  {r['danmaku_bonus']:6.4f}  {r['bvid']}  {title}"
+            )
     print("=" * 68)
 
 
@@ -196,9 +216,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=30, help="top-K to dump (default 30)")
     ap.add_argument("--out", type=str, default="", help="output JSON path (auto if empty)")
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="dump the full pool (sorted), not just top-K",
+    )
     args = ap.parse_args()
 
-    snap = asyncio.run(_snapshot(args.limit, args.out))
+    snap = asyncio.run(_snapshot(args.limit, args.out, args.full))
     _print_summary(snap)
     print(f"\nsaved -> {snap.get('out_path')}")
 
