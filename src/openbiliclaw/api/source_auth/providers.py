@@ -99,8 +99,22 @@ _PROBE_FAIL_TTL_SECONDS = PROBE_FAIL_TTL_SECONDS
 # freshness turns out shorter (CLAUDE.md pitfall #3).
 _VERIFIED_FRESH_SECONDS = 6 * 3600
 
-# rdt-cli's own credential lifetime (``reddit_tasks._RDT_CREDENTIAL_TTL_SECONDS``).
-_RDT_TTL_SECONDS = 7 * 24 * 3600
+
+def _rdt_ttl_seconds() -> int:
+    """The credential lifetime the Reddit gate actually enforces.
+
+    Read from ``reddit_tasks`` rather than duplicated: this used to be a
+    literal ``7 * 24 * 3600`` and silently kept advertising 7 days after the
+    gate moved 6h earlier (to stay clear of rdt-cli's own browser-refresh
+    subprocess), so the settings page showed a green "凭据就绪" badge for six
+    hours after the backend had already stopped calling rdt. Imported lazily —
+    ``reddit_tasks`` pulls in the discovery engine, which this module does not
+    want at import time.
+    """
+    from openbiliclaw.sources.reddit_tasks import RDT_CREDENTIAL_TTL_SECONDS
+
+    return RDT_CREDENTIAL_TTL_SECONDS
+
 
 # Human-readable detail for each X (twitter) health state.
 _X_STATE_DETAIL = {
@@ -883,7 +897,7 @@ def _reddit_extension(ctx: SourceAuthContext) -> SourceAuthContract:
             verification="verified",
             verify_method="local_file",
             verified_at=_rdt_saved_at(),
-            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            verify_ttl_seconds=_rdt_ttl_seconds(),
             detail="已登录 Reddit（reddit_session 已同步）。",
             legacy_state="ready",
             legacy_logged_in=True,
@@ -895,7 +909,7 @@ def _reddit_extension(ctx: SourceAuthContext) -> SourceAuthContract:
         credential_origin="none",
         verification="unverified",
         verify_method="local_file",
-        verify_ttl_seconds=_RDT_TTL_SECONDS,
+        verify_ttl_seconds=_rdt_ttl_seconds(),
         detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
         legacy_state="unverified",
         legacy_logged_in=False,
@@ -1013,7 +1027,7 @@ def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
                 credential_origin="none",
                 verification="unverified",
                 verify_method="local_file",
-                verify_ttl_seconds=_RDT_TTL_SECONDS,
+                verify_ttl_seconds=_rdt_ttl_seconds(),
                 can_verify_now=False,
                 detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
                 legacy_state="missing",
@@ -1030,7 +1044,7 @@ def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
             verification=verification,
             verify_method="local_file",
             verified_at=_rdt_saved_at() if verification != "unverified" else "",
-            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            verify_ttl_seconds=_rdt_ttl_seconds(),
             can_verify_now=credential != "none",
             detail=status.message,
             legacy_state=state,
