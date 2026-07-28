@@ -1,5 +1,10 @@
 # LLM Token Diet Spec — heavy-user cost scaling
 
+> **2026-07-28 correction:** Phase 0's original standalone gate description is
+> historical. Use the production-equivalent repeated gate in
+> [`2026-07-18-eval-reason-diet-spec.md`](./2026-07-18-eval-reason-diet-spec.md);
+> the former independent-snapshot / absolute-threshold evidence is invalid.
+>
 **Created:** 2026-07-05
 **Scope:** discovery evaluation prompt/cache/fallback, recommendation expression & classification
 prompts, candidate-pipeline eval batching, LLM module-tier routing, prompt content caps
@@ -158,8 +163,9 @@ all shipped value retained.
 ### Phase 0 — Golden-set replay gate
 
 A standalone script (`scripts/run_profile_diet_ab.py`, following the `scripts/run_*_eval.py`
-conventions) that quantifies quality drift from any prompt-input change using **real data from
-the local DB** — no synthetic personas:
+conventions) quantifies quality drift from any prompt-input change using **real data from
+the local DB** — no synthetic personas. The current implementation runs repeated A/A and A/B
+pairs over one frozen production-mix snapshot and requires a JSON evidence artifact:
 
 1. Sample N ≥ 100 recently `evaluated` discovery candidates (mixed strategies/platforms) plus
    the current profile.
@@ -224,7 +230,7 @@ dict it receives; keys are unchanged, only list lengths shrink.
 
 Acceptance: on a synthetic maxed profile (128 domains × 30 specifics, 256 tags), the rendered
 profile block shrinks ≥60% by character count; dislikes list length is unchanged; prompt-cache
-invariant test passes; **Phase 0 replay gates pass** (flip ≤ 3%, Spearman ≥ 0.95).
+invariant test passes; the corrected repeated A/A-relative gate passes with a JSON artifact.
 
 ### Phase 2 — Batch-path embedding pre-filter (shadow → enforce)
 
@@ -238,8 +244,8 @@ the cache split (`engine.py:1357-1386`), before batching. Quality-first rollout:
   `grep prefilter-shadow`, then count would-be-filtered items with LLM score ≥ admission
   threshold.
   Flip to `enforce` only after shadow shows that count ≈ 0 over a few days of waves.
-- **Wider interest coverage than the single path**: compare against the top-64 interest tags +
-  the 32 compact domain labels (not the single path's top-10) — false negatives shrink as
+- **Wider interest coverage than the compact prompt block**: compare against the top-256
+  recall-visible interest tags + the 32 compact domain labels — false negatives shrink as
   coverage grows, and vectors are computed **once per call** and reused across all candidates
   (the single path recomputes per item — do not copy that). If per-call embedding latency
   measures too high, fall back to top-64 tags only.

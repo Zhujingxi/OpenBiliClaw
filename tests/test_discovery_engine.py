@@ -1286,6 +1286,65 @@ async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_exclud
 
 
 @pytest.mark.asyncio
+async def test_embedding_prefilter_clamps_negative_cosine_to_zero() -> None:
+    profile = SoulProfile()
+    profile.preferences.interests = [InterestTag(name="正向兴趣", category="测试", weight=1.0)]
+    embedding = _CountingEmbeddingService(
+        {
+            "正向兴趣": [1.0, 0.0],
+            "反向内容 完全相反": [-1.0, 0.0],
+        }
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=_DynamicBatchLLMService(),
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+
+    filtered = await engine._embedding_prefilter(  # noqa: SLF001
+        [DiscoveredContent(bvid="BVNEG", title="反向内容", description="完全相反")],
+        profile,
+    )
+
+    assert filtered == {0: 0.0}
+
+
+@pytest.mark.asyncio
+async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None:
+    profile = SoulProfile()
+    profile.preferences.interests = [
+        InterestTag(
+            name=f"头部兴趣{index}",
+            category="测试",
+            weight=1.0 - index / 1000,
+        )
+        for index in range(64)
+    ]
+    profile.preferences.interests.append(
+        InterestTag(name="第65项长尾", category="测试", weight=0.5)
+    )
+    vectors = {f"头部兴趣{index}": [1.0, 0.0] for index in range(64)}
+    vectors.update(
+        {
+            "第65项长尾": [0.0, 1.0],
+            "长尾命中 只匹配第65项": [0.0, 1.0],
+        }
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=_DynamicBatchLLMService(),
+        embedding_service=_CountingEmbeddingService(vectors),
+        eval_prefilter_mode="enforce",
+    )
+
+    filtered = await engine._embedding_prefilter(  # noqa: SLF001
+        [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第65项")],
+        profile,
+    )
+
+    assert filtered == {}
+
+
+@pytest.mark.asyncio
 async def test_evaluate_content_batch_prefilter_shadow_logs_but_sends_all(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

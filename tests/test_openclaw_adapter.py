@@ -1115,10 +1115,12 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             database: object,
             embedding_service: object = None,
             concurrency: object = None,
+            eval_prefilter_mode: str = "shadow",
         ) -> None:
             self.llm_service = llm_service
             self.database = database
             self.concurrency = concurrency
+            self.eval_prefilter_mode = eval_prefilter_mode
 
         def register_strategy(self, strategy: object) -> None:
             registered_strategies.append(str(getattr(strategy, "name", "")))
@@ -1171,6 +1173,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ),
         discovery=SimpleNamespace(
             admission_min_score=0.60,
+            eval_prefilter_mode="enforce",
             visual_profile_enabled=False,
             keyframe_enabled=False,
             keyframe_max_frames=8,
@@ -1273,6 +1276,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.llm_service.module_overrides["evaluation"].model == "gpt-4o-mini"
     assert services.llm_service.concurrency == 3
     assert services.discovery_engine.concurrency.llm_evaluation_concurrency == 2
+    assert services.discovery_engine.eval_prefilter_mode == "enforce"
     assert (
         services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
     )

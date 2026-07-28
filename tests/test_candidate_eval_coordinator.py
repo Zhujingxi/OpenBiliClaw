@@ -162,6 +162,25 @@ def test_effective_candidate_eval_workers_reserves_one_llm_slot() -> None:
     assert effective_candidate_eval_workers(0, 99) == 1
 
 
+def test_coordinator_uses_pipeline_coalescing_claim() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=3)
+    ready_calls: list[int] = []
+
+    def claim_ready_batch(*, limit: int) -> None:
+        ready_calls.append(limit)
+        return None
+
+    pipeline.claim_ready_batch = claim_ready_batch  # type: ignore[attr-defined]
+    pipeline.eval_ready_in_seconds = lambda *, limit: 42.0  # type: ignore[attr-defined]
+    coordinator = _coordinator(pipeline, worker_count=1)
+
+    delay = coordinator._fill_open_slots()  # noqa: SLF001
+
+    assert ready_calls == [30]
+    assert delay == pytest.approx(42.0)
+    assert pipeline.started == []
+
+
 @pytest.mark.asyncio
 async def test_coordinator_caps_worker_claims_at_three_batches_and_ninety_raw() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=240)

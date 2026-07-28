@@ -1,5 +1,13 @@
 # LLM Token Diet — Implementation Plan
 
+> **2026-07-28 correction:** the executable replay workflow below is superseded
+> by the hardened gate in
+> [`2026-07-18-eval-reason-diet-spec.md`](./2026-07-18-eval-reason-diet-spec.md).
+> Current runs require `--repeats >=3` and `--output`, preserve production
+> traffic weights, use one frozen snapshot and production `max_tokens=4096`,
+> and fail on missing responses. Old standalone gate evidence is not valid for
+> landing.
+>
 > **Spec:** [`2026-07-05-llm-token-diet-spec.md`](./2026-07-05-llm-token-diet-spec.md)
 > **Status:** Final r2 — 2026-07-05. r1 = cost levers; r2 added the quality-preservation layer
 > (Task 0 replay gate, per-item interest recall, pre-filter shadow rollout) so recommendation
@@ -46,11 +54,13 @@ Test `tests/test_profile_diet_ab.py` (pure helpers only — the script's LLM run
    - `--sample N` (default 100): pull the most recent `evaluated`/admitted discovery
      candidates from the real DB (mixed strategies; `--platform` filter optional), plus the
      current profile.
-   - `--arm-b compact|body-cap|model=<provider:model>`: arm A always scores with today's
+   - `--arm-b compact|reason-diet|model=<instance-id>` (v2; legacy routing also
+     accepts `model=<provider:model>`): arm A always scores with today's
      baseline inputs; arm B applies the candidate change. Both arms bypass `_eval_cache`
      (fresh scores) and share negative exemplars.
-   - Output: metrics table + top-10 largest `|Δscore|` items with titles, and exit code 1 when
-     a gate fails (flip > 3% or Spearman < 0.95) so it can gate CI/PR runs.
+   - Output: metrics table + required JSON artifact containing raw scores,
+     snapshot digests, routes, usage, and gate inputs; exit code 1 when the
+     repeated relative gate fails.
 3. Keep the script read-only against the DB (no status/state writes).
 4. `.venv/bin/python -m pytest tests/test_profile_diet_ab.py -q` + lint + mypy.
 
@@ -101,8 +111,8 @@ Test `tests/test_discovery_engine.py`
    (`tests/test_discovery_engine.py:181`) still passes unmodified.
 6. Run targeted tests + lint + mypy.
 7. **Acceptance (quality gate):** run
-   `.venv/bin/python scripts/run_profile_diet_ab.py --arm-b compact --sample 100` against the
-   real DB; record the metrics in the PR. Gates: flip ≤ 3%, Spearman ≥ 0.95. If failing, raise
+   `.venv/bin/python scripts/run_profile_diet_ab.py --arm-b compact --sample 100 --repeats 3 --output data/eval/profile-diet-compact.json` against the
+   real DB; record the artifact in the PR. The repeated A/A-relative gate decides the result. If failing, raise
    `_EVAL_PROFILE_DOMAIN_CAP` / `_EVAL_PROFILE_INTEREST_CAP` stepwise and re-run.
 
 **Note:** in-memory `_eval_cache` entries from the old digest become unreachable — acceptable
@@ -199,7 +209,7 @@ Test `tests/test_llm_service.py` (or wherever `_route_bucket_for_caller` is cove
    `[llm.recommendation]` comment blocks add (a) one worked flash-tier example
    (provider + model lines, commented out), (b) one line listing the caller families the bucket
    covers, (c) in `[llm.evaluation]`, a pointer to
-   `scripts/run_profile_diet_ab.py --arm-b model=<provider:model>` as the way to validate a
+   `scripts/run_profile_diet_ab.py --arm-b model=<instance-id> --sample 100 --repeats 3 --output data/eval/model-route.json` as the way to validate a
    downgrade before adopting it; in `[llm.soul]` note it should stay on the quality model.
 4. Run targeted tests + lint + mypy.
 
@@ -322,7 +332,7 @@ Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
    `discovery.eval_prefilter_mode = "enforce"`; otherwise leave shadow on and revisit the
    threshold with that data.
 3. Config-only follow-up (user action, not code): validate a flash-tier model with
-   `scripts/run_profile_diet_ab.py --arm-b model=<provider:model>`; if gates pass, set
+   `scripts/run_profile_diet_ab.py --arm-b model=<instance-id> --sample 100 --repeats 3 --output data/eval/model-route.json`; if gates pass, set
    `[llm.evaluation]` / `[llm.discovery]` / `[llm.recommendation]` in local `config.toml`.
 4. Recommendation feed spot-check for a week: long-tail/niche items still appear (the
    `related_interests` recall field is doing its job); expression tone unchanged.

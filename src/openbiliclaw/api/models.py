@@ -2109,6 +2109,8 @@ class SchedulerConfigOut(BaseModel):
     pool_source_shares: dict[str, int] = Field(default_factory=dict)
     account_sync_interval_hours: int = 6
     refresh_check_interval_seconds: int = 60
+    eval_min_batch_size: int = Field(default=15, ge=1, le=90)
+    eval_max_wait_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
     signal_event_threshold: int = 6
     feedback_batch_threshold: int = 3
     trending_refresh_minutes: int = 3
@@ -2147,6 +2149,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
+    eval_prefilter_mode: Literal["off", "shadow", "enforce"] = "shadow"
     candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
     visual_profile_enabled: bool = False

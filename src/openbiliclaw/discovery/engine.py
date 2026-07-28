@@ -839,7 +839,10 @@ class ContentDiscoveryEngine:
             key=lambda interest: float(interest.weight or 0.0),
             reverse=True,
         )
-        for interest in ranked_interests[:_CONTENT_PROMPT_INTEREST_CAP]:
+        # Enforce must see every interest that the downstream long-tail recall
+        # can surface. Restricting this to the compact prompt's top 64 caused
+        # candidates matching ranks 65..256 to be rejected before recall ran.
+        for interest in ranked_interests[:_EVAL_RECALL_POOL_CAP]:
             append_label(interest.name)
 
         compact_profile = compact_evaluation_profile_summary(
@@ -913,6 +916,7 @@ class ContentDiscoveryEngine:
                 (cosine_similarity(content_vec, interest_vec) for interest_vec in interest_vectors),
                 default=0.0,
             )
+            max_sim = max(0.0, min(1.0, max_sim))
             if max_sim < _EMBEDDING_PREFILTER_MIN_SIMILARITY:
                 filtered_scores[index] = round(max_sim * 0.5, 4)
         return filtered_scores

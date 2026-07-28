@@ -136,6 +136,7 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
+_MIN_ADMISSION_MIN_SCORE = 0.50
 _DEFAULT_EVAL_PREFILTER_MODE = "shadow"
 _SUPPORTED_EVAL_PREFILTER_MODES = {"off", "shadow", "enforce"}
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
@@ -2405,7 +2406,7 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
 
 
 def _normalize_probability(value: object, *, default: float) -> float:
-    """Normalize a TOML probability in the open interval ``(0, 1]``."""
+    """Normalize the admission floor in the supported interval ``[0.5, 1]``."""
     if isinstance(value, bool):
         return default
     if not isinstance(value, (int, float, str)):
@@ -2414,7 +2415,7 @@ def _normalize_probability(value: object, *, default: float) -> float:
         score = float(value)
     except (TypeError, ValueError):
         return default
-    if score <= 0.0 or score > 1.0:
+    if score < _MIN_ADMISSION_MIN_SCORE or score > 1.0:
         return default
     return score
 

@@ -468,7 +468,8 @@ claim_lease_minutes = 10
 planner_poll_seconds = 120
 # 兜底失效（小时）：即便画像 digest 未变，pending 关键词超过这个时长也会过期。
 plan_ttl_hours = 12
-# 统一推荐池入池最低分。来源/插件 observed 标签不能绕过该门槛。
+# 统一推荐池入池最低分，合法范围 [0.5, 1]；低于 0.5 会回退 0.6。
+# 来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
 # query inspiration 脑暴默认开启，与旧 merged keyword planner 并行组成“混合”模式；
 # planner 会通过本机 mcporter 调用搜索 provider 链获取预览，再由

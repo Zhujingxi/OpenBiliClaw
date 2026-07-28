@@ -412,6 +412,7 @@ async def test_respond_with_tools_never_consults_phantom_core_memory_block() -> 
         llm_service=ProbeTrackingToolService(),
         tools=[{"name": "noop"}],
         tool_dispatcher=object(),
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
     )
 
     reply = await dialogue.respond("你好")

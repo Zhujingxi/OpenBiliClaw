@@ -59,7 +59,7 @@ def _restore_cli_process_state() -> Iterator[None]:
         cli_module._RUNTIME_COMPONENTS.update(original_runtime_components)
 
 
-def test_build_discovery_candidate_pipeline_uses_scheduler_eval_coalescing_config() -> None:
+def test_build_discovery_candidate_pipeline_drains_one_shot_runs_immediately() -> None:
     class FakeDatabase:
         def __init__(self) -> None:
             self.admission_min_score: float | None = None
@@ -85,8 +85,8 @@ def test_build_discovery_candidate_pipeline_uses_scheduler_eval_coalescing_confi
 
     assert pipeline.pool_target_count == 321
     assert pipeline.admission_min_score == 0.72
-    assert pipeline.min_eval_batch_size == 23
-    assert pipeline.max_eval_wait_seconds == 45.5
+    assert pipeline.min_eval_batch_size == 1
+    assert pipeline.max_eval_wait_seconds == 0.0
     assert database.admission_min_score == 0.72
 
 

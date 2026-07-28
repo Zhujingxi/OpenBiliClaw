@@ -11732,8 +11732,11 @@ def _build_discovery_candidate_pipeline(
         discovery_engine=discovery_engine,
         pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
         admission_min_score=admission_min_score,
-        min_eval_batch_size=int(getattr(config.scheduler, "eval_min_batch_size", 15)),
-        max_eval_wait_seconds=float(getattr(config.scheduler, "eval_max_wait_seconds", 90.0)),
+        # Manual producer commands are one-shot processes. An in-memory wait
+        # window cannot survive process exit, so they must drain immediately;
+        # daemon coalescing is owned by CandidateEvalCoordinator.
+        min_eval_batch_size=1,
+        max_eval_wait_seconds=0.0,
     )
 
 

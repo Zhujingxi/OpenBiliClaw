@@ -1301,6 +1301,41 @@ async def test_pipeline_accumulates_eval_batch_until_minimum_or_timeout(
     assert db.count_discovery_candidates_by_status()["cached"] == 3
 
 
+def test_claim_ready_batch_honors_minimum_or_timeout(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVCLAIMWAIT{i}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=f"BVCLAIMWAIT{i}",
+                title=f"Claim wait {i}",
+            )
+            for i in range(3)
+        ]
+    )
+    now = 1000.0
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_BatchRecordingEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+        min_eval_batch_size=8,
+        max_eval_wait_seconds=60,
+        time_fn=lambda: now,
+    )
+
+    assert pipeline.claim_ready_batch(limit=30) is None
+    assert pipeline.eval_ready_in_seconds(limit=30) == pytest.approx(60.0)
+
+    now += 61
+    claim = pipeline.claim_ready_batch(limit=30)
+
+    assert claim is not None
+    assert len(claim.rows) == 3
+
+
 @pytest.mark.asyncio
 async def test_pipeline_runs_eval_immediately_when_minimum_batch_is_ready(
     tmp_path: Path,

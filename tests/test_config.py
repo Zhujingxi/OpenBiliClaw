@@ -2645,7 +2645,7 @@ multimodal_image_timeout_seconds = 10
 
         assert getattr(config.discovery, field) == expected
 
-    @pytest.mark.parametrize("literal", ["0", "-0.1", "1.1", '"nope"'])
+    @pytest.mark.parametrize("literal", ["0", "0.49", "-0.1", "1.1", '"nope"'])
     def test_discovery_invalid_admission_min_score_falls_back_to_default(
         self, tmp_path: Path, literal: str
     ) -> None:

@@ -14806,6 +14806,8 @@ class TestEmbeddingAndCompatProviderE2E:
                         "youtube": 1,
                     },
                     "refresh_check_interval_seconds": 75,
+                    "eval_min_batch_size": 23,
+                    "eval_max_wait_seconds": 45.5,
                     "signal_event_threshold": 9,
                     "trending_refresh_minutes": 5,
                     "explore_refresh_minutes": 18,
@@ -14827,6 +14829,10 @@ class TestEmbeddingAndCompatProviderE2E:
                         "https://github.com/example/OpenBiliClaw.git",
                         "git@github.com:example/OpenBiliClaw.git",
                     ],
+                },
+                "discovery": {
+                    "eval_prefilter_mode": "enforce",
+                    "admission_min_score": 0.72,
                 },
                 "storage": {"db_path": "runtime-data/openbiliclaw.db"},
                 "logging": {
@@ -14883,6 +14889,10 @@ class TestEmbeddingAndCompatProviderE2E:
             "bangumi": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
+        assert cfg.scheduler.eval_min_batch_size == 23
+        assert cfg.scheduler.eval_max_wait_seconds == 45.5
+        assert response.json()["config"]["scheduler"]["eval_min_batch_size"] == 23
+        assert response.json()["config"]["scheduler"]["eval_max_wait_seconds"] == 45.5
         assert cfg.scheduler.signal_event_threshold == 9
         assert cfg.scheduler.trending_refresh_minutes == 5
         assert cfg.scheduler.explore_refresh_minutes == 18
@@ -14899,6 +14909,9 @@ class TestEmbeddingAndCompatProviderE2E:
             "https://github.com/example/OpenBiliClaw.git",
             "git@github.com:example/OpenBiliClaw.git",
         ]
+        assert cfg.discovery.eval_prefilter_mode == "enforce"
+        assert cfg.discovery.admission_min_score == 0.72
+        assert response.json()["config"]["discovery"]["eval_prefilter_mode"] == "enforce"
         assert cfg.storage.db_path == "runtime-data/openbiliclaw.db"
         assert cfg.logging.file_level == "WARNING"
         assert cfg.logging.max_file_size_mb == 123

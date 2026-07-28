@@ -227,12 +227,14 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         search_budget_total=30,
     )
+    discovery_cfg = getattr(config, "discovery", None)
 
     discovery_engine = ContentDiscoveryEngine(
         llm_service=llm_service,
         database=database,
         embedding_service=embedding_service,
         concurrency=concurrency,
+        eval_prefilter_mode=str(getattr(discovery_cfg, "eval_prefilter_mode", "shadow")),
     )
     search_strategy = SearchStrategy(
         llm_service=llm_service,
