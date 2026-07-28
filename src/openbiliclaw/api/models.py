@@ -1844,7 +1844,7 @@ class LLMConfigOut(BaseModel):
     routes: dict[str, ModuleLLMConfigOut] = Field(default_factory=dict)
     default_provider: str = "deepseek"
     concurrency: int = 4
-    timeout: int = 300
+    timeout: int = 1200
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;
     # old clients still sending it are ignored on PUT).

@@ -136,8 +136,11 @@ _DEFAULT_MULTIMODAL_IMAGE_TIMEOUT_SECONDS = 6
 DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
-_DEFAULT_LLM_TIMEOUT = 300
+# Slow reasoning / OpenAI-compatible relays can legitimately take well over
+# five minutes for one long response; 20 minutes is the product request ceiling.
+_DEFAULT_LLM_TIMEOUT = 1200
 _MIN_LLM_TIMEOUT = 10
+_MAX_LLM_TIMEOUT = 1200
 _DEFAULT_POOL_SOURCE_SHARES = {
     "bilibili": 5,
     "xiaohongshu": 1,
@@ -2606,7 +2609,7 @@ def _normalize_llm_timeout(value: object) -> int:
     else:
         return _DEFAULT_LLM_TIMEOUT
 
-    if normalized < _MIN_LLM_TIMEOUT:
+    if not (_MIN_LLM_TIMEOUT <= normalized <= _MAX_LLM_TIMEOUT):
         return _DEFAULT_LLM_TIMEOUT
     return normalized
 

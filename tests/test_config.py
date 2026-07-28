@@ -88,6 +88,7 @@ class TestConfigDefaults:
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
         assert config.llm.concurrency == 4
+        assert config.llm.timeout == 1200
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
@@ -127,6 +128,15 @@ class TestConfigDefaults:
 
         assert config.llm.concurrency == 3
         assert background_llm_concurrency(config.llm.concurrency) == 2
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(10, 10), (600, 600), (1200, 1200), (9, 1200), (1201, 1200), ("bad", 1200)],
+    )
+    def test_llm_timeout_normalization_uses_twenty_minute_default(
+        self, raw: object, expected: int
+    ) -> None:
+        assert config_module._normalize_llm_timeout(raw) == expected
 
     def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
         config = Config()
