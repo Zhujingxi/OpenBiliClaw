@@ -189,12 +189,14 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.185 (2026-07-26)**
+📌 Latest: **v0.3.186 (2026-07-29)**
 
-- **Desktop Web list stops jumping** — with scroll auto-load on, background replenishment no longer rebuilds cards and returning to the tab no longer reorders the list.
-- **X discovery works again** — the root cause behind the always-404 search is fixed, so keyword discovery returns real posts.
-- **Model auth failures name names** — a 401 no longer retries in a loop and says exactly which provider and host rejected the key.
-- **X / Reddit honour the network mode** — both sources' CLI paths now follow `[network].mode` instead of inheriting whatever proxy happened to be set.
+- **Mobile LAN access now supports IPv6** — the default server listens on both IPv4 and IPv6, and QR codes use valid bracketed IPv6 URLs.
+- **Concurrent event writes are more reliable** — `/api/events` now uses independent atomic SQLite transactions, preventing intermittent 500s under multi-threaded writes.
+- **Candidate-pool maintenance now converges** — it no longer restores and trims the same invisible items around the target inventory level.
+- **OpenAI-compatible no-reasoning requests self-heal** — if a gateway ignores the setting and returns reasoning without content, OpenBiliClaw retries with thinking disabled.
+
+Full changelog: [docs/changelog.md](docs/changelog.md).
 
 ## Community
 
