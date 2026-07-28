@@ -75,13 +75,12 @@ _INIT_X_COLLECTION_TIMEOUT_SECONDS = 480.0
 
 # ── Progress-aware deadlines (idle + absolute) ───────────────────────────
 #
-# IDLE: max seconds with NO new progress signal. Derived from the same
-# slow-gateway figure as ``_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE`` — one
-# chunk on a slow real gateway ≈ 300s — doubled for slack, so a chunk that
-# takes twice the worst observed time still counts as alive. A genuinely
-# unreachable Base URL / wrong model name / dead proxy produces *zero* chunks
-# and therefore still fails fast (10 min), which is what users need diagnosed.
-_INIT_PROGRESS_IDLE_SECONDS = 600.0
+# IDLE: max seconds with NO completed preference chunk. A progress marker only
+# advances after the whole provider response has arrived, so this outer guard
+# must exceed the configured 20-minute per-request timeout. Twenty-five minutes
+# leaves five minutes for the analyzer's bounded 65s rate-limit cooldowns while
+# remaining below the 45-minute absolute ceiling.
+_INIT_PROGRESS_IDLE_SECONDS = 1500.0
 # Stage 4's progress reports are coarser (a handful per plan stage, each
 # covering a full discover+score+copy sweep), so it needs a wider idle window
 # than stage 2's per-chunk cadence.
@@ -7001,7 +7000,7 @@ async def run_guided_init(
     least one selected source must yield signals or stage 1 raises
     ``GuidedInitError("empty_signals")``. ``client`` may be ``None`` when
     ``include_bili`` is False. Stage 1 has one wall-clock budget shared by all
-    selected sources (10 minutes by default), with shorter Bilibili/X caps and
+    selected sources (30 minutes by default), with shorter Bilibili/X caps and
     cooperative cancellation for extension collectors. Collected events are
     committed in one SQLite transaction before preference analysis starts.
 

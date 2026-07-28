@@ -1154,6 +1154,7 @@ async def test_profile_analysis_deadlines_split_idle_and_absolute() -> None:
         event_count=1100, requested=None, concurrency=1
     )
     assert idle == cli._INIT_PROGRESS_IDLE_SECONDS
+    assert idle == 1500.0
     # Generous enough for the reported 6-chunk bootstrap on a slow gateway.
     assert absolute == cli._INIT_PROGRESS_ABSOLUTE_SECONDS
 
