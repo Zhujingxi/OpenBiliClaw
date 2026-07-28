@@ -3,6 +3,8 @@
 import asyncio
 import io
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -29,6 +31,33 @@ from openbiliclaw.soul.profile import (
     SoulProfile,
     ValuesLayer,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_cli_process_state() -> Iterator[None]:
+    """Keep CLI-owned process globals from leaking into later tests."""
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    noisy_loggers = ("httpx", "httpcore", "openai", "openai._base_client")
+    original_noisy_levels = {name: logging.getLogger(name).level for name in noisy_loggers}
+    runtime_components = cli_module._RUNTIME_COMPONENTS
+    original_runtime_components = dict(runtime_components)
+    runtime_components.clear()
+    try:
+        yield
+    finally:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            if handler not in original_handlers:
+                handler.close()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(original_level)
+        for name, level in original_noisy_levels.items():
+            logging.getLogger(name).setLevel(level)
+        cli_module._RUNTIME_COMPONENTS.clear()
+        cli_module._RUNTIME_COMPONENTS.update(original_runtime_components)
 
 
 class _FakeMemoryLayer:

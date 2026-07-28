@@ -13,7 +13,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -105,11 +104,13 @@ async def main() -> None:
         return
 
     speculations = [
-        SpeculativeInterest.from_dict({
-            **s,
-            "created_at": "",
-            "status": "active",
-        })
+        SpeculativeInterest.from_dict(
+            {
+                **s,
+                "created_at": "",
+                "status": "active",
+            }
+        )
         for s in raw_specs
         if isinstance(s, dict) and s.get("domain")
     ]
