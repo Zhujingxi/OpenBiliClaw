@@ -359,3 +359,52 @@ async def test_prewarm_marks_even_when_no_frames() -> None:
         assert processed == 1
         assert db.get_candidates_needing_keyframes(limit=10) == []
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_does_not_stamp_when_embed_fails_on_real_frames() -> None:
+    """A transient embed outage (frames fetched but every embed_image returns [])
+    must NOT be stamped as done — otherwise the video is permanently excluded
+    from P3 re-prewarm (pitfall rule 2: never persist failed/empty results).
+
+    Only the genuine no-videoshot case (frames == []) and the success case
+    (embedded > 0) are definitive and get stamped.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        db.cache_content(
+            bvid="BVEMBFAIL", title="t", cover_url="", relevance_score=0.8,
+            source="search", pool_expression="e", pool_topic_label="t",
+            topic_group="g", style_key="s",
+        )
+        # embed_image returns [] for every frame (simulates backend down /
+        # rate-limited / transient failure — embed_image's own contract is to
+        # return [] on failure so the next call retries).
+        emb = _KeyframeEmb({})
+
+        async def _embed_image_fail(*args: object, **kwargs: object) -> list[float]:
+            return []
+
+        emb.embed_image = _embed_image_fail  # type: ignore[assignment]
+        engine = _engine(db, emb)
+
+        async def _real_frames(bvid: str, **kwargs: object) -> list[bytes]:
+            # Non-empty frames: the video HAS videoshot data, but embedding fails.
+            return [b"\x00" * 10]
+
+        import openbiliclaw.discovery.keyframes as kf_mod
+
+        original = kf_mod.fetch_keyframes
+        kf_mod.fetch_keyframes = _real_frames  # type: ignore[assignment]
+        try:
+            processed = await engine.prewarm_pool_keyframes(limit=10)
+        finally:
+            kf_mod.fetch_keyframes = original  # type: ignore[assignment]
+
+        assert processed == 1
+        # NOT stamped — still needs keyframes, will retry next cycle.
+        remaining = db.get_candidates_needing_keyframes(limit=10)
+        assert len(remaining) == 1
+        assert remaining[0]["bvid"] == "BVEMBFAIL"
+        db.close()

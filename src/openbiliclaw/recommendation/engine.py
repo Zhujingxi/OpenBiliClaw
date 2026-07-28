@@ -2695,9 +2695,19 @@ class RecommendationEngine:
             except Exception:
                 logger.debug("keyframe prewarm failed for %s", bvid, exc_info=True)
             try:
-                # Stamp even on zero frames — otherwise videos without
-                # videoshot data are re-fetched on every prewarm cycle.
-                mark(bvid, keyframe_count=embedded)
+                # Only stamp when the result is definitive, so a TRANSIENT embed
+                # backend failure (frames were fetched but every embed_image
+                # returned []) is not persisted as "done" — that would permanently
+                # exclude the video from P3 re-prewarm (get_candidates_needing_keyframes
+                # filters keyframes_fetched_at IS NULL). Two cases are definitive:
+                #   - frames == []: the video genuinely has no videoshot data
+                #     (permanent) — stamp so it is not re-fetched every cycle.
+                #   - embedded > 0: at least one frame embedded — stamp the count.
+                # frames non-empty but embedded == 0 means a transient embed
+                # outage: leave keyframes_fetched_at NULL so it retries next
+                # cycle (pitfall rule 2: never persist failed/empty results).
+                if not frames or embedded > 0:
+                    mark(bvid, keyframe_count=embedded)
             except Exception:
                 logger.debug("mark_keyframes_fetched failed for %s", bvid, exc_info=True)
             processed += 1
