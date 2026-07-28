@@ -8683,7 +8683,7 @@ ${cardFeedbackBarHtml()}`;
           ])
         ),
         concurrency: getIntInput("llmConcurrency", 4),
-        timeout: getIntInput("llmTimeout", 300),
+        timeout: getIntInput("llmTimeout", 1200),
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding }
       };
       return {

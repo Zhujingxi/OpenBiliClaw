@@ -39,7 +39,7 @@ class OllamaProvider(OpenAIProvider):
         api_key: str = "ollama",
         model: str = "",
         base_url: str = "http://127.0.0.1:11434/v1",
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         num_ctx: int = 0,
     ) -> None:
         model = model.strip()

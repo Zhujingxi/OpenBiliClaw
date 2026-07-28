@@ -77,7 +77,7 @@ class OpenAIProvider(LLMProvider):
         base_url: str = "",
         provider_name: str = "openai",
         token_provider: Callable[[bool], Awaitable[str]] | None = None,
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         embedding_output_dimensionality: int = 0,
         api_flavor: str = "",
         proxy: str = "",
@@ -751,7 +751,7 @@ class DeepSeekProvider(OpenAIProvider):
         *,
         base_url: str = "https://api.deepseek.com",
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         proxy: str = "",
         trust_env: bool = True,
     ) -> None:

@@ -13808,6 +13808,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "data_dir": "runtime-data",
                 "llm": {
                     "concurrency": 5,
+                    "timeout": 1200,
                     "deepseek": {"reasoning_effort": "high"},
                     "openrouter": {
                         "http_referer": "https://example.com",
@@ -13898,6 +13899,8 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.data_dir == "runtime-data"
         assert cfg.llm.concurrency == 5
         assert response.json()["config"]["llm"]["concurrency"] == 5
+        assert cfg.llm.timeout == 1200
+        assert response.json()["config"]["llm"]["timeout"] == 1200
         assert cfg.llm.deepseek.reasoning_effort == "high"
         assert cfg.llm.openrouter.http_referer == "https://example.com"
         assert cfg.llm.openrouter.x_title == "Example App"

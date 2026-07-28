@@ -13042,7 +13042,7 @@ def create_app(
                 },
                 default_provider=legacy_default_provider,
                 concurrency=int(getattr(cfg.llm, "concurrency", 4)),
-                timeout=int(getattr(cfg.llm, "timeout", 300)),
+                timeout=int(getattr(cfg.llm, "timeout", 1200)),
                 fallback_provider=legacy_fallback_provider,
                 openai=_provider_out(_legacy_provider_projection("openai")),
                 claude=_provider_out(_legacy_provider_projection("claude")),

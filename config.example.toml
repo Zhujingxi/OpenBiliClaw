@@ -60,8 +60,8 @@ default_chain = ["deepseek"]
 concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
-# openai_compatible. Allowed range: 10..600. Default 300s.
-timeout = 300
+# openai_compatible. Allowed range: 10..1200. Default 1200s (20 minutes).
+timeout = 1200
 # 新实例请直接在桌面设置页创建。手工配置时复制下面的完整表，
 # 给每个渠道一个稳定且唯一的 ID，再把 ID 加进 default_chain：
 #

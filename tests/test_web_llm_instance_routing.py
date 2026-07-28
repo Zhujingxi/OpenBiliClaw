@@ -110,7 +110,8 @@ def test_extension_manages_native_instances_and_preserves_module_routes() -> Non
     assert 'setVal("cfgLlmInstanceApiKey", "")' in POPUP_JS
     assert 'id="cfgLlmInstanceClearApiKey"' in POPUP_HTML
     assert 'getInt("cfgLlmConcurrencyV2", 4)' in POPUP_JS
-    assert 'getInt("cfgLlmTimeoutV2", 300)' in POPUP_JS
+    assert 'getInt("cfgLlmTimeoutV2", 1200)' in POPUP_JS
+    assert 'id="cfgLlmTimeoutV2" type="number" min="10" max="1200"' in POPUP_HTML
 
 
 def test_embedding_fallback_copy_calls_out_vector_space_compatibility() -> None:

@@ -8251,9 +8251,9 @@ function bindSettings() {
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
     setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
-    setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 1200);
     setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 4);
-    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 1200);
     state.llmProbeResults.clear();
     renderLlmRoutingSummary(cfg.llm || {});
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
@@ -8508,7 +8508,7 @@ function bindSettings() {
           ]),
         ),
         concurrency: getInt("cfgLlmConcurrencyV2", 4),
-        timeout: getInt("cfgLlmTimeoutV2", 300),
+        timeout: getInt("cfgLlmTimeoutV2", 1200),
         embedding: {
           ...(state.runtimeConfig?.llm?.embedding || {}),
           provider: getVal("cfgEmbeddingProvider"),
