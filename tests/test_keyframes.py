@@ -270,7 +270,15 @@ async def test_keyframe_bonus_max_pools_across_frames() -> None:
 
 
 @pytest.mark.asyncio
-async def test_keyframe_bonus_negative_centroid_cancels() -> None:
+async def test_keyframe_bonus_negative_centroid_does_not_cancel() -> None:
+    """A frame matching a disliked centroid is NOT penalized (positive-only).
+
+    The neg penalty was dropped (see _keyframe_bonus_from_vecs): P3 reuses P1's
+    centroids, and the live measurement showed pos/neg best-sim nearly
+    coinciding, so the penalty cancelled the positive for 75% of equipped
+    candidates. A frame matching BOTH pos and neg centroids now earns the full
+    pos bonus; the neg centroid is ignored for scoring.
+    """
     key_map = {keyframe_embedding_cache_key("BVX", 0): [1.0, 0.0, 0.0]}
     with tempfile.TemporaryDirectory() as d:
         db = Database(Path(d) / "t.db")
@@ -285,7 +293,8 @@ async def test_keyframe_bonus_negative_centroid_cancels() -> None:
         engine._visual_profile_cache = None
         cand = DiscoveredContent(bvid="BVX", title="t", relevance_score=0.8)
         bonus = await engine._keyframe_bonus_map([cand])
-        assert bonus.get("BVX", 0.0) == 0.0  # penalty cancels, never negative
+        # Matching neg no longer cancels: earns the same bonus as pos-only.
+        assert bonus.get("BVX", 0.0) > 0.0
         db.close()
 
 

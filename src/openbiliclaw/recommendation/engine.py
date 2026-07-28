@@ -125,7 +125,7 @@ _VISUAL_COVER_MIN_COVERAGE = 0.6
 _VISUAL_PROFILE_BONUS_MAX = 0.05  # hard cap on the additive nudge
 _VISUAL_PROFILE_SIM_FLOOR = 0.31  # live p50 of candidate-vs-centroid cosine
 _VISUAL_PROFILE_SIM_CEIL = 0.61  # live p95 of candidate-vs-centroid cosine
-_VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
+_VISUAL_PROFILE_PENALTY_MAX = 0.05  # UNUSED (neg dropped, see _visual_profile_bonus_from_vec)
 
 
 # Video keyframe bonus (P3) — INDEPENDENT of both bonuses above. Compares a
@@ -163,7 +163,7 @@ _VISUAL_PROFILE_PENALTY_MAX = 0.05  # hard cap on the dislike-cover penalty
 _KEYFRAME_BONUS_MAX = 0.05  # hard cap on the additive nudge
 _KEYFRAME_SIM_FLOOR = 0.40  # measured p50 of keyframe-vs-centroid pos best sim
 _KEYFRAME_SIM_CEIL = 0.64  # measured p95 of keyframe-vs-centroid pos best sim
-_KEYFRAME_PENALTY_MAX = 0.05  # hard cap on the disliked-style penalty
+_KEYFRAME_PENALTY_MAX = 0.05  # UNUSED now (neg penalty dropped, see _keyframe_bonus_from_vecs)
 _KEYFRAME_DEFAULT_MAX_FRAMES = 4  # frames sampled per video
 
 
@@ -2354,13 +2354,21 @@ class RecommendationEngine:
         pos_centroids: list[list[float]],
         neg_centroids: list[list[float]],
     ) -> float:
-        """Map cover↔centroid cosine to a bounded bonus (pos) minus penalty (neg).
+        """Map cover↔pos-centroid cosine to a bounded bonus (positive-only).
 
         Same-modal image↔image cosine uses the ``_VISUAL_PROFILE_SIM_*`` range
-        (independent of the cross-modal cover↔text range). The negative penalty
-        only subtracts from this signal's own positive — never below 0, so a
-        disliked-cover match can at most zero out the visual-profile nudge, not
-        demote the candidate below its base relevance.
+        (independent of the cross-modal cover↔text range).
+
+        Negative centroids are accepted but NO LONGER used as a penalty. The
+        prior ``positive - penalty`` design cancelled the pos signal for over
+        half of candidates: liked and disliked covers overlap in visual space
+        (a cover is a weak visual proxy, and binary like/dislike feedback does
+        not separate *visual* taste from topic/length/UP-style dislike), so
+        the neg best-sim ran as high as the pos best-sim (live p50: neg 0.440
+        vs pos 0.405) and the penalty ate the positive. Dropping the penalty
+        releases the validated pos-direction signal; the neg centroids are
+        still built and persisted so a future, sharper feedback model can
+        reintroduce a conditional penalty without a rebuild.
         """
         if not cover_vec:
             return 0.0
@@ -2381,15 +2389,10 @@ class RecommendationEngine:
             norm = max(0.0, min(1.0, (sim - floor) / span))
             return cap * norm
 
-        positive = _map(
+        return _map(
             _best(pos_centroids),
             _VISUAL_PROFILE_SIM_FLOOR, _VISUAL_PROFILE_SIM_CEIL, _VISUAL_PROFILE_BONUS_MAX,
         )
-        penalty = _map(
-            _best(neg_centroids),
-            _VISUAL_PROFILE_SIM_FLOOR, _VISUAL_PROFILE_SIM_CEIL, _VISUAL_PROFILE_PENALTY_MAX,
-        )
-        return max(0.0, positive - penalty)
 
     async def _visual_profile_bonus_map(
         self,
@@ -2453,7 +2456,7 @@ class RecommendationEngine:
         pos_centroids: list[list[float]],
         neg_centroids: list[list[float]],
     ) -> float:
-        """Max-pool frame↔centroid cosine into a bounded bonus minus penalty.
+        """Max-pool frame↔pos-centroid cosine into a bounded bonus (positive-only).
 
         Max-pool (not mean): the question is "does ANY sampled frame look like
         the user's taste", and a mean would wash out one strong match among
@@ -2461,6 +2464,16 @@ class RecommendationEngine:
         :meth:`_visual_profile_bonus_from_vec` but on its own ``_KEYFRAME_*``
         range — keyframes are downscaled stills whose distribution differs
         from full-size covers.
+
+        Negative centroids are accepted but NO LONGER used as a penalty, for
+        the same reason as P1: P3 reuses P1's centroids, and the live
+        keyframe-vs-centroid measurement showed pos/neg best-sim nearly
+        coinciding (p50: pos 0.397 vs neg 0.395), so the penalty cancelled
+        the positive for 75% of equipped candidates (only 25/99 earned a
+        nonzero bonus). P3 is marginally better than P1 (net p50 +0.022 vs
+        P1's -0.024) but not enough to justify a penalty that mostly
+        subtracts signal. The neg centroids stay built/persisted for a
+        future conditional-penalty reintroduction.
         """
         if not frame_vecs:
             return 0.0
@@ -2484,15 +2497,10 @@ class RecommendationEngine:
             norm = max(0.0, min(1.0, (sim - floor) / span))
             return cap * norm
 
-        positive = _map(
+        return _map(
             _best(pos_centroids),
             _KEYFRAME_SIM_FLOOR, _KEYFRAME_SIM_CEIL, _KEYFRAME_BONUS_MAX,
         )
-        penalty = _map(
-            _best(neg_centroids),
-            _KEYFRAME_SIM_FLOOR, _KEYFRAME_SIM_CEIL, _KEYFRAME_PENALTY_MAX,
-        )
-        return max(0.0, positive - penalty)
 
     async def _keyframe_bonus_map(
         self,

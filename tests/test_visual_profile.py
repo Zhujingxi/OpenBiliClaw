@@ -196,8 +196,16 @@ async def test_bonus_map_positive_nudge_for_liked_style() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bonus_map_negative_penalty_reduces_bonus() -> None:
-    """A candidate matching a disliked-cover centroid gets a penalty (≤ positive)."""
+async def test_bonus_map_negative_centroid_does_not_cancel() -> None:
+    """A candidate matching a disliked centroid is NOT penalized (positive-only).
+
+    The neg penalty was dropped because liked/disliked covers overlap in
+    visual space and binary feedback doesn't separate visual taste, so the
+    penalty cancelled the pos signal for over half of candidates. A candidate
+    matching BOTH pos and neg centroids now earns the full pos bonus — the
+    neg centroid is ignored for scoring (still built/persisted for a future
+    conditional-penalty reintroduction).
+    """
     dim = 8
     liked_url = "https://i0.hdslb.com/bfs/archive/liked.jpg"
     disliked_url = "https://i0.hdslb.com/bfs/archive/disliked.jpg"
@@ -224,8 +232,9 @@ async def test_bonus_map_negative_penalty_reduces_bonus() -> None:
         engine._visual_profile_cache = None
         cand = DiscoveredContent(bvid="BVCAND", cover_url=cand_url, relevance_score=0.80)
         bonus = await engine._visual_profile_bonus_map([cand])
-        # Positive and negative cancel (same cosine) → net 0 (penalty clamps at positive).
-        assert bonus.get("BVCAND", 0.0) == 0.0
+        # Matching neg no longer cancels: the candidate earns the same bonus it
+        # would with no neg centroid at all.
+        assert bonus.get("BVCAND", 0.0) > 0.0
         db.close()
 
 
