@@ -2087,6 +2087,18 @@ class RecommendationEngine:
         Returns ``[]`` (disabling the visual bonus) when image embedding is
         inactive, there's no embedding service, or the profile has no usable
         interest anchors — so callers can stay on the zero-cost text-only path.
+
+        Hot-path contract: anchor vectors are resolved cache-first via
+        ``lookup_cached`` (L1 in-memory → L2 SQLite, never a provider API
+        call). Only on a genuine cold miss — a brand-new interest name never
+        embedded in this deployment, or its L2 key evicted — does it fall
+        back to one ``embed()`` per anchor. That cold-start cost is paid at
+        most once per anchor name: ``embed()`` writes L1+L2, and every
+        subsequent ``serve()`` hits L1 (the anchor is re-touched each call,
+        so it stays hot). There is no prewarm hook for interest-anchor names
+        because the engine does not hold the soul profile; the lookup-first
+        path plus L1 stickiness keeps the steady-state hot path network-free
+        without one.
         """
         embedding = self._embedding_service
         if embedding is None:
@@ -2105,13 +2117,21 @@ class RecommendationEngine:
         if not anchors:
             return []
 
+        lookup = getattr(embedding, "lookup_cached", None)
         vectors: list[list[float]] = []
         for anchor in anchors:
-            try:
-                vec = await embedding.embed(anchor)
-            except Exception:
-                logger.debug("visual anchor embed failed for %r", anchor, exc_info=True)
-                continue
+            # Cache-first: L1 → L2, no provider call. Steady state is pure L1.
+            vec: list[float] = []
+            if callable(lookup):
+                vec = lookup(anchor) or []
+            if not vec:
+                # Cold miss only — embed once, then L1/L2 caches it for every
+                # future serve(). Best-effort: a failure just skips this anchor.
+                try:
+                    vec = await embedding.embed(anchor)
+                except Exception:
+                    logger.debug("visual anchor embed failed for %r", anchor, exc_info=True)
+                    continue
             if vec:
                 vectors.append(vec)
         return vectors
@@ -2253,14 +2273,22 @@ class RecommendationEngine:
 
         Returns the cached list (possibly empty). Idempotent — once loaded, the
         hot path reads memory only. ``rebuild_visual_profile`` refreshes it.
+
+        On a transient DB error (e.g. "database is locked") the cache is left
+        ``None`` so the NEXT call retries the load — previously it was set to
+        ``[]``, and since the guard is ``is None`` (``[] is not None``) a single
+        first-load error silently disabled P1 AND P3 (which shares this cache)
+        for the whole process lifetime, recoverable only by new feedback
+        triggering a rebuild. Logged at WARNING so the silent disable is
+        observable (pitfall rule 7: diagnosable beats "appears to work").
         """
         if self._visual_profile_cache is None:
             try:
                 self._visual_profile_cache = self._database.get_user_visual_clusters()
             except Exception:
-                logger.debug("visual profile load failed", exc_info=True)
-                self._visual_profile_cache = []
-        return self._visual_profile_cache
+                logger.warning("visual profile load failed; will retry next call", exc_info=True)
+                # Leave None — do NOT cache [] (would permanently disable P1/P3).
+        return self._visual_profile_cache or []
 
     async def rebuild_visual_profile(self) -> int:
         """Rebuild liked/disliked cover centroids from recommendation feedback.
@@ -2359,6 +2387,27 @@ class RecommendationEngine:
             stored.append(
                 {"polarity": "neg", "centroid": list(c.centroid), "member_count": c.member_count}
             )
+
+        # Guard against wiping a previously-valid profile on a transient
+        # failure: if there IS feedback (pos_urls or neg_urls non-empty) but
+        # this rebuild produced zero clusters (all cover embeds failed, or
+        # every liked cover was a dissimilar singleton pruned by min_members),
+        # do NOT call replace_user_visual_clusters([]) — that DELETEs the
+        # whole table and destroys existing centroids, causing the profile to
+        # appear/disappear/reappear. Only wipe when there is genuinely no
+        # feedback at all. The in-memory cache is left untouched too, so the
+        # hot path keeps using the last good centroids until a rebuild
+        # succeeds (pitfall rule 2: never persist failed/empty results).
+        has_feedback = bool(pos_urls or neg_urls)
+        if not stored and has_feedback:
+            logger.warning(
+                "Visual profile rebuild produced 0 centroids from %d pos / %d neg "
+                "feedback covers (transient embed failure or all singletons); "
+                "preserving existing %d centroids",
+                len(pos_urls), len(neg_urls),
+                len(self._visual_profile_cache or []),
+            )
+            return 0
 
         try:
             self._database.replace_user_visual_clusters(stored)
@@ -2728,13 +2777,16 @@ class RecommendationEngine:
         candidates: list[DiscoveredContent],
         profile: SoulProfile,
     ) -> dict[str, float]:
-        """Per-candidate danmaku bonus for serve() (lookup-only).
+        """Per-candidate danmaku bonus for serve() (candidate vectors lookup-only).
 
         Compares each candidate's stored danmaku summary against the profile's
         interest anchors (text↔text, same anchors the cover bonus embeds).
         Returns ``{}`` — leaving the ranking byte-identical — when the feature
-        is off or nothing is stored yet. Never embeds on this hot path: a cache
-        miss simply contributes no bonus and the prewarm fills it.
+        is off or nothing is stored yet. Candidate danmaku vectors are
+        lookup-only (a cache miss contributes no bonus; the prewarm fills it).
+        Anchor vectors are resolved cache-first too — see
+        ``_danmaku_anchor_vectors`` for the cold-miss fallback (one embed per
+        anchor, paid once then L1-cached).
         """
         if not self._danmaku_active():
             return {}
@@ -2791,7 +2843,9 @@ class RecommendationEngine:
 
         Same anchors as ``_visual_anchor_vectors`` but without the
         image-embedding gate — danmaku matching is text↔text, so it works on
-        any embedding provider.
+        any embedding provider. Same cache-first hot-path contract: L1→L2
+        lookup, cold-miss fallback to one ``embed()`` per anchor (paid once,
+        then L1-cached for every future serve()).
         """
         embedding = self._embedding_service
         if embedding is None:
@@ -2805,13 +2859,18 @@ class RecommendationEngine:
                 anchors.append(name)
         if not anchors:
             return []
+        lookup = getattr(embedding, "lookup_cached", None)
         vectors: list[list[float]] = []
         for anchor in anchors:
-            try:
-                vec = await embedding.embed(anchor)
-            except Exception:
-                logger.debug("danmaku anchor embed failed for %r", anchor, exc_info=True)
-                continue
+            vec: list[float] = []
+            if callable(lookup):
+                vec = lookup(anchor) or []
+            if not vec:
+                try:
+                    vec = await embedding.embed(anchor)
+                except Exception:
+                    logger.debug("danmaku anchor embed failed for %r", anchor, exc_info=True)
+                    continue
             if vec:
                 vectors.append(vec)
         return vectors
