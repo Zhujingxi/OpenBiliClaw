@@ -332,7 +332,7 @@ openbiliclaw start
 - **桌面端**：浏览器直接访问 `http://127.0.0.1:8420/web`（或 `http://127.0.0.1:8420/`，自动跳转）。大屏两栏布局，推荐流、画像、聊天、消息和设置全在一页。
 - **移动端**：点击插件顶部的手机图标扫二维码，或手动输入 `http://<电脑局域网 IP>:8420/m/`。适合手机上刷推荐、看画像、和阿B聊天。
 
-> 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 局域网可达，`127.0.0.1` = 仅本机）。
+> 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 通过可用的 IPv4 / IPv6 局域网访问，`127.0.0.1` = 仅本机）。二维码优先使用 IPv4；仅有 IPv6 时会自动生成带方括号的 IPv6 地址。
 
 打开 `/m/` 后可以把手机页面保存成桌面快捷入口：iPhone / iPad 用 Safari 的「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；如果想要更稳定的完整 PWA 安装提示，建议在可信环境里用 HTTPS 反代访问本机后端。
 
@@ -612,7 +612,7 @@ background ─ background admission (default 3) ──────┘
 │   行为采集 · MAIN-world tap（评论/弹幕·xhs强信号）│
 │   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
-                       │ REST API / WebSocket
+                       │ IPv4 0.0.0.0 + IPv6 [::] → REST API / WebSocket
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
                        │ + ping 预检降级 → /web · /setup · /m → 配置后重启
 ┌──────────────────────▼─────────────────────────┐

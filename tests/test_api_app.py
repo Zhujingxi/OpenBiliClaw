@@ -3389,6 +3389,48 @@ class TestBackendAPI:
 
         assert app_module._detect_lan_ip() == "192.168.31.98"
 
+    def test_detect_lan_ip_falls_back_to_ipv6_when_ipv4_is_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openbiliclaw.api import app as app_module
+
+        monkeypatch.setattr(app_module, "_default_route_ip", lambda: None)
+        monkeypatch.setattr(app_module, "_interface_ipv4_candidates", lambda: [])
+        monkeypatch.setattr(app_module, "_default_route_ipv6", lambda: "2001:db8:1::8")
+        monkeypatch.setattr(
+            app_module,
+            "_interface_ipv6_candidates",
+            lambda: ["fe80::1", "fd12:3456:789a::7"],
+        )
+
+        assert app_module._detect_lan_ip() == "fd12:3456:789a::7"
+
+    def test_interface_ipv6_probe_ignores_link_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openbiliclaw.api import app as app_module
+
+        monkeypatch.setattr(app_module.socket, "has_ipv6", True)
+        monkeypatch.setattr(app_module.os, "name", "posix")
+        monkeypatch.setattr(
+            app_module.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "inet6 fe80::1%en0 prefixlen 64 scopeid 0x4\n"
+                    "inet6 fd12:3456:789a::7 prefixlen 64\n"
+                    "inet6 2001:db8:1::8/64 scope global\n"
+                ),
+            ),
+        )
+
+        assert app_module._interface_ipv6_candidates() == [
+            "fe80::1",
+            "fd12:3456:789a::7",
+            "2001:db8:1::8",
+        ]
+
     def test_windows_interface_ipv4_probe_hides_ipconfig_console(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

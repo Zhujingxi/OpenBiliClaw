@@ -122,7 +122,8 @@ if web_dir.is_dir():
 
 局域网访问约定：
 - `openbiliclaw start` 默认仍绑定 `127.0.0.1`，只允许本机访问。
-- 手机访问需要用户显式使用 `openbiliclaw start --host 0.0.0.0`。
+- 手机访问需要用户显式使用 `openbiliclaw start --host 0.0.0.0`；该 wildcard
+  会同时创建 IPv4 `0.0.0.0` 与可用的 IPv6 `[::]` listener。
 - 默认无鉴权、面向可信局域网；可选 `[api.auth].enabled`（`openbiliclaw set-password`）为局域网 / 远程设备加密码门禁，本机免登录。LAN HTTP 仍为明文，介意嗅探请上 HTTPS（反代），不要直接暴露公网 / 公共 Wi-Fi / 未受信 VPN。
 
 ### 样式策略
@@ -259,6 +260,9 @@ openbiliclaw start --host 0.0.0.0
 
 # 手机浏览器打开
 http://<电脑局域网IP>:8420/m/
+
+# 仅有 IPv6 时（方括号不可省略）
+http://[电脑局域网IPv6]:8420/m/
 ```
 
 打开 `/m/` 后可在 iOS Safari 通过「分享 → 添加到主屏幕」保存为桌面图标；Android Chrome / Chromium 浏览器可通过菜单里的「安装应用」或「添加到主屏幕」保存。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；完整 PWA 安装提示对 HTTPS 更稳定。

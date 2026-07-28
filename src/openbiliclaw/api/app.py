@@ -565,6 +565,20 @@ def _default_route_ip() -> str | None:
         return None
 
 
+def _default_route_ipv6() -> str | None:
+    """Return the IPv6 address selected for outbound traffic, if usable."""
+    if not socket.has_ipv6:
+        return None
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.1)
+            sock.connect(("2001:4860:4860::8888", 80))
+            ip = sock.getsockname()[0]
+            return str(ip) if ip else None
+    except Exception:
+        return None
+
+
 def _interface_ipv4_candidates() -> list[str]:
     """Best-effort local IPv4 enumeration without extra dependencies."""
     commands: list[list[str]]
@@ -609,6 +623,60 @@ def _interface_ipv4_candidates() -> list[str]:
     return candidates
 
 
+def _interface_ipv6_candidates() -> list[str]:
+    """Best-effort global/ULA IPv6 enumeration without extra dependencies."""
+    if not socket.has_ipv6:
+        return []
+    commands = (
+        [["ipconfig"]]
+        if os.name == "nt"
+        else [["ifconfig"], ["ip", "-6", "addr", "show", "scope", "global"]]
+    )
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for command in commands:
+        try:
+            if os.name == "nt":
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        for token in re.findall(
+            r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f:]*"
+            r"(?:%[\w.-]+)?(?:/\d+)?",
+            proc.stdout,
+        ):
+            candidate = token.split("/", 1)[0].split("%", 1)[0]
+            try:
+                addr = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if isinstance(addr, ipaddress.IPv6Address) and candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+        if candidates:
+            break
+    return candidates
+
+
 def _is_rfc1918_ipv4(addr: ipaddress.IPv4Address) -> bool:
     return any(addr in network for network in _RFC1918_NETWORKS)
 
@@ -631,12 +699,32 @@ def _usable_lan_candidate(ip: str) -> tuple[bool, bool]:
     return (True, _is_rfc1918_ipv4(addr))
 
 
+def _usable_ipv6_lan_candidate(ip: str) -> tuple[bool, bool]:
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return (False, False)
+    if (
+        not isinstance(addr, ipaddress.IPv6Address)
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr.ipv4_mapped is not None
+        or not (addr.is_private or addr.is_global)
+    ):
+        return (False, False)
+    return (True, addr.is_private)
+
+
 def _detect_lan_ip() -> str | None:
-    """Return a likely phone-reachable LAN IPv4 address.
+    """Return a likely phone-reachable LAN IPv4 or IPv6 address.
 
     UDP default-route detection can return VPN/TUN addresses such as
     198.18.0.1 on macOS. Prefer RFC1918 interface addresses and only use
     the default-route result when it is not a benchmark / loopback address.
+    IPv4 remains preferred for compatibility; an IPv6 ULA/global address is
+    returned when the machine has no usable IPv4 LAN address.
     """
     candidates = _interface_ipv4_candidates()
     route_ip = _default_route_ip()
@@ -652,7 +740,23 @@ def _detect_lan_ip() -> str | None:
             return candidate
         if fallback is None:
             fallback = candidate
-    return fallback
+    if fallback is not None:
+        return fallback
+
+    ipv6_candidates = _interface_ipv6_candidates()
+    route_ipv6 = _default_route_ipv6()
+    if route_ipv6:
+        ipv6_candidates.append(route_ipv6)
+    ipv6_fallback: str | None = None
+    for candidate in ipv6_candidates:
+        usable, ula = _usable_ipv6_lan_candidate(candidate)
+        if not usable:
+            continue
+        if ula:
+            return candidate
+        if ipv6_fallback is None:
+            ipv6_fallback = candidate
+    return ipv6_fallback
 
 
 _RESETTABLE_CONFIG_FIELDS = {

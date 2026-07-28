@@ -5,6 +5,8 @@
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
+LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘

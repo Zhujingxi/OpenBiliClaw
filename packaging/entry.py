@@ -787,7 +787,13 @@ def _should_use_tray() -> bool:
     return True
 
 
-def _run_server_in_tray(server: Any, host: str, port: int, project_root: Path) -> None:
+def _run_server_in_tray(
+    server: Any,
+    host: str,
+    port: int,
+    project_root: Path,
+    listener_sockets: list[Any] | None = None,
+) -> None:
     """Run uvicorn in a background thread and a system-tray icon in the
     foreground (Windows). There is no console / window, so the only way to stop
     the backend is the tray menu's quit — which sets ``server.should_exit`` so
@@ -804,7 +810,10 @@ def _run_server_in_tray(server: Any, host: str, port: int, project_root: Path) -
         # ("后端已退出" and no clue) — the __main__ crash handler only sees the
         # main thread. Persist the traceback so the failure is diagnosable.
         try:
-            server.run()
+            if listener_sockets:
+                server.run(sockets=listener_sockets)
+            else:
+                server.run()
         except Exception:
             import traceback
 
@@ -1084,18 +1093,30 @@ def main() -> None:
     config_kwargs = {"access_log": False} if use_tray else {}
     config = uvicorn.Config(app, host=host, port=port, log_level="info", **config_kwargs)
     server = uvicorn.Server(config)
+    from openbiliclaw.runtime.api_server import (
+        close_listener_sockets,
+        create_wildcard_listener_sockets,
+    )
 
-    if use_tray:
-        # Windowed build: uvicorn runs in the background and a tray icon owns the
-        # foreground (Windows system tray / macOS menu bar). No console window
-        # appears; closing nothing stops it — only the tray menu's "退出" quits.
-        where = "系统托盘（右下角）" if os.name == "nt" else "菜单栏（右上角）"
-        print(f"[OpenBiliClaw] 已最小化到{where}；右键托盘图标可查看日志或退出。")
-        _run_server_in_tray(server, host, port, project_root)
-    else:
-        # Dev / non-Windows / tray unavailable: run in the foreground (console).
-        _close_splash()
-        server.run()
+    listener_sockets = create_wildcard_listener_sockets(host, port)
+
+    try:
+        if use_tray:
+            # Windowed build: uvicorn runs in the background and a tray icon owns the
+            # foreground (Windows system tray / macOS menu bar). No console window
+            # appears; closing nothing stops it — only the tray menu's "退出" quits.
+            where = "系统托盘（右下角）" if os.name == "nt" else "菜单栏（右上角）"
+            print(f"[OpenBiliClaw] 已最小化到{where}；右键托盘图标可查看日志或退出。")
+            _run_server_in_tray(server, host, port, project_root, listener_sockets)
+        else:
+            # Dev / non-Windows / tray unavailable: run in the foreground (console).
+            _close_splash()
+            if listener_sockets:
+                server.run(sockets=listener_sockets)
+            else:
+                server.run()
+    finally:
+        close_listener_sockets(listener_sockets)
 
 
 if __name__ == "__main__":

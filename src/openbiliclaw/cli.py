@@ -991,7 +991,22 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             "then restart the daemon."
         )
         _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
-    uvicorn.run(api_app, host=host, port=port, log_level="info")
+    from openbiliclaw.runtime.api_server import (
+        close_listener_sockets,
+        create_wildcard_listener_sockets,
+    )
+
+    listeners = create_wildcard_listener_sockets(host, port)
+    if listeners is None:
+        uvicorn.run(api_app, host=host, port=port, log_level="info")
+        return
+
+    config = uvicorn.Config(api_app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        server.run(sockets=listeners)
+    finally:
+        close_listener_sockets(listeners)
 
 
 def _build_memory_manager() -> Any:

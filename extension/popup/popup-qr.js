@@ -24,8 +24,9 @@ const GF_LOG = new Array(256).fill(0);
 
 export function buildMobileWebUrl({ host, port } = {}) {
   const safeHost = String(host || "127.0.0.1").trim() || "127.0.0.1";
+  const urlHost = safeHost.includes(":") && !safeHost.startsWith("[") ? `[${safeHost}]` : safeHost;
   const safePort = Number.isInteger(Number(port)) ? Number(port) : 8420;
-  return `http://${safeHost}:${safePort}/m/`;
+  return `http://${urlHost}:${safePort}/m/`;
 }
 
 export function isLoopbackMobileHost(host) {
