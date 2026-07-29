@@ -236,9 +236,9 @@ class DouyinDiscoveryProducer:
         if preferred_configured:
             return preferred_configured
 
-        non_search = tuple(source for source in configured if source != "search")
-        if non_search:
-            return non_search[:1]
+        configured_non_search = tuple(source for source in configured if source != "search")
+        if configured_non_search:
+            return configured_non_search[:1]
         return configured[:1] or ("search",)
 
     def _candidate_pool_full(self) -> bool:
