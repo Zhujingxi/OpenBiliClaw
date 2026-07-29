@@ -416,6 +416,64 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     assert count == 1
 
 
+def test_database_delight_paths_exclude_durable_seen_items(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    bvid = "BV1SEENDELIGHT"
+    database.cache_content(bvid, title="已经看过", relevance_score=0.94)
+    _mark_delight_ready(
+        database,
+        bvid,
+        delight_score=0.94,
+        reason="旧惊喜文案",
+        hook="旧惊喜主题",
+    )
+
+    database.mark_items_seen("bilibili", [bvid])
+
+    assert database.get_delight_candidates(min_delight_score=0.75) == []
+    assert database.count_delight_candidates(min_delight_score=0.75) == 0
+    assert (
+        database.get_pool_candidates_needing_delight_score(
+            limit=10,
+            min_delight_score_for_reason=0.95,
+        )
+        == []
+    )
+
+
+def test_mark_delight_seen_records_cross_source_identity_and_consumes_queue(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    storage_key = "youtube:video-42"
+    database.cache_content(
+        storage_key,
+        title="跨平台惊喜",
+        source="youtube-search",
+        source_platform="youtube",
+        content_id="video-42",
+        relevance_score=0.92,
+    )
+    _mark_delight_ready(
+        database,
+        storage_key,
+        delight_score=0.92,
+        reason="值得看看",
+        hook="新方向",
+    )
+
+    assert database.mark_delight_seen(storage_key) is True
+
+    assert "youtube:video-42" in database.get_seen_content_keys()
+    assert database.get_delight_candidates(min_delight_score=0.75) == []
+    notified = database.conn.execute(
+        "SELECT delight_notified FROM content_cache WHERE bvid = ?",
+        (storage_key,),
+    ).fetchone()
+    assert notified is not None
+    assert notified["delight_notified"] == 1
+
+
 def test_database_dynamic_delight_threshold_keeps_floor_before_min_sample_size(
     tmp_path: Path,
 ) -> None:

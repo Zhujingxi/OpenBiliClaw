@@ -139,8 +139,7 @@ def test_degraded_config_put_recovers_runtime_in_process_without_restart(
         assert app.state.degraded_reason == ""
         assert app.state.degraded_issues == []
         assert (
-            app.state.feedback_batch_scheduler.soul_engine
-            is app.state.runtime_context.soul_engine
+            app.state.feedback_batch_scheduler.soul_engine is app.state.runtime_context.soul_engine
         )
 
         ping = client.get("/api/ping").json()

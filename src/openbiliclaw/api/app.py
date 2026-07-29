@@ -2180,6 +2180,10 @@ def create_app(
     #
     # Allowed during init:
     #  - /api/init, /api/init/cancel        — init control itself
+    #  - /api/config/probe-service          — read-only draft probes for LLM,
+    #                                         embedding, and network settings;
+    #                                         the LLM path still uses the stable
+    #                                         total concurrency gate
     #  - /api/bilibili/cookie               — handler no-ops during init
     #  - /api/auth/*                        — auth-gate management (login/admin)
     #  - /api/sources/*/kick                — init's own dispatcher kick
@@ -2198,6 +2202,7 @@ def create_app(
         {
             "/api/init",
             "/api/init/cancel",
+            "/api/config/probe-service",
             "/api/bilibili/cookie",
             "/api/sources/bangumi/identity",
         }
@@ -7412,8 +7417,9 @@ def create_app(
         the delight in the queue; ``view`` keeps the card visible in-session but
         marks the candidate read (same semantics as the recommendation pool's
         ``shown`` flag — a browsed surprise doesn't reappear on the next queue
-        re-hydration); ``dismiss`` and ``dislike`` consume the candidate
-        immediately.
+        re-hydration); ``dismiss`` records the canonical identity as already
+        handled so it is permanently excluded from both recommendation channels;
+        ``dislike`` consumes the candidate and records a negative preference.
         """
         from fastapi.responses import JSONResponse
 
@@ -7435,6 +7441,17 @@ def create_app(
             else:
                 ctx.database.mark_delight_notified(bvid)
 
+        def mark_delight_seen() -> None:
+            mark_seen = getattr(ctx.runtime_controller, "mark_delight_seen", None)
+            if callable(mark_seen):
+                mark_seen(bvid)
+                return
+            mark_seen = getattr(ctx.database, "mark_delight_seen", None)
+            if callable(mark_seen):
+                mark_seen(bvid)
+                return
+            mark_delight_consumed()
+
         if response_type == "view":
             # Browsing the content marks the candidate read — mirrors the
             # recommendation pool, where a served item flips to 'shown' and
@@ -7451,9 +7468,18 @@ def create_app(
 
         if response_type == "dismiss":
             try:
-                mark_delight_consumed()
+                mark_delight_seen()
             except Exception:
-                logger.debug("Failed to dismiss delight bvid %s", bvid)
+                logger.exception("Failed to permanently dismiss delight bvid %s", bvid)
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "ok": False,
+                        "action": "dismiss",
+                        "bvid": bvid,
+                        "error": "persist_failed",
+                    },
+                )
             return JSONResponse(content={"ok": True, "action": "dismissed", "bvid": bvid})
 
         if response_type == "like":
@@ -15512,7 +15538,7 @@ def create_app(
     _web_dir = _Path(__file__).resolve().parent.parent / "web"
     _shared_web_dir = _web_dir / "shared"
     if _web_dir.is_dir():
-        _favicon_path = _web_dir / "icon-192.png"
+        _favicon_path = _web_dir / "icon-32.png"
 
         @app.get("/favicon.ico", include_in_schema=False)
         def _favicon() -> FileResponse:

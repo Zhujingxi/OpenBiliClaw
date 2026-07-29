@@ -5669,7 +5669,7 @@ ${cardFeedbackBarHtml()}`;
         showToast(url ? "已打开惊喜推荐" : "后端没有返回可打开链接");
         return;
       }
-      const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已忽略这条惊喜推荐";
+      const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
       const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
@@ -5682,6 +5682,11 @@ ${cardFeedbackBarHtml()}`;
           message: ""
         })
       });
+      if (response === "dismiss" && feedbackResult == null) {
+        showToast("这次还没记上，请再试一次");
+        setActiveDelight(state.delightIndex);
+        return;
+      }
       if (response === "like" && feedbackResult == null) {
         showToast("这次喜欢还没记上，可以再试一次");
         setActiveDelight(state.delightIndex);

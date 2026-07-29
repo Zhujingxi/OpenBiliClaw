@@ -170,7 +170,7 @@ test("recommend tab reserves a dedicated delight slot above the recommendation l
   assert.match(popupJs, /"看看"/);
   assert.match(popupJs, /"不感兴趣"/);
   assert.match(popupJs, /"聊一聊"/);
-  assert.match(popupJs, /"稍后看"/);
+  assert.match(popupJs, /"看过了，不再推荐"/);
 });
 
 test("recommendation cards use explicit editorial content sections", () => {

@@ -1092,7 +1092,9 @@ class TestBackendAPI:
         assert '<meta name="mobile-web-app-capable" content="yes">' in response.text
         assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response.text
         assert '<meta name="apple-mobile-web-app-title" content="BiliClaw">' in response.text
-        assert '<link rel="apple-touch-icon" sizes="180x180" href="icon-192.png">' in response.text
+        assert (
+            '<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=4">'
+        ) in response.text
 
     def test_mobile_web_manifest_is_installable_and_assets_resolve(self) -> None:
         from fastapi.testclient import TestClient
@@ -1116,10 +1118,14 @@ class TestBackendAPI:
         icons = manifest["icons"]
         sizes = {icon["sizes"] for icon in icons}
         assert {"192x192", "512x512"}.issubset(sizes)
+        purposes = {(icon["sizes"], icon.get("purpose")) for icon in icons}
+        assert ("192x192", "any") in purposes
+        assert ("512x512", "any") in purposes
+        assert ("192x192", "maskable") in purposes
+        assert ("512x512", "maskable") in purposes
 
         for icon in icons:
             assert icon["type"] == "image/png"
-            assert icon.get("purpose") == "any maskable"
             icon_response = client.get(f"/m/{icon['src']}")
             assert icon_response.status_code == 200
             assert icon_response.headers.get("content-type", "").startswith("image/png")
@@ -3169,7 +3175,16 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("image/png")
-        assert response.content
+        assert (
+            response.content
+            == (
+                Path(__file__).resolve().parent.parent
+                / "src"
+                / "openbiliclaw"
+                / "web"
+                / "icon-32.png"
+            ).read_bytes()
+        )
 
     def test_health_endpoint_reports_profile_ready_when_available(self) -> None:
         from fastapi.testclient import TestClient
@@ -10825,12 +10840,17 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.writes: list[tuple[str, tuple[object, ...]]] = []
                 self.notified: list[str] = []
+                self.seen: list[str] = []
 
             def _execute_write(self, query: str, params: tuple[object, ...]) -> None:
                 self.writes.append((query, params))
 
             def mark_delight_notified(self, bvid: str) -> None:
                 self.notified.append(bvid)
+
+            def mark_delight_seen(self, bvid: str) -> bool:
+                self.seen.append(bvid)
+                return True
 
         database = FakeDatabase()
         app = create_app(memory_manager=object(), database=database, soul_engine=object())
@@ -10843,8 +10863,32 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["action"] == "dismissed"
-        assert database.notified == ["BV1DL"]
+        assert database.seen == ["BV1DL"]
+        assert database.notified == []
         assert database.writes == []
+
+    def test_delight_dismiss_reports_persistence_failure(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def mark_delight_seen(self, bvid: str) -> bool:
+                raise RuntimeError(f"write failed for {bvid}")
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/delight/respond",
+            json={"bvid": "BV1FAIL", "title": "惊喜", "response": "dismiss"},
+        )
+
+        assert response.status_code == 500
+        assert response.json() == {
+            "ok": False,
+            "action": "dismiss",
+            "bvid": "BV1FAIL",
+            "error": "persist_failed",
+        }
 
     def test_get_config_returns_llm_and_embedding_settings(
         self,
@@ -16192,6 +16236,85 @@ class TestGuidedInitEndpoints:
             resp = client.post("/api/events", json={})
         assert resp.status_code == 409
         assert resp.json()["error"] == "init_running"
+
+    def test_config_service_probes_allowed_during_init(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        calls: list[str] = []
+
+        class FakeRegistry:
+            def is_chat_capable(self, name: str) -> bool:
+                return name == "probe-instance"
+
+            def provider_type(self, name: str) -> str:  # noqa: ARG002
+                return "openai_compatible"
+
+            def get(self, name: str) -> object:  # noqa: ARG002
+                return SimpleNamespace(_model="probe-model")
+
+            async def complete_provider(
+                self,
+                provider_name: str,
+                *_args: object,
+                **_kwargs: object,
+            ) -> object:
+                calls.append(f"llm:{provider_name}")
+                return SimpleNamespace(
+                    content="OK",
+                    instance_id=provider_name,
+                    provider="openai_compatible",
+                    model="probe-model",
+                )
+
+        class FakeEmbeddingService:
+            async def probe(self) -> bool:
+                calls.append("embedding")
+                return True
+
+        app, _ = self._make_app(tmp_path)
+        monkeypatch.setattr(
+            "openbiliclaw.llm.registry.build_llm_registry",
+            lambda _cfg: FakeRegistry(),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.llm.registry.build_embedding_service",
+            lambda _cfg, _registry: FakeEmbeddingService(),
+        )
+
+        with TestClient(app) as client:
+            app.state.runtime_context.init_coordinator.try_start("active")
+            llm = client.post(
+                "/api/config/probe-service",
+                json={
+                    "kind": "llm_instance",
+                    "instance_id": "probe-instance",
+                    "config": {},
+                },
+            )
+            embedding = client.post(
+                "/api/config/probe-service",
+                json={
+                    "kind": "embedding",
+                    "config": {
+                        "llm": {
+                            "embedding": {
+                                "provider": "ollama",
+                                "model": "bge-m3",
+                            }
+                        }
+                    },
+                },
+            )
+
+        assert llm.status_code == 200
+        assert llm.json()["ok"] is True
+        assert embedding.status_code == 200
+        assert embedding.json()["ok"] is True
+        assert calls == ["llm:probe-instance", "embedding"]
 
     def test_write_endpoint_allowed_when_idle(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

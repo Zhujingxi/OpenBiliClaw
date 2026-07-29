@@ -189,9 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.188 (2026-07-29)**
+📌 Latest: **v0.3.189 (2026-07-30)**
 
-- **Repairing model configuration no longer requires another restart** — saving valid settings in degraded mode atomically rebuilds the full runtime in the current backend process, removes the 503 gate, and resumes setup immediately; failed construction rolls back safely.
+- **Consistent branding across every icon surface** — browser tabs, PWA and Apple home screens, extension and web headers, desktop splash, social previews, store artwork, and documentation screenshots no longer show white outer borders or the legacy `B` mark.
+- **Dismissing a delight now stays dismissed** — “seen, do not recommend again” writes to the shared seen ledger, so the same item cannot return through either regular or delight recommendations.
+- **Desktop browsing and taste chat are steadier** — infinite scrolling no longer jumps back to a platform tab, while pending-confirmation cards gain clear hierarchy, responsive layouts, and accessible interaction.
+- **Source-task failures are no longer disguised as empty results** — Douyin and Xiaohongshu now distinguish timeouts, failures, exhausted budgets, and safety cooldowns while preserving retryable keywords and queue state.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -630,7 +633,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
-│ Delight gate: formal copy/topic ready → score + atomic snapshot → UI │
+│ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │

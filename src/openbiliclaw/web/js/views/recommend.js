@@ -482,7 +482,7 @@ function renderDelightTray() {
         <button class="delight-inline-nav" id="delight-next" type="button" ${idx >= delights.length - 1 ? "disabled" : ""}>\u203A</button>
       </div>
     ` : ""}
-    ${!uiState.handled ? `<button class="delight-later-btn" id="delight-later" type="button" title="\u7A0D\u540E\u770B" aria-label="\u7A0D\u540E\u770B">\u00D7</button>` : ""}
+    ${!uiState.handled ? `<button class="delight-later-btn" id="delight-later" type="button" title="\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350" aria-label="\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350">${X_SVG_ICON}</button>` : ""}
     <div class="delight-compact">
       <div class="delight-kicker-line">
         <span class="delight-tag">\u60CA\u559C\u63A8\u8350</span>
@@ -691,8 +691,17 @@ function renderDelightTray() {
     requestAnimationFrame(() => input.focus());
   }
 
-  tray.querySelector("#delight-later")?.addEventListener("click", () => {
-    skipDelightAt(idx);
+  tray.querySelector("#delight-later")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await respondToDelight(d.bvid, "dismiss", d.title);
+      skipDelightAt(idx);
+    } catch {
+      button.disabled = false;
+      button.title = "操作失败，请重试";
+      button.setAttribute("aria-label", "操作失败，请重试");
+    }
   });
 
   if (delights.length > 1) {

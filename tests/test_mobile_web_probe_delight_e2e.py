@@ -491,6 +491,39 @@ def test_mobile_delight_tap_on_card_body_opens_content(
     assert [post["response"] for post in stub.delight_posts] == ["view"]
 
 
+def test_mobile_delight_close_persists_dismiss_before_removing_card(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = mobile_web_server
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    close = chromium_page.get_by_role("button", name="看过了，不再推荐")
+    expect(close).to_be_visible()
+
+    close.click()
+
+    assert stub.delight_post_received.wait(timeout=2)
+    assert [post["response"] for post in stub.delight_posts] == ["dismiss"]
+    expect(chromium_page.locator(".delight-tray")).to_have_count(0)
+
+
+def test_mobile_delight_close_failure_keeps_card_for_retry(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = mobile_web_server
+    stub.delight_response_status = 500
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    close = chromium_page.get_by_role("button", name="看过了，不再推荐")
+
+    close.click()
+
+    assert stub.delight_post_received.wait(timeout=2)
+    assert [post["response"] for post in stub.delight_posts] == ["dismiss"]
+    expect(chromium_page.locator(".delight-tray")).to_be_visible()
+    expect(chromium_page.get_by_role("button", name="操作失败，请重试")).to_be_enabled()
+
+
 def test_mobile_delight_drag_past_dead_zone_does_not_open_content(
     mobile_web_server: tuple[str, MobileWebStub],
     chromium_page: Page,

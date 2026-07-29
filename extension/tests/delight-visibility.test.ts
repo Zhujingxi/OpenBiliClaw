@@ -60,6 +60,25 @@ test("extension delight banner keeps positive actions visible", () => {
   assert.match(rejectBlock, /removeCurrentDelight/);
 });
 
+test("extension delight close persists handled content as seen", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const rememberBlock = sourceBlock(
+    popupJs,
+    "function rememberDismissedDelight(bvid)",
+    "// ── Delight queue helpers",
+  );
+  const dismissBlock = sourceBlock(
+    popupJs,
+    'dismiss.className = "delight-banner-dismiss";',
+    "banner.append(row, dismiss);",
+  );
+
+  assert.match(rememberBlock, /respondToDelight\(bvid, "dismiss"\)/);
+  assert.doesNotMatch(rememberBlock, /markDelightSent/);
+  assert.match(dismissBlock, /aria-label", "看过了，不再推荐"/);
+  assert.match(dismissBlock, /await rememberDismissedDelight\(delight\.bvid\)/);
+});
+
 test("desktop delight actions remove only explicit negative responses", () => {
   const desktopJs = readFileSync(
     resolve("../src/openbiliclaw/web/desktop/assets/js/app.js"),

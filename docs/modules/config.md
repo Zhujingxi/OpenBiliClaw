@@ -294,7 +294,7 @@ multimodal_enabled = true   # 封面 image-only 向量；与文本同一空间
 
 #### 配置页服务探测 API（v0.3.114+）
 
-桌面 Web `/web` 与插件 side panel 都可测试单个聊天实例、整条默认链和 embedding。插件可直接新建、编辑、删除实例并调整全局 `default_chain`；模块自定义链在插件中只读展示，需进入 PC Web 编辑。探测走一个**无写入**接口，不会保存 `config.toml`，也不会触发运行时热重载。
+桌面 Web `/web` 与插件 side panel 都可测试单个聊天实例、整条默认链和 embedding。插件可直接新建、编辑、删除实例并调整全局 `default_chain`；模块自定义链在插件中只读展示，需进入 PC Web 编辑。探测走一个**无写入**接口，不会保存 `config.toml`，也不会触发运行时热重载；guided init 运行期间仍可调用，不受 `409 init_running` 写端门控影响。真正保存草稿的 `PUT /api/config` 在 init 期间仍被禁止。
 
 ```http
 POST /api/config/probe-service

@@ -367,7 +367,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
-│  │ delight: expression/topic ready -> score + atomic copy snapshot -> API/runtime UI │ │
+│  │ delight: copy/topic ready + seen_items guard -> score/snapshot -> UI × writes seen ledger │ │
 │  │ reshuffle: current IDs + seen_items -> PoolServeSnapshot/MMR -> atomic persist -> one batch event │ │
 │  │ maintenance worker: isolated connection -> <=50 mutations/batch -> commit/yield │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │

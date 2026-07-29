@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>OpenBiliClaw 推荐首页</title>
-  <link rel="icon" type="image/png" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/m/icon-32.png?v=4">
   <script>
     (() => {
       let accent = "classic";
@@ -41,7 +41,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
         </button>
         <a class="brand" href="#home" aria-label="OpenBiliClaw 首页">
-          <img class="brand-mark" src="/m/icon-192.png" alt="">
+          <img class="brand-mark" src="/m/icon-maskable-192.png" alt="">
           <span class="brand-copy"><span class="brand-title">OpenBiliClaw</span><span class="brand-sub">你的本地全网推荐入口</span></span>
         </a>
       </div>
@@ -170,8 +170,8 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
                 </button>
                 <span class="feedback-separator" aria-hidden="true">/</span>
-                <button class="feedback-icon-btn" data-delight="dismiss" type="button" aria-label="忽略" title="忽略">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
+                <button class="feedback-icon-btn" data-delight="dismiss" type="button" aria-label="看过了，不再推荐" title="看过了，不再推荐">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                 </button>
                 <span class="feedback-separator" aria-hidden="true">/</span>
                 <button class="feedback-icon-btn watch-later-btn" data-delight="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
@@ -264,11 +264,16 @@
           </div>
         </div>
         <div class="dialogue-pending">
-          <button class="pill-btn" id="desktopPendingToggle" type="button" aria-expanded="false" aria-controls="desktopPendingConfirmations">待聊确认（<span id="desktopPendingCount">0</span>）</button>
+          <button id="desktopPendingToggle" type="button" aria-expanded="false" aria-controls="desktopPendingConfirmations">
+            <span class="dialogue-pending-toggle-title">待聊确认 <span class="dialogue-pending-toggle-count" id="desktopPendingCount">0</span></span>
+            <span class="dialogue-pending-toggle-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 10 5 5 5-5"/></svg>
+            </span>
+          </button>
           <div class="profile-card-list" id="desktopPendingConfirmations" hidden></div>
         </div>
         <div class="chat-log" id="chatLog"></div>
-      <form class="chat-input" id="chatForm"><input id="chatInput" placeholder="说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。"><button class="pill-btn primary" type="submit">发送</button></form>
+        <form class="chat-input" id="chatForm"><input id="chatInput" aria-label="和阿B聊聊你的口味" placeholder="说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。"><button class="pill-btn primary" type="submit">发送</button></form>
       </section>
 
       <section class="settings-page content-page" id="settingsPage" aria-label="后端设置" hidden>

@@ -305,7 +305,7 @@
     .top-left { display: flex; align-items: center; gap: var(--space-4); min-width: 0; justify-self: start; }
     .brand { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
     .brand-copy { display: grid; gap: 3px; min-width: 0; }
-    .brand-mark { width: 42px; height: 42px; display: block; border-radius: var(--radius-md); object-fit: cover; box-shadow: var(--elev-ring); }
+    .brand-mark { width: 42px; height: 42px; display: block; border-radius: var(--radius-md); object-fit: cover; background: #fb7299; box-shadow: none; }
     .brand-title { display: block; font-family: var(--font-display); font-size: var(--text-xl); line-height: 1; font-weight: 700; letter-spacing: -0.03em; white-space: nowrap; }
     .brand-sub { display: block; color: var(--muted); font-size: var(--text-sm); line-height: 1.2; white-space: nowrap; }
     .search { width: min(100%, 560px); justify-self: center; display: grid; grid-template-columns: 1fr auto; align-items: center; border: 2px solid var(--border-soft); background: var(--surface); border-radius: var(--radius-pill); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); }
@@ -905,12 +905,59 @@
     .content-page-head h2, .profile-page-head h2 { margin-top: var(--space-1); }
     .profile-page-list { gap: var(--space-4); }
     .profile-page-actions { margin-top: var(--space-5); justify-content: start; }
-    .chat-page { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+    .chat-page { width: min(100%, 920px); height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
     .chat-page .content-page-head { margin-bottom: var(--space-5); }
-    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); align-content: start; overflow: auto; scrollbar-width: none; }
+    .dialogue-pending { margin-bottom: var(--space-2); border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 78%); border-radius: var(--radius-lg); background: linear-gradient(180deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 15%), var(--surface)); overflow: hidden; }
+    #desktopPendingToggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 0; border-radius: inherit; background: transparent; color: var(--fg); font: inherit; font-size: 12px; font-weight: 800; text-align: left; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+    #desktopPendingToggle:hover { background: color-mix(in oklab, var(--accent-subtle), transparent 48%); }
+    #desktopPendingToggle:focus-visible, .dialogue-pending-item button:focus-visible, .dialogue-card-action:focus-visible, .dialogue-evidence summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .dialogue-pending-toggle-title { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); }
+    .dialogue-pending-toggle-count { min-width: 20px; height: 20px; display: inline-grid; place-items: center; padding: 0 6px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-on); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1; }
+    .dialogue-pending-toggle-chevron { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; color: var(--muted); transition: transform var(--motion-base) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+    .dialogue-pending-toggle-chevron svg { width: 15px; height: 15px; }
+    #desktopPendingToggle.is-expanded .dialogue-pending-toggle-chevron { transform: rotate(180deg); color: var(--accent); }
+    #desktopPendingConfirmations { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 0 8px 8px; }
+    #desktopPendingConfirmations[hidden] { display: none; }
+    .dialogue-pending-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--border); border-radius: 13px; background: color-mix(in oklab, var(--surface), var(--bg) 12%); }
+    .dialogue-pending-copy { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px var(--space-2); }
+    .dialogue-pending-copy strong { grid-column: 1 / -1; grid-row: 2; color: var(--fg); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+    .dialogue-pending-kind, .dialogue-pending-confidence { color: var(--meta); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.35; }
+    .dialogue-pending-kind { grid-column: 1; grid-row: 1; }
+    .dialogue-pending-confidence { grid-column: 2; grid-row: 1; justify-self: end; color: var(--accent); font-weight: 750; }
+    .dialogue-pending-item button { min-height: 30px; padding: 0 10px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 66%); border-radius: var(--radius-pill); background: var(--accent-subtle); color: color-mix(in oklab, var(--accent), var(--fg) 30%); font: inherit; font-size: var(--text-xs); font-weight: 800; white-space: nowrap; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+    .dialogue-pending-item button:hover { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+    .dialogue-pending-empty { margin: 0; padding: 8px; color: var(--muted); font-size: var(--text-xs); text-align: center; }
+    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); padding: 2px 3px 4px 0; align-content: start; overflow: auto; scrollbar-width: none; }
     .chat-page .chat-log::-webkit-scrollbar { display: none; }
+    .dialogue-card { position: relative; width: min(100%, 760px); display: grid; gap: 0; justify-self: start; padding: 22px 24px 20px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 68%); border-radius: 22px; background: linear-gradient(145deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 16%), var(--surface)); box-shadow: var(--elev-ring), 0 14px 34px var(--message-shadow); overflow: hidden; }
+    .dialogue-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent); }
+    .dialogue-card[data-card-state="confirmed"], .dialogue-card[data-card-state="revised"] { border-color: color-mix(in oklab, var(--success), var(--border-soft) 54%); }
+    .dialogue-card[data-card-state="confirmed"]::before, .dialogue-card[data-card-state="revised"]::before { background: var(--success); }
+    .dialogue-card[data-card-state="rejected"] { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 58%); }
+    .dialogue-card[data-card-state="rejected"]::before { background: var(--danger); }
+    .dialogue-card[data-card-state="deferred"]::before { background: var(--meta); }
+    .dialogue-card-kicker { margin: 0 0 7px; color: var(--accent); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .dialogue-card-title { margin: 0; color: var(--fg); font-size: clamp(20px, 2.1vw, 27px); font-weight: 780; letter-spacing: -0.025em; line-height: 1.28; text-wrap: balance; }
+    .dialogue-card-state { width: fit-content; margin: 14px 0 0; padding: 5px 9px; border-radius: var(--radius-pill); background: var(--accent-subtle); color: color-mix(in oklab, var(--accent), var(--fg) 30%); font-size: var(--text-xs); font-weight: 750; }
+    .dialogue-evidence { margin-top: 13px; color: var(--muted); font-size: var(--text-sm); }
+    .dialogue-evidence summary { width: fit-content; padding: 4px 0; color: var(--fg-2); font-weight: 700; cursor: pointer; }
+    .dialogue-evidence summary::marker { color: var(--accent); }
+    .dialogue-evidence ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 12px 12px 12px 30px; border-radius: var(--radius-md); background: color-mix(in oklab, var(--bg), transparent 18%); line-height: 1.55; }
+    .dialogue-card-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin-top: 18px; padding-top: var(--space-4); border-top: 1px solid var(--border-soft); }
+    .dialogue-card-action { min-width: 0; min-height: 40px; padding: 0 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--fg-2); font: inherit; font-size: var(--text-sm); font-weight: 750; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard); }
+    .dialogue-card-action:hover { border-color: var(--accent); background: var(--accent-subtle); color: var(--fg); }
+    .dialogue-card-action.is-confirm { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+    .dialogue-card-action.is-confirm:hover { border-color: var(--accent-hover); background: var(--accent-hover); color: var(--accent-on); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 78%); }
+    .dialogue-card-action.is-reject:hover { border-color: var(--danger); background: color-mix(in oklab, var(--danger), transparent 90%); color: var(--danger); }
+    .dialogue-card-action.is-defer { border-color: transparent; background: transparent; color: var(--muted); }
+    .dialogue-card-action:disabled { opacity: 0.48; cursor: default; }
+    .dialogue-question-shell { width: min(100%, 760px); display: grid; gap: var(--space-2); }
+    .dialogue-question-shell .dialogue-evidence { margin-left: var(--space-3); }
+    .chat-page .chat-bubble { width: fit-content; max-width: min(82%, 680px); padding: 12px 15px; line-height: 1.55; }
+    .chat-page .chat-bubble.user { justify-self: end; margin-left: 12%; border-bottom-right-radius: 4px; }
+    .chat-page .chat-bubble.agent { justify-self: start; margin-right: 12%; border-bottom-left-radius: 4px; }
     .chat-page .chat-input { align-self: end; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); display: flex; align-items: center; padding: var(--space-1); }
-    .chat-page .chat-input:focus-within { border: 0; box-shadow: 0 0 0 1px var(--accent), 0 0 8px 3px color-mix(in oklab, var(--contrast-strong), transparent 35%); }
+    .chat-page .chat-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 78%); }
     .chat-page .chat-input input { border: 0; background: transparent; padding: 13px var(--space-3); color: var(--fg); flex: 1; min-width: 0; }
     .chat-page .chat-input input:focus-visible { border-color: transparent; box-shadow: none; }
     .chat-page .chat-input .pill-btn.primary { display: flex; align-items: center; padding-block: 13px; }
@@ -1489,7 +1536,7 @@
       .settings-tabs { overflow-x: auto; grid-template-columns: repeat(6, minmax(92px, 1fr)); }
       .content-page, .profile-page { max-width: 100%; }
       .content-page-head, .profile-page-head { align-items: start; flex-direction: column; gap: var(--space-3); margin-bottom: var(--space-5); }
-      .chat-page { height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; }
+      .chat-page { height: 100%; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr) auto; }
       .chat-page .chat-log { min-height: 0; }
       #profileDetails, .profile-layer, .profile-item, .profile-domain, .profile-insight, .profile-memory, .speculative-item, .mbti-block { min-width: 0; max-width: 100%; }
       .profile-domain-head, .profile-insight-head, .profile-memory-head, .profile-context-row { align-items: start; }
@@ -1551,6 +1598,10 @@
       .video-card .card-actions.is-composing .composer-cancel:active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-on); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
       .video-card .card-actions.is-composing .chat-action { grid-column: 3; grid-row: 1; }
       .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .dialogue-card { padding: 18px 18px 16px; border-radius: 18px; }
+      .dialogue-card-title { font-size: 20px; }
+      .dialogue-card-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .chat-page .chat-bubble { max-width: 90%; }
       .small-btn { width: 100%; }
       .mobile-back-btn, .mobile-search .pill-btn, .mobile-summary-head .small-btn, .source-credential-actions .small-btn { width: auto; }
       .delight-feedback-actions .feedback-icon-btn { flex: 0 0 26px; width: 26px; height: 26px; min-height: 26px; }

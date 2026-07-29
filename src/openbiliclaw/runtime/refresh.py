@@ -243,6 +243,7 @@ class SupportsEventDatabase(Protocol):
         limit: int = 20,
     ) -> list[dict[str, Any]]: ...
     def mark_delight_notified(self, bvid: str) -> None: ...
+    def mark_delight_seen(self, bvid: str) -> bool: ...
     def count_delight_candidates(
         self,
         *,
@@ -1287,6 +1288,18 @@ class ContinuousRefreshController:
     def mark_delight_sent(self, bvid: str) -> None:
         """Persist delight notification delivery markers."""
         self.database.mark_delight_notified(bvid)
+        now = self._now().isoformat()
+        self._update_discovery_runtime_state(
+            lambda state: state.update({"last_delight_notification_at": now})
+        )
+
+    def mark_delight_seen(self, bvid: str) -> None:
+        """Permanently consume a delight as already handled by the user."""
+        marker = getattr(self.database, "mark_delight_seen", None)
+        if callable(marker):
+            marker(bvid)
+        else:
+            self.database.mark_delight_notified(bvid)
         now = self._now().isoformat()
         self._update_discovery_runtime_state(
             lambda state: state.update({"last_delight_notification_at": now})

@@ -756,6 +756,17 @@ def _delight_ready_copy_sql() -> str:
     """
 
 
+def _delight_unseen_guard_sql() -> str:
+    """Exclude canonical identities already present in the durable seen ledger."""
+    return """
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM seen_items AS seen
+                        WHERE seen.item_key = content_cache.item_key
+                      )
+    """
+
+
 # Rows claimed by the surprise (delight) channel: already delivered as a
 # delight, or scored above the current threshold with its formal pool copy
 # synchronized into the delight snapshot. Requiring the exact snapshot keeps
@@ -14423,6 +14434,7 @@ class Database:
               AND COALESCE(feedback_type, '') != 'dislike'
               AND COALESCE(delight_score, 0.0) > 0.0
               {_delight_ready_copy_sql()}
+              {_delight_unseen_guard_sql()}
             ORDER BY score DESC
             """
         )
@@ -14506,6 +14518,7 @@ class Database:
                   TRIM(COALESCE(pool_topic_label, ''))
               AND {feedback_clause}
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
+              {_delight_unseen_guard_sql()}
             ORDER BY delight_score DESC, relevance_score DESC, discovered_at DESC
             LIMIT ?
             """,
@@ -14524,6 +14537,38 @@ class Database:
             """,
             (bvid,),
         )
+
+    def mark_delight_seen(self, bvid: str) -> bool:
+        """Permanently consume a delight and add its canonical identity to seen items.
+
+        The seen ledger is written first, so a process interruption between the
+        two writes still fails closed: every recommendation exit filters the
+        canonical identity even if the delight-specific notification bit has
+        not yet been updated.
+        """
+        row = self.conn.execute(
+            """
+            SELECT bvid, content_id, source, source_platform
+            FROM content_cache
+            WHERE bvid = ?
+            LIMIT 1
+            """,
+            (bvid,),
+        ).fetchone()
+        recorded = False
+        if row is not None:
+            platform = canonical_source_platform(str(row["source_platform"] or ""))
+            if not platform:
+                platform = _pool_source_family(
+                    str(row["source"] or ""),
+                    str(row["source_platform"] or ""),
+                )
+            content_id = str(row["content_id"] or row["bvid"] or "").strip()
+            if platform and platform != "unknown" and content_id:
+                self.mark_items_seen(platform, [content_id])
+                recorded = True
+        self.mark_delight_notified(bvid)
+        return recorded
 
     def update_delight_score(
         self,
@@ -14593,6 +14638,7 @@ class Database:
                   TRIM(COALESCE(pool_topic_label, ''))
               AND COALESCE(feedback_type, '') = ''
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+              {_delight_unseen_guard_sql()}
             """,
             (min_delight_score, *admission_params),
         )
@@ -14637,6 +14683,7 @@ class Database:
                   AND COALESCE(relevance_score, 0.0) >= ?
                   {_delight_ready_copy_sql()}
                   {guard_sql}
+                  {_delight_unseen_guard_sql()}
                 ORDER BY relevance_score DESC, discovered_at DESC
                 LIMIT ?
                 """,
@@ -14680,6 +14727,7 @@ class Database:
                     )
                   )
                   {guard_sql}
+                  {_delight_unseen_guard_sql()}
                 ORDER BY
                     relevance_score DESC,
                     delight_score DESC,

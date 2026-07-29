@@ -1884,18 +1884,16 @@ function renderReadyRecommendationHint() {
 
 function rememberDismissedDelight(bvid) {
   if (!bvid) {
-    return;
+    return Promise.resolve();
   }
-  if (!state.dismissedDelightBvids.includes(bvid)) {
-    state.dismissedDelightBvids = [...state.dismissedDelightBvids, bvid];
-  }
-  // Persist on the backend so popup reloads + future
-  // /api/delight/pending-batch fetches honour the dismissal too.
-  // Otherwise an in-memory dismiss is lost the moment the popup
-  // closes, and the same bvid pops back up next time.
-  markDelightSent(bvid).catch(() => {
-    // Silent fail — the in-memory dismissal still works for this
-    // session even if the network ack doesn't go through.
+  // A user-driven × means "handled / already seen", not merely "hide this
+  // popup instance". The dismiss response writes both delight_notified and
+  // the canonical seen ledger. A failed write stays visible for retry.
+  return respondToDelight(bvid, "dismiss").then((result) => {
+    if (!state.dismissedDelightBvids.includes(bvid)) {
+      state.dismissedDelightBvids = [...state.dismissedDelightBvids, bvid];
+    }
+    return result;
   });
 }
 
@@ -3252,8 +3250,18 @@ function buildDelightCard(delight) {
   const dismiss = document.createElement("button");
   dismiss.className = "message-dismiss";
   dismiss.textContent = "\u00D7";
-  dismiss.title = "\u5173\u95ED";
-  dismiss.addEventListener("click", () => dismissMessageByBvid(delight.bvid));
+  dismiss.title = "\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350";
+  dismiss.setAttribute("aria-label", "\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350");
+  dismiss.addEventListener("click", async () => {
+    dismiss.disabled = true;
+    try {
+      await dismissMessageByBvid(delight.bvid);
+    } catch {
+      dismiss.disabled = false;
+      dismiss.title = "操作失败，请重试";
+      dismiss.setAttribute("aria-label", "操作失败，请重试");
+    }
+  });
   item.append(dismiss);
 
   // Top row: thumbnail + (hook badge + title)
@@ -3390,7 +3398,7 @@ async function handleDelightResponse(delight, responseType) {
       }
     }
     if (responseType !== "like") {
-      dismissMessageByBvid(delight.bvid, false);
+      await dismissMessageByBvid(delight.bvid, false, false);
     }
   } catch (err) {
     console.error("Delight response failed:", err);
@@ -3492,12 +3500,10 @@ function expandDelightChat(itemEl, delight) {
   input.focus();
 }
 
-function dismissMessageByBvid(bvid, removeFromDom = true) {
+async function dismissMessageByBvid(bvid, removeFromDom = true, persist = true) {
+  if (persist) await rememberDismissedDelight(bvid);
   state.messages = state.messages.filter((m) => m.bvid !== bvid);
   updateMessageBadge();
-  // Mirror the dismiss on the backend so the same bvid doesn't
-  // re-surface via /api/delight/pending-batch on next popup reload.
-  rememberDismissedDelight(bvid);
   if (removeFromDom) {
     const item = elements.messagesList?.querySelector(`[data-bvid="${CSS.escape(bvid)}"]`);
     if (item) item.remove();
@@ -5474,20 +5480,26 @@ function renderDelightSlot() {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "delight-banner-dismiss";
-  dismiss.title = "稍后看";
-  dismiss.setAttribute("aria-label", "关闭这条惊喜推荐");
+  dismiss.title = "看过了，不再推荐";
+  dismiss.setAttribute("aria-label", "看过了，不再推荐");
   dismiss.textContent = "×";
-  dismiss.addEventListener("click", (event) => {
+  dismiss.addEventListener("click", async (event) => {
     event.stopPropagation();
-    rememberDismissedDelight(delight.bvid);
-    shiftDelightQueue();
-    setHint(
-      state.activeDelights.length > 0
-        ? "这条收起了，下一条上。"
-        : "先给你收起来，回头想看再翻。",
-      "info",
-    );
-    renderDelightSlot();
+    dismiss.disabled = true;
+    try {
+      await rememberDismissedDelight(delight.bvid);
+      shiftDelightQueue();
+      setHint(
+        state.activeDelights.length > 0
+          ? "已标为看过，下一条上。"
+          : "已标为看过，不会再推荐。",
+        "success",
+      );
+      renderDelightSlot();
+    } catch {
+      dismiss.disabled = false;
+      setHint("这次还没记上，请再试一次。", "error");
+    }
   });
 
   banner.append(row, dismiss);
@@ -5598,8 +5610,10 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "dislike", delight.title);
         } catch (err) {
           console.error("Delight dislike failed:", err);
+          setHint("这次还没记上，请再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
-        rememberDismissedDelight(delight.bvid);
         removeCurrentDelight();
         setHint("记下了，这类惊喜先少来点。", "success");
         renderDelightSlot();
@@ -5807,7 +5821,10 @@ function renderDelightSlot() {
               onTerminal: () => { void loadWatchLater(); },
             });
           }
-          rememberDismissedDelight(item.bvid || item.content_id);
+          void rememberDismissedDelight(item.bvid || item.content_id).catch(() => {
+            // The saved item remains available in watch later; a failed delight
+            // acknowledgement can be retried if it is surfaced again.
+          });
         });
         const saved = partition.savedCount;
         const failed = partition.failedCount;

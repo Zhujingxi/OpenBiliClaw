@@ -3,6 +3,7 @@ from pathlib import Path
 
 APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
+INDEX_HTML = Path("src/openbiliclaw/web/desktop/index.html")
 SAVED_SYNC_CORE = Path("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
 
 
@@ -84,6 +85,19 @@ def test_delight_view_button_actually_opens_the_content() -> None:
     # native <a href>), so there's no double-open.
     assert 'respondDelight(state.delight, "view"));' in app_js
     assert 'if (event.button === 1) respondDelight(state.delight, "view");' in app_js
+
+
+def test_delight_close_button_is_labeled_as_permanent_seen_action() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+    index_html = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert (
+        'data-delight="dismiss" type="button" '
+        'aria-label="看过了，不再推荐" title="看过了，不再推荐"'
+    ) in index_html
+    assert "已标为看过，不再推荐" in app_js
+    assert 'if (response === "dismiss" && feedbackResult == null)' in app_js
+    assert "这次还没记上，请再试一次" in app_js
 
 
 def test_cover_css_resets_anchor_defaults() -> None:
