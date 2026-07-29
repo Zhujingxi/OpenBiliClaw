@@ -179,6 +179,53 @@ async def test_plugin_search_client_does_not_fallback_to_direct_on_empty_task_by
 
     assert fallback.keywords == []
     assert result == []
+    assert client.last_search_outcome == "empty"
+
+
+@pytest.mark.asyncio
+async def test_plugin_search_client_distinguishes_timeout_from_empty(
+    database: Database,
+) -> None:
+    client = DouyinPluginSearchClient(
+        database=database,
+        direct_client=_FallbackClient(),
+        wait_seconds=0,
+        poll_interval_seconds=0.01,
+        kick=lambda: None,
+    )
+
+    result = await client.search_aweme("猫", limit=5)
+
+    assert result == []
+    assert client.last_search_outcome == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_plugin_search_client_distinguishes_failed_task_from_empty(
+    database: Database,
+) -> None:
+    queue = DyTaskQueue(database)
+    client = DouyinPluginSearchClient(
+        database=database,
+        direct_client=_FallbackClient(),
+        wait_seconds=2,
+        poll_interval_seconds=0.01,
+        kick=lambda: None,
+    )
+
+    async def fail_task() -> None:
+        for _ in range(100):
+            task = queue.next_pending()
+            if task:
+                queue.fail(str(task["id"]), error="captcha")
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("search task was not enqueued")
+
+    result, _ = await asyncio.gather(client.search_aweme("猫", limit=5), fail_task())
+
+    assert result == []
+    assert client.last_search_outcome == "failed"
 
 
 @pytest.mark.asyncio
@@ -470,6 +517,7 @@ async def test_search_aweme_raises_budget_sentinel_when_armed(database: Database
     )
     with pytest.raises(DouyinBudgetExhausted):
         await client.search_aweme("猫", limit=5)
+    assert client.last_search_outcome == "budget_exhausted"
     # Budget-rejected path must NOT fall back to direct-cookie search.
     assert fallback.keywords == []
 

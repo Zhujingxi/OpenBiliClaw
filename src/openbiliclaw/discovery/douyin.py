@@ -50,6 +50,8 @@ class DouyinDiscoveryResult:
     items: list[DiscoveredContent]
     cached: bool
     source_counts: dict[str, int]
+    keyword_outcomes: dict[str, str] = field(default_factory=dict)
+    source_outcomes: dict[str, str] = field(default_factory=dict)
 
 
 class DouyinDiscoveryService:
@@ -92,6 +94,8 @@ class DouyinDiscoveryService:
                 items=items,
                 cached=True,
                 source_counts=_source_counts(items),
+                keyword_outcomes=_strategy_outcomes(strategy, "keyword_outcomes"),
+                source_outcomes=_strategy_outcomes(strategy, "source_outcomes"),
             )
 
         items = await strategy.discover(profile, limit=limit)
@@ -99,6 +103,8 @@ class DouyinDiscoveryService:
             items=items,
             cached=False,
             source_counts=_source_counts(items),
+            keyword_outcomes=_strategy_outcomes(strategy, "keyword_outcomes"),
+            source_outcomes=_strategy_outcomes(strategy, "source_outcomes"),
         )
 
     def _build_strategy(self, opts: DouyinDiscoveryOptions) -> DouyinDirectStrategy:
@@ -152,3 +158,16 @@ def _douyin_items(raw_items: list[Any]) -> list[DiscoveredContent]:
         for item in raw_items
         if isinstance(item, DiscoveredContent) and item.source_platform == "douyin"
     ]
+
+
+def _strategy_outcomes(strategy: DouyinDirectStrategy, key: str) -> dict[str, str]:
+    raw = strategy.last_intermediates.get(key, {})
+    if not isinstance(raw, dict):
+        return {}
+    outcomes: dict[str, str] = {}
+    for name, value in raw.items():
+        normalized_name = str(name).strip()
+        normalized_value = str(value).strip().lower()
+        if normalized_name and normalized_value:
+            outcomes[normalized_name] = normalized_value
+    return outcomes

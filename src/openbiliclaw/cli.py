@@ -4277,6 +4277,7 @@ def _enqueue_dy_search_task(
     max_items_per_keyword: int = 20,
 ) -> str | None:
     """Enqueue a Douyin plugin search task for the browser extension."""
+    from openbiliclaw.config import load_config
     from openbiliclaw.sources.dy_tasks import DyTaskQueue
 
     normalized_keywords = []
@@ -4300,6 +4301,12 @@ def _enqueue_dy_search_task(
         return None
 
     try:
+        cfg = load_config()
+        budget = int(getattr(getattr(cfg.sources, "douyin", None), "daily_search_budget", 0))
+    except Exception:
+        budget = 0
+
+    try:
         queue = DyTaskQueue(database)
         task_id = queue.enqueue_with_id(
             "search",
@@ -4307,7 +4314,7 @@ def _enqueue_dy_search_task(
                 "keywords": normalized_keywords,
                 "max_items_per_keyword": max(1, int(max_items_per_keyword)),
             },
-            daily_budget=20,
+            daily_budget=budget,
         )
     except Exception as exc:
         console.print(f"  [yellow]抖音搜索任务未入队: {exc}[/yellow]")
@@ -9272,9 +9279,10 @@ def search_douyin(
         console.print(
             "  [dim]抖音搜索任务超时:扩展未连接 / 任务还在跑。可加 --wait-seconds 240 重试。[/dim]"
         )
-        return
+        raise typer.Exit(code=1)
     if status_label == "failed":
         console.print("  [yellow]抖音搜索任务失败 —— 检查扩展日志。[/yellow]")
+        raise typer.Exit(code=1)
 
 
 @app.command("fetch-xhs")
@@ -11357,10 +11365,33 @@ def _run_douyin_discovery(
     )
     _print_page_title("抖音内容发现", f"plugin/direct {' / '.join(normalized_sources)}")
     if not discovered:
+        outcomes = set(result.source_outcomes.values())
+        if "timeout" in outcomes:
+            _print_status_panel(
+                "warning",
+                "抖音插件任务等待超时",
+                "任务可能仍在浏览器后台执行；可提高 "
+                "OPENBILICLAW_DY_DISCOVERY_SEARCH_WAIT_SECONDS 后重试并检查任务状态。",
+            )
+            raise typer.Exit(code=1)
+        if "failed" in outcomes:
+            _print_status_panel(
+                "warning",
+                "抖音插件任务执行失败",
+                "任务已返回失败终态；请检查扩展日志和 dy_tasks 的结构化错误。",
+            )
+            raise typer.Exit(code=1)
+        if outcomes and outcomes <= {"budget_exhausted"}:
+            _print_status_panel(
+                "info",
+                "抖音 discovery 分支预算已耗尽",
+                "本轮没有执行抓取；请调整对应 daily_*_budget 或等待 UTC 日预算重置。",
+            )
+            raise typer.Exit(code=1)
         _print_status_panel(
             "info",
             "没有发现到新抖音内容",
-            "可能是 Cookie 失效、签名被拒绝，或本轮关键词没有结果。",
+            "插件任务已正常完成但没有候选；可能是关键词没有结果或页面触发了软风控。",
         )
         return
 
@@ -11400,6 +11431,152 @@ def _build_discovery_candidate_pipeline(
         pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
         admission_min_score=admission_min_score,
     )
+
+
+def _run_douyin_formal_discovery(*, limit: int) -> None:
+    """Run the formal Douyin producer without the daemon master switch."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+    _require_runtime_config()
+    config = load_config()
+    dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
+    if dy_cfg is None or not bool(getattr(dy_cfg, "enabled", False)):
+        _print_status_panel(
+            "warning",
+            "抖音 discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.douyin].enabled。",
+        )
+        raise typer.Exit(code=1)
+    mode = str(getattr(dy_cfg, "mode", "direct")).strip().lower()
+    if mode != "direct":
+        _print_status_panel(
+            "warning",
+            "抖音 discovery 模式暂不支持",
+            f"当前 mode={mode!r}；本版本仅支持 direct。",
+        )
+        raise typer.Exit(code=1)
+
+    cookie_env = str(getattr(dy_cfg, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"))
+    if not resolve_douyin_cookie(data_dir=config.data_path, cookie_env=cookie_env):
+        _print_status_panel(
+            "warning",
+            "缺少抖音 Cookie",
+            f"请设置 {cookie_env}，或保持浏览器扩展在线以同步登录 Cookie。",
+        )
+        raise typer.Exit(code=1)
+
+    database = _get_runtime_database()
+    if not hasattr(database, "conn"):
+        _print_status_panel("warning", "抖音任务表不可用", "当前数据库不支持 dy_tasks。")
+        raise typer.Exit(code=1)
+
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+    producer = build_douyin_discovery_producer(
+        config=config,
+        database=database,
+        soul_engine=soul_engine,
+        discovery_engine=discovery_engine,
+        candidate_pipeline=candidate_pipeline,
+        keyword_fetch=keyword_fetch,
+        # Manual discover is source-scoped and must not inherit the daemon's
+        # scheduler master switch.
+        enabled_override=True,
+    )
+    if producer is None:
+        _print_status_panel(
+            "warning",
+            "抖音 discovery producer 未启动",
+            "请确认抖音来源已启用、mode=direct 且任务数据库可用。",
+        )
+        raise typer.Exit(code=1)
+
+    result = asyncio.run(producer.produce_if_due(limit=limit))
+    reason = str(result.get("reason", ""))
+    discovered = int(cast("int | float | str | bool", result.get("discovered", 0)) or 0)
+    enqueued = int(cast("int | float | str | bool", result.get("enqueued", 0)) or 0)
+    source_counts_raw = result.get("source_counts", {})
+    source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
+    source_counts_text = ", ".join(
+        f"{source}:{count}" for source, count in sorted(source_counts.items())
+    )
+    source_outcomes_raw = result.get("source_outcomes", {})
+    source_outcomes = source_outcomes_raw if isinstance(source_outcomes_raw, dict) else {}
+    source_outcomes_text = ", ".join(
+        f"{source}:{outcome}" for source, outcome in sorted(source_outcomes.items())
+    )
+
+    _print_page_title("抖音内容发现", "正式 producer · unified keywords · candidate pipeline")
+    if reason in {"ok", "empty"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "douyin"),
+                ("来源分布", source_counts_text or "（无）"),
+                ("分支状态", source_outcomes_text or "（无）"),
+            ],
+        )
+        if reason == "empty":
+            console.print("  [dim]本轮分支正常完成，但没有产生新候选。[/dim]")
+            return
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+
+    messages = {
+        "disabled": ("info", "抖音 discovery 已禁用", "请启用抖音来源后重试。"),
+        "throttled": (
+            "info",
+            "距离上次抖音 discovery 不足最小调度间隔",
+            "可在配置页调整抖音最小调度间隔分钟数。",
+        ),
+        "pool_full": ("info", "候选池已满", "当前无需继续补充抖音候选。"),
+        "no_profile": ("warning", "尚未初始化 Soul 画像", "请先执行 `openbiliclaw init`。"),
+        "budget_exhausted": (
+            "warning",
+            "抖音 discovery 分支预算已耗尽",
+            "请调整对应 daily_*_budget 或等待 UTC 日预算重置。",
+        ),
+        "timeout": (
+            "warning",
+            "抖音插件任务等待超时",
+            "任务可能仍在浏览器后台执行；请检查扩展连接和 dy_tasks 状态。",
+        ),
+        "error": (
+            "warning",
+            "抖音 discovery 执行失败",
+            "请检查后端及扩展日志中的结构化错误。",
+        ),
+    }
+    kind, title, body = messages.get(reason, ("warning", "未知状态", reason or "无详细信息"))
+    _print_status_panel(kind, title, body)
+    if reason not in {"throttled", "pool_full"}:
+        raise typer.Exit(code=1)
 
 
 def _run_zhihu_discovery(*, limit: int) -> None:
@@ -11910,9 +12087,9 @@ def discover(
             _print_status_panel(
                 "info",
                 "--strategy 仅对 Bilibili 生效",
-                "douyin 渠道走 direct-cookie discovery，已忽略策略过滤。",
+                "douyin 渠道走正式 producer，已忽略策略过滤。",
             )
-        _run_douyin_discovery(limit=limit)
+        _run_douyin_formal_discovery(limit=limit)
         return
 
     if source_normalized == "zhihu":

@@ -416,6 +416,12 @@ daemon 的 `sync_if_due()` 还受共享 `background_llm_work_allowed()` 约束�
 
 `analyze_events()` 失败时，`sync_now()` 会把安全原因写入 `last_sync_error`（`画像分析失败：<原因>`，供 `/api/init-status` 与账号同步状态读取），并细分模型未配置 / 不存在 / 鉴权失败 / 额度用尽 / 限流 / 超时 / 连接失败 / SSL 证书失败 / 服务器错误 / 无效响应 / 内容合规拒绝；无法识别则显式记为 `profile_analysis_error + unexpected_error`。它**不推进任何游标、不打 `last_account_sync_at` 时间戳**——整个 tick 回滚，下一次允许执行的 `sync_if_due` tick 重试同一批事件，也不会被 `sync_interval_hours` 节流锁死，随后重新抛出交给 `run_forever` 分类记日志；若画像之前已有来源拉取失败，fresh-state 写入仍保留本轮那些 issue，横幅不会只剩最后一个画像错误。Issue #113 收口后，`profile_analysis_timeout_seconds` 默认 360 秒（受控调用可传 `<=0` 关闭），到期会取消 Soul/provider coroutine，并写 `profile_analysis_timeout + {stage:"profile_analysis", kind:"timeout"}` 与固定安全排查 detail；`GET /api/init-status` 已真正消费这条错误，三端会优先显示 detail。外部 `CancelledError` 继承自 `BaseException`，不会被失败捕获，因此热重载 / 重启打断的取消语义不变。
 
+### DouyinDiscoveryProducer
+
+`DouyinDiscoveryProducer.produce_if_due()` 是 daemon 与 `openbiliclaw discover --source douyin` 共用的正式入口。手动 CLI 构造时传 `enabled_override=True`，只绕过后台 scheduler 总开关；来源 enabled/mode、最小间隔、每日预算和候选池上限仍照常执行。producer 通过 `KeywordFetchCoordinator` claim 统一关键词，用 `DouyinDiscoveryService(cache=False, evaluate=False)` 拉 raw candidates，再交 `DiscoveryCandidatePipeline` 写入 `discovery_candidates(pending_eval)`。
+
+search / hot / feed 每条分支都有结构化终态 `used / empty / timeout / failed / budget_exhausted`。search 按关键词分别结算：有候选才 `mark_used`，真实空结果 `mark_failed`，插件 timeout / failed 调 `requeue_transient()` 无损退回 pending 且不增加 attempts，预算耗尽的当前词与未执行词 rollback；前序已成功候选不会被整轮异常丢弃。统一关键词池为空时不再跳过整轮，search 可回退画像兴趣词，hot / feed 仍独立执行。大缺口固定包含 search，并在 hot / feed 间逐轮轮换，避免 feed 长期饥饿；小缺口仍优先 feed / hot。
+
 ### YoutubeDiscoveryProducer
 
 ```python

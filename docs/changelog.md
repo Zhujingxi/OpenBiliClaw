@@ -6,6 +6,7 @@
 
 ## v0.3.188：降级配置原地恢复（2026-07-29）
 
+- **修复抖音 discovery 把任务故障当空结果、误消费关键词和 feed 长期饿死**：插件 search / hot / feed 现在把真实空结果、超时、失败与预算耗尽分开回传；producer 按每个关键词的真实终态分别 `used / failed / pending`，保留预算耗尽前已成功的候选，瞬时故障无损重排且不增加 attempts，统一关键词池暂空也不再阻断独立 hot / feed。大缺口改为 search + hot/feed 逐轮轮换，避免 feed 永远没有调度机会。`discover --source douyin` 已切到与 daemon 相同的正式 producer、统一关键词和待评估候选链；`search-douyin` 读取配置预算（`0` 为无限），并以非零退出码暴露 timeout / failed，真实空结果仍成功退出。
 - **应用图标去除白色方边并进入启动页**：品牌源图从实色白底改为透明外缘，扩展 16 / 48 / 128px、PWA / favicon 192 / 512px、Windows `.ico` 与 macOS `.icns` 全部从同一透明源图重新派生，系统托盘、菜单栏、桌面和深色背景下不再露出白色方框；Windows PyInstaller 启动页同步加入同款粉色猫爪图标，不再只有应用名和启动文案。透明角与启动页品牌区域新增像素级回归测试。
 - **修好 LLM 配置后不再要求重启后端**：安装包覆盖安装本来已经退出旧 `OpenBiliClaw.exe` 并启动新版本，但新进程会先读取保留的旧 `config.toml`，若其中仍有启用但缺 Key 的实例就以 degraded 恢复态启动；用户随后在 `/setup/` 修好配置时，`PUT /api/config` 过去只写盘并返回 `restart_required=true`，导致刚覆盖安装完还要再手动重启一次。现在降级上下文复用启动时保留的数据库、MemoryManager、事件总线和稳定 LLM total gate，按正常热重载的原子构造路径一次性补齐 Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller；全部构造成功后同步解除 API 503 guard、刷新 `app.state` 镜像、重绑 feedback scheduler 并启动所需后台任务，返回 `reloaded=true / restart_required=false`，`/setup/` 当场进入下一步。核心构造失败时恢复 `config.toml.bak`、保持降级并返回可重试 503；核心已恢复而仅后台循环启动失败时不反向回滚有效配置。旧后端或无备份的异常 bootstrap 仍保留 `restart_required` 兼容兜底。
 - **PC Web 自动续页不再跳回平台 Tab**：用户点过平台 Tab 后再用滚轮浏览到底部，Tab 会继续持有键盘焦点；续页完成时重绘库存徽标，旧实现用普通 `focus()` 恢复焦点，Chromium 实测会把 `scrollY` 从 4849 拉回 85。现在重绘仍保留无障碍焦点，但通过 `preventScroll` 阻止浏览器改写视口；新增真实 Chromium 回归，锁住“焦点保留、滚动位置不变”两条约定。

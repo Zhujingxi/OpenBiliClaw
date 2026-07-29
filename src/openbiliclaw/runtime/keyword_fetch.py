@@ -207,6 +207,20 @@ class KeywordFetchCoordinator:
                 "keyword fetch: rollback_keyword_to_pending failed for id=%s", claimed.id
             )
 
+    def requeue_transient(self, claimed: ClaimedKeyword) -> None:
+        """Re-pend one word after timeout or a platform-wide transient failure."""
+        requeue = getattr(self._db, "requeue_keyword_after_transient_failure", None)
+        if not callable(requeue):
+            self.rollback(claimed)
+            return
+        try:
+            requeue(claimed.id)
+        except Exception:
+            logger.exception(
+                "keyword fetch: requeue_keyword_after_transient_failure failed for id=%s",
+                claimed.id,
+            )
+
 
 def mark_keyword_terminal_from_xhs_task(
     database: Any,

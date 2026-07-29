@@ -265,6 +265,10 @@ async def test_douyin_producer_restores_search_for_larger_runtime_gap() -> None:
 
     assert calls[0].sources == ("search", "hot")
 
+    await producer.produce_if_due(limit=12)
+
+    assert calls[1].sources == ("search", "feed")
+
 
 async def test_douyin_producer_uses_hot_before_feed_for_medium_runtime_gap() -> None:
     calls: list[DouyinDiscoveryOptions] = []
@@ -397,7 +401,10 @@ async def test_douyin_flag_on_marks_used_on_success(tmp_path: Any) -> None:
     async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
         seen.append(options)
         return DouyinDiscoveryResult(
-            items=[SimpleNamespace(), SimpleNamespace()], cached=True, source_counts={}
+            items=[SimpleNamespace(), SimpleNamespace()],
+            cached=True,
+            source_counts={},
+            keyword_outcomes={"kw-a": "used", "kw-b": "used"},
         )
 
     producer = DouyinDiscoveryProducer(
@@ -424,7 +431,13 @@ async def test_douyin_flag_on_marks_failed_on_empty(tmp_path: Any) -> None:
     db.insert_pending_keywords("douyin", ["kw-a"], "dig")
 
     async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
-        return DouyinDiscoveryResult(items=[], cached=True, source_counts={})
+        return DouyinDiscoveryResult(
+            items=[],
+            cached=True,
+            source_counts={},
+            keyword_outcomes={"kw-a": "empty"},
+            source_outcomes={"search": "empty", "hot": "empty"},
+        )
 
     producer = DouyinDiscoveryProducer(
         soul_engine=_FakeSoulEngine(),
@@ -460,11 +473,18 @@ async def test_douyin_flag_on_budget_sentinel_rolls_back(tmp_path: Any) -> None:
     assert _dy_statuses(db) == {"kw-a": "pending", "kw-b": "pending"}
 
 
-async def test_douyin_flag_on_empty_store_skips(tmp_path: Any) -> None:
+async def test_douyin_flag_on_empty_store_falls_back_to_profile_keywords(tmp_path: Any) -> None:
     db = _mk_db(tmp_path)  # store empty
+    seen: list[DouyinDiscoveryOptions] = []
 
     async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
-        raise AssertionError("discover must not run when the store is empty")
+        seen.append(options)
+        return DouyinDiscoveryResult(
+            items=[],
+            cached=True,
+            source_counts={},
+            source_outcomes={"search": "empty", "hot": "empty"},
+        )
 
     producer = DouyinDiscoveryProducer(
         soul_engine=_FakeSoulEngine(),
@@ -474,7 +494,9 @@ async def test_douyin_flag_on_empty_store_skips(tmp_path: Any) -> None:
         keyword_fetch=KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(True)),
     )
     result = await producer.produce_if_due(limit=12)
-    assert result["reason"] == "no_keywords"
+    assert result["reason"] == "empty"
+    assert seen[0].keywords == ()
+    assert seen[0].sources == ("search", "hot")
     assert _dy_statuses(db) == {}
 
 
@@ -510,7 +532,12 @@ async def test_douyin_producer_claims_exactly_keywords_per_run() -> None:
 
     async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
         seen.append(options)
-        return DouyinDiscoveryResult(items=[SimpleNamespace()], cached=True, source_counts={})
+        return DouyinDiscoveryResult(
+            items=[SimpleNamespace()],
+            cached=True,
+            source_counts={},
+            keyword_outcomes={f"kw-{i}": "used" for i in range(3)},
+        )
 
     producer = DouyinDiscoveryProducer(
         soul_engine=_FakeSoulEngine(),
@@ -529,7 +556,87 @@ async def test_douyin_producer_claims_exactly_keywords_per_run() -> None:
     # Exactly the claimed words flow into the strategy's seed keywords.
     assert sorted(seen[0].keywords) == ["kw-0", "kw-1", "kw-2"]
     assert seen[0].keywords_per_run == 3
-    assert len(coordinator.used[0]) == 3
+    assert [item.keyword for batch in coordinator.used for item in batch] == [
+        "kw-0",
+        "kw-1",
+        "kw-2",
+    ]
+
+
+async def test_douyin_producer_finalizes_each_keyword_independently(tmp_path: Any) -> None:
+    db = _mk_db(tmp_path)
+    db.insert_pending_keywords("douyin", ["kw-a", "kw-b", "kw-c"], "dig")
+
+    async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=[SimpleNamespace(source_strategy="dy-plugin-hot-related")],
+            cached=True,
+            source_counts={"dy-plugin-hot-related": 1},
+            keyword_outcomes={
+                "kw-a": "used",
+                "kw-b": "empty",
+                "kw-c": "timeout",
+            },
+            source_outcomes={"search": "used", "hot": "used"},
+        )
+
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        keyword_fetch=KeywordFetchCoordinator(
+            database=db, discovery_config=_DiscoveryCfg(True, fetch_batch=3)
+        ),
+    )
+
+    result = await producer.produce_if_due(limit=12)
+
+    assert result["reason"] == "ok"
+    assert _dy_statuses(db) == {
+        "kw-a": "used",
+        "kw-b": "failed",
+        "kw-c": "pending",
+    }
+
+
+async def test_douyin_producer_preserves_success_before_search_budget_exhaustion(
+    tmp_path: Any,
+) -> None:
+    db = _mk_db(tmp_path)
+    db.insert_pending_keywords("douyin", ["kw-a", "kw-b", "kw-c"], "dig")
+
+    async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=[SimpleNamespace(source_strategy="dy-plugin-search")],
+            cached=True,
+            source_counts={"dy-plugin-search": 1},
+            keyword_outcomes={
+                "kw-a": "used",
+                "kw-b": "budget_exhausted",
+                "kw-c": "budget_exhausted",
+            },
+            source_outcomes={"search": "used", "hot": "empty"},
+        )
+
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        keyword_fetch=KeywordFetchCoordinator(
+            database=db, discovery_config=_DiscoveryCfg(True, fetch_batch=3)
+        ),
+    )
+
+    result = await producer.produce_if_due(limit=12)
+
+    assert result["reason"] == "ok"
+    assert _dy_statuses(db) == {
+        "kw-a": "used",
+        "kw-b": "pending",
+        "kw-c": "pending",
+    }
 
 
 async def test_douyin_flag_on_feed_only_run_does_not_claim(tmp_path: Any) -> None:

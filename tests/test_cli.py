@@ -2034,10 +2034,74 @@ def test_discover_douyin_requires_enabled_config(
     result = runner.invoke(app, ["discover", "--source", "douyin"])
 
     assert result.exit_code == 1
-    assert "抖音 direct discovery 未启用" in result.stdout
+    assert "抖音 discovery 未启用" in result.stdout
 
 
-def test_discover_douyin_runs_direct_strategy(
+def test_discover_douyin_uses_formal_producer_and_ignores_scheduler_master_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    config = config_module.Config()
+    config.sources.douyin.enabled = True
+    config.sources.douyin.cookie_env = "TEST_DY_COOKIE"
+    config.scheduler.enabled = False
+    captured: dict[str, object] = {}
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(personality_portrait="稳定用户画像" * 30)
+
+    class FakeDatabase:
+        conn = object()
+
+    class FakePipeline:
+        last_admitted_items: list[DiscoveredContent] = []
+
+    class FakeProducer:
+        async def produce_if_due(self, *, limit: int) -> dict[str, object]:
+            captured["limit"] = limit
+            return {
+                "reason": "empty",
+                "discovered": 0,
+                "enqueued": 0,
+                "source_counts": {},
+                "source_outcomes": {"search": "empty", "hot": "empty"},
+            }
+
+    def fake_build_producer(**kwargs: object) -> FakeProducer:
+        captured.update(kwargs)
+        return FakeProducer()
+
+    import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine())
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", lambda: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **kwargs: FakePipeline(),
+    )
+    monkeypatch.setattr(
+        douyin_producer_module,
+        "build_douyin_discovery_producer",
+        fake_build_producer,
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+    monkeypatch.setenv("TEST_DY_COOKIE", "sessionid=test;")
+
+    result = runner.invoke(app, ["discover", "--source", "douyin", "--limit", "7"])
+
+    assert result.exit_code == 0
+    assert captured["enabled_override"] is True
+    assert captured["limit"] == 7
+    assert "正式 producer" in result.stdout
+    assert "本轮分支正常完成" in result.stdout
+
+
+def test_discover_douyin_debug_runs_direct_strategy(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
 ) -> None:
@@ -2091,7 +2155,7 @@ def test_discover_douyin_runs_direct_strategy(
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
     monkeypatch.setenv("TEST_DY_COOKIE", "msToken=t; ttwid=tw;")
 
-    result = runner.invoke(app, ["discover", "--source", "douyin", "--limit", "5"])
+    result = runner.invoke(app, ["discover-douyin", "--limit", "5"])
 
     assert result.exit_code == 0
     assert "抖音内容发现" in result.stdout
@@ -2099,7 +2163,7 @@ def test_discover_douyin_runs_direct_strategy(
     assert "douyin" in result.stdout
 
 
-def test_discover_douyin_reads_cookie_from_synced_file(
+def test_discover_douyin_debug_reads_cookie_from_synced_file(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
     tmp_path: Path,
@@ -2142,13 +2206,13 @@ def test_discover_douyin_reads_cookie_from_synced_file(
     )
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
-    result = runner.invoke(app, ["discover", "--source", "douyin", "--limit", "5"])
+    result = runner.invoke(app, ["discover-douyin", "--limit", "5"])
 
     assert result.exit_code == 0
     assert "没有发现到新抖音内容" in result.stdout
 
 
-def test_discover_douyin_does_not_use_recent_bootstrap_creator_seeds_by_default(
+def test_discover_douyin_debug_does_not_use_recent_bootstrap_creator_seeds_by_default(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
 ) -> None:
@@ -2192,7 +2256,7 @@ def test_discover_douyin_does_not_use_recent_bootstrap_creator_seeds_by_default(
     monkeypatch.setenv("TEST_DY_COOKIE", "msToken=t; ttwid=tw;")
     monkeypatch.delenv("OPENBILICLAW_DOUYIN_CREATOR_SEC_UIDS", raising=False)
 
-    result = runner.invoke(app, ["discover", "--source", "douyin", "--limit", "5"])
+    result = runner.invoke(app, ["discover-douyin", "--limit", "5"])
 
     assert result.exit_code == 0
 
@@ -5731,7 +5795,10 @@ def test_enqueue_dy_search_task_records_keywords(
     class FakeDatabase:
         conn = object()
 
+    config = config_module.Config()
+    config.sources.douyin.daily_search_budget = 37
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
     monkeypatch.setattr("openbiliclaw.sources.dy_tasks.DyTaskQueue", FakeQueue)
 
     task_id = _enqueue_dy_search_task(("猫", "美食"), max_items_per_keyword=7)
@@ -5741,6 +5808,25 @@ def test_enqueue_dy_search_task_records_keywords(
         "keywords": ["猫", "美食"],
         "max_items_per_keyword": 7,
     }
+    assert captured["daily_budget"] == 37
+
+
+def test_search_douyin_timeout_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    monkeypatch.setattr(cli_module, "_enqueue_dy_search_task", lambda *args, **kwargs: "task-1")
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_dy_search_results",
+        lambda *args, **kwargs: ([], {}, "timeout"),
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["search-douyin", "--keyword", "猫", "--wait-seconds", "1"])
+
+    assert result.exit_code == 1
+    assert "任务超时" in result.stdout
 
 
 def test_collect_dy_search_results_reads_completed_task(

@@ -144,6 +144,24 @@ def test_rollback_returns_claimed_to_pending(db: Database) -> None:
     assert [c.keyword for c in again] == ["a"]
 
 
+def test_requeue_transient_returns_claimed_to_pending_without_burning_attempt(
+    db: Database,
+) -> None:
+    db.insert_pending_keywords("douyin", ["a"], "dig")
+    coord = KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(True))
+    claimed = coord.claim("douyin", 1)
+
+    coord.requeue_transient(claimed[0])
+
+    row = db.conn.execute(
+        "SELECT status, attempts FROM discovery_keywords WHERE id = ?",
+        (claimed[0].id,),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+
+
 # ── xhs task-result lifecycle helper ──────────────────────────────────────
 
 
@@ -220,6 +238,7 @@ def test_coordinator_is_inert_against_a_db_without_the_dao() -> None:
     coord.mark_failed([item])
     coord.mark_executing(item)
     coord.rollback(item)
+    coord.requeue_transient(item)
 
 
 def test_xhs_terminal_helper_inert_against_db_without_dao() -> None:
