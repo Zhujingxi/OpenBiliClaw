@@ -515,7 +515,7 @@ def test_desktop_platform_chips_render_counts_and_accessible_selected_state() ->
     assert "ENDPOINTS.append" not in body
     # 整排 chip 每次渲染都被替换，焦点必须还回去，否则方向键导航一点就断。
     assert "row.contains(document.activeElement)" in body
-    assert "restored?.focus();" in body
+    assert "restored?.focus({ preventScroll: true });" in body
     assert "btn.tabIndex = selected ? 0 : -1;" in body
 
     switch = _function_body(app_js, "setActiveFilter")

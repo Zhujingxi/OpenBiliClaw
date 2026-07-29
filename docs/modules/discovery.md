@@ -576,7 +576,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。
 
-**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`；旧画像 digest 的 `pending` 作废为 `expired`。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一，`used/expired` 历史不挡同词再生成。
+**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts；旧画像 digest 的 `pending` 作废为 `expired`。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一，`used/expired` 历史不挡同词再生成。
 
 **生成（planner loop）**：`runtime/keyword_planner.py::KeywordPlanner` 作为独立后台对象（在 `api/runtime_context.py` 构造、持 `llm_service`+db+config，由 refresh controller 的 `run_forever` 拉起），每 `planner_poll_seconds` 轮一次：
 
@@ -588,7 +588,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 - **内联评估并入池**（B 站 search、抖音 plugin）：抓 → 评估 → admit 都在本调用内，返回即 `used`，异常 / 空即 `failed`。
 - **fetch-only → 交共享 pipeline 延后入池**（X、YouTube）：producer 只取 raw 候选交 `discovery_candidates`，交付即 `used`（admit 由 `DiscoveryCandidatePipeline` 后续做）。
-- **真正异步**（仅小红书，扩展 out-of-band）：`claim` → 入队带 `source_keyword_id` 的 xhs 任务 → 词 `executing` → task-result 回调标 `used`/`failed`。`claim` 后被预算拒（XHS enqueue `ok=False` / 抖音 `search_aweme` 抛 `DouyinBudgetExhausted`）→ 词 `claimed → pending` 回滚（连续超 `attempts` → `failed`）。
+- **真正异步**（仅小红书，扩展 out-of-band）：`claim` → 入队带 `source_keyword_id` 的 xhs 任务 → 词 `executing` → task-result 回调标 `used`/`failed`。`claim` 后被预算拒（XHS enqueue `ok=False` / 抖音 `search_aweme` 抛 `DouyinBudgetExhausted`）→ 词 `claimed → pending` 回滚（连续超 `attempts` → `failed`）。若扩展回传 `rate_limited`，该词按瞬时平台故障处理为 `executing → pending`、attempts 不变；SQLite 平台冷却期间 XHS producer 不再 claim / 生成新词，来源关闭时 `/next-task` 也不会消费已排队任务。
 
 **yield 端到端**：候选全程透传 `source_keyword_id`，入池（`_cache_results` 这唯一 admission 收口）按 `(source_keyword_id, content_id)` **幂等**回填 `yield_count`（与 `used` 解耦，覆盖三形态）；连续 0 产出且过保护期的 `used` 词退役为 `expired`，不再轮换。
 
@@ -619,6 +619,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | 5.5 内容评估 | ✅ | `evaluate_content()` 已被四类发现策略复用（含 SearchStrategy） |
 | 5.6 发现引擎编排 | ✅ | 并发执行策略 + 高分去重 + 直接 discover 缓存收口；runtime 正常路径通过待评估池 admission 到 SQLite 推荐池 |
 | 统一待评估候选池 | ✅ | B 站、XHS、抖音、YouTube、X、知乎的原始候选先写入 `discovery_candidates(pending_eval)`，`DiscoveryCandidatePipeline` 再混源 claim、batch 评估、按阈值入 `content_cache`；API runtime 会先通过 supply fill loop 按 `pending_eval + evaluating` 补足有效待评估水位，入库前过滤历史候选和已缓存内容，再蓄到 8 条或等待 120 秒跑 batch evaluator；refresh path 和独立 candidate eval loop 共用同一 drain helper |
+| 小红书自动任务领取门与风控背压 | ✅ | 自动 search / creator / bootstrap 在 API claim 时再次检查小红书来源开关与全局 scheduler，关闭后旧 pending 任务不会触发浏览器页面；search / creator 之间的最小领取间隔持久化。扩展识别安全验证 / 操作频繁 / 429 后，后端打开 1 小时平台级冷却，停止 producer 与所有 XHS task claim，并把关联 planner 关键词无损退回 pending。 |
 | M120 多事件循环并发控制修复 | ✅ | `DiscoveryConcurrencyController` 现在会按当前 event loop 重新绑定 semaphore，CLI `init` 的分阶段补货不会再在第二轮触发跨 loop `RuntimeError` |
 | 候选供给升级 | ✅ | 主发现不足时触发 backfill，并把相关性 / 候选层级写入缓存 |
 | M118 topic_key 与池子层压缩 | ✅ | Search / Related 现在会给候选带稳定 `topic_key`，发现引擎会先压缩同 topic 重复项，再写入 discovery pool |

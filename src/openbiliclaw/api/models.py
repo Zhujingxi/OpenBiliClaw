@@ -676,7 +676,8 @@ class SourceStatusItem(BaseModel):
       does not prove that it currently works.
     - ``login_required`` / ``error`` — a local command credential is missing,
       or its saved credential file is invalid.
-    - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
+    - ``expired`` / ``blocked`` — X live-health states.
+    - ``rate_limited`` — X live-health or XHS persisted safety cooldown.
     - ``no_auth``    — source needs no login (YouTube, public).
     - ``disabled``   — source switched off in config (Bangumi only, and only
       until it moves onto ``auth``, where scheduling and credential state are
@@ -698,6 +699,8 @@ class SourceStatusItem(BaseModel):
     state: str = "missing"
     detail: str = ""
     logged_in: bool = False
+    # Discovery sub-feed/task execution is circuit-broken independently of the
+    # login verdict (currently X For-You and XHS platform safety cooldown).
     feed_paused: bool = False
     # ``None`` means "this source has no auth contract", the honest answer for a
     # backend older than the contract — not a missing value to be defaulted away
@@ -1892,7 +1895,7 @@ class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
     daily_search_budget: int = 0
     daily_creator_budget: int = 0
-    task_interval_seconds: int = 45
+    task_interval_seconds: int = 300
     min_interval_minutes: int = 3
 
 

@@ -807,7 +807,7 @@
   <text x="800" y="100" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="600">XhsTaskQueue / DyTaskQueue / YtTaskQueue (各自独立 SQLite 表)</text>
   <line x1="515" y1="110" x2="1085" y2="110" stroke="#30363d" stroke-width="1"/>
   <text x="800" y="130" text-anchor="middle" fill="#c9d1d9" font-size="9.5">pending → in_progress (claimed_at) → completed/failed · 卡死 &gt;15min 回收</text>
-  <text x="520" y="152" fill="#8b949e" font-size="9">XHS: daily_search_budget=30 · daily_creator_budget=10 · task_interval=45s</text>
+  <text x="520" y="152" fill="#8b949e" font-size="9">XHS: daily_search_budget=30 · daily_creator_budget=10 · task_interval=300s</text>
   <text x="520" y="168" fill="#8b949e" font-size="9">抖音: daily_search_budget=30 (经 DyTaskQueue + 扩展派发)</text>
   <text x="520" y="184" fill="#8b949e" font-size="9">YouTube: daily_search_budget=6 (稳态后端直采，bootstrap 经队列)</text>
 

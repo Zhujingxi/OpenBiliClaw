@@ -20,6 +20,7 @@ from openbiliclaw.runtime.keyword_fetch import (
     ClaimedKeyword,
     KeywordFetchCoordinator,
     mark_keyword_terminal_from_xhs_task,
+    requeue_keyword_from_xhs_rate_limit,
 )
 from openbiliclaw.storage.database import Database
 
@@ -166,6 +167,26 @@ def test_xhs_terminal_helper_marks_failed_on_failure(db: Database) -> None:
     assert _statuses(db) == {"a": "failed"}
 
 
+def test_xhs_rate_limit_requeues_executing_keyword_without_burning_attempt(
+    db: Database,
+) -> None:
+    db.insert_pending_keywords("xiaohongshu", ["a"], "dig")
+    coord = KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(True))
+    claimed = coord.claim("xiaohongshu", 1)
+    coord.mark_executing(claimed[0])
+    payload = json.dumps({"keyword": "a", "source_keyword_id": claimed[0].id})
+
+    requeue_keyword_from_xhs_rate_limit(db, payload)
+
+    row = db.conn.execute(
+        "SELECT status, attempts FROM discovery_keywords WHERE id = ?",
+        (claimed[0].id,),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+
+
 def test_xhs_terminal_helper_is_noop_without_source_keyword_id(db: Database) -> None:
     db.insert_pending_keywords("xiaohongshu", ["a"], "dig")
     coord = KeywordFetchCoordinator(database=db, discovery_config=_DiscoveryCfg(True))
@@ -204,6 +225,7 @@ def test_coordinator_is_inert_against_a_db_without_the_dao() -> None:
 def test_xhs_terminal_helper_inert_against_db_without_dao() -> None:
     payload = json.dumps({"source_keyword_id": 1})
     mark_keyword_terminal_from_xhs_task(_BareDb(), payload, success=True)  # no raise
+    requeue_keyword_from_xhs_rate_limit(_BareDb(), payload)  # no raise
 
 
 # ── plumbing surface check ────────────────────────────────────────────────

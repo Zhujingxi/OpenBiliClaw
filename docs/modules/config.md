@@ -571,13 +571,13 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true` |
+| `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true`。关闭后 producer 停止产词，`/api/sources/xhs/next-task` 也不会领取此前已排队的自动 search / creator / bootstrap 任务，因此扩展不会继续打开自动发现页面；任务保留为 pending，重新开启后恢复 |
 | `daily_search_budget` | int | `0` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限，持续补池只受平台缺口、单轮 `discovery_limit` 和 producer 节流控制 |
 | `daily_creator_budget` | int | `0` | 每天订阅创作者抓取任务上限；`0` 表示不设每日上限 |
-| `task_interval_seconds` | int | `45` | 扩展分发器两次任务之间的最小间隔（秒） |
+| `task_interval_seconds` | int | `300` | 后端领取连续 search / creator 任务的最小间隔（秒，默认 5 分钟）；下一次可领取时间持久化在 SQLite，后端重启、MV3 service worker 重启或多个浏览器 profile 都不能绕过。bootstrap 不受普通间隔限制，但仍受来源开关和平台风控冷却约束 |
 | `min_interval_minutes` | int | `3` | `XhsTaskProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前该项名为 `min_interval_hours`（默认 `1`）且不可配置，单位改为分钟以与其余来源对齐 |
 
-> **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有"主动发现"（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。
+> **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有"主动发现"（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。扩展识别到可见的安全验证、操作频繁或 HTTP 429 后会返回结构化 `rate_limited`；后端固定进入 1 小时持久化平台冷却，期间停止任务领取和关键词生产。该安全窗口当前故意不提供可调短配置，避免用户误把风控保护降到不安全值。
 
 ### `[sources.douyin]`
 

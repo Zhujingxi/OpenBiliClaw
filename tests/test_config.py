@@ -1192,7 +1192,7 @@ def test_sources_xiaohongshu_defaults() -> None:
     assert config.sources.xiaohongshu.enabled is False
     assert config.sources.xiaohongshu.daily_search_budget == 0
     assert config.sources.xiaohongshu.daily_creator_budget == 0
-    assert config.sources.xiaohongshu.task_interval_seconds == 45
+    assert config.sources.xiaohongshu.task_interval_seconds == 300
 
 
 def test_sources_douyin_defaults() -> None:

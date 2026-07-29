@@ -642,6 +642,7 @@ background ─ background admission (default 3) ──────┘
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ 六平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit       │
+│ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │

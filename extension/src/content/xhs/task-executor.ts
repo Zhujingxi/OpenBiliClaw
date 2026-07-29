@@ -51,6 +51,10 @@ import {
   type XhsBootstrapNote,
   type XhsBootstrapScope,
 } from "./bootstrap.js";
+import {
+  detectXhsTaskRiskControl,
+  type XhsRiskControlDetection,
+} from "./risk-control.js";
 
 const MAX_URLS = 20;
 const RENDER_WAIT_MS = 5_000;
@@ -74,7 +78,7 @@ export interface TaskResultPayload {
   urls: string[];
   notes: Array<XhsNoteMetadata | XhsBootstrapNote>;
   scope_counts?: Record<string, number>;
-  status: "ok" | "empty" | "partial" | "error";
+  status: "ok" | "empty" | "partial" | "error" | "rate_limited";
   error?: string;
   next_url?: string;
   debug?: Record<string, unknown>;
@@ -257,6 +261,24 @@ function scheduleOwnProfileNavigationClick(doc: Document, win: Window, baseUrl: 
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function rateLimitedTaskResult(
+  taskId: string,
+  detection: XhsRiskControlDetection,
+): TaskResultPayload {
+  return {
+    task_id: taskId,
+    urls: [],
+    notes: [],
+    status: "rate_limited",
+    error: detection.error,
+    debug: {
+      xhs_risk_control: {
+        reason: detection.reason,
+      },
+    },
+  };
 }
 
 async function sendTaskResult(result: TaskResultPayload): Promise<void> {
@@ -657,11 +679,34 @@ async function executeTaskInPage(
 ): Promise<TaskResultPayload> {
   try {
     if (msg.type === "bootstrap_profile") {
-      return executeBootstrapTaskInPage(msg, win, doc);
+      const immediateRisk = detectXhsTaskRiskControl(doc);
+      if (immediateRisk) {
+        return rateLimitedTaskResult(msg.task_id, immediateRisk);
+      }
+      const result = await executeBootstrapTaskInPage(msg, win, doc);
+      if (result.status === "empty") {
+        const emptyPageRisk = detectXhsTaskRiskControl(doc, {
+          includePageText: true,
+        });
+        if (emptyPageRisk) {
+          return rateLimitedTaskResult(msg.task_id, emptyPageRisk);
+        }
+      }
+      return result;
     }
 
+    const immediateRisk = detectXhsTaskRiskControl(doc);
+    if (immediateRisk) {
+      return rateLimitedTaskResult(msg.task_id, immediateRisk);
+    }
     const found = await waitForCards(doc);
     if (!found) {
+      const emptyPageRisk = detectXhsTaskRiskControl(doc, {
+        includePageText: true,
+      });
+      if (emptyPageRisk) {
+        return rateLimitedTaskResult(msg.task_id, emptyPageRisk);
+      }
       return { task_id: msg.task_id, urls: [], notes: [], status: "empty" };
     }
 
@@ -675,6 +720,12 @@ async function executeTaskInPage(
     });
 
     if (urls.length === 0) {
+      const emptyPageRisk = detectXhsTaskRiskControl(doc, {
+        includePageText: true,
+      });
+      if (emptyPageRisk) {
+        return rateLimitedTaskResult(msg.task_id, emptyPageRisk);
+      }
       return { task_id: msg.task_id, urls: [], notes: [], status: "empty" };
     }
 

@@ -177,6 +177,7 @@ from openbiliclaw.runtime.image_cache import (
 )
 from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
+    requeue_keyword_from_xhs_rate_limit,
     source_keyword_id_from_xhs_task,
 )
 from openbiliclaw.saved_sync.extension_broker import (
@@ -1857,6 +1858,7 @@ def create_app(
         app.state.degraded_reason = ""
         app.state.degraded_issues = []
         feedback_batch_scheduler.soul_engine = ctx.soul_engine
+
     profile_pipeline_backfill_lock = asyncio.Lock()
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
@@ -11256,9 +11258,34 @@ def create_app(
         """Claim and return the oldest runnable xhs task, or 204 if none."""
         from starlette.responses import Response
 
+        xhs_cfg = getattr(
+            getattr(getattr(ctx, "config", None), "sources", None),
+            "xiaohongshu",
+            None,
+        )
+        scheduler_cfg = getattr(getattr(ctx, "config", None), "scheduler", None)
+        background_tasks_enabled = bool(getattr(xhs_cfg, "enabled", False)) and bool(
+            getattr(scheduler_cfg, "enabled", True)
+        )
+
+        if _xhs_task_queue is not None:
+            cooldown = _xhs_task_queue.cooldown_remaining_seconds()
+            if cooldown > 0:
+                return Response(
+                    status_code=204,
+                    headers={"Retry-After": str(cooldown)},
+                )
+
         native_task = _claim_extension_native_task("xhs")
         if native_task is not None:
             return native_task
+
+        # Disabling a source stops automatic discovery immediately, including
+        # tasks that were already pending before the config hot-reload. Keep
+        # them pending so re-enabling can resume rather than silently discard
+        # user-planned work. Explicit native-save jobs above remain available.
+        if not background_tasks_enabled:
+            return Response(status_code=204)
 
         # 204 No Content responses MUST NOT carry a body (RFC 7230).
         # JSONResponse(204, None) serialises None to "null" (4 bytes),
@@ -11268,9 +11295,29 @@ def create_app(
         # check on every poll. Use a body-less Response instead.
         if _xhs_task_queue is None:
             return Response(status_code=204)
-        task = _xhs_task_queue.next_pending(only_ids=_init_owned_ids_filter())
+        try:
+            task_interval_seconds = max(
+                0,
+                int(getattr(xhs_cfg, "task_interval_seconds", 300)),
+            )
+        except (TypeError, ValueError):
+            task_interval_seconds = 300
+        task = _xhs_task_queue.next_pending(
+            only_ids=_init_owned_ids_filter(),
+            min_interval_seconds=task_interval_seconds,
+        )
         if task is None:
-            return Response(status_code=204)
+            delay = int(
+                _xhs_task_queue.runtime_state().get(
+                    "next_claim_delay_seconds",
+                    0,
+                )
+                or 0
+            )
+            return Response(
+                status_code=204,
+                headers={"Retry-After": str(delay)} if delay > 0 else None,
+            )
 
         import json as _json
 
@@ -11287,13 +11334,20 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
+        status = str(payload.get("status", "") or "").strip()
         if _is_extension_native_job(task_id):
             if not _is_extension_native_job(task_id, "xhs"):
                 raise HTTPException(status_code=409, detail="task_result_conflict")
-            return _submit_extension_native_result("xhs", payload)
+            result = _submit_extension_native_result("xhs", payload)
+            if status == "rate_limited" and _xhs_task_queue is not None:
+                _xhs_task_queue.record_rate_limit(
+                    error=str(payload.get("error_code", "") or "xhs_rate_limited"),
+                )
+            return result
 
-        status = payload.get("status", "")
         urls = payload.get("urls", [])
+        if not isinstance(urls, list):
+            urls = []
         notes = [note for note in payload.get("notes", []) if isinstance(note, dict)]
         scope_counts = payload.get("scope_counts")
         if not isinstance(scope_counts, dict):
@@ -11308,7 +11362,22 @@ def create_app(
         task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
-        if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
+        if status == "rate_limited":
+            legacy_queue.record_rate_limit(
+                task_id,
+                error=str(payload.get("error", "") or "xhs_rate_limited"),
+                urls=urls,
+                notes=notes if notes else None,
+                scope_counts=scope_counts,
+                debug=debug,
+            )
+            requeue_keyword_from_xhs_rate_limit(
+                ctx.database,
+                task.get("payload_json") if task is not None else None,
+            )
+        elif status in {"partial", "ok"} or (
+            status == "empty" and task_type == "bootstrap_profile"
+        ):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
             added_notes, enriched_notes = legacy_queue.merge_result_with_enrichment(
                 task_id,
@@ -11660,6 +11729,20 @@ def create_app(
                 feed_paused=source_feed_paused(auth_ctx, slug),
                 auth=contract,
             )
+        xhs_runtime_state = (
+            _xhs_task_queue.runtime_state()
+            if _xhs_task_queue is not None
+            else {"rate_limited": False}
+        )
+        xhs_item = items["xiaohongshu"]
+        if xhs_item.enabled and bool(xhs_runtime_state.get("rate_limited")):
+            remaining_seconds = int(xhs_runtime_state.get("cooldown_remaining_seconds", 0) or 0)
+            remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+            xhs_item.state = "rate_limited"
+            xhs_item.detail = (
+                f"小红书触发安全验证，后台任务已自动暂停，约 {remaining_minutes} 分钟后恢复领取。"
+            )
+            xhs_item.feed_paused = True
         # Bangumi's uniform item (built above) is replaced: it carries a
         # discovery-health detail and the token_state axis the loop cannot model.
         # Do not delete this line thinking the loop covers it — it does not.
@@ -15278,8 +15361,7 @@ def create_app(
                         ok=True,
                         config=_config_to_response(cfg, issues, mask_keys=True),
                         message=(
-                            reload_message
-                            + " 后端已原地恢复；部分后台任务启动失败，"
+                            reload_message + " 后端已原地恢复；部分后台任务启动失败，"
                             "不影响继续初始化。"
                         ),
                         reloaded=True,

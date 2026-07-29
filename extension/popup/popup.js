@@ -8547,7 +8547,7 @@ function bindSettings() {
           enabled: checked("cfgXhsEnabled"),
           daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
-          task_interval_seconds: getInt("cfgXhsTaskInterval", 45),
+          task_interval_seconds: getInt("cfgXhsTaskInterval", 300),
           min_interval_minutes: getInt("cfgXhsMinInterval", 3),
         },
         douyin: {

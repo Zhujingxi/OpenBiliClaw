@@ -9831,6 +9831,26 @@ class Database:
             (int(keyword_id),),
         )
 
+    def requeue_keyword_after_transient_failure(self, keyword_id: int) -> None:
+        """Return a claimed/executing keyword after a platform-wide transient.
+
+        Unlike :meth:`mark_keyword_failed`, this does not bump ``attempts``:
+        rate limiting says the platform is temporarily unavailable, not that
+        the keyword itself failed. Unlike the budget rollback, an async XHS
+        task has already reached ``executing``, so both in-flight states are
+        eligible here.
+        """
+        self._execute_write(
+            """
+            UPDATE discovery_keywords
+            SET status = 'pending',
+                claimed_at = NULL,
+                executing_at = NULL
+            WHERE id = ? AND status IN ('claimed', 'executing')
+            """,
+            (int(keyword_id),),
+        )
+
     def reclaim_leased_keywords(
         self,
         claim_lease_minutes: float,

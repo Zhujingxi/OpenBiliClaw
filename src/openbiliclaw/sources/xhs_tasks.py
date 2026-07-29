@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+XHS_RATE_LIMIT_COOLDOWN_SECONDS = 60 * 60
+_XHS_RUNTIME_STATE_ROW_ID = 1
+_XHS_PACED_TASK_TYPES = frozenset({"search", "creator"})
+
 XHS_BOOTSTRAP_SCOPE_EVENT_TYPES = {
     "saved": "favorite",
     "liked": "like",
@@ -41,6 +45,38 @@ XHS_BOOTSTRAP_SCOPE_LABELS = {
 }
 
 _RECENT_TASK_STATUSES = ("pending", "in_progress", "completed", "failed")
+
+
+def _utc_now(value: datetime | None = None) -> datetime:
+    now = value or datetime.now(UTC)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=UTC)
+    return now.astimezone(UTC)
+
+
+def _format_sqlite_timestamp(value: datetime) -> str:
+    return _utc_now(value).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_sqlite_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return _utc_now(parsed)
+
+
+def _remaining_seconds(until: datetime | None, now: datetime) -> int:
+    if until is None:
+        return 0
+    seconds = max(0.0, (until - now).total_seconds())
+    return int(seconds) if seconds.is_integer() else int(seconds) + 1
 
 
 def _note_key(note: dict[str, Any]) -> str:
@@ -230,6 +266,15 @@ class XhsTaskQueue:
             );
             CREATE INDEX IF NOT EXISTS idx_xhs_tasks_status
                 ON xhs_tasks (status, created_at);
+            CREATE TABLE IF NOT EXISTS xhs_task_runtime_state (
+                singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+                next_claim_at   TIMESTAMP,
+                cooldown_until  TIMESTAMP,
+                cooldown_reason TEXT NOT NULL DEFAULT '',
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT OR IGNORE INTO xhs_task_runtime_state(singleton)
+            VALUES (1);
         """)
         columns = {
             str(row["name"])
@@ -299,7 +344,173 @@ class XhsTaskQueue:
         self._db.conn.commit()
         return task_id
 
-    def next_pending(self, only_ids: set[str] | None = None) -> dict[str, Any] | None:
+    def runtime_state(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Return persisted pacing and risk-control state for diagnostics."""
+        current = _utc_now(now)
+        row = self._db.conn.execute(
+            """
+            SELECT next_claim_at, cooldown_until, cooldown_reason, updated_at
+            FROM xhs_task_runtime_state
+            WHERE singleton = ?
+            """,
+            (_XHS_RUNTIME_STATE_ROW_ID,),
+        ).fetchone()
+        if row is None:
+            return {
+                "rate_limited": False,
+                "cooldown_remaining_seconds": 0,
+                "next_claim_delay_seconds": 0,
+                "cooldown_until": "",
+                "next_claim_at": "",
+                "cooldown_reason": "",
+                "updated_at": "",
+            }
+        next_claim_at = _parse_sqlite_timestamp(row["next_claim_at"])
+        cooldown_until = _parse_sqlite_timestamp(row["cooldown_until"])
+        cooldown_remaining = _remaining_seconds(cooldown_until, current)
+        return {
+            "rate_limited": cooldown_remaining > 0,
+            "cooldown_remaining_seconds": cooldown_remaining,
+            "next_claim_delay_seconds": max(
+                cooldown_remaining,
+                _remaining_seconds(next_claim_at, current),
+            ),
+            "cooldown_until": str(row["cooldown_until"] or ""),
+            "next_claim_at": str(row["next_claim_at"] or ""),
+            "cooldown_reason": str(row["cooldown_reason"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def cooldown_remaining_seconds(self, *, now: datetime | None = None) -> int:
+        """Return the active platform cooldown, or zero when tasks may run."""
+        return int(self.runtime_state(now=now)["cooldown_remaining_seconds"])
+
+    def record_rate_limit(
+        self,
+        task_id: str | None = None,
+        *,
+        error: str = "xhs_rate_limited",
+        urls: list[str] | None = None,
+        notes: list[dict[str, Any]] | None = None,
+        scope_counts: dict[str, Any] | None = None,
+        debug: dict[str, Any] | None = None,
+        cooldown_seconds: int = XHS_RATE_LIMIT_COOLDOWN_SECONDS,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Persist a platform-wide cooldown and optionally fail its task.
+
+        The state lives outside an individual task so it survives backend and
+        MV3 service-worker restarts. Repeated reports can only extend the
+        cooldown; they never shorten an existing safety window.
+        """
+        current = _utc_now(now)
+        requested_until = current + timedelta(seconds=max(1, int(cooldown_seconds)))
+        conn = self._db.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            state = conn.execute(
+                """
+                SELECT next_claim_at, cooldown_until
+                FROM xhs_task_runtime_state
+                WHERE singleton = ?
+                """,
+                (_XHS_RUNTIME_STATE_ROW_ID,),
+            ).fetchone()
+            existing_cooldown = (
+                _parse_sqlite_timestamp(state["cooldown_until"]) if state is not None else None
+            )
+            effective_until = max(
+                requested_until,
+                existing_cooldown or requested_until,
+            )
+            existing_next_claim = (
+                _parse_sqlite_timestamp(state["next_claim_at"]) if state is not None else None
+            )
+            effective_next_claim = max(
+                effective_until,
+                existing_next_claim or effective_until,
+            )
+            conn.execute(
+                """
+                INSERT INTO xhs_task_runtime_state(
+                    singleton, next_claim_at, cooldown_until,
+                    cooldown_reason, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    next_claim_at = excluded.next_claim_at,
+                    cooldown_until = excluded.cooldown_until,
+                    cooldown_reason = excluded.cooldown_reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _XHS_RUNTIME_STATE_ROW_ID,
+                    _format_sqlite_timestamp(effective_next_claim),
+                    _format_sqlite_timestamp(effective_until),
+                    str(error or "xhs_rate_limited")[:128],
+                    _format_sqlite_timestamp(current),
+                ),
+            )
+
+            if task_id:
+                row = conn.execute(
+                    "SELECT result_json FROM xhs_tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                current_result: dict[str, Any] = {}
+                if row is not None and row["result_json"]:
+                    try:
+                        parsed = json.loads(str(row["result_json"]))
+                        if isinstance(parsed, dict):
+                            current_result = parsed
+                    except json.JSONDecodeError:
+                        current_result = {}
+                merged, _added, _enriched = _merge_result_payload(
+                    current_result,
+                    urls=urls,
+                    notes=notes,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+                merged["error"] = str(error or "xhs_rate_limited")
+                merged["rate_limited"] = True
+                merged["cooldown_until"] = _format_sqlite_timestamp(effective_until)
+                conn.execute(
+                    """
+                    UPDATE xhs_tasks
+                    SET status = 'failed',
+                        result_json = ?,
+                        completed_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        json.dumps(merged, ensure_ascii=False),
+                        _format_sqlite_timestamp(current),
+                        task_id,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+        logger.warning(
+            "xhs task circuit breaker opened: task_id=%s reason=%s cooldown_until=%s",
+            task_id or "-",
+            str(error or "xhs_rate_limited")[:128],
+            _format_sqlite_timestamp(effective_until),
+        )
+        return self.runtime_state(now=current)
+
+    def next_pending(
+        self,
+        only_ids: set[str] | None = None,
+        *,
+        min_interval_seconds: int = 0,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         """Claim and return the oldest runnable task, or None.
 
         The extension can be installed in multiple browser profiles, and
@@ -310,7 +521,8 @@ class XhsTaskQueue:
         eligible again after 15 minutes so a crashed extension does not
         permanently wedge the queue.
         """
-        stale_before = (datetime.now(UTC) - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+        current = _utc_now(now)
+        stale_before = _format_sqlite_timestamp(current - timedelta(minutes=15))
         # ``only_ids`` restricts which tasks may be claimed (gui-init: during an
         # active init the dispatcher is only handed init-owned bootstrap tasks,
         # so a stale pending task can't starve the run). None = no restriction.
@@ -325,6 +537,29 @@ class XhsTaskQueue:
         conn = self._db.open_connection()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            state = conn.execute(
+                """
+                SELECT next_claim_at, cooldown_until
+                FROM xhs_task_runtime_state
+                WHERE singleton = ?
+                """,
+                (_XHS_RUNTIME_STATE_ROW_ID,),
+            ).fetchone()
+            cooldown_until = (
+                _parse_sqlite_timestamp(state["cooldown_until"]) if state is not None else None
+            )
+            if _remaining_seconds(cooldown_until, current) > 0:
+                conn.commit()
+                return None
+            next_claim_at = (
+                _parse_sqlite_timestamp(state["next_claim_at"]) if state is not None else None
+            )
+            if _remaining_seconds(next_claim_at, current) > 0:
+                # Pacing applies only to automatic discovery tasks. Do not let
+                # an older search row hide a later init bootstrap, which is
+                # intentionally exempt from the ordinary inter-task delay.
+                where += " AND type NOT IN (?, ?)"
+                params.extend(sorted(_XHS_PACED_TASK_TYPES))
             row = conn.execute(
                 f"SELECT * FROM xhs_tasks WHERE {where} ORDER BY created_at ASC LIMIT 1",
                 params,
@@ -332,12 +567,27 @@ class XhsTaskQueue:
             if row is None:
                 conn.commit()
                 return None
+            task_type = str(row["type"] or "")
             task_id = str(row["id"])
             conn.execute(
-                "UPDATE xhs_tasks SET status = 'in_progress', claimed_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (task_id,),
+                "UPDATE xhs_tasks SET status = 'in_progress', claimed_at = ? WHERE id = ?",
+                (_format_sqlite_timestamp(current), task_id),
             )
+            interval_seconds = max(0, int(min_interval_seconds))
+            if task_type in _XHS_PACED_TASK_TYPES and interval_seconds > 0:
+                next_claim_at = current + timedelta(seconds=interval_seconds)
+                conn.execute(
+                    """
+                    UPDATE xhs_task_runtime_state
+                    SET next_claim_at = ?, updated_at = ?
+                    WHERE singleton = ?
+                    """,
+                    (
+                        _format_sqlite_timestamp(next_claim_at),
+                        _format_sqlite_timestamp(current),
+                        _XHS_RUNTIME_STATE_ROW_ID,
+                    ),
+                )
             claimed = conn.execute("SELECT * FROM xhs_tasks WHERE id = ?", (task_id,)).fetchone()
             conn.commit()
         except Exception:

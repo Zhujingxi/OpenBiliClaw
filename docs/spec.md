@@ -292,6 +292,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │  └──────────────┘  └──────────────┘  └─────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ bili/xhs/dy/yt/zhihu/reddit 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
+│  │ XHS 自动任务：source/scheduler 领取门 → SQLite 节流/风控冷却 → 关闭/限流时不再开任务 tab │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ B 站 / 抖音 / X Cookie 同步（runtime-stream 请求 + 扩展回传）│   │
@@ -419,7 +420,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │           多源适配层 (SourceAdapter Protocol, v0.3.0+)         │
 │  ┌──────────────┐  ┌──────────────────┐  ┌─────────────┐    │
 │  │ B 站 Adapter  │  │ Bili/小红书/抖音/YouTube/知乎/Reddit任务桥│ │ Web Adapter │  │
-│  │ (WBI API+DOM兜底)│ │ (扩展代理 + DOM-first)│  │ (Playwright │    │
+│  │ (WBI API+DOM兜底)│ │ (扩展代理 + DOM-first + XHS持久熔断)│  │ (Playwright │    │
 │  │              │  │ + profile/search/feed/yt/zhihu)│ │ + LLM 抽取)│    │
 │  └──────────────┘  └──────────────────┘  └─────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │

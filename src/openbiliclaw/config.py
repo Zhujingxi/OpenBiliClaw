@@ -1045,8 +1045,10 @@ class XiaohongshuSourceConfig:
     daily_search_budget: int = 0
     # Max creator-subscription fetch tasks per day.
     daily_creator_budget: int = 0
-    # Seconds the extension dispatcher waits between tasks.
-    task_interval_seconds: int = 45
+    # Minimum seconds the backend permits between extension-dispatched
+    # search/creator task claims. Persisted centrally so MV3/browser restarts
+    # and multiple extension profiles cannot bypass the pacing floor.
+    task_interval_seconds: int = 300
     # Minimum gap between two producer runs for this source. Aligned to 3
     # minutes across every source (2026-07-26) so pool replenishment has one
     # cadence instead of eight; the per-run size is still bounded by
@@ -1884,7 +1886,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             enabled=bool(xhs_raw.get("enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
-            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),
+            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 300)),
             min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 3))),
         ),
         douyin=DouyinSourceConfig(

@@ -36,6 +36,9 @@ import {
   readBootstrapScrollMetrics,
   type XhsBootstrapNote,
 } from "../src/content/xhs/bootstrap.ts";
+import {
+  classifyXhsRiskControlText,
+} from "../src/content/xhs/risk-control.ts";
 
 // We can't directly import task-executor.ts because it transitively
 // imports "./passive.js" which Node resolves differently from esbuild.
@@ -92,6 +95,38 @@ test("TaskResultPayload shape matches dispatcher expectations", () => {
   };
   assert.equal(emptyResult.status, "empty");
   assert.equal(emptyResult.urls.length, 0);
+
+  const rateLimitedResult = {
+    task_id: "t4",
+    urls: [] as string[],
+    status: "rate_limited" as const,
+    error: "xhs_rate_limited",
+  };
+  assert.equal(rateLimitedResult.status, "rate_limited");
+  assert.equal(rateLimitedResult.error, "xhs_rate_limited");
+});
+
+test("classifyXhsRiskControlText recognizes the security-verification popup", () => {
+  assert.deepEqual(
+    classifyXhsRiskControlText("安全验证\n请勿频繁操作，稍后重试\n问题反馈"),
+    {
+      error: "xhs_rate_limited",
+      reason: "security_verification",
+    },
+  );
+  assert.deepEqual(
+    classifyXhsRiskControlText("Too Many Requests (HTTP 429)"),
+    {
+      error: "xhs_rate_limited",
+      reason: "frequent_operation",
+    },
+  );
+});
+
+test("classifyXhsRiskControlText does not treat generic retry copy as a challenge", () => {
+  assert.equal(classifyXhsRiskControlText("网络开小差了，请稍后重试"), null);
+  assert.equal(classifyXhsRiskControlText("账号安全验证使用说明"), null);
+  assert.equal(classifyXhsRiskControlText("普通的小红书笔记内容"), null);
 });
 
 test("extractBootstrapNotesFromState maps saved liked and history groups", () => {

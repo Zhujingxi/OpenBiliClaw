@@ -639,6 +639,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │

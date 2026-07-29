@@ -234,6 +234,26 @@ def mark_keyword_terminal_from_xhs_task(
         logger.exception("keyword fetch: %s failed for id=%s", method, keyword_id)
 
 
+def requeue_keyword_from_xhs_rate_limit(
+    database: Any,
+    payload_json: str | None,
+) -> None:
+    """Re-pend an async XHS keyword when the platform, not the word, failed."""
+    keyword_id = _extract_source_keyword_id(payload_json)
+    if keyword_id is None:
+        return
+    requeue = getattr(database, "requeue_keyword_after_transient_failure", None)
+    if not callable(requeue):
+        return
+    try:
+        requeue(keyword_id)
+    except Exception:
+        logger.exception(
+            "keyword fetch: requeue_keyword_after_transient_failure failed for id=%s",
+            keyword_id,
+        )
+
+
 def source_keyword_id_from_xhs_task(payload_json: str | None) -> int | None:
     """Public: read ``source_keyword_id`` off an xhs-task payload, or ``None``.
 

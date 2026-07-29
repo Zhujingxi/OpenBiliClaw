@@ -1,7 +1,7 @@
 """Soul-driven xhs search task producer.
 
 Runs on the same loop as the continuous refresh controller. Once per
-throttle window (default 4h) it:
+throttle window (default 3 minutes) it:
   1. Reads the current SoulProfile
   2. Asks an LLM to rewrite interest tags into xhs-flavored keywords
   3. Enqueues one ``search`` task per keyword into ``XhsTaskQueue``
@@ -87,6 +87,9 @@ class XhsTaskProducer:
         """
         if not self.enabled:
             return self._skip("disabled")
+
+        if self.task_queue.cooldown_remaining_seconds() > 0:
+            return self._skip("rate_limited")
 
         if not self._is_due():
             return self._skip("throttled")
@@ -228,6 +231,7 @@ class XhsTaskProducer:
         # operators can grep for why the producer isn't firing without
         # drowning the log in identical-reason WARNINGs. Reasons:
         #   disabled       — explicitly turned off in config
+        #   rate_limited   — the extension observed XHS security verification
         #   throttled      — last enqueue within ``min_interval_minutes``
         #   no_profile     — soul profile not built yet (init window)
         #   no_keywords    — LLM keyword generation returned 0 items

@@ -242,8 +242,9 @@ enabled = false
 daily_search_budget = 0
 # 每天订阅创作者抓取任务上限；0 表示不设每日上限。
 daily_creator_budget = 0
-# 扩展分发器两次任务之间的最小间隔（秒），进一步降低风控风险
-task_interval_seconds = 45
+# 后端允许扩展领取两次搜索/创作者任务之间的最小间隔（秒）；
+# 状态持久化，重启扩展或同时使用多个浏览器配置也不会绕过
+task_interval_seconds = 300
 min_interval_minutes = 3                 # producer 两次入队之间的最小间隔
 
 # ── 抖音（Douyin）direct-cookie discovery 专用配置 ──

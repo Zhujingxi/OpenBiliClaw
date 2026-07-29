@@ -168,6 +168,37 @@ async def test_producer_throttled_when_recent_task_exists(
 
 
 @pytest.mark.asyncio
+async def test_producer_skips_keyword_generation_during_platform_cooldown(
+    queue: XhsTaskQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    async def fake_keywords(_llm: Any, _profile: Any, *, count: int) -> list[str]:
+        nonlocal called
+        called = True
+        return ["should-not-run"]
+
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.xhs_producer.generate_xhs_keywords",
+        fake_keywords,
+    )
+    queue.record_rate_limit(cooldown_seconds=600)
+    producer = XhsTaskProducer(
+        task_queue=queue,
+        soul_engine=_FakeSoulEngine(_profile_with_interests()),
+        llm_service=_FakeLLMService(),
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due()
+
+    assert result == {"enqueued": 0, "attempted": 0, "reason": "rate_limited"}
+    assert called is False
+
+
+@pytest.mark.asyncio
 async def test_producer_handles_empty_keywords(
     queue: XhsTaskQueue,
     monkeypatch: pytest.MonkeyPatch,

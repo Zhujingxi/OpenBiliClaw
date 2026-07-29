@@ -8711,7 +8711,7 @@ ${cardFeedbackBarHtml()}`;
             enabled: $("#xhsEnabled").value === "on",
             daily_search_budget: getIntInput("xhsDailySearchBudget", 0),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
-            task_interval_seconds: getIntInput("xhsTaskInterval", 45),
+            task_interval_seconds: getIntInput("xhsTaskInterval", 300),
             min_interval_minutes: getIntInput("xhsMinInterval", 3)
           },
           douyin: {
