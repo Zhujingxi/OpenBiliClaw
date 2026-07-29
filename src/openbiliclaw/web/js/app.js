@@ -91,7 +91,7 @@ function renderStatusBar() {
         "background:var(--warning-soft);color:#d97706;font-size:12px;padding:6px 16px;text-align:center";
       $statusBar.after(existing);
     }
-    existing.textContent = state.degradedReason || "AI 服务配置有误，修复并重启后端前大部分功能不可用";
+    existing.textContent = state.degradedReason || "AI 服务配置有误，修复并保存前大部分功能不可用";
   } else if (existing) {
     existing.remove();
   }

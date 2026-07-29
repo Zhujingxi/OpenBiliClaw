@@ -932,11 +932,11 @@ OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；�
 | `ok` | 请求是否完成。校验失败时为 `false`。 |
 | `reloaded` | 是否已热重载运行时组件。 |
 | `rollback_applied` | 热重载失败后是否已从 `config.toml.bak` 回滚。 |
-| `restart_required` | 新配置是否已写入但需要重启 daemon 才能生效。降级模式保存会返回 `true`。 |
+| `restart_required` | 新配置是否已写入但无法原地激活、需要重启 daemon 的异常兜底。正常保存和成功的降级恢复都返回 `false`。 |
 | `config` | 保存后或回滚后的配置快照，API Key 仍默认 masked。 |
 | `message` | 给 UI 展示的人类可读状态。 |
 
-当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues；`PUT /api/config` 会保存修复配置但不尝试热重载，返回 `restart_required=true`，要求用户重启 daemon。`/setup/` 不会在旧降级进程上直接进入初始化：它保存一个不含凭据、24 小时过期的本地续接标记，提示重启并轮询 `/api/ping`；新进程报告非 degraded 后自动 reload、清除标记并进入账号连接步骤。插件和桌面设置页继续展示同一 `restart_required` 指引。
+当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues。`PUT /api/config` 写入通过校验的修复配置后，会复用降级上下文已经保留的数据库、MemoryManager、事件总线和稳定 total gate，通过 `RuntimeContext.rebuild_from_config()` 原子构造完整运行时；成功后同步清除 context / `app.state` 的 degraded 状态、重绑 API 自有 feedback scheduler，并调用 `restart_background_tasks()`，返回 `reloaded=true / restart_required=false`。因此 `/setup/` 会在同一进程中立即进入账号连接步骤，插件与桌面设置页也会立即读到可用状态。核心构造失败会恢复 `config.toml.bak`、保持 503 guard 并返回 `ok=false`；只有没有旧文件可回滚且新配置已经落盘等异常 bootstrap 才使用 `restart_required=true`。前端保留短期续接标记与 `/api/ping` 轮询，仅用于兼容旧后端和该兜底响应。
 
 ## 环境变量
 

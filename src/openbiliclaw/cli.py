@@ -988,7 +988,7 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             f"reason: {reason or 'unknown'}\n"
             + "\n".join(issues)
             + "\n\nOpen the extension popup settings to fix the LLM credentials, "
-            "then restart the daemon."
+            "then save; the daemon will recover in-process."
         )
         _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
     from openbiliclaw.runtime.api_server import (

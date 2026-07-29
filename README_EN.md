@@ -189,9 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.187 (2026-07-29)**
+📌 Latest: **v0.3.188 (2026-07-29)**
 
-- **First-time setup no longer gets trapped by a stale placeholder instance** — degraded startup can discover, test, and save a replacement endpoint, then resume automatically after restart without misleading 503s in extension settings.
+- **Repairing model configuration no longer requires another restart** — saving valid settings in degraded mode atomically rebuilds the full runtime in the current backend process, removes the 503 gate, and resumes setup immediately; failed construction rolls back safely.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -609,7 +609,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
 └──────────────────────┬─────────────────────────┘
                        │ IPv4 0.0.0.0 + IPv6 [::] → REST API / WebSocket
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
-                       │ + ping preflight → /web · /setup · /m → config + restart
+                       │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
 │ Skills · Dialogue · Runtime · 10s undo barrier   │

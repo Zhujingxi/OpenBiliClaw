@@ -4,6 +4,12 @@
 
 `src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录对话确认入口新增的公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。
 
+## 降级配置恢复
+
+`PUT /api/config` 在 `llm_registry_unavailable` 降级态下不再只写盘并要求重启。服务端会复用当前进程已经初始化的数据库、MemoryManager、事件总线、任务注册表和 LLM total gate，通过正常热重载路径原子构造完整的 LLM Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller。构造全部成功后才同步解除业务 API 的 503 guard，并返回 `reloaded=true`、`restart_required=false`；`/setup/` 和插件设置页可以在同一进程里立即继续。
+
+如果核心运行时构造失败，已有 `config.toml` 会从事务备份恢复，响应为 HTTP 503、`ok=false`、`rollback_applied=true`，降级 guard 保持不变。若核心已经成功发布、只是附属后台循环重启失败，则保留已生效的新配置与健康运行时，返回 `ok=true`、`reloaded=true` 并携带 warning，避免把磁盘配置回滚成与内存运行时不一致的旧版本。只有没有可回滚旧文件且进程内激活失败的异常 bootstrap 路径，才保留 `restart_required=true` 兼容兜底。
+
 ## 对话确认端点
 
 | 方法与路径 | 状态 | 契约 |

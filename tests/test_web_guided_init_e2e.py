@@ -726,12 +726,80 @@ def test_setup_wizard_e2e_renders_structured_config_validation_error(
     assert '{"ok":' not in text
 
 
-def test_setup_wizard_e2e_waits_for_degraded_restart_then_resumes(
+def test_setup_wizard_e2e_degraded_save_recovers_in_place_without_restart(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
 ) -> None:
-    """A save-only degraded recovery must not advance into init against the
-    old process; after restart, the non-secret marker resumes at account setup."""
+    """A repaired degraded runtime should advance immediately on hot recovery."""
+    base_url, stub = guided_init_server
+    degraded_config = {
+        "language": "zh",
+        "degraded": True,
+        "degraded_reason": "llm_registry_unavailable",
+        "issues": [
+            {
+                "field": "llm.instances.deepseek.api_key",
+                "message": "启用的 `deepseek` 实例缺少 API Key。",
+                "severity": "blocking",
+            }
+        ],
+        "llm": {
+            "routing_version": 2,
+            "instances": {
+                "deepseek": {
+                    "name": "DeepSeek 官方",
+                    "provider_type": "deepseek",
+                    "enabled": True,
+                    "api_key": "",
+                    "model": "deepseek-v4-flash",
+                }
+            },
+            "default_chain": ["deepseek"],
+            "routes": {},
+        },
+        "sources": {"bilibili": {"enabled": True}},
+    }
+    recovered_config = {
+        **degraded_config,
+        "degraded": False,
+        "degraded_reason": "",
+        "issues": [],
+    }
+    stub.config_override = degraded_config
+    stub.config_put_response = {
+        "ok": True,
+        "config": recovered_config,
+        "message": "配置已保存，后端已从降级模式原地恢复，无需重启。",
+        "reloaded": True,
+        "rollback_applied": False,
+        "restart_required": False,
+    }
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.locator("#apiKey").fill("sk-test")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+
+    assert len(stub.config_puts) == 1
+    assert stub.config_puts[0]["suppress_background_llm_work"] is True
+    assert (
+        chromium_page.evaluate(
+            "() => localStorage.getItem('openbiliclaw.setup.resume_after_restart')"
+        )
+        is None
+    )
+    assert "请重启" not in chromium_page.locator("#msg0").inner_text()
+
+
+def test_setup_wizard_e2e_supports_restart_fallback_when_hot_recovery_is_unavailable(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """Older backends/exceptional bootstrap paths may still require restart.
+
+    The fallback must not advance into init against a degraded process; after
+    restart, the non-secret marker resumes at account setup.
+    """
     base_url, stub = guided_init_server
     chromium_page.add_init_script("window.__OBC_TEST_RESTART_POLL_MS = 30;")
     degraded_config = {

@@ -4,6 +4,10 @@
 
 ---
 
+## v0.3.188：降级配置原地恢复（2026-07-29）
+
+- **修好 LLM 配置后不再要求重启后端**：安装包覆盖安装本来已经退出旧 `OpenBiliClaw.exe` 并启动新版本，但新进程会先读取保留的旧 `config.toml`，若其中仍有启用但缺 Key 的实例就以 degraded 恢复态启动；用户随后在 `/setup/` 修好配置时，`PUT /api/config` 过去只写盘并返回 `restart_required=true`，导致刚覆盖安装完还要再手动重启一次。现在降级上下文复用启动时保留的数据库、MemoryManager、事件总线和稳定 LLM total gate，按正常热重载的原子构造路径一次性补齐 Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller；全部构造成功后同步解除 API 503 guard、刷新 `app.state` 镜像、重绑 feedback scheduler 并启动所需后台任务，返回 `reloaded=true / restart_required=false`，`/setup/` 当场进入下一步。核心构造失败时恢复 `config.toml.bak`、保持降级并返回可重试 503；核心已恢复而仅后台循环启动失败时不反向回滚有效配置。旧后端或无备份的异常 bootstrap 仍保留 `restart_required` 兼容兜底。
+
 ## v0.3.187：初始化与模型配置自救修复（2026-07-29）
 
 - **修复首次初始化与插件模型配置互相锁死**：新装默认配置会带一个启用但尚未填写 Key 的 DeepSeek 占位实例，后端因此以 `llm_registry_unavailable` 降级启动来提供修复界面；此前降级保护层却把设置页自己的 `/api/config/probe-service` 与 `/api/config/discover-models` 也拦成 503，`/setup/` 切到 SenseNova 等新服务商时又把旧占位实例继续作为启用 fallback 提交，最终先出现“获取模型 503”，再以“DeepSeek 缺 API Key”返回 400，插件读取未写入的旧配置后继续显示同一 503。现在降级模式精确放行无写入的草稿探测、模型发现与来源比例建议接口，推荐/画像等业务 API 仍保持 503；首启向导只会停用诊断明确标为 blocking、且未被自定义模块链引用的旧占位实例，并把它从默认链移除（不删除正常实例或改写用户自定义链）。400 改为展示结构化 blocking issue，不再截断整段 JSON；降级保存返回 `restart_required=true` 时向导停在模型步骤，写入不含 Key 的 24 小时续接标记并轮询 liveness，重启成功后自动进入账号连接步骤，避免对旧降级进程直接启动初始化。新增真实降级 FastAPI 回归与 Chromium E2E，覆盖插件/桌面共用探测、SenseNova 替换占位、可诊断 400 和重启续接。

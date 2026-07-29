@@ -1271,7 +1271,7 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
         .map((issue) => normalizeText(issue?.message))
         .filter(Boolean);
       const degradedMessage =
-        issueMessages.join("；") || "后端的 AI 服务配置有问题，修复并重启后恢复。";
+        issueMessages.join("；") || "后端的 AI 服务配置有问题，修复并保存后会立即恢复。";
       // A degraded backend that was NEVER initialized should still land the
       // user in the guided-init journey — its first step IS configuring the
       // LLM provider, and the init checklist surfaces the degraded blocker

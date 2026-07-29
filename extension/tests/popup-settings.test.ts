@@ -772,7 +772,9 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /后端不可达且没有缓存配置/);
   assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
   assert.match(popupJs, /restart_required/);
-  assert.match(popupJs, /保存并提示重启/);
+  assert.match(popupJs, /保存并恢复/);
+  assert.match(popupJs, /保存有效配置后会原地恢复，无需重启/);
+  assert.doesNotMatch(popupJs, /保存修复后需要重启后端/);
 });
 
 test("settings page shows the budget-semantics hint for every per-source budget group", () => {

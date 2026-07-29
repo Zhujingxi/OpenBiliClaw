@@ -1235,7 +1235,7 @@
     function presentDegradedConfigRecovery(snapshot) {
       if (snapshot?.degraded !== true) return;
       state.degraded = true;
-      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL；保存成功后后端会原地恢复。";
       const diagnostic = configErrorMessage(snapshot);
       const configStatus = $("#configStatus");
       if (configStatus) {
@@ -1243,7 +1243,7 @@
         configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
       }
       $("#statusLabel").textContent = "模型配置待修复";
-      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复并保存。";
       if (degradedRecoveryPresented) return;
       degradedRecoveryPresented = true;
       openSettingsPage("models");

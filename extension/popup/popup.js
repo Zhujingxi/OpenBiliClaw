@@ -6278,7 +6278,7 @@ function renderRecommendationState(stateShape) {
       elements.emptyAction.textContent = "去设置修复 →";
       elements.emptyAction.hidden = false;
     }
-    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
+    setHint("AI 服务配置有误：修好 LLM 配置并保存后即可恢复。", "error");
     return;
   }
 
@@ -6292,7 +6292,7 @@ function renderRecommendationState(stateShape) {
     showRecommendationEmptyState(
       "还没完成初始化",
       stateShape.degraded
-        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        ? "先修好 AI 服务配置（下方检查项会说明原因）；保存成功后即可点「开始初始化」。"
         : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
     if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
@@ -6303,7 +6303,7 @@ function renderRecommendationState(stateShape) {
     }
     setHint(
       stateShape.degraded
-        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
+        ? "AI 服务配置有误：修好 LLM 配置并保存后即可开始初始化。"
         : "先完成初始化，把画像和候选池攒起来。",
       stateShape.degraded ? "error" : "info",
     );
@@ -7253,7 +7253,7 @@ function bindSettings() {
 
   function setSaveButtonMode(mode = "") {
     saveBtn.dataset.tone = mode === "warning" ? "warning" : "";
-    saveBtn.textContent = mode === "degraded" ? "保存并提示重启" : "保存配置";
+    saveBtn.textContent = mode === "degraded" ? "保存并恢复" : "保存配置";
   }
 
   function hideConfigBanners() {
@@ -7292,7 +7292,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存有效配置后会原地恢复，无需重启。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");

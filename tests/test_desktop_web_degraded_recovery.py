@@ -13,6 +13,8 @@ def test_desktop_web_opens_actionable_model_settings_in_degraded_mode() -> None:
     assert "const pingSnapshot = await requestJson(ENDPOINTS.ping)" in APP_JS
     assert "if (pingSnapshot?.degraded === true)" in APP_JS
     assert "state.degraded = config.degraded === true" in APP_JS
+    assert "保存成功后后端会原地恢复" in APP_JS
+    assert "模型设置修复后重启后端" not in APP_JS
 
 
 def test_desktop_web_surfaces_top_level_degraded_issues() -> None:

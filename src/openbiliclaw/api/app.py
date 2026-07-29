@@ -1839,6 +1839,24 @@ def create_app(
         debounce_seconds=_FEEDBACK_BATCH_DEBOUNCE_SECONDS,
     )
     app.state.feedback_batch_scheduler = feedback_batch_scheduler
+
+    def _complete_degraded_runtime_recovery() -> None:
+        """Publish an atomically rebuilt degraded context as fully available.
+
+        ``RuntimeContext.rebuild_from_config`` constructs every swappable
+        component before publishing any of them, so once it returns the process
+        no longer needs the startup-only degraded guard.  Keep both the
+        authoritative context and the legacy ``app.state`` mirrors in sync, and
+        rebind the one API-owned scheduler that captured ``soul_engine`` during
+        app construction.
+        """
+        ctx.degraded = False
+        ctx.degraded_reason = ""
+        ctx.degraded_issues = []
+        app.state.degraded = False
+        app.state.degraded_reason = ""
+        app.state.degraded_issues = []
+        feedback_batch_scheduler.soul_engine = ctx.soul_engine
     profile_pipeline_backfill_lock = asyncio.Lock()
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
@@ -2030,8 +2048,8 @@ def create_app(
     # config-recovery message on PUT /api/config).
     _degraded_init_detail = (
         "LLM 配置有误，AI 服务无法启动，暂时无法初始化。"
-        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存，"
-        "然后 restart daemon 让新配置生效后再试。"
+        "请到设置页修正 LLM provider 配置（API key / 模型 / 接口地址）并保存；"
+        "校验通过后端会原地恢复，无需重启。"
     )
 
     def _init_blocked_by_degraded() -> bool:
@@ -15195,34 +15213,29 @@ def create_app(
 
             set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
 
-            if bool(getattr(ctx, "degraded", False)):
-                return ConfigUpdateResponse(
-                    ok=True,
-                    config=_config_to_response(
-                        cfg,
-                        issues,
-                        mask_keys=True,
-                        degraded=True,
-                        degraded_reason=str(getattr(ctx, "degraded_reason", "")),
-                    ),
-                    message=(
-                        f"配置已保存到 {saved_path}。AI 服务配置修复后，"
-                        "请重启后端（restart daemon）让新配置生效。"
-                    ),
-                    reloaded=False,
-                    rollback_applied=False,
-                    restart_required=True,
-                )
-
             # ── Hot-reload: rebuild runtime components ──────────────
             reload_message = f"配置已保存到 {saved_path}。"
+            was_degraded = bool(getattr(ctx, "degraded", False))
+            recovered_from_degraded = False
             try:
                 await ctx.rebuild_from_config(cfg)
+                if was_degraded:
+                    # Core runtime activation is the transaction boundary.  A
+                    # degraded context has no old business runtime to preserve,
+                    # and rebuild_from_config publishes only after every
+                    # component was constructed, so it is now safe to remove
+                    # the 503 guard without restarting the process.
+                    _complete_degraded_runtime_recovery()
+                    recovered_from_degraded = True
                 await ctx.restart_background_tasks(
                     app,
                     run_post_reload_llm_work=not suppress_background_llm_work,
                 )
-                reload_message += " 运行时组件已热重载，新配置立即生效。"
+                reload_message += (
+                    " 后端已从降级模式原地恢复，无需重启。"
+                    if was_degraded
+                    else " 运行时组件已热重载，新配置立即生效。"
+                )
                 logger.info("Config hot-reload succeeded")
                 # Notify WebSocket subscribers so the extension re-fetches data
                 with suppress(Exception):
@@ -15241,6 +15254,38 @@ def create_app(
                     restart_required=False,
                 )
             except Exception as exc:
+                if recovered_from_degraded:
+                    # The complete runtime is already live and matches the
+                    # persisted config; only ancillary background-loop startup
+                    # failed. Rolling config.toml back here would create the
+                    # inverse split-brain (healthy new runtime + broken old
+                    # config on disk). Keep the recovered runtime available;
+                    # setup intentionally suppresses those loops until init.
+                    logger.exception(
+                        "Degraded runtime recovered, but background task restart failed"
+                    )
+                    with suppress(Exception):
+                        await ctx.event_hub.publish(
+                            {
+                                "type": "config_reloaded",
+                                "message": (
+                                    "配置已生效，后端已原地恢复；"
+                                    "部分后台任务启动失败，将在后续配置刷新时重试。"
+                                ),
+                            }
+                        )
+                    return ConfigUpdateResponse(
+                        ok=True,
+                        config=_config_to_response(cfg, issues, mask_keys=True),
+                        message=(
+                            reload_message
+                            + " 后端已原地恢复；部分后台任务启动失败，"
+                            "不影响继续初始化。"
+                        ),
+                        reloaded=True,
+                        rollback_applied=False,
+                        restart_required=False,
+                    )
                 logger.exception("Config hot-reload failed — attempting config rollback")
                 if backup_path is None:
                     rollback_message = (
@@ -15276,14 +15321,31 @@ def create_app(
                     )
                     rollback_applied = True
 
-                return ConfigUpdateResponse(
+                failure_response = ConfigUpdateResponse(
                     ok=True,
-                    config=_config_to_response(rollback_cfg, _collect_config_issues(rollback_cfg)),
+                    config=_config_to_response(
+                        rollback_cfg,
+                        _collect_config_issues(rollback_cfg),
+                        degraded=was_degraded,
+                        degraded_reason=(
+                            str(getattr(ctx, "degraded_reason", "")) if was_degraded else ""
+                        ),
+                    ),
                     message=reload_message + rollback_message,
                     reloaded=False,
                     rollback_applied=rollback_applied,
-                    restart_required=False,
+                    # With no prior file to restore, the validated config did
+                    # land on disk but could not activate in-process. Retain the
+                    # old restart fallback for this exceptional bootstrap path.
+                    restart_required=bool(was_degraded and backup_path is None),
                 )
+                if was_degraded and rollback_applied:
+                    failure_response.ok = False
+                    return JSONResponse(
+                        status_code=503,
+                        content=failure_response.model_dump(mode="json"),
+                    )
+                return failure_response
 
     def _normalize_enabled_sources_override(
         raw_enabled: dict[str, bool] | None,
