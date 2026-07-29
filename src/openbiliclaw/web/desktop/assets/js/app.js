@@ -3204,7 +3204,9 @@ ${savedCardFeedbackBarHtml(listKind)}
         const chips = Array.from(row.querySelectorAll(".chip"));
         const restored = chips.find((chip) => chip.dataset.filter === focusedFilter)
           || chips.find((chip) => chip.dataset.filter === state.filter);
-        restored?.focus();
+        // 鼠标 / 触控板滚动不会清掉 Tab 焦点。自动续页重绘库存徽标时，这个
+        // Tab 可能已经远在视口上方；普通 focus() 会把页面从列表底部拉回 Tab。
+        restored?.focus({ preventScroll: true });
       }
       const resetButton = $("#resetFiltersBtn");
       if (resetButton) resetButton.hidden = state.filter === "全部" && !String(state.query || "").trim();

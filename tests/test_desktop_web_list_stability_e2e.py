@@ -58,6 +58,8 @@ class StabilityStub:
     def __init__(self) -> None:
         self.recommendation_gets = 0
         self.append_received = threading.Event()
+        self.append_release = threading.Event()
+        self.append_release.set()
 
 
 def _json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -168,6 +170,7 @@ def stability_server() -> tuple[str, StabilityStub]:
                 self.rfile.read(length)
             if path == "/api/recommendations/append":
                 state.append_received.set()
+                state.append_release.wait(timeout=5.0)
                 return _json_response(self, {"items": _recommendations("B", APPEND_COUNT)})
             return _json_response(self, {"ok": True})
 
@@ -325,6 +328,55 @@ def test_pool_refill_event_keeps_loaded_cards_and_scroll_position(
     assert abs(after["scrollY"] - before["scrollY"]) < 2, "补货事件把滚动位置带跑了"
     # 库存数字本身仍要跟着事件走，重绘收窄不能把头部一起冻住。
     assert chromium_page.locator("#metricPool").text_content().strip() == "70"
+
+
+def test_auto_append_keeps_scroll_position_when_filter_tab_retains_focus(
+    stability_server: tuple[str, StabilityStub],
+    chromium_page: Page,
+) -> None:
+    """点过平台 Tab 后用滚轮下滑不会清掉焦点；续页重绘 Tab 时必须只恢复焦点，
+    不能让浏览器为离屏 Tab 自动改写 scrollY。"""
+    base_url, stub = stability_server
+    chromium_page.goto(f"{base_url}/web/")
+    expect(chromium_page.locator("#videoGrid .video-card:not(.is-skeleton)")).to_have_count(
+        CARD_COUNT, timeout=8000
+    )
+
+    active_filter = chromium_page.locator('#filterRow .chip[data-filter="全部"]')
+    active_filter.click()
+    expect(active_filter).to_be_focused()
+
+    stub.append_release.clear()
+    try:
+        chromium_page.evaluate(
+            "() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })"
+        )
+        chromium_page.evaluate("() => window.dispatchEvent(new Event('scroll'))")
+        assert stub.append_received.wait(timeout=6.0), "滚到底没有触发自动加载"
+        before = chromium_page.evaluate(
+            """() => ({
+              scrollY: window.scrollY,
+              activeFilter: document.activeElement?.dataset?.filter || '',
+            })"""
+        )
+        assert before["activeFilter"] == "全部", "滚轮浏览不应清掉平台 Tab 的键盘焦点"
+
+        stub.append_release.set()
+        expect(chromium_page.locator("#videoGrid .video-card:not(.is-skeleton)")).to_have_count(
+            CARD_COUNT + APPEND_COUNT, timeout=6000
+        )
+        chromium_page.wait_for_timeout(250)
+        after = chromium_page.evaluate(
+            """() => ({
+              scrollY: window.scrollY,
+              activeFilter: document.activeElement?.dataset?.filter || '',
+            })"""
+        )
+    finally:
+        stub.append_release.set()
+
+    assert after["activeFilter"] == "全部", "重绘后仍应保留平台 Tab 的键盘焦点"
+    assert abs(after["scrollY"] - before["scrollY"]) < 2, "自动续页把页面跳回了平台 Tab"
 
 
 def test_tab_resume_hydration_preserves_locally_loaded_cards(

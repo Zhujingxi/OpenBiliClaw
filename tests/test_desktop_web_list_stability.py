@@ -44,6 +44,15 @@ def test_recommendation_grid_is_rendered_incrementally() -> None:
     assert "grid.appendChild(skeleton);" in sync
 
 
+def test_filter_focus_restoration_does_not_scroll_back_to_tabs() -> None:
+    """平台 Tab 留着焦点时，用户仍可能已用滚轮浏览到列表底部。自动续页会重绘
+    Tab 库存徽标；恢复键盘焦点不能把视口也带回已经离屏的 Tab。"""
+    render_filters = _function_body("renderFilters")
+
+    assert "restored?.focus({ preventScroll: true });" in render_filters
+    assert "restored?.focus();" not in render_filters
+
+
 def test_pool_events_do_not_redraw_the_recommendation_grid() -> None:
     """refresh.pool_updated 每轮补货会打好几次，它只该刷新库存 / 头部 / 侧栏。"""
     handle_runtime = _function_body("handleRuntimeEvent")

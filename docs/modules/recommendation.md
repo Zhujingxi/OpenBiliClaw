@@ -36,6 +36,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | M119 风格多样性与快速文案增强 | ✅ | `reshuffle` 现在会同时约束 `topic_key + style_key`，并把快速 fallback 文案润色成更自然的老B友短句 |
 | M120 来源上限与硬配比 | ✅ | `reshuffle` 现在会对 `topic_key + style_key + source` 同时加硬上限，小批次优先保留不同来源，10 条一批时单一来源最多 3 条 |
 | M121 推荐自动续页 | ✅ | popup 与移动 Web 滚到底附近时会调用 `append` 从 discovery pool 再续 10 条，不再只能整组“换一批”；插件 / side panel 与移动 Web 的自动续页都需要用户向下滚动 / 翻页先触发一次意图门闩，后台和推荐消费后的 `refresh.pool_updated` 只刷新池子状态与可换提示，不会重拉 `/api/recommendations` 覆盖已 append 的历史卡片，也不会在加载更多哨兵仍可见时空转消耗候选池；底部「加载更多」按钮仍作为兜底，并会在插入追加卡片前预热封面 |
+| PC Web 自动续页滚动稳定 | ✅ | 平台 Tab 即使在用户用滚轮 / 触控板浏览到列表底部后仍持有键盘焦点，续页完成重绘 Tab 库存徽标时也只恢复焦点、不把离屏 Tab 滚回视口；推荐卡增量追加、当前 `scrollY` 与键盘可达性同时保留。 |
 | Web 空失败态恢复 | ✅ | 移动与桌面 Web 会把推荐/库存读取失败与真实空结果分开：瞬时超时进入 1/2/4/8 秒、最多四次的单飞恢复；成功空数组终止推荐重试；`refresh.pool_updated` 只在当前列表仍为空且上次推荐读取失败时触发条件恢复，已有或追加卡片不会被覆盖。库存状态可由含 `pool_available_count` 的实时快照独立恢复，不再把未知状态渲染成零库存。 |
 | M122 来源优先补齐 | ✅ | 推荐选片时会先补齐不同 `source`，再限制重复 `style`，避免 `explore` 把 `search/trending` 挤出同一批结果 |
 | 平台定向推荐（PC Web） | ✅ | `serve / reshuffle / append`（含 `*_with_result`）新增默认空的 keyword-only `source_platform`。非空时只装载该 canonical 平台的候选、跳过跨平台保底补位，其余 curator 打分、amplification guard、embedding/MMR、topic/style/broad-topic 多样性、视觉加成、持久化与 shown 提交全部复用既有实现——平台作用域只缩小候选集合，绝不是"先生成混合批次再过滤结果"。返回前经 `_enforce_platform_scope()` 校验，发现跨平台行记 ERROR 并丢弃，不让泄漏进响应。省略该参数时调用形状与行为与引入前完全一致（对签名不确定的兼容对象也只在真的带平台时才传新关键字）。**仅 PC Web 有该交互**：移动 Web、扩展 popup / side panel 与 CLI 没有平台 Tab，继续走不带平台的兼容路径，行为不变 |
@@ -200,6 +201,7 @@ items = await engine.append_recommendations(
 行为说明：
 
 - 用于 popup 和移动 Web 推荐流的续页，不会清空当前列表
+- PC Web 使用同一 `append` 契约并在续页完成后更新平台库存 Tab；若焦点仍停在已经离屏的 Tab，DOM 重绘只恢复键盘焦点而不改变当前滚动位置
 - 会先排除前端已经展示过的 `excluded_bvids`
 - 若 API 看到 `pool_available_count=0`，会立即返回 `items=[]` 并按 30 秒 debounce 触发一次后台补货；不会读取画像或进入推荐引擎
 - 若 `excluded_bvids` 或持久化已看账本把候选清空，引擎直接返回空数组，不执行 curator、MMR embedding 或推荐历史写入
