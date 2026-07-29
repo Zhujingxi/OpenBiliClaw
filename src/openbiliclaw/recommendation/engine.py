@@ -97,35 +97,53 @@ _VISUAL_COVER_MIN_COVERAGE = 0.6
 # centroids (same-modal image↔image cosine), not text interest anchors. Runs in
 # parallel and is added on top of the cover↔text bonus in serve().
 #
-# CALIBRATION PROVENANCE: MEASURED 2026-07-27 against dashscope
-# qwen3-vl-embedding (dim=1024). Two distinct quantities were measured:
+# SCORING: margin-based, not absolute floor/ceil. The cover modality cannot
+# distinguish like/dislike everywhere — measured (2026-07-28, see below),
+# the user's 2 pos and 3 neg centroids are VISUALLY INTERLEAVED: 2/6 pos×neg
+# pairs are "contested" (cosine 0.674 and 0.576, >= 0.40). In a contested region
+# a like and a dislike point at the same cover style (love-hate), so the cover
+# has no say. We abstain there. Where the cover DOES separate (s_pos - s_neg
+# beyond a margin), we boost if the candidate leans liked, suppress if it leans
+# disliked. One number on the difference, not two floor/ceil on absolutes —
+# self-calibrating because s_pos and s_neg share one embedding/pipeline (the
+# 0.80 lesson generalized: absolute thresholds depend on distribution intuition;
+# a difference under the same yardstick does not).
 #
-#  1. COVER-PAIR cosine (random pairs of real covers, 452 covers / 101,926
-#     pairs via scripts/calibrate_visual_thresholds.py): p50=0.219 p95=0.409
-#     p99=0.497. This is the *spread* of covers in the space — it sets the
-#     CLUSTER threshold in visual_profile.py (whether two liked covers merge
-#     into one taste peak), NOT this bonus's floor/ceil.
-#  2. CANDIDATE-vs-CENTROID cosine (834 pool candidates vs the user's liked
-#     cover centroids, measured on the live pool): p50=0.310 p75=0.481
-#     p90=0.561 p95=0.609 p99=0.732 p100=0.889. This is what this bonus
-#     actually computes — a candidate's max cosine against the user's taste
-#     peaks — so THIS is the distribution the floor/ceil come from. It sits
-#     higher than the cover-pair spread because a centroid is the mean of
-#     liked covers and candidates are discovered for this user, so both sides
-#     are already on-style versus a random pair.
-#
-# The earlier 0.22/0.41 (cover-pair p50/p95) was the wrong distribution: it
-# made 70% of candidates earn a bonus and 38% hit the 0.05 cap on the live
-# pool, collapsing the top of the ranking into a flat band of ties — the same
-# saturation symptom the cover bonus had before its own live recalibration.
-# Floor at p50 means ~50% of candidates earn some bonus; ceil at p95 means ~5%
-# reach the cap. Reopen after any embedding provider/model swap OR once the
-# centroid set grows (more liked covers shift the candidate-vs-centroid
-# distribution): rerun the live measurement and re-derive (rule 3).
-_VISUAL_PROFILE_BONUS_MAX = 0.05  # hard cap on the additive nudge
-_VISUAL_PROFILE_SIM_FLOOR = 0.31  # live p50 of candidate-vs-centroid cosine
-_VISUAL_PROFILE_SIM_CEIL = 0.61  # live p95 of candidate-vs-centroid cosine
-_VISUAL_PROFILE_PENALTY_MAX = 0.05  # UNUSED (neg dropped, see _visual_profile_bonus_from_vec)
+# CALIBRATION PROVENANCE: MEASURED 2026-07-28 against dashscope
+# qwen3-vl-embedding (dim=1024) via scripts/measure_visual_profile_geometry.py
+# on the live pool (2 pos + 3 neg centroids, 1366 candidate covers):
+#   contested pos×neg pairs: pos0×neg0=0.674, pos1×neg1=0.576 (>= 0.40)
+#   net (s_pos - s_neg): p5=-0.154 p25=-0.075 p50=-0.024 p75=0.029 p90=0.078
+#                         p95=0.114 p99=0.187   (61% of candidates net < 0)
+# margin 0.05 sits between p75 (0.029) and p90 (0.078) → only the clearly
+# separated top ~20% boost and bottom ~35% suppress; the contested middle
+# grays out. boost scale from net p95 (0.114), suppress scale from net p5
+# (-0.154). Reopen after any embedding provider/model swap OR once the
+# centroid set grows: rerun the geometry script and re-derive (rule 3).
+_VISUAL_PROFILE_BOOST_MAX = 0.05  # signed bonus cap when candidate clearly leans liked
+_VISUAL_PROFILE_SUPPRESS_MAX = 0.08  # signed demotion cap when clearly leans disliked
+_VISUAL_PROFILE_MARGIN = 0.05  # |s_pos - s_neg| at/above which the cover has an opinion
+# pos×neg centroid cosine at/above which the pair is "contested" (love-hate:
+# the cover modality cannot distinguish like/dislike in this region → gray).
+# CALIBRATION: the 6 live pos×neg centroid pairs split into a high cluster
+# (0.674, 0.576 — genuinely overlapping) and a low cluster (0.377, 0.327,
+# 0.318, 0.219 — separated), with a clean gap between 0.377 and 0.576. 0.45
+# sits in that gap: it flags the 2 true overlaps and leaves the 4 separated
+# pairs active. (0.40 was too low — centroid means are more cohesive than raw
+# covers, so 0.40 tripped almost every pair and grayed P3 out entirely.)
+_VISUAL_PROFILE_CONTESTED = 0.45
+# Margin required to act in a CONTESTED region (love-hate: centroids overlap,
+# so the cover is less trustworthy there). 2x the normal margin: a candidate
+# must clear a higher bar to boost/suppress, but a clear win still speaks
+# (graying clear wins just because centroids overlap threw away ~40% of P3).
+_VISUAL_PROFILE_CONTESTED_MARGIN = 0.10
+# Net (s_pos - s_neg) scale endpoints for the boost/suppress mapping. From the
+# live measurement: p95=0.114 (boost full-strength), p5=-0.154 (suppress full).
+_VISUAL_PROFILE_NET_P95 = 0.114
+_VISUAL_PROFILE_NET_P5 = -0.154
+# Legacy single-signal caps retained for reference / snapshot stats; the margin
+# design supersedes the absolute floor/ceil nudges below.
+_VISUAL_PROFILE_PENALTY_MAX = 0.05  # UNUSED (margin scoring, see _visual_profile_bonus_from_vec)
 
 
 # Video keyframe bonus (P3) — INDEPENDENT of both bonuses above. Compares a
@@ -136,34 +154,32 @@ _VISUAL_PROFILE_PENALTY_MAX = 0.05  # UNUSED (neg dropped, see _visual_profile_b
 # taste" is the right question for recall, and max is more sensitive to that
 # than a mean that washes out a single strong match.
 #
+# SCORING: same margin design as P1 (boost/suppress/gray on s_pos - s_neg, with
+# contested-pair abstention) — see _VISUAL_PROFILE_* above. P3 reuses P1's
+# centroids and the same geometry, so it shares the contested-set and margin.
+#
 # CALIBRATION PROVENANCE: MEASURED 2026-07-28 against dashscope
 # qwen3-vl-embedding (dim=1024) — 99 Bilibili pool candidates with real
-# videoshot sprite crops (160x90/480x270 stills), max-pooled best cosine
-# against the SAME P1 pos/neg centroids this bonus reads:
-#   pos best sim: p50=0.397  p75=0.491  p90=0.557  p95=0.639  p99=0.697
-#   neg best sim: p50=0.395  p75=0.481  p90=0.566  p95=0.597  p99=0.648
-#   net (pos-neg): p50=+0.022  p95=+0.093   overlap(neg>pos)=41%
-# Floor/ceil = p50/p95 of pos best sim, mirroring the P1 cover convention
-# (candidate-vs-centroid cosine). The earlier borrowed 0.22/0.41 was the
-# cover-PAIR distribution and saturates here: p50 is 0.397, so a 0.22 floor
-# puts nearly every candidate's positive term at the cap.
-#
-# NOTE on the pos/neg overlap: P3 reuses P1's centroids and the same
-# ``positive - penalty`` formula, so it inherits P1's neg-cancellation
-# tendency. P3 is MARGINALLY better than P1 (net p50 +0.022 vs P1's -0.024;
-# overlap 41% vs P1's >50%) — keyframes separate liked/disliked taste a
-# little better than covers, but not enough to cure the cancellation: pos
-# and neg distributions still nearly coincide (both p50≈0.396, p95≈0.62),
-# so the median candidate's net bonus is ~0 and only the tail (net p95=
-# 0.093) earns a visible nudge. This is the same structural limit P1 hit
-# (cover is a weak visual proxy + binary feedback doesn't separate visual
-# taste); P3 softens it without removing it. Reopen after any embedding
-# provider/model swap (rule 3): rerun
-# scripts/prewarm_and_measure_keyframes.py and re-derive from the fresh p50/p95.
-_KEYFRAME_BONUS_MAX = 0.05  # hard cap on the additive nudge
-_KEYFRAME_SIM_FLOOR = 0.40  # measured p50 of keyframe-vs-centroid pos best sim
-_KEYFRAME_SIM_CEIL = 0.64  # measured p95 of keyframe-vs-centroid pos best sim
-_KEYFRAME_PENALTY_MAX = 0.05  # UNUSED now (neg penalty dropped, see _keyframe_bonus_from_vecs)
+# videoshot sprite crops, max-pooled best cosine against the P1 pos/neg
+# centroids (scripts/prewarm_and_measure_keyframes.py):
+#   net (pos-neg): p5=-0.081 p25=-0.018 p50=+0.022 p75=0.052 p90=0.069
+#                  p95=0.093 p99=0.258   overlap(neg>pos)=41%
+# P3 is marginally better than P1 at separating liked/disliked (net p50 +0.022
+# vs P1's -0.024) — keyframes discriminate a little better than covers, but the
+# interleaving still costs ~40% of candidates to the gray band. boost scale from
+# net p95 (0.093), suppress scale from net p5 (-0.081); smaller than P1's because
+# the keyframe net range is tighter. Reopen after any embedding provider/model
+# swap (rule 3): rerun scripts/prewarm_and_measure_keyframes.py.
+_KEYFRAME_BOOST_MAX = 0.05  # signed bonus cap when a frame clearly leans liked
+_KEYFRAME_SUPPRESS_MAX = 0.04  # signed demotion cap when clearly leans disliked
+_KEYFRAME_MARGIN = 0.05  # |s_pos - s_neg| at/above which the frames have an opinion
+_KEYFRAME_CONTESTED = 0.45  # shares P1's contested threshold (same centroids)
+# Margin to act in a contested region (2x normal), mirroring P1.
+_KEYFRAME_CONTESTED_MARGIN = 0.10
+# Net scale endpoints from the live keyframe measurement: p95=0.093, p5=-0.081.
+_KEYFRAME_NET_P95 = 0.093
+_KEYFRAME_NET_P5 = -0.081
+_KEYFRAME_PENALTY_MAX = 0.05  # UNUSED (margin scoring supersedes, see _keyframe_bonus_from_vecs)
 _KEYFRAME_DEFAULT_MAX_FRAMES = 4  # frames sampled per video
 
 
@@ -187,10 +203,13 @@ _DANMAKU_SIM_CEIL = 0.65  # text↔text cosine at/above → full bonus
 # can reach before per-platform normalization. Normalization rescales each
 # platform's combined_bonus to [0, this], so a platform missing signals
 # (bangumi/xhs) still reaches the same height as Bilibili at its top.
+# Visual signals are now SIGNED (margin scoring: boost +, suppress -), so the
+# cap is the sum of the boost caps (the positive ceiling); signed normalization
+# maps each platform's [g_min, g_max] -> [-cap, +cap].
 _COMBINED_BONUS_CAP = (
     _VISUAL_COVER_BONUS_MAX
-    + _VISUAL_PROFILE_BONUS_MAX
-    + _KEYFRAME_BONUS_MAX
+    + _VISUAL_PROFILE_BOOST_MAX
+    + _KEYFRAME_BOOST_MAX
     + _DANMAKU_BONUS_MAX
 )
 
@@ -2312,7 +2331,10 @@ class RecommendationEngine:
 
         from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
         from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
-        from openbiliclaw.recommendation.visual_profile import build_centroids
+        from openbiliclaw.recommendation.visual_profile import (
+            build_centroids,
+            cross_clean_labels,
+        )
 
         # feedback rows: {bvid, cover_url, feedback_type, ...}. Use the
         # dedicated feedback-cover query, NOT get_recommendations — that one
@@ -2375,8 +2397,23 @@ class RecommendationEngine:
 
         pos_vecs = await _vecs_for(pos_urls)
         neg_vecs = await _vecs_for(neg_urls)
-        pos_clusters = build_centroids(pos_vecs)
-        neg_clusters = build_centroids(neg_vecs)
+        # Cross-clean label noise BEFORE clustering: drop liked/disliked covers
+        # that sit in the enemy's territory (misclicks / love-hate contradictions).
+        # Done before clustering so noise can't pollute a centroid first. The
+        # dropped covers are NOT flipped to the opposite polarity — just removed
+        # from centroid construction (kept raw in the feedback table for later
+        # hard-negative use). Conservative drop_margin: on small feedback sets a
+        # single drop shifts the centroid a lot, so only clear cases are pruned.
+        cleaned = cross_clean_labels(pos_vecs, neg_vecs, k=3, drop_margin=0.08)
+        if cleaned.dropped_pos or cleaned.dropped_neg:
+            logger.info(
+                "Visual profile cross-clean dropped %d pos / %d neg covers (label noise "
+                "in enemy territory); clustering %d pos / %d neg",
+                len(cleaned.dropped_pos), len(cleaned.dropped_neg),
+                len(cleaned.kept_pos), len(cleaned.kept_neg),
+            )
+        pos_clusters = build_centroids(cleaned.kept_pos)
+        neg_clusters = build_centroids(cleaned.kept_neg)
 
         stored: list[dict[str, Any]] = []
         for c in pos_clusters:
@@ -2426,46 +2463,68 @@ class RecommendationEngine:
         cover_vec: list[float],
         pos_centroids: list[list[float]],
         neg_centroids: list[list[float]],
+        contested: set[tuple[int, int]],
     ) -> float:
-        """Map cover↔pos-centroid cosine to a bounded bonus (positive-only).
+        """Margin-score a cover against the pos/neg centroids (signed).
 
-        Same-modal image↔image cosine uses the ``_VISUAL_PROFILE_SIM_*`` range
-        (independent of the cross-modal cover↔text range).
+        Same-modal image↔image cosine. The cover modality cannot distinguish
+        like/dislike everywhere (the user's liked/disliked covers are visually
+        interleaved — see ``_VISUAL_PROFILE_*`` calibration), so this abstains
+        where the cover has no say and acts only where it clearly separates:
 
-        Negative centroids are accepted but NO LONGER used as a penalty. The
-        prior ``positive - penalty`` design cancelled the pos signal for over
-        half of candidates: liked and disliked covers overlap in visual space
-        (a cover is a weak visual proxy, and binary like/dislike feedback does
-        not separate *visual* taste from topic/length/UP-style dislike), so
-        the neg best-sim ran as high as the pos best-sim (live p50: neg 0.440
-        vs pos 0.405) and the penalty ate the positive. Dropping the penalty
-        releases the validated pos-direction signal; the neg centroids are
-        still built and persisted so a future, sharper feedback model can
-        reintroduce a conditional penalty without a rebuild.
+        - Find the best pos centroid (i) and best neg centroid (j).
+        - If (i, j) is a CONTESTED pair (cosine >= _VISUAL_PROFILE_CONTESTED),
+          the candidate sits in a love-hate region: the centroids overlap, so
+          the bar to trust the cover is HIGHER. Require |net| >=
+          _VISUAL_PROFILE_CONTESTED_MARGIN (2x the normal margin) to act; the
+          ambiguous middle grays out. A candidate with a CLEAR net still speaks
+          — the contested region is skeptical, not mute (graying a clear win
+          just because the centroids overlap threw away ~40% of P3's signal).
+        - Else the normal margin applies: s_pos - s_neg >= margin → boost,
+          s_neg - s_pos >= margin → suppress (negative).
+        - Else (|net| < the applicable margin) → gray.
+
+        Returns a SIGNED float in [-_SUPPRESS_MAX, +_BOOST_MAX]. The neg
+        centroids are used here (unlike the prior pure-pos design) because the
+        contested + margin geometry is what makes them safe: a neg match only
+        suppresses when it clearly wins past the (possibly raised) margin.
         """
         if not cover_vec:
             return 0.0
+        if not pos_centroids and not neg_centroids:
+            return 0.0
         from openbiliclaw.llm.embedding import cosine_similarity
 
-        def _best(centroids: list[list[float]]) -> float:
-            best = 0.0
-            for c in centroids:
+        def _best_idx(centroids: list[list[float]]) -> tuple[int, float]:
+            best_i, best_s = -1, 0.0
+            for idx, c in enumerate(centroids):
                 sim = cosine_similarity(cover_vec, c)
-                if sim > best:
-                    best = sim
-            return best
+                if sim > best_s:
+                    best_s, best_i = sim, idx
+            return best_i, best_s
 
-        def _map(sim: float, floor: float, ceil: float, cap: float) -> float:
-            span = ceil - floor
+        i, s_pos = _best_idx(pos_centroids) if pos_centroids else (-1, 0.0)
+        j, s_neg = _best_idx(neg_centroids) if neg_centroids else (-1, 0.0)
+
+        # Contested region: best pos/neg centroids are a love-hate pair. Raise
+        # the margin (don't mute) — a candidate with a clear net still speaks.
+        contested_region = i >= 0 and j >= 0 and (i, j) in contested
+        margin = _VISUAL_PROFILE_CONTESTED_MARGIN if contested_region else _VISUAL_PROFILE_MARGIN
+
+        net = s_pos - s_neg
+        if net >= margin:
+            # Boost: map [margin, net_p95] -> [0, BOOST_MAX].
+            span = _VISUAL_PROFILE_NET_P95 - margin
             if span <= 0:
-                return 0.0
-            norm = max(0.0, min(1.0, (sim - floor) / span))
-            return cap * norm
-
-        return _map(
-            _best(pos_centroids),
-            _VISUAL_PROFILE_SIM_FLOOR, _VISUAL_PROFILE_SIM_CEIL, _VISUAL_PROFILE_BONUS_MAX,
-        )
+                return _VISUAL_PROFILE_BOOST_MAX
+            return _VISUAL_PROFILE_BOOST_MAX * min(1.0, (net - margin) / span)
+        if -net >= margin:
+            # Suppress: map [margin, -net_p5] -> [0, -SUPPRESS_MAX].
+            span = (-_VISUAL_PROFILE_NET_P5) - margin
+            if span <= 0:
+                return -_VISUAL_PROFILE_SUPPRESS_MAX
+            return -_VISUAL_PROFILE_SUPPRESS_MAX * min(1.0, (-net - margin) / span)
+        return 0.0
 
     async def _visual_profile_bonus_map(
         self,
@@ -2487,14 +2546,28 @@ class RecommendationEngine:
             return {}
 
         from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+        from openbiliclaw.recommendation.visual_profile import (
+            VisualCluster,
+            contested_pairs,
+        )
 
         cache = self._load_visual_profile_cache()
         if not cache:
             return {}
-        pos_centroids = [r["centroid"] for r in cache if r.get("polarity") == "pos"]
-        neg_centroids = [r["centroid"] for r in cache if r.get("polarity") == "neg"]
+        pos_rows = [r for r in cache if r.get("polarity") == "pos"]
+        neg_rows = [r for r in cache if r.get("polarity") == "neg"]
+        pos_centroids = [r["centroid"] for r in pos_rows]
+        neg_centroids = [r["centroid"] for r in neg_rows]
         if not pos_centroids and not neg_centroids:
             return {}
+
+        # Contested pairs: pos/neg centroid index pairs whose cosine >= threshold
+        # (love-hate regions where the cover has no say). Computed once per batch.
+        contested = contested_pairs(
+            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in pos_rows],
+            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in neg_rows],
+            threshold=_VISUAL_PROFILE_CONTESTED,
+        )
 
         with_cover = 0
         warmed = 0
@@ -2509,8 +2582,12 @@ class RecommendationEngine:
             if not cover_vec:
                 continue
             warmed += 1
-            bonus = self._visual_profile_bonus_from_vec(cover_vec, pos_centroids, neg_centroids)
-            if bonus > 0.0:
+            bonus = self._visual_profile_bonus_from_vec(
+                cover_vec, pos_centroids, neg_centroids, contested
+            )
+            # Signed: keep both boosts (>0) and suppressions (<0). A zero means
+            # the candidate is in the contested/gray band — no entry, no nudge.
+            if abs(bonus) > 0.0:
                 bonuses[bvid] = bonus
         # Fairness guard (same rationale as _visual_bonus_map): withhold the
         # bonus for the whole batch until enough cover-bearing candidates are
@@ -2528,7 +2605,7 @@ class RecommendationEngine:
         candidates: list[DiscoveredContent],
         combined_bonus: dict[str, float],
     ) -> dict[str, float]:
-        """Rescale the stacked bonus per-platform to [0, _COMBINED_BONUS_CAP].
+        """Rescale the stacked bonus per-platform to [-cap, +cap] (signed).
 
         Without this, platforms missing a signal (bangumi/xhs have no danmaku
         or keyframes) are structurally shorter on combined_bonus than Bilibili
@@ -2539,16 +2616,22 @@ class RecommendationEngine:
 
         Per-platform min-max normalization fixes the height: within each
         platform's own pool, the strongest candidate's bonus is stretched to
-        ``_COMBINED_BONUS_CAP`` and the weakest to 0. A platform that lacks a
-        signal only loses *intra-platform* discrimination for it (its rows
-        still spread across the same [0, cap] range by their remaining
-        signals), not *cross-platform* height.
+        ``+cap`` and the weakest to ``-cap``. A platform that lacks a signal
+        only loses *intra-platform* discrimination for it (its rows still
+        spread across the same [-cap, +cap] range by their remaining signals),
+        not *cross-platform* height.
 
-        A platform group whose max bonus is 0 (no signal at all, e.g. a
-        platform with neither covers nor danmaku) is left at 0 — stretching a
-        zero range would NaN the bonuses. Empty input returns empty, so the
-        all-signals-off / no-centroids case stays byte-identical (no bonus
-        keys -> no normalization -> empty dict).
+        SIGNED because the visual signals (P1/P3) now use margin scoring that
+        can suppress (negative) as well as boost. Mapping the full [g_min,
+        g_max] range to [-cap, +cap] keeps a gray/zero candidate near 0 when
+        the platform's range is roughly symmetric, and levels both the top
+        (boost) and bottom (suppress) per platform.
+
+        A platform group whose max == min (all equal, including all-zero) is
+        left as-is — stretching a zero span would NaN, and an all-equal group
+        carries no intra-platform information to rescale anyway. Empty input
+        returns empty, so the all-signals-off / no-centroids case stays
+        byte-identical (no bonus keys -> no normalization -> empty dict).
         """
         if not combined_bonus:
             return combined_bonus
@@ -2563,12 +2646,9 @@ class RecommendationEngine:
             platform = str(getattr(cand, "source_platform", "") or "").strip() or "bilibili"
             platform_of[bvid] = platform
 
-        # Group bonus values by platform (only bvids present in combined_bonus;
-        # a 0-bonus candidate that isn't a key contributes nothing to min/max).
+        # Group ALL bonus values (incl. negative suppressions) by platform.
         groups: dict[str, list[float]] = {}
         for bvid, bonus in combined_bonus.items():
-            if bonus <= 0.0:
-                continue
             groups.setdefault(platform_of.get(bvid, "bilibili"), []).append(bonus)
 
         if not groups:
@@ -2581,18 +2661,14 @@ class RecommendationEngine:
             g_min = min(vals)
             span = g_max - g_min
             if span <= 0.0:
-                # All nonzero bonuses in this platform are equal — give them
-                # the full cap (they tie intra-platform regardless).
-                for bvid, bonus in combined_bonus.items():
-                    if platform_of.get(bvid, "bilibili") == platform and bonus > 0.0:
-                        normalized[bvid] = cap
+                # All bonuses in this platform are equal (incl. all-zero) — no
+                # intra-platform information to rescale; leave as-is.
                 continue
             for bvid, bonus in combined_bonus.items():
                 if platform_of.get(bvid, "bilibili") != platform:
                     continue
-                if bonus <= 0.0:
-                    continue
-                normalized[bvid] = cap * (bonus - g_min) / span
+                # Map [g_min, g_max] -> [-cap, +cap].
+                normalized[bvid] = cap * (2.0 * (bonus - g_min) / span - 1.0)
         return normalized
 
     def _keyframe_bonus_from_vecs(
@@ -2600,52 +2676,64 @@ class RecommendationEngine:
         frame_vecs: list[list[float]],
         pos_centroids: list[list[float]],
         neg_centroids: list[list[float]],
+        contested: set[tuple[int, int]],
     ) -> float:
-        """Max-pool frame↔pos-centroid cosine into a bounded bonus (positive-only).
+        """Margin-score max-pooled frames against the pos/neg centroids (signed).
 
         Max-pool (not mean): the question is "does ANY sampled frame look like
         the user's taste", and a mean would wash out one strong match among
-        several unremarkable frames. Mirrors
-        :meth:`_visual_profile_bonus_from_vec` but on its own ``_KEYFRAME_*``
-        range — keyframes are downscaled stills whose distribution differs
-        from full-size covers.
+        several unremarkable frames. Mirrors :meth:`_visual_profile_bonus_from_vec`
+        but on its own ``_KEYFRAME_*`` scale — keyframes are downscaled stills
+        whose net range is tighter than full-size covers.
 
-        Negative centroids are accepted but NO LONGER used as a penalty, for
-        the same reason as P1: P3 reuses P1's centroids, and the live
-        keyframe-vs-centroid measurement showed pos/neg best-sim nearly
-        coinciding (p50: pos 0.397 vs neg 0.395), so the penalty cancelled
-        the positive for 75% of equipped candidates (only 25/99 earned a
-        nonzero bonus). P3 is marginally better than P1 (net p50 +0.022 vs
-        P1's -0.024) but not enough to justify a penalty that mostly
-        subtracts signal. The neg centroids stay built/persisted for a
-        future conditional-penalty reintroduction.
+        Same margin design as P1 (see _visual_profile_bonus_from_vec): find the
+        best pos (i) and best neg (j) centroid across all frames; if (i,j) is a
+        contested pair, raise the margin (don't mute) — a clear net still speaks;
+        else boost/suppress on the net past the normal margin. The neg centroids
+        are used (the contested + margin geometry makes them safe) — P3 reuses
+        P1's centroids and its contested set. Returns a SIGNED float in
+        [-_SUPPRESS_MAX, +_BOOST_MAX].
         """
-        if not frame_vecs:
+        if not frame_vecs or (not pos_centroids and not neg_centroids):
             return 0.0
         from openbiliclaw.llm.embedding import cosine_similarity
 
-        def _best(centroids: list[list[float]]) -> float:
-            best = 0.0
-            for frame_vec in frame_vecs:
-                if not frame_vec:
-                    continue
-                for centroid in centroids:
-                    sim = cosine_similarity(frame_vec, centroid)
-                    if sim > best:
-                        best = sim
-            return best
+        # Best pos/neg centroid across all frames (max-pool), keeping the index
+        # that achieved it so we can test the contested pair.
+        best_pos_i, best_pos_s = -1, 0.0
+        for fv in frame_vecs:
+            if not fv:
+                continue
+            for idx, c in enumerate(pos_centroids):
+                sim = cosine_similarity(fv, c)
+                if sim > best_pos_s:
+                    best_pos_s, best_pos_i = sim, idx
+        best_neg_j, best_neg_s = -1, 0.0
+        for fv in frame_vecs:
+            if not fv:
+                continue
+            for idx, c in enumerate(neg_centroids):
+                sim = cosine_similarity(fv, c)
+                if sim > best_neg_s:
+                    best_neg_s, best_neg_j = sim, idx
 
-        def _map(sim: float, floor: float, ceil: float, cap: float) -> float:
-            span = ceil - floor
-            if span <= 0:
-                return 0.0
-            norm = max(0.0, min(1.0, (sim - floor) / span))
-            return cap * norm
-
-        return _map(
-            _best(pos_centroids),
-            _KEYFRAME_SIM_FLOOR, _KEYFRAME_SIM_CEIL, _KEYFRAME_BONUS_MAX,
+        contested_region = (
+            best_pos_i >= 0 and best_neg_j >= 0 and (best_pos_i, best_neg_j) in contested
         )
+        margin = _KEYFRAME_CONTESTED_MARGIN if contested_region else _KEYFRAME_MARGIN
+
+        net = best_pos_s - best_neg_s
+        if net >= margin:
+            span = _KEYFRAME_NET_P95 - margin
+            if span <= 0:
+                return _KEYFRAME_BOOST_MAX
+            return _KEYFRAME_BOOST_MAX * min(1.0, (net - margin) / span)
+        if -net >= margin:
+            span = (-_KEYFRAME_NET_P5) - margin
+            if span <= 0:
+                return -_KEYFRAME_SUPPRESS_MAX
+            return -_KEYFRAME_SUPPRESS_MAX * min(1.0, (-net - margin) / span)
+        return 0.0
 
     async def _keyframe_bonus_map(
         self,
@@ -2667,14 +2755,27 @@ class RecommendationEngine:
             return {}
 
         from openbiliclaw.llm.embedding import keyframe_embedding_cache_key
+        from openbiliclaw.recommendation.visual_profile import (
+            VisualCluster,
+            contested_pairs,
+        )
 
         cache = self._load_visual_profile_cache()
         if not cache:
             return {}
-        pos_centroids = [r["centroid"] for r in cache if r.get("polarity") == "pos"]
-        neg_centroids = [r["centroid"] for r in cache if r.get("polarity") == "neg"]
+        pos_rows = [r for r in cache if r.get("polarity") == "pos"]
+        neg_rows = [r for r in cache if r.get("polarity") == "neg"]
+        pos_centroids = [r["centroid"] for r in pos_rows]
+        neg_centroids = [r["centroid"] for r in neg_rows]
         if not pos_centroids and not neg_centroids:
             return {}
+
+        # P3 shares P1's centroids and contested set (same geometry).
+        contested = contested_pairs(
+            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in pos_rows],
+            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in neg_rows],
+            threshold=_KEYFRAME_CONTESTED,
+        )
 
         bonuses: dict[str, float] = {}
         for candidate in candidates:
@@ -2688,8 +2789,10 @@ class RecommendationEngine:
                     frame_vecs.append(vec)
             if not frame_vecs:
                 continue
-            bonus = self._keyframe_bonus_from_vecs(frame_vecs, pos_centroids, neg_centroids)
-            if bonus > 0.0:
+            bonus = self._keyframe_bonus_from_vecs(
+                frame_vecs, pos_centroids, neg_centroids, contested
+            )
+            if abs(bonus) > 0.0:
                 bonuses[bvid] = bonus
         return bonuses
 

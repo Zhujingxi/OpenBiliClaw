@@ -108,6 +108,9 @@ async def _run(limit: int, measure_only: bool) -> dict[str, Any]:
     pos_best: list[float] = []
     neg_best: list[float] = []
     net: list[float] = []
+    # Track which (pos_i, neg_j) pair each candidate lands on, to see if
+    # contested pairs are eating the boost/suppress tail.
+    pair_counts: dict[tuple[int, int], int] = {}
     equipped = 0
     for r in rows:
         bvid = str(r[0] or "")
@@ -119,13 +122,32 @@ async def _run(limit: int, measure_only: bool) -> dict[str, Any]:
         if not frame_vecs:
             continue
         equipped += 1
-        p = _best_sim(frame_vecs, pos_centroids) if pos_centroids else 0.0
-        n = _best_sim(frame_vecs, neg_centroids) if neg_centroids else 0.0
+        # best pos index + sim
+        bpi, bps = -1, 0.0
+        for idx, c in enumerate(pos_centroids):
+            best = 0.0
+            for fv in frame_vecs:
+                if fv:
+                    s = cosine_similarity(fv, c)
+                    if s > best: best = s
+            if best > bps: bps, bpi = best, idx
+        bni, bns = -1, 0.0
+        for idx, c in enumerate(neg_centroids):
+            best = 0.0
+            for fv in frame_vecs:
+                if fv:
+                    s = cosine_similarity(fv, c)
+                    if s > best: best = s
+            if best > bns: bns, bni = best, idx
+        p = bps if bpi >= 0 else 0.0
+        n = bns if bni >= 0 else 0.0
         pos_best.append(p)
         neg_best.append(n)
         net.append(p - n)
+        if bpi >= 0 and bni >= 0:
+            pair_counts[(bpi, bni)] = pair_counts.get((bpi, bni), 0) + 1
 
-    pts = (50, 75, 90, 95, 99)
+    pts = (5, 10, 25, 50, 75, 90, 95, 99)
     pos_pct = _percentiles(pos_best, pts)
     result = {
         "prewarmed_this_run": prewarmed,
@@ -135,6 +157,8 @@ async def _run(limit: int, measure_only: bool) -> dict[str, Any]:
         "neg_best_sim": _percentiles(neg_best, pts),
         "net_pos_minus_neg": _percentiles(net, pts),
         "overlap_neg_gt_pos": sum(1 for x in net if x < 0),
+        "pair_counts": {f"pos{p}_neg{n}": c for (p, n), c in sorted(pair_counts.items())},
+        "contested_pairs": [(0, 0), (1, 1)],  # at threshold 0.45 (see geometry script)
         "suggested": {
             "_KEYFRAME_SIM_FLOOR": round(pos_pct[50], 2),
             "_KEYFRAME_SIM_CEIL": round(pos_pct[95], 2),

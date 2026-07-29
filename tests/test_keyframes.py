@@ -270,14 +270,12 @@ async def test_keyframe_bonus_max_pools_across_frames() -> None:
 
 
 @pytest.mark.asyncio
-async def test_keyframe_bonus_negative_centroid_does_not_cancel() -> None:
-    """A frame matching a disliked centroid is NOT penalized (positive-only).
+async def test_keyframe_bonus_contested_pair_grays_out() -> None:
+    """A frame whose best pos/neg centroids are contested → gray (no nudge).
 
-    The neg penalty was dropped (see _keyframe_bonus_from_vecs): P3 reuses P1's
-    centroids, and the live measurement showed pos/neg best-sim nearly
-    coinciding, so the penalty cancelled the positive for 75% of equipped
-    candidates. A frame matching BOTH pos and neg centroids now earns the full
-    pos bonus; the neg centroid is ignored for scoring.
+    P3 reuses P1's centroids and contested set. When the liked and disliked
+    centroids coincide (love-hate region), the margin design abstains instead
+    of boost-minus-penalty cancelling to ~0.
     """
     key_map = {keyframe_embedding_cache_key("BVX", 0): [1.0, 0.0, 0.0]}
     with tempfile.TemporaryDirectory() as d:
@@ -293,8 +291,34 @@ async def test_keyframe_bonus_negative_centroid_does_not_cancel() -> None:
         engine._visual_profile_cache = None
         cand = DiscoveredContent(bvid="BVX", title="t", relevance_score=0.8)
         bonus = await engine._keyframe_bonus_map([cand])
-        # Matching neg no longer cancels: earns the same bonus as pos-only.
-        assert bonus.get("BVX", 0.0) > 0.0
+        # Contested → gray: no entry.
+        assert bonus.get("BVX", 0.0) == 0.0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_keyframe_bonus_clear_pos_boosts_clear_neg_suppresses() -> None:
+    """Separated centroids: a pos-leaning frame boosts, neg-leaning suppresses."""
+    key_map = {
+        keyframe_embedding_cache_key("BVPOS", 0): [1.0, 0.0, 0.0],
+        keyframe_embedding_cache_key("BVNEG", 0): [0.0, 1.0, 0.0],
+    }
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        db.replace_user_visual_clusters(
+            [
+                {"polarity": "pos", "centroid": [1.0, 0.0, 0.0], "member_count": 3},
+                {"polarity": "neg", "centroid": [0.0, 1.0, 0.0], "member_count": 3},
+            ]
+        )
+        engine = _engine(db, _KeyframeEmb(key_map))
+        engine._visual_profile_cache = None
+        pos_cand = DiscoveredContent(bvid="BVPOS", title="t", relevance_score=0.8)
+        neg_cand = DiscoveredContent(bvid="BVNEG", title="t", relevance_score=0.8)
+        bonus = await engine._keyframe_bonus_map([pos_cand, neg_cand])
+        assert bonus.get("BVPOS", 0.0) > 0.0   # leans liked → boost
+        assert bonus.get("BVNEG", 0.0) < 0.0   # leans disliked → suppress
         db.close()
 
 

@@ -149,9 +149,13 @@ async def _snapshot(limit: int, out_override: str, full: bool = False) -> dict[s
     rows.sort(key=lambda r: r["final_score"], reverse=True)
 
     def _stats(key: str) -> dict[str, Any]:
-        vals = [r[key] for r in rows if r[key] > 0]
+        vals = [r[key] for r in rows if r[key] != 0]
+        pos = [v for v in vals if v > 0]
+        neg = [v for v in vals if v < 0]
         return {
             "nonzero": len(vals),
+            "pos": len(pos),
+            "neg": len(neg),
             "min": round(min(vals), 6) if vals else 0.0,
             "max": round(max(vals), 6) if vals else 0.0,
             "mean": round(sum(vals) / len(vals), 6) if vals else 0.0,

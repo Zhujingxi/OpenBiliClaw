@@ -21,7 +21,10 @@ from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.recommendation.visual_profile import (
     best_centroid_similarity,
     build_centroids,
+    contested_pairs,
+    cross_clean_labels,
 )
+from openbiliclaw.recommendation.visual_profile import VisualCluster
 from openbiliclaw.storage.database import Database
 
 # Reuse the A/B harness vector helpers (exact-cosine cover vectors).
@@ -87,6 +90,62 @@ def test_build_centroids_skips_zero_vectors() -> None:
 
 def test_build_centroids_empty_input() -> None:
     assert build_centroids([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Cross-clean + contested — pure functions.
+# ---------------------------------------------------------------------------
+
+
+def test_cross_clean_drops_cover_in_enemy_territory() -> None:
+    """A liked cover closer to disliked covers than to liked ones is dropped."""
+    dim = 8
+    # Two tight liked clusters far apart; one "like" planted among dislikes.
+    pos_core = [_cover_vec_for_cosine(0.95, dim) for _ in range(4)]
+    neg_core = [_cover_vec_for_cosine(0.0, dim) for _ in range(4)]  # orthogonal
+    mislabeled_like = _cover_vec_for_cosine(0.02, dim)  # near the dislikes
+    res = cross_clean_labels(pos_core + [mislabeled_like], neg_core, k=3, drop_margin=0.05)
+    assert mislabeled_like in res.dropped_pos
+    assert mislabeled_like not in res.kept_pos
+    # Core likes are kept.
+    assert len(res.kept_pos) == 4
+    assert not res.dropped_neg
+
+
+def test_cross_clean_never_flips_polarity() -> None:
+    """A dropped like is NOT moved into the neg set (kept raw, not relabeled)."""
+    dim = 8
+    pos = [_cover_vec_for_cosine(0.95, dim) for _ in range(4)]
+    neg = [_cover_vec_for_cosine(0.0, dim) for _ in range(4)]
+    stray = _cover_vec_for_cosine(0.02, dim)
+    res = cross_clean_labels(pos + [stray], neg, k=3, drop_margin=0.05)
+    assert stray in res.dropped_pos
+    assert stray not in res.kept_neg  # never relabeled to negative
+
+
+def test_cross_clean_conservative_margin_keeps_borderline() -> None:
+    """A near-tie (enemy barely above own) is kept when drop_margin is high."""
+    dim = 8
+    pos = [_cover_vec_for_cosine(0.95, dim) for _ in range(4)]
+    neg = [_cover_vec_for_cosine(0.0, dim) for _ in range(4)]
+    # Borderline: closer to own than enemy by a hair -> not dropped at 0.08.
+    borderline = _cover_vec_for_cosine(0.90, dim)
+    res = cross_clean_labels(pos + [borderline], neg, k=3, drop_margin=0.08)
+    assert borderline in res.kept_pos
+
+
+def test_contested_pairs_flags_overlapping_centroids() -> None:
+    """A pos/neg centroid pair above threshold is contested; separated is not."""
+    dim = 8
+    pos = [VisualCluster(tuple(_cover_vec_for_cosine(0.95, dim)), 2)]
+    neg_close = [VisualCluster(tuple(_cover_vec_for_cosine(0.93, dim)), 2)]  # ~0.95 cos
+    neg_far = [VisualCluster(tuple(_cover_vec_for_cosine(0.0, dim)), 2)]  # ~0
+    assert contested_pairs(pos, neg_close, threshold=0.40) == {(0, 0)}
+    assert contested_pairs(pos, neg_far, threshold=0.40) == set()
+
+
+def test_contested_pairs_empty_when_no_centroids() -> None:
+    assert contested_pairs([], []) == set()
 
 
 # ---------------------------------------------------------------------------
@@ -196,26 +255,24 @@ async def test_bonus_map_positive_nudge_for_liked_style() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bonus_map_negative_centroid_does_not_cancel() -> None:
-    """A candidate matching a disliked centroid is NOT penalized (positive-only).
+async def test_bonus_map_contested_pair_grays_out() -> None:
+    """A candidate whose best pos/neg centroids are contested → gray (no nudge).
 
-    The neg penalty was dropped because liked/disliked covers overlap in
-    visual space and binary feedback doesn't separate visual taste, so the
-    penalty cancelled the pos signal for over half of candidates. A candidate
-    matching BOTH pos and neg centroids now earns the full pos bonus — the
-    neg centroid is ignored for scoring (still built/persisted for a future
-    conditional-penalty reintroduction).
+    When the liked and disliked centroids are themselves close (a love-hate
+    region — the cover modality cannot distinguish like/dislike there), the
+    margin design abstains: neither boost nor suppress. This is the fix for
+    the neg-cancellation problem — instead of boost-minus-penalty cancelling
+    to ~0, the geometry explicitly says "no opinion".
     """
     dim = 8
     liked_url = "https://i0.hdslb.com/bfs/archive/liked.jpg"
     disliked_url = "https://i0.hdslb.com/bfs/archive/disliked.jpg"
-    # Candidate matches BOTH the liked and disliked centroids (same style).
     cand_url = "https://i0.hdslb.com/bfs/archive/cand.jpg"
-    vec = _cover_vec_for_cosine(0.90, dim)
+    # pos and neg centroids are near-identical (contested); candidate matches both.
     key_map = {
         image_embedding_cache_key_for_url(liked_url): _cover_vec_for_cosine(0.95, dim),
         image_embedding_cache_key_for_url(disliked_url): _cover_vec_for_cosine(0.95, dim),
-        image_embedding_cache_key_for_url(cand_url): vec,
+        image_embedding_cache_key_for_url(cand_url): _cover_vec_for_cosine(0.90, dim),
     }
     with tempfile.TemporaryDirectory() as d:
         db = Database(Path(d) / "t.db")
@@ -232,9 +289,49 @@ async def test_bonus_map_negative_centroid_does_not_cancel() -> None:
         engine._visual_profile_cache = None
         cand = DiscoveredContent(bvid="BVCAND", cover_url=cand_url, relevance_score=0.80)
         bonus = await engine._visual_profile_bonus_map([cand])
-        # Matching neg no longer cancels: the candidate earns the same bonus it
-        # would with no neg centroid at all.
-        assert bonus.get("BVCAND", 0.0) > 0.0
+        # Contested → gray: no entry (the candidate is in the love-hate band).
+        assert bonus.get("BVCAND", 0.0) == 0.0
+        db.close()
+
+
+async def test_bonus_map_clear_pos_boosts_clear_neg_suppresses() -> None:
+    """Separated centroids: a pos-leaning candidate boosts, neg-leaning suppresses.
+
+    When pos and neg centroids are far apart (the cover CAN distinguish), the
+    margin design acts: a candidate closer to liked gets a positive nudge, one
+    closer to disliked gets a negative (suppression) nudge. The neg centroid is
+    used here — safely, because the region is not contested and the margin gate
+    only fires on a clear win.
+    """
+    dim = 8
+    liked_url = "https://i0.hdslb.com/bfs/archive/liked.jpg"
+    disliked_url = "https://i0.hdslb.com/bfs/archive/disliked.jpg"
+    pos_cand_url = "https://i0.hdslb.com/bfs/archive/poscand.jpg"
+    neg_cand_url = "https://i0.hdslb.com/bfs/archive/negcand.jpg"
+    key_map = {
+        image_embedding_cache_key_for_url(liked_url): _cover_vec_for_cosine(0.95, dim),
+        image_embedding_cache_key_for_url(disliked_url): _cover_vec_for_cosine(0.0, dim),
+        image_embedding_cache_key_for_url(pos_cand_url): _cover_vec_for_cosine(0.90, dim),
+        image_embedding_cache_key_for_url(neg_cand_url): _cover_vec_for_cosine(0.10, dim),
+    }
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        emb = _ProfileEmb(key_map)
+        engine = _engine(db, emb)
+        from openbiliclaw.recommendation.visual_profile import build_centroids
+        pos_c = build_centroids([_cover_vec_for_cosine(0.95, dim)], min_members=1)[0]
+        neg_c = build_centroids([_cover_vec_for_cosine(0.0, dim)], min_members=1)[0]
+        db.replace_user_visual_clusters([
+            {"polarity": "pos", "centroid": list(pos_c.centroid), "member_count": 1},
+            {"polarity": "neg", "centroid": list(neg_c.centroid), "member_count": 1},
+        ])
+        engine._visual_profile_cache = None
+        pos_cand = DiscoveredContent(bvid="BVPOS", cover_url=pos_cand_url, relevance_score=0.80)
+        neg_cand = DiscoveredContent(bvid="BVNEG", cover_url=neg_cand_url, relevance_score=0.80)
+        bonus = await engine._visual_profile_bonus_map([pos_cand, neg_cand])
+        assert bonus.get("BVPOS", 0.0) > 0.0   # clearly leans liked → boost
+        assert bonus.get("BVNEG", 0.0) < 0.0   # clearly leans disliked → suppress
         db.close()
 
 
