@@ -5992,9 +5992,11 @@ class TestBackendAPI:
             recommendation_engine=FakeRecommendationEngine(runtime),
             runtime_controller=runtime,
         )
-        client = TestClient(app)
-
-        response = client.post("/api/recommendations/reshuffle")
+        with TestClient(app) as client:
+            response = client.post("/api/recommendations/reshuffle")
+            deadline = time.monotonic() + 1.0
+            while not hub.events and time.monotonic() < deadline:
+                time.sleep(0.01)
 
         assert response.status_code == 200
         assert response.json() == {
