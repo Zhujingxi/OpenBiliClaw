@@ -22,6 +22,11 @@ def test_brand_png_assets_have_expected_dimensions() -> None:
         with Image.open(ROOT / relative_path) as icon:
             assert icon.format == "PNG", relative_path
             assert icon.size == expected_size, relative_path
+            rgba = icon.convert("RGBA")
+            assert rgba.getpixel((0, 0))[3] == 0, relative_path
+            assert rgba.getpixel((expected_size[0] // 2, expected_size[1] // 2))[3] == 255, (
+                relative_path
+            )
 
 
 def test_desktop_icon_containers_include_all_required_sizes() -> None:
@@ -30,10 +35,12 @@ def test_desktop_icon_containers_include_all_required_sizes() -> None:
         assert {(16, 16), (32, 32), (48, 48), (128, 128), (256, 256)}.issubset(
             windows_icon.ico.sizes()
         )
+        assert windows_icon.convert("RGBA").getpixel((0, 0))[3] == 0
 
     with Image.open(ROOT / "packaging" / "icon.icns") as macos_icon:
         assert macos_icon.format == "ICNS"
         assert macos_icon.size == (1024, 1024)
+        assert macos_icon.convert("RGBA").getpixel((0, 0))[3] == 0
 
 
 def test_user_facing_brand_marks_reference_canonical_icon_assets() -> None:
