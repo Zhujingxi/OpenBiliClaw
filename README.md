@@ -599,10 +599,14 @@ background ─ background admission (default 3) ──────┘
 持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
+                       ├→ worker忙：dialogue_busy + Retry-After → 两端等待态自动重试
+                       ├→ 已澄清疑惑：只展示当前持有者；当前 session 已有 turn 则隐藏
                        ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                        │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
                        ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
+实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 ```
 
 ```

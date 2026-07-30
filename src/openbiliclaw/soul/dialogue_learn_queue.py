@@ -785,6 +785,7 @@ class DialogueSettlementQueue:
         self._queue: asyncio.Queue[DialogueJob] = asyncio.Queue()
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._active_job: DialogueJob | None = None
         self._worker_permit: DialogueSettlementWorkerPermit | None = None
         self._accepting = True
         self._resume = asyncio.Event()
@@ -817,6 +818,16 @@ class DialogueSettlementQueue:
     @property
     def depth(self) -> int:
         return self._queue.qsize()
+
+    @property
+    def accepting(self) -> bool:
+        """Whether external producers may submit new settlement work."""
+        return self._accepting and not self._closed
+
+    @property
+    def ready_for_interactive_submission(self) -> bool:
+        """Whether a short user command can run without waiting behind LLM work."""
+        return self.accepting and self._active_job is None and self._queue.empty()
 
     def require_dialogue_settlement_worker(self) -> None:
         """Require the permit owned by this queue's actual worker Task."""
@@ -960,9 +971,14 @@ class DialogueSettlementQueue:
         self._resume.set()
 
     async def pause_and_drain(self, *, timeout: float | None = None) -> None:
-        self._accepting = False
+        # Keep accepting while an existing long-running LLM settlement drains.
+        # Rejecting first used to make every chat/pending-open request fail for
+        # the whole drain window.  Once join() returns there is no ``await``
+        # before the flag flips, so no producer can interleave between the
+        # observed idle state and the atomic pause.
         self._resume.set()
         await self._join(timeout=timeout)
+        self._accepting = False
 
     async def wait_until_started(self) -> None:
         """Wait until the actual worker Task owns a permit or startup fails."""
@@ -1029,6 +1045,7 @@ class DialogueSettlementQueue:
         try:
             while True:
                 job = await self._queue.get()
+                self._active_job = job
                 try:
                     await self._resume.wait()
                     current_permit = self._worker_permit
@@ -1053,6 +1070,7 @@ class DialogueSettlementQueue:
                         job.sequence,
                     )
                 finally:
+                    self._active_job = None
                     self._registry.release(job.anchor_snapshot)
                     self._queue.task_done()
         finally:

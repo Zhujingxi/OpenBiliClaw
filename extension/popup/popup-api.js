@@ -589,16 +589,23 @@ export async function fetchChatTurns({ session = "popup", scope = "", limit = 50
   return requestJson(`/chat/turns?${params.toString()}`, { method: "GET" });
 }
 
-export async function fetchPendingConfirmations({ countOnly = false } = {}) {
-  const suffix = countOnly ? "?count_only=1" : "";
+export async function fetchPendingConfirmations({
+  countOnly = false,
+  session = "",
+} = {}) {
+  const params = new URLSearchParams();
+  if (countOnly) params.set("count_only", "1");
+  if (session) params.set("session", session);
+  const suffix = params.size ? `?${params.toString()}` : "";
   return requestJson(`/chat/pending-confirmations${suffix}`, { method: "GET" });
 }
 
-export async function openPendingConfirmation(ref, { session = "popup" } = {}) {
+export async function openPendingConfirmation(ref, { session = "popup", signal } = {}) {
   return requestJson(`/chat/pending-confirmations/${encodeURIComponent(String(ref || ""))}/open`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session }),
+    signal,
   });
 }
 

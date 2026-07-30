@@ -45,9 +45,9 @@
     if (!dialogueConfirmation) throw new Error("dialogue-confirmation shared helper did not load");
     const {
       executeCardAction,
+      executePendingConfirmationOpen,
       isCardTurn,
       isQuestionTurn,
-      pendingConfirmationOpenPath,
       renderPendingListMarkup,
       renderTurnMarkup,
       selectDialogueTurns
@@ -1212,7 +1212,12 @@
         }
         return details;
       } catch (error) {
-        if (error?.name === "AbortError") throw new Error(`${path} 请求超时，请稍后刷新确认是否已写入。`);
+        if (error?.name === "AbortError") {
+          const timeoutError = new Error(`${path} 请求超时，请稍后刷新确认是否已写入。`);
+          timeoutError.name = "TimeoutError";
+          timeoutError.code = "request_timeout";
+          throw timeoutError;
+        }
         throw error;
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
@@ -5821,7 +5826,10 @@ ${cardFeedbackBarHtml()}`;
     }
 
     async function refreshDesktopPendingConfirmations() {
-      const payload = await requestJsonStrict(ENDPOINTS.pendingConfirmations, { cache: "no-store" });
+      const payload = await requestJsonStrict(
+        `${ENDPOINTS.pendingConfirmations}?session=webui`,
+        { cache: "no-store" }
+      );
       state.pendingConfirmations = {
         ...state.pendingConfirmations,
         count: Math.max(0, Number(payload?.count) || 0),
@@ -5888,19 +5896,38 @@ ${cardFeedbackBarHtml()}`;
       const ref = button.dataset.confirmationRef || "";
       if (!ref || button.disabled) return;
       button.disabled = true;
+      button.textContent = "打开中…";
       try {
-        const turn = await requestJsonStrict(pendingConfirmationOpenPath(ref), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session: "webui" })
+        const turn = await executePendingConfirmationOpen(ref, {
+          session: "webui",
+          signal: dialogueCardActionAbortController.signal,
+          request(path, body, { signal } = {}) {
+            return requestJsonStrict(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+              signal
+            });
+          },
+          onWaiting({ message }) {
+            button.textContent = "等待中…";
+            showToast(`${message}，空闲后会自动打开`, { duration: 4200 });
+          }
         });
         if (turn?.turn_id) updateDesktopDialogueTurn(turn);
         await refreshDialogueConfirmationSurface();
         showToast(isQuestionTurn(turn) ? "这条疑惑已经放进对话里" : "这张确认卡已经放进对话里");
         $("#chatInput")?.focus();
-      } catch {
+      } catch (error) {
         button.disabled = false;
-        showToast("这条待聊内容暂时打不开，请稍后重试");
+        button.textContent = "打开";
+        if (Number(error?.status) === 409) {
+          await refreshDialogueConfirmationSurface();
+          showToast("另一条疑惑正在聊，待聊列表已经同步");
+        } else if (error?.name !== "AbortError") {
+          const detail = String(error?.details?.detail?.message || "").trim();
+          showToast(detail || "这条待聊内容暂时打不开，请稍后重试");
+        }
       }
     }
 
@@ -8330,7 +8357,7 @@ ${cardFeedbackBarHtml()}`;
         const socket = new WebSocket(getRuntimeStreamUrl());
         state.runtimeSocket = socket;
         socket.addEventListener("open", () => {
-          $("#statusLabel").textContent = "实时连接中";
+          $("#statusLabel").textContent = "实时连接正常";
           restartDesktopFailedRecoveries();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
@@ -8346,17 +8373,35 @@ ${cardFeedbackBarHtml()}`;
           }
         });
         socket.addEventListener("message", (event) => {
-          try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload?.type === "runtime.heartbeat") {
+              $("#statusLabel").textContent = "实时连接正常";
+              return;
+            }
+            handleRuntimeEvent(payload);
+          } catch {}
         });
-        socket.addEventListener("close", () => {
+        socket.addEventListener("close", (event) => {
           if (state.runtimeSocket === socket) {
             state.runtimeSocket = null;
+            $("#statusLabel").textContent = "实时流重连中";
+            console.info("runtime-stream closed; reconnect scheduled", {
+              code: event.code,
+              reason: event.reason || "",
+              clean: event.wasClean
+            });
             scheduleDesktopRuntimeReconnect();
           }
         });
-        socket.addEventListener("error", () => { $("#statusLabel").textContent = "实时流断开"; });
+        socket.addEventListener("error", () => {
+          if (state.runtimeSocket === socket) {
+            $("#statusLabel").textContent = "实时流重连中";
+          }
+        });
       } catch {
-        $("#statusLabel").textContent = "实时流不可用";
+        $("#statusLabel").textContent = "实时流重连中";
+        scheduleDesktopRuntimeReconnect();
       }
     }
 
@@ -9625,6 +9670,15 @@ ${cardFeedbackBarHtml()}`;
         void hydrateFromBackend();
         void refreshUpdateStatus();
       } catch (error) {
+        if (error?.code === "request_timeout") {
+          const pendingMessage = "保存请求仍可能在后台等待对话整理完成；期间后端功能可继续使用，完成后页面会自动收到热重载事件。";
+          if ($("#configStatus")) {
+            $("#configStatus").setAttribute("role", "status");
+            $("#configStatus").value = pendingMessage;
+          }
+          showToast("配置仍在后台安全热重载", { duration: 5200 });
+          return;
+        }
         const message = configErrorMessage(error.details) || error.message || "未知错误";
         if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");

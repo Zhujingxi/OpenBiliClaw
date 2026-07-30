@@ -50,7 +50,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
-_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS = 30.0
+# Dialogue learning may legitimately spend up to the configured 20-minute LLM
+# timeout in one worker job.  Give it the same 25-minute no-progress envelope
+# as guided preference analysis instead of rolling config.toml back after 30s.
+_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS = 25 * 60.0
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:

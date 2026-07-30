@@ -595,10 +595,14 @@ config recovery draft (normal or degraded; business APIs remain gated)
 durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
+                          ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
+                          ├→ active confusion: current holder only; hidden once this session has its turn
                           ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                           │                                                └→ publication-only retry → projection / exact release
                           ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
+config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
+realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 ```
 
 ```

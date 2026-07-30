@@ -257,14 +257,16 @@ async def test_pause_and_drain_timeout_is_reported_and_queue_can_resume() -> Non
     try:
         with pytest.raises(TimeoutError):
             await queue.pause_and_drain(timeout=0.01)
-        assert await queue.submit({"tag": "while-paused"}) is False
+        # A timed-out drain never entered the atomic paused state, so user
+        # work remains admissible instead of being dropped during hot reload.
+        assert await queue.submit({"tag": "while-draining"}) is True
         queue.resume()
         assert await queue.submit({"tag": "after-resume"}) is True
     finally:
         release.set()
         await queue.shutdown(timeout=1)
 
-    assert processed == ["blocked", "after-resume"]
+    assert processed == ["blocked", "while-draining", "after-resume"]
 
 
 @pytest.mark.asyncio

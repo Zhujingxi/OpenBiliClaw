@@ -19,7 +19,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 from uuid import UUID
 
@@ -257,6 +257,7 @@ _CONFIRMATION_GLOBAL_COOLDOWN_HOURS = 12
 # object-level ask budget and makes "以后再说" durable without becoming a
 # permanent dismissal. Recalibrate after the first production month.
 _CONFIRMATION_OBJECT_COOLDOWN_HOURS = 72
+_RUNTIME_STREAM_HEARTBEAT_SECONDS = 20.0
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
 # provider call, so ``touch()`` proves that the wrapper/event loop still owns the
@@ -2675,9 +2676,14 @@ def create_app(
             ],
             "confidence": confidence,
             "created_at": "",
+            "status": str(getattr(confusion, "status", "") or "").strip().lower(),
         }
 
-    def _pending_confirmation_items(*, limit: int) -> list[dict[str, Any]]:
+    def _pending_confirmation_items(
+        *,
+        limit: int,
+        session: str = "",
+    ) -> list[dict[str, Any]]:
         def rank(item: dict[str, Any]) -> tuple[float, int, str]:
             return (
                 -float(item.get("confidence", 0.0) or 0.0),
@@ -2690,13 +2696,34 @@ def create_app(
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
         if confusion_manager is not None:
             try:
-                for confusion in confusion_manager.list_open():
+                for confusion in confusion_manager.list_active():
                     item = _confusion_confirmation_item(confusion)
                     if item is not None:
                         confusions.append(item)
             except Exception:
                 logger.debug("Failed to load pending confusions", exc_info=True)
-        confusions.sort(key=rank)
+        # A clarifying confusion owns the database's single global slot.  Keep
+        # that exact item in the reserved seat across every UI session instead
+        # of showing a different open row whose click can only return 409.
+        confusions.sort(
+            key=lambda item: (
+                0 if item.get("status") == "clarifying" else 1,
+                *rank(item),
+            )
+        )
+        if confusions and confusions[0].get("status") == "clarifying":
+            active = confusions[0]
+            active_ref = str(active.get("ref", ""))
+            normalized_session = session.strip()
+            already_visible = bool(
+                normalized_session
+                and _get_chat_confirmation_turn(
+                    ref=active_ref,
+                    session=normalized_session,
+                )
+                is not None
+            )
+            confusions = [] if already_visible else [active]
 
         capacity = max(0, int(limit))
         # Reserve seats for confusions first (see _PENDING_CONFUSION_RESERVED_SLOTS
@@ -2878,6 +2905,22 @@ def create_app(
         if queue is None:
             raise HTTPException(status_code=503, detail="Dialogue settlement queue not ready.")
         return queue
+
+    def _dialogue_queue_ready_for_interactive_submission() -> bool:
+        """Keep short clicks out of a queue currently occupied by LLM work."""
+        queue = _dialogue_settlement_queue()
+        ready = getattr(queue, "ready_for_interactive_submission", None)
+        return True if ready is None else bool(ready)
+
+    def _raise_dialogue_busy() -> NoReturn:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "dialogue_busy",
+                "message": "后台正在整理上一段对话，这条内容会自动重试。",
+            },
+            headers={"Retry-After": "2"},
+        )
 
     def _require_dialogue_settlement_worker() -> None:
         require = getattr(
@@ -3118,7 +3161,7 @@ def create_app(
         from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
 
         if confusion.status == "open":
-            completion = await _submit_dialogue_settlement(
+            completion = await _submit_dialogue_settlement_required(
                 DialogueJobKind.CONFUSION_OPEN_SYNC,
                 {
                     "operation": "schedule",
@@ -3128,8 +3171,6 @@ def create_app(
                     "ignore_cooldown": ignore_cooldown,
                 },
             )
-            if completion is None:
-                raise HTTPException(status_code=503, detail="Confusion scheduling is delayed.")
             settlement = completion.settlement or {}
             claimed = bool(settlement.get("claimed", False))
             if not claimed:
@@ -3139,7 +3180,7 @@ def create_app(
                 )
             return True
         if confusion.ask_turn_id != turn_id:
-            completion = await _submit_dialogue_settlement(
+            await _submit_dialogue_settlement_required(
                 DialogueJobKind.CONFUSION_OPEN_SYNC,
                 {
                     "operation": "retarget",
@@ -3148,8 +3189,6 @@ def create_app(
                     "asked_at": datetime.now(UTC).isoformat(),
                 },
             )
-            if completion is None:
-                raise HTTPException(status_code=503, detail="Confusion retarget is delayed.")
         return False
 
     async def _create_confirmation_turn(
@@ -3249,7 +3288,7 @@ def create_app(
                 if claimed_open:
                     from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
 
-                    await _submit_dialogue_settlement(
+                    await _submit_dialogue_settlement_required(
                         DialogueJobKind.CONFUSION_OPEN_SYNC,
                         {
                             "operation": "rollback",
@@ -3261,7 +3300,7 @@ def create_app(
             if kind == "confusion" and str(row.get("turn_id", "")) != turn_id:
                 from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
 
-                completion = await _submit_dialogue_settlement(
+                await _submit_dialogue_settlement_required(
                     DialogueJobKind.CONFUSION_OPEN_SYNC,
                     {
                         "operation": "retarget",
@@ -3270,8 +3309,6 @@ def create_app(
                         "asked_at": datetime.now(UTC).isoformat(),
                     },
                 )
-                if completion is None:
-                    raise HTTPException(status_code=503, detail="Confusion retarget is delayed.")
 
         turn = _normalize_chat_turn(row)
         should_anchor = user_initiated or kind == "confusion"
@@ -3282,7 +3319,7 @@ def create_app(
             producer_source = (
                 "pending_confusion_throw" if kind == "confusion" else "pending_probe_throw"
             )
-            completion = await _submit_dialogue_settlement(
+            await _submit_dialogue_settlement_required(
                 DialogueJobKind.ANCHOR_ESTABLISH,
                 {
                     "target_kind": kind,
@@ -3292,8 +3329,6 @@ def create_app(
                     "producer_source": producer_source,
                 },
             )
-            if completion is None:
-                raise HTTPException(status_code=503, detail="Dialogue anchor is delayed.")
         return turn, bool(created)
 
     async def _maybe_attach_system_confirmation(
@@ -5258,7 +5293,16 @@ def create_app(
 
         async def _send_runtime_events() -> None:
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=_RUNTIME_STREAM_HEARTBEAT_SECONDS,
+                    )
+                except TimeoutError:
+                    event = {
+                        "type": "runtime.heartbeat",
+                        "sent_at": datetime.now(UTC).isoformat(),
+                    }
                 if _ws_revoked():
                     with suppress(Exception):
                         await websocket.close(code=4401)
@@ -8371,6 +8415,21 @@ def create_app(
                 raise HTTPException(
                     status_code=409, detail="Card state changed; refresh and retry."
                 )
+            # A pending-open card establishes its dialogue anchor while the
+            # card itself intentionally remains ``pending``. Deferring that
+            # card must release the same exact generation too; otherwise the
+            # invisible old anchor blocks every later pending item with 409.
+            if (
+                state == "pending"
+                and anchor_manager is not None
+                and active_anchor is not None
+                and active_anchor.origin_turn_id == turn.turn_id
+            ):
+                anchor_manager.release(
+                    reason="settled",
+                    card_state="deferred",
+                    expected_generation=active_anchor.generation,
+                )
         deferred_until = _defer_dialogue_confirmation(str(turn.payload.get("ref", "")))
         return {
             "ok": True,
@@ -8976,9 +9035,17 @@ def create_app(
     @app.get("/api/chat/pending-confirmations", response_model=None)
     async def list_pending_confirmations(
         count_only: bool = Query(default=False),
+        session: str = Query(default=""),
     ) -> dict[str, Any]:
-        await _reconcile_orphan_confusion_claims()
-        items = _pending_confirmation_items(limit=_PENDING_CONFIRMATION_LIMIT)
+        # Reconciliation is a local queue mutation. A list read must remain
+        # available while a long LLM settlement owns the worker; the orphan can
+        # be reconciled on the next idle read/open instead of blocking the UI.
+        if _dialogue_queue_ready_for_interactive_submission():
+            await _reconcile_orphan_confusion_claims()
+        items = _pending_confirmation_items(
+            limit=_PENDING_CONFIRMATION_LIMIT,
+            session=session,
+        )
         if count_only:
             return {"count": len(items)}
         return {"count": len(items), "items": items}
@@ -8988,7 +9055,11 @@ def create_app(
         ref: str,
         payload: Annotated[dict[str, object], Body()],
     ) -> ChatTurnOut:
+        if not _dialogue_queue_ready_for_interactive_submission():
+            _raise_dialogue_busy()
         await _reconcile_orphan_confusion_claims()
+        if not _dialogue_queue_ready_for_interactive_submission():
+            _raise_dialogue_busy()
         item = _pending_confirmation_by_ref(ref)
         if item is None:
             raise HTTPException(status_code=404, detail="Pending confirmation not found.")
@@ -15395,9 +15466,14 @@ def create_app(
                         restart_required=False,
                     )
                 logger.exception("Config hot-reload failed — attempting config rollback")
+                reload_error = str(exc).strip()
+                if isinstance(exc, TimeoutError):
+                    reload_error = "后台对话在 25 分钟内仍未整理完成，运行时未能安全切换"
+                elif not reload_error:
+                    reload_error = type(exc).__name__
                 if backup_path is None:
                     rollback_message = (
-                        f" 热重载失败（{str(exc)[:200]}），未找到可回滚的 config.toml.bak。"
+                        f" 热重载失败（{reload_error[:200]}），未找到可回滚的 config.toml.bak。"
                     )
                     rollback_cfg = cfg
                     rollback_applied = False
@@ -15425,7 +15501,7 @@ def create_app(
                         )
                     rollback_cfg = load_config(saved_path)
                     rollback_message = (
-                        f" 热重载失败（{str(exc)[:200]}），已从 config.toml.bak 回滚。"
+                        f" 热重载失败（{reload_error[:200]}），已从 config.toml.bak 回滚。"
                     )
                     rollback_applied = True
 

@@ -238,6 +238,8 @@ durable dialogue → confirmation entry(pending list / cards)
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
                    action≤1s: completed → 200 | blocked → 202 processing
                               └→ popup/desktop GET poll 1/2/5s, deadline 30s
+                   pending open busy → 503 dialogue_busy/Retry-After → UI auto-retry ≤25m
+                   active clarifying → only current holder; hide in sessions already showing it
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → lightweight ref winner receipt
                    → event → object → derived → rebuild-marker → applied
@@ -273,6 +275,9 @@ protected mutation 只允许 actual worker Task；嵌套 settle 沿该 task 的�
 的 active/detached child 对 mutation 与递归 admission 均 fail closed。
 队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/桌面在 30 秒内读取
 durable turn，重启丢 job 时允许同 action 重新提交；不增加 job table 或恢复 scanner。
+pending-open 是更严格的 required local transaction：长 LLM job 占住 worker 时不先
+admission，而返回 `dialogue_busy` 让 popup/桌面带等待态自动重试；热重载保持 admission
+直到队列 idle，再原子 pause/revoke，25 分钟安全窗覆盖 20 分钟 provider timeout。
 两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
 避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享
 dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时
@@ -295,7 +300,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │  │ XHS 自动任务：source/scheduler 领取门 → SQLite 节流/风控冷却 → 关闭/限流时不再开任务 tab │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ B 站 / 抖音 / X Cookie 同步（runtime-stream 请求 + 扩展回传）│   │
+│  │ runtime-stream 20s idle 心跳 + B站/抖音/X Cookie 请求与扩展回传│   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 扩展捕捉 E2E：run -> runtime-stream -> 入口归位 -> DOM 操作 -> /api/events │ │
