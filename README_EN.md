@@ -189,12 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.189 (2026-07-30)**
+📌 Latest: **v0.3.190 (2026-07-30)**
 
-- **Consistent branding across every icon surface** — browser tabs, PWA and Apple home screens, extension and web headers, desktop splash, social previews, store artwork, and documentation screenshots no longer show white outer borders or the legacy `B` mark.
-- **Dismissing a delight now stays dismissed** — “seen, do not recommend again” writes to the shared seen ledger, so the same item cannot return through either regular or delight recommendations.
-- **Desktop browsing and taste chat are steadier** — infinite scrolling no longer jumps back to a platform tab, while pending-confirmation cards gain clear hierarchy, responsive layouts, and accessible interaction.
-- **Source-task failures are no longer disguised as empty results** — Douyin and Xiaohongshu now distinguish timeouts, failures, exhausted budgets, and safety cooldowns while preserving retryable keywords and queue state.
+- **A refreshed Windows startup experience** — the new dark-gradient branded splash uses the latest pink claw icon and clearly shows startup status, activity progress, and the current version.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
