@@ -37,7 +37,7 @@ def test_make_splash_writes_valid_png(tmp_path: Path) -> None:
 def test_make_splash_has_expected_dimensions(tmp_path: Path) -> None:
     from PIL import Image
 
-    out = make_splash_mod.make_splash(tmp_path / "splash.png")
+    out = make_splash_mod.make_splash(tmp_path / "splash.png", version="1.2.3")
     with Image.open(out) as img:
         assert img.size == (make_splash_mod._W, make_splash_mod._H)
         # The launch screen carries the canonical pink brand mark instead of a
@@ -50,6 +50,22 @@ def test_make_splash_has_expected_dimensions(tmp_path: Path) -> None:
         assert red > 220
         assert green < 180
         assert blue > 120
+
+
+def test_make_splash_renders_requested_version(tmp_path: Path) -> None:
+    first = make_splash_mod.make_splash(tmp_path / "first.png", version="1.2.3")
+    second = make_splash_mod.make_splash(tmp_path / "second.png", version="9.8.7")
+
+    assert first.read_bytes() != second.read_bytes()
+    assert make_splash_mod._display_version("1.2.3") == "v1.2.3"
+    assert make_splash_mod._display_version("v1.2.3") == "v1.2.3"
+
+
+def test_read_project_version_uses_package_metadata(tmp_path: Path) -> None:
+    project_file = tmp_path / "pyproject.toml"
+    project_file.write_text('[project]\nname = "demo"\nversion = "2.4.6"\n', encoding="utf-8")
+
+    assert make_splash_mod._read_project_version(project_file) == "2.4.6"
 
 
 def test_make_splash_creates_parent_dirs(tmp_path: Path) -> None:
