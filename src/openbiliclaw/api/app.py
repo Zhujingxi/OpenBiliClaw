@@ -2241,6 +2241,46 @@ def create_app(
     # downstream handling. CORS stays inner; 401/403 echo a permissive header.
     app.middleware("http")(make_auth_middleware(_get_auth_gate))
 
+    # ── Feedback async ingest ────────────────────────────────────────────
+    # /api/feedback persists the event and returns immediately; the pipeline
+    # ingest (which can run a multi-minute preference LLM pass when the
+    # INTEREST buffer consumes) is scheduled as a background task. The lock
+    # serializes bursts so rapid like/dislike/comment clicks don't fan out
+    # into concurrent LLM analyses; the task registry keeps references alive
+    # and lets shutdown cancel cleanly.
+    feedback_ingest_lock = asyncio.Lock()
+    feedback_ingest_tasks: set[asyncio.Task[None]] = set()
+
+    def _schedule_feedback_ingest(
+        *,
+        feedback_type: str,
+        title: str,
+        note: str,
+    ) -> None:
+        """Queue one feedback signal for background pipeline ingestion."""
+        if ctx.soul_engine is None:
+            return
+        if not bool(getattr(ctx.soul_engine, "unified_interest_line_enabled", False)):
+            return
+
+        async def _run() -> None:
+            try:
+                async with feedback_ingest_lock:
+                    await _ingest_feedback_signal(
+                        feedback_type=feedback_type,
+                        title=title,
+                        note=note,
+                    )
+            except Exception:
+                logger.exception(
+                    "Background feedback ingest failed for %s",
+                    feedback_type,
+                )
+
+        task = asyncio.create_task(_run())
+        feedback_ingest_tasks.add(task)
+        task.add_done_callback(feedback_ingest_tasks.discard)
+
     def _schedule_post_feedback_tasks() -> None:
         with suppress(Exception):
             feedback_batch_scheduler.schedule()
@@ -2257,8 +2297,11 @@ def create_app(
         the single event-driven writer of the interest layer. Gated behind
         ``scheduler.unified_interest_line`` because the legacy feedback batch
         (``_schedule_post_feedback_tasks``) still runs — with both consumers
-        live the same feedback would be counted twice. Best-effort: a pipeline
-        failure never breaks the feedback response.
+        live the same feedback would be counted twice. Invoked from
+        :func:`_schedule_feedback_ingest` as a background task after the HTTP
+        response is returned; best-effort — a pipeline failure never breaks
+        the feedback response, and slow LLM layer updates never stall the
+        click.
         """
         if ctx.soul_engine is None:
             return 0
@@ -5473,6 +5516,11 @@ def create_app(
         if feedback_scheduler is not None:
             with suppress(Exception):
                 await feedback_scheduler.close()
+        for task in tuple(feedback_ingest_tasks):
+            task.cancel()
+        if feedback_ingest_tasks:
+            await asyncio.gather(*tuple(feedback_ingest_tasks), return_exceptions=True)
+            feedback_ingest_tasks.clear()
         refresh_task = getattr(app.state, "refresh_task", None)
         if refresh_task is not None:
             refresh_task.cancel()
@@ -9872,7 +9920,9 @@ def create_app(
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
-        await _ingest_feedback_signal(
+        # Feedback is persisted above; pipeline learning runs in the
+        # background so the HTTP response is never coupled to LLM latency.
+        _schedule_feedback_ingest(
             feedback_type=feedback_type,
             title=rec_title,
             note=note,

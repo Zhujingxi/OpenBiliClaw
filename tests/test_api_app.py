@@ -19190,27 +19190,26 @@ class TestUnifiedInterestLineFeedbackIngestion:
             self.batch_calls += 1
             return {"triggered": False}
 
-    def _post_feedback(
+    def _make_feedback_client(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         *,
         unified: bool,
-    ) -> tuple[Any, int]:
+    ) -> tuple[Any, list[int], Any]:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.api import app as api_app
         from openbiliclaw.memory.manager import MemoryManager
 
-        schedules = 0
+        schedules: list[int] = [0]
 
         class FakeFeedbackBatchScheduler:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
             def schedule(self) -> None:
-                nonlocal schedules
-                schedules += 1
+                schedules[0] += 1
 
             async def close(self) -> None:
                 return None
@@ -19226,28 +19225,44 @@ class TestUnifiedInterestLineFeedbackIngestion:
                 soul_engine=soul,
             )
         )
+        return soul, schedules, client
 
-        response = client.post(
-            "/api/feedback",
-            json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
-        )
-        assert response.status_code == 200
-        return soul, schedules
+    def _wait_for_signals(self, soul: Any, timeout_seconds: float = 5.0) -> None:
+        """Wait for the background ingest task to append its pipeline signal."""
+        deadline = time.monotonic() + timeout_seconds
+        while not soul.pipeline.signals and time.monotonic() < deadline:
+            time.sleep(0.01)
 
     def test_flag_off_leaves_feedback_behaviour_byte_identical(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=False)
+        soul, schedules, client = self._make_feedback_client(monkeypatch, tmp_path, unified=False)
+
+        with client:
+            response = client.post(
+                "/api/feedback",
+                json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+            )
+            assert response.status_code == 200
+            self._wait_for_signals(soul)
 
         assert soul.pipeline.signals == [], "开关关闭时反馈绝不能进 pipeline（否则与旧批线双计）"
-        assert schedules == 1, "旧批线调度保持不变"
+        assert schedules[0] == 1, "旧批线调度保持不变"
 
     def test_flag_on_feeds_one_feedback_signal_into_the_pipeline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         from openbiliclaw.soul.pipeline import OnionLayer, SignalType
 
-        soul, schedules = self._post_feedback(monkeypatch, tmp_path, unified=True)
+        soul, schedules, client = self._make_feedback_client(monkeypatch, tmp_path, unified=True)
+
+        with client:
+            response = client.post(
+                "/api/feedback",
+                json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+            )
+            assert response.status_code == 200
+            self._wait_for_signals(soul)
 
         assert len(soul.pipeline.signals) == 1
         signal = soul.pipeline.signals[0]
@@ -19256,7 +19271,81 @@ class TestUnifiedInterestLineFeedbackIngestion:
         assert signal.payload["title"] == "讲透城市与建筑"
         assert signal.payload["note"] == "太浅了"
         assert signal.target_layers == frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE})
-        assert schedules == 1, "Wave A 旧批线仍照常调度"
+        assert schedules[0] == 1, "Wave A 旧批线仍照常调度"
+
+    def test_flag_on_returns_before_background_ingest_completes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """POST /api/feedback must not wait for the (potentially slow) LLM ingest."""
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.memory.manager import MemoryManager
+
+        ingest_started = threading.Event()
+        release_ingest = threading.Event()
+        ingest_finished = threading.Event()
+
+        class BlockingPipeline:
+            async def ingest(self, signal: Any) -> object:
+                ingest_started.set()
+                await asyncio.to_thread(release_ingest.wait, 15)
+                ingest_finished.set()
+                return object()
+
+        class BlockingSoulEngine:
+            unified_interest_line_enabled = True
+            pipeline = BlockingPipeline()
+
+            def is_profile_ready(self) -> bool:
+                return True
+
+            def record_immediate_feedback_cognition(
+                self,
+                *,
+                feedback_type: str,
+                title: str,
+                note: str = "",
+            ) -> None:
+                return None
+
+        schedules: list[int] = [0]
+
+        class FakeFeedbackBatchScheduler:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def schedule(self) -> None:
+                schedules[0] += 1
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(api_app, "FeedbackBatchScheduler", FakeFeedbackBatchScheduler)
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=self._FakeDatabase(),
+                soul_engine=BlockingSoulEngine(),
+            )
+        )
+
+        with client:
+            response = client.post(
+                "/api/feedback",
+                json={"recommendation_id": 7, "feedback_type": "like", "note": ""},
+            )
+            assert response.status_code == 200
+            assert ingest_started.wait(timeout=3), "后台 ingest 任务应已被调度"
+            assert not ingest_finished.is_set(), "响应不能等待 ingest 完成"
+            release_ingest.set()
+            assert ingest_finished.wait(timeout=3), "放行后后台 ingest 应完成"
+
+        assert schedules[0] == 1
 
 
 class TestSoulEngineFeedbackConfigPlumbing:

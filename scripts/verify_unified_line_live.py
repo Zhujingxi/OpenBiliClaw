@@ -50,9 +50,10 @@ POLL_TIMEOUT_SECONDS = 300.0
 LATENCY_LIMIT_SECONDS = 600.0
 POLL_INTERVAL_SECONDS = 2.0
 READ_HTTP_TIMEOUT_SECONDS = 30.0
-# ``POST /api/feedback`` can synchronously run the configured preference LLM,
-# whose shipped timeout is 300 seconds. Keep a transport margin beyond that
-# provider budget so a healthy slow response reaches the evidence poll.
+# ``POST /api/feedback`` now returns before the preference LLM runs (the
+# pipeline ingest is scheduled as a background task with a 300-second provider
+# budget). Keep a transport margin so the background analysis and the evidence
+# poll still complete within this window.
 FEEDBACK_HTTP_TIMEOUT_SECONDS = 330.0
 # The shipped feedback scheduler debounces for 5 seconds. Once the core evidence
 # is visible, observe two full debounce windows before declaring the appended

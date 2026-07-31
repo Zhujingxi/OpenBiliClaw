@@ -15,6 +15,10 @@
 | `POST /api/delight/respond` | ✅ | `response="dismiss"` 是三端“× / 看过了，不再推荐”的永久消费动作：服务端按 `bvid` 解析 `content_cache` 中的 canonical `source_platform/content_id`，先写 `seen_items`，再置 `delight_notified=1`；后续普通推荐与惊喜推荐均硬排除。`view` 只置惊喜已读，`dislike` 另记录负偏好，`like/chat` 继续保留当前候选。 |
 | `POST /api/delight/sent` | ✅ | 仅确认主动通知已送达并维护推送冷却，不代表用户已看，不写 `seen_items`；UI 叉号不得把它作为消费路径。 |
 
+## 推荐反馈端点
+
+`POST /api/feedback` 先持久化 recommendation 反馈字段与 memory `feedback` 事件，随后立即返回；当 `scheduler.unified_interest_line=true`（默认）时，反馈信号由后台任务串行投入 `ProfileUpdatePipeline`（`feedback_ingest_lock` 保证连点不会并发触发偏好 LLM 分析），HTTP 响应不等待 LLM。`FeedbackBatchScheduler` 仍负责 debounce 兜底 flush 与一次性旧游标迁移；`unified_interest_line=false` 时恢复旧反馈批路径。
+
 ## 降级配置恢复
 
 `PUT /api/config` 在 `llm_registry_unavailable` 降级态下不再只写盘并要求重启。服务端会复用当前进程已经初始化的数据库、MemoryManager、事件总线、任务注册表和 LLM total gate，通过正常热重载路径原子构造完整的 LLM Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller。构造全部成功后才同步解除业务 API 的 503 guard，并返回 `reloaded=true`、`restart_required=false`；`/setup/` 和插件设置页可以在同一进程里立即继续。
