@@ -189,10 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.185 (2026-07-28)**
+📌 Latest: **v0.3.186 (2026-07-31)**
 
-- **Multimodal visual signals calibrated on real data** — thresholds for the cover / visual-profile / keyframe / danmaku ranking bonuses are all re-derived from real deployment data, ending the initial-value saturation.
-- **More accurate recommendations: negative penalty dropped** — liked and disliked covers overlap in visual space, so the negative penalty was cancelling the positive signal; going positive-only correctly lifts kigurumi / AI desktop-pet / MV content matching your taste.
+- **Geometric redesign of visual scoring** — liked and disliked covers overlap in visual space, so scoring now uses a margin: boost/suppress only where the cover modality can separate them, abstain in contested regions; kigurumi / character-showcase / MV content matching your taste is correctly lifted.
+- **Cold-start gating** — no centroids are built from too little feedback, avoiding a noise-dominated fragile profile; it activates once 8 covers are collected, with ranking unchanged until then.
 - **Cross-platform fairness** — Bilibili-only danmaku / keyframe signals no longer structurally suppress bangumi / xiaohongshu; each platform is normalized within its own pool, and bangumi is back in the feed.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).

@@ -4,6 +4,14 @@
 
 ---
 
+## v0.3.186：视觉评分几何重设计 + 冷启动门控（2026-07-31）
+
+- **P1/P3 从「纯正向」改为 margin 评分（有符号 boost/suppress/gray）**：v0.3.185 的「去 neg 惩罚、纯正向」是对 neg 抵消问题的**第一刀**——直接砍掉 neg，安全但浪费了 neg 能说话的区域。本轮用几何方法把 neg 安全地请回来，取代纯正向也取代被搁置的 C 方案（dislike 理由字段）。三点设计：①**聚类前 cross-cleaning**（`visual_profile.cross_clean_labels`）：kNN 检测落在敌方势力范围的 liked/disliked 封面（misclick / love-hate 矛盾），保守 `drop_margin=0.08` 剔除，**绝不翻转极性**（只从质心构建中移除，原始反馈保留作未来 hard-negative）。②**聚类后 contested 检测**（`contested_pairs`）：pos×neg 质心 cosine ≥ `_VISUAL_PROFILE_CONTESTED=0.45` 标记为 love-hate 区——封面模态在此分不清 like/dislike。③**打分时 margin 判定代替绝对阈值**：`s_pos − s_neg ≥ margin → boost`，`s_neg − s_pos ≥ margin → suppress`（负值），`|net| < margin → gray`（弃权）。一个差值数字自标定（s_pos/s_neg 共享同一 embedding/管线，差值无需单独 τ，0.80 教训的一般化）。**contested 区不静默而是抬高门槛 2×**（`_VISUAL_PROFILE_CONTESTED_MARGIN=0.10`）——实测发现"质心重叠就整对灰掉"会丢掉 ~40% 的 P3 信号（39 个 clear win 被误杀），改成"提高说服力门槛但保留 clear win"。校准全部来自实测（`scripts/measure_visual_profile_geometry.py`，1366 候选）：contested 0.45（6 个 pos×neg 质心对在 0.377/0.576 间有干净断点）、margin 0.05（net p75/p90 之间）、boost/suppress scale 从 net p5/p95。实测效果：vp +107/−280、kf +4/−3（过粗灰门下 kf 0/−1）；三平台都 span −0.20~+0.20；方向验证 boost 的是 kigurumi/角色展示/MV。suppress 偏多是诚实读数：用户视觉上 dislike 多于 like。
+- **per-platform 归一化扩展为有符号**：v0.3.185 的归一化是 `[0, _COMBINED_BONUS_CAP]`（无符号），但 margin 评分引入了负值 suppress，无符号归一化会把 suppress 折叠掉。`_normalize_bonus_per_platform` 改为 `[g_min, g_max] → [−cap, +cap]`，让 suppress（负）与 fairness leveling 共存——缺信号平台（bangumi/xhs）既追平 Bilibili 的高度，又能正确表达 suppress。
+- **视觉画像冷启动门控**：`rebuild_visual_profile` 新增 per-polarity 地板 `_VISUAL_PROFILE_MIN_FEEDBACK=8`——低于 8 个有向量的封面，该极性不建质心。原因：低于 ~4 个封面时 kNN cross-clean 退化（需 3 个 own_others）、2 封面均值质心是噪声主导的脆弱质心，不如弃权（零质心 → bonus map 返回 `{}` → 排序逐字节不变）。**per-polarity 而非 total**：margin 评分天然支持单边冷启动——只 pos 过线 → `net = s_pos − 0` → 匹配 liked 风格的 boost、无 suppress（纯 pos 冷启动）；只 neg 过线对称。日志分三态：partial cold-start（info）、both-below（info，预期）、真 transient 失败（warning + 保留旧质心，铁律 2）。8 是原理下界（PROVISIONAL，rule 3 已标 provenance）：kNN k=3 需 ≥4、min_members=2 需余量，实测 12 pos/22 neg 产出 2/3 质心，8 是较小侧 ~2/3。
+
+---
+
 ## v0.3.185：多模态视觉信号真实数据标定 + 跨平台公平性（2026-07-28）
 
 - **四路视觉/弹幕加成全部按真实部署数据重标定**：cover↔文本锚点 0.15/0.45→0.35/0.48（834 covers 的 per-cover max anchor cosine p50/p95）；P1 视觉画像 0.55/0.80→0.31/0.61（candidate-vs-centroid p50/p95，原 0.22/0.41 是 cover-PAIR 分布导致 70% nonzero / 38% 挂顶饱和）；P3 关键帧 0.55/0.80→0.40/0.64（99 真实精灵图帧的 keyframe-vs-centroid pos best sim p50/p95，原借用的 0.22/0.41 会饱和）；聚类阈值 0.80→0.50（cover-pair p99=0.497，0.80 意味着没有任何两个真实封面能聚成簇→零质心→静默 no-op）。每个阈值都带 calibration-provenance 注释（铁律 3），并配 `scripts/calibrate_visual_thresholds.py` / `scripts/prewarm_and_measure_keyframes.py` / `scripts/snapshot_ranking.py` 三个只读测量工具复现。

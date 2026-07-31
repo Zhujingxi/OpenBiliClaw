@@ -769,7 +769,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `keyframe_enabled` | bool | `false` | 是否启用**视频关键帧**加成（P3）：封面是 UP 主手选的营销图、常常标题党，不代表视频内容；B 站已为每个视频预生成关键帧雪碧图（进度条悬停预览），一次请求即可取到，**无需下载视频、无需 ffmpeg**。用 P1 建好的口味质心去匹配真实画面而非封面，帧向量取 max-pool。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；仅对 B 站视频有效（实测 30/30 覆盖率，时长 45s–5106s）。默认关闭时加成恒 0，排序与旧版逐字节一致 |
 | `keyframe_max_frames` | int | `4` | 每个视频采样的关键帧数。合法范围 `1..12`，超范围回退默认值。相邻关键帧高度冗余，4 帧已能覆盖正片（采样跨全部雪碧图均匀分布并跳过片头片尾） |
 | `keyframe_fetch_limit` | int | `50` | 每轮预热处理的视频数上限。合法范围 `1..200` |
-| `visual_profile_enabled` | bool | `false` | 是否启用**用户视觉画像**加成（P1）：把点赞/踩过的推荐封面聚成 k 个均值质心，候选封面↔质心同模态余弦映射为有界加成（正向）− 有界惩罚（负向，"标题党封面"降权），在 `serve()` 排序上与封面↔文本锚点加成并行叠加。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；与 `multimodal_evaluation_enabled` 互相独立。默认关闭/无反馈数据时加成恒 0，排序与旧版逐字节一致 |
+| `visual_profile_enabled` | bool | `false` | 是否启用**用户视觉画像**加成（P1）：把点赞/踩过的推荐封面聚成 k 个均值质心，候选封面↔质心同模态余弦经 **margin 评分**映射为**有符号**加成（能分清 like/dislike 的区域 boost/suppress，分不清的 contested 区弃权；聚类前 cross-clean 标签噪声、聚类后 contested 检测），在 `serve()` 排序上与封面↔文本锚点加成并行叠加。**冷启动门控**：per-polarity 不足 8 个封面时不建质心（排序不变）。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；与 `multimodal_evaluation_enabled` 互相独立。默认关闭/无反馈数据时加成恒 0，排序与旧版逐字节一致 |
 | `multimodal_batch_size` | int | `8` | 图文评估 batch 上限。合法范围 `1..12`，超范围回退默认值；纯文本评估仍使用调用方原 batch size |
 | `multimodal_image_max_px` | int | `384` | 送入评估器前封面图压缩后的最大边。合法范围 `128..768`，超范围回退默认值 |
 | `multimodal_image_quality` | int | `72` | JPEG 压缩质量。合法范围 `40..90`，超范围回退默认值 |
