@@ -8,6 +8,7 @@ when thresholds are met.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -897,6 +898,11 @@ class ProfileUpdatePipeline:
             if data_dir
             else {layer.value: LayerBuffer(layer=layer) for layer in _BUFFERED_LAYERS}
         )
+        # Serializes ingest/flush/tick layer updates so a burst of concurrent
+        # callers (e.g. rapid feedback clicks + extension event batches) never
+        # drains overlapping buffers and runs parallel LLM analyses, and so
+        # pipeline_state.json snapshots never interleave.
+        self._ingest_lock = asyncio.Lock()
         self._total_ingested = 0
         # Out-of-order retraction tombstones: (identity_key, action) → retraction
         # event time. In-memory only — the events table is the durable tombstone
@@ -946,7 +952,18 @@ class ProfileUpdatePipeline:
         return await self.ingest_batch([signal])
 
     async def ingest_batch(self, signals: list[ProfileSignal]) -> IngestResult:
-        """Ingest multiple signals, then check all buffers for readiness."""
+        """Ingest multiple signals, then check all buffers for readiness.
+
+        The whole append → consume → persist sequence holds ``_ingest_lock``:
+        concurrent callers are serialized, so each drained batch runs its own
+        (potentially LLM-backed) layer update without overlapping another
+        batch's analysis or racing ``_save_state`` snapshots.
+        """
+        async with self._ingest_lock:
+            return await self._ingest_batch_locked(signals)
+
+    async def _ingest_batch_locked(self, signals: list[ProfileSignal]) -> IngestResult:
+        """Locked body of :meth:`ingest_batch` (see there for semantics)."""
         # Atomic retraction-discount preprocessing runs BEFORE any threshold
         # consumption (_update_layer) so a same-batch or out-of-order retraction
         # discounts the matching positive before it can be folded into a layer
@@ -1109,16 +1126,18 @@ class ProfileUpdatePipeline:
         """Periodic check: update any layers whose buffers are ready."""
         result = FlushResult()
         now = datetime.now()
-        for layer in _BUFFERED_LAYERS:
-            buf = self._buffers.get(layer.value)
-            threshold = self._thresholds.get(layer)
-            has_strong = buf is not None and any(
-                s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
-            )
-            if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
-                update_result = await self._update_layer(layer, buf)
-                if update_result:
-                    result.layers_updated.append(update_result)
+        async with self._ingest_lock:
+            for layer in _BUFFERED_LAYERS:
+                buf = self._buffers.get(layer.value)
+                threshold = self._thresholds.get(layer)
+                has_strong = buf is not None and any(
+                    s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
+                )
+                if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
+                    update_result = await self._update_layer(layer, buf)
+                    if update_result:
+                        result.layers_updated.append(update_result)
+            self._save_state()
 
         # Speculator tick: expire → promote → generate.
         # Pipeline.tick runs every minute, but the speculator doesn't
@@ -1191,7 +1210,6 @@ class ProfileUpdatePipeline:
             except Exception:
                 logger.exception("Profile consolidation failed during pipeline tick")
 
-        self._save_state()
         return result
 
     def _record_consolidation_cognition(self, report: Any) -> None:
@@ -1246,14 +1264,15 @@ class ProfileUpdatePipeline:
     ) -> FlushResult:
         """Force-update specified layers regardless of thresholds."""
         result = FlushResult()
-        target_layers = layers or _BUFFERED_LAYERS
-        for layer in target_layers:
-            buf = self._buffers.get(layer.value)
-            if buf and buf.signals:
-                update_result = await self._update_layer(layer, buf)
-                if update_result:
-                    result.layers_updated.append(update_result)
-        self._save_state()
+        async with self._ingest_lock:
+            target_layers = layers or _BUFFERED_LAYERS
+            for layer in target_layers:
+                buf = self._buffers.get(layer.value)
+                if buf and buf.signals:
+                    update_result = await self._update_layer(layer, buf)
+                    if update_result:
+                        result.layers_updated.append(update_result)
+            self._save_state()
         return result
 
     # -- Internal -------------------------------------------------------------

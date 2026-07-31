@@ -10,6 +10,7 @@ correctly; this file proves the surrounding machinery is solid.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -369,6 +370,46 @@ async def test_strong_signal_still_blocked_by_min_interval(tmp_path: Path) -> No
     flush_result = await pipeline.tick()
     interest_updated = [r for r in flush_result.layers_updated if r.layer == OnionLayer.INTEREST]
     assert not interest_updated, "Even strong signals must respect min_interval_seconds gate"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ingest_batches_do_not_overlap_llm_analysis(tmp_path: Path) -> None:
+    """A burst of concurrent ingest_batch calls must serialize layer updates.
+
+    Without the pipeline lock, two rapid feedback ingests each drain their own
+    buffer and run parallel preference LLM passes (double cost + racing
+    ``pipeline_state.json`` snapshots). The lock queues the second call until
+    the first analysis finishes.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    in_flight = 0
+    max_in_flight = 0
+
+    class BlockingService(_RichFakeService):
+        async def complete_structured_task(self, **kwargs: Any) -> LLMResponse:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            entered.set()
+            try:
+                await asyncio.wait_for(release.wait(), timeout=10)
+            finally:
+                in_flight -= 1
+            return await super().complete_structured_task(**kwargs)
+
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, service=BlockingService())
+
+    first = asyncio.create_task(pipeline.ingest(signal_from_feedback("like", "A", "")))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    second = asyncio.create_task(pipeline.ingest(signal_from_feedback("like", "B", "")))
+    # Give the second call a real chance to start; the lock must keep it queued.
+    await asyncio.sleep(0.05)
+    assert max_in_flight == 1, "concurrent ingests must not overlap LLM analysis"
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert all(result.signals_accepted == 1 for result in results)
+    assert max_in_flight == 1
 
 
 @pytest.mark.asyncio
