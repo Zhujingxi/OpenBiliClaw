@@ -141,6 +141,28 @@ _VISUAL_PROFILE_CONTESTED_MARGIN = 0.10
 # live measurement: p95=0.114 (boost full-strength), p5=-0.154 (suppress full).
 _VISUAL_PROFILE_NET_P95 = 0.114
 _VISUAL_PROFILE_NET_P5 = -0.154
+
+# Cold-start floor: minimum embedded covers required to build centroids for a
+# given polarity (like OR dislike). Below this, that polarity is skipped — no
+# centroids, so the bonus map returns {} for it and the ranking is unchanged
+# (the safe cold start). Per-polarity, not total: if only likes clear the floor,
+# pos centroids are built and neg stays empty -> net = s_pos - 0 -> candidates
+# matching liked style boost, nothing suppresses (pure-pos cold start). Symmetric
+# for neg-only.
+#
+# CALIBRATION PROVENANCE: PROVISIONAL — chosen on principle, not yet measured
+# against a real feedback-growth curve (rule 3). The 8 lower-bounds the two
+# mechanisms that protect centroid quality:
+#   - cross_clean_labels uses kNN k=3: it needs >=4 covers per polarity to have
+#     3 own_others (below that, kNN clamps to "all of them" and label-noise
+#     cleaning is degenerate). 8 gives 7 own_others — kNN fully populated.
+#   - build_centroids min_members=2: a 2-cover cluster is a fragile mean. 8 lets
+#     cross-clean drop 1-2 strays and still leave a multi-member cluster.
+# Live data (12 pos / 22 neg -> 2/3 centroids) is well above this; 8 is ~2/3 of
+# the smaller side, leaving headroom for cleaning losses. Reopen once a real
+# feedback-growth curve is measured: if centroids at 8 are noisy in practice,
+# raise; if the cold-start window is too long, lower.
+_VISUAL_PROFILE_MIN_FEEDBACK = 8
 # Legacy single-signal caps retained for reference / snapshot stats; the margin
 # design supersedes the absolute floor/ceil nudges below.
 _VISUAL_PROFILE_PENALTY_MAX = 0.05  # UNUSED (margin scoring, see _visual_profile_bonus_from_vec)
@@ -2412,8 +2434,40 @@ class RecommendationEngine:
                 len(cleaned.dropped_pos), len(cleaned.dropped_neg),
                 len(cleaned.kept_pos), len(cleaned.kept_neg),
             )
-        pos_clusters = build_centroids(cleaned.kept_pos)
-        neg_clusters = build_centroids(cleaned.kept_neg)
+        # Cold-start floor: only build centroids for a polarity that has enough
+        # embedded covers. Below the floor the kNN cross-clean is degenerate and
+        # a 2-cover mean is a fragile, noise-dominated centroid — better to
+        # abstain (no centroids -> bonus map returns {} -> ranking unchanged)
+        # than to ship a biased profile. Per-polarity: a polarity that clears
+        # the floor is built even if the other doesn't (pure-pos / pure-neg cold
+        # start, which the margin scoring handles: the missing side contributes
+        # s=0, so only boosts or only suppressions fire).
+        pos_clusters = (
+            build_centroids(cleaned.kept_pos)
+            if len(pos_vecs) >= _VISUAL_PROFILE_MIN_FEEDBACK
+            else []
+        )
+        neg_clusters = (
+            build_centroids(cleaned.kept_neg)
+            if len(neg_vecs) >= _VISUAL_PROFILE_MIN_FEEDBACK
+            else []
+        )
+        # Partial cold-start: one polarity cleared the floor, the other didn't.
+        # The built side still scores (pure-pos / pure-neg cold start via the
+        # margin design); the sub-floor side abstains. Logged separately from the
+        # both-below case, which the guard below handles.
+        if pos_clusters and not neg_clusters and neg_urls:
+            logger.info(
+                "Visual profile partial cold-start: pos built (%d clusters), neg below "
+                "the %d-cover floor (%d covers); neg abstains",
+                len(pos_clusters), _VISUAL_PROFILE_MIN_FEEDBACK, len(neg_vecs),
+            )
+        elif neg_clusters and not pos_clusters and pos_urls:
+            logger.info(
+                "Visual profile partial cold-start: neg built (%d clusters), pos below "
+                "the %d-cover floor (%d covers); pos abstains",
+                len(neg_clusters), _VISUAL_PROFILE_MIN_FEEDBACK, len(pos_vecs),
+            )
 
         stored: list[dict[str, Any]] = []
         for c in pos_clusters:
@@ -2427,23 +2481,38 @@ class RecommendationEngine:
 
         # Guard against wiping a previously-valid profile on a transient
         # failure: if there IS feedback (pos_urls or neg_urls non-empty) but
-        # this rebuild produced zero clusters (all cover embeds failed, or
-        # every liked cover was a dissimilar singleton pruned by min_members),
-        # do NOT call replace_user_visual_clusters([]) — that DELETEs the
-        # whole table and destroys existing centroids, causing the profile to
+        # this rebuild produced zero clusters, do NOT call
+        # replace_user_visual_clusters([]) — that DELETEs the whole table and
+        # destroys existing centroids, causing the profile to
         # appear/disappear/reappear. Only wipe when there is genuinely no
         # feedback at all. The in-memory cache is left untouched too, so the
         # hot path keeps using the last good centroids until a rebuild
         # succeeds (pitfall rule 2: never persist failed/empty results).
         has_feedback = bool(pos_urls or neg_urls)
         if not stored and has_feedback:
-            logger.warning(
-                "Visual profile rebuild produced 0 centroids from %d pos / %d neg "
-                "feedback covers (transient embed failure or all singletons); "
-                "preserving existing %d centroids",
-                len(pos_urls), len(neg_urls),
-                len(self._visual_profile_cache or []),
+            # Distinguish cold-start (expected: below the feedback floor) from a
+            # genuine transient failure (enough data, but embeds failed / every
+            # cover was a dissimilar singleton). Cold-start is info, not warning.
+            both_cold = (
+                len(pos_vecs) < _VISUAL_PROFILE_MIN_FEEDBACK
+                and len(neg_vecs) < _VISUAL_PROFILE_MIN_FEEDBACK
             )
+            if both_cold:
+                logger.info(
+                    "Visual profile cold-start: %d pos / %d neg covers below the %d-cover "
+                    "floor; no centroids built (preserving any existing %d)",
+                    len(pos_vecs), len(neg_vecs),
+                    _VISUAL_PROFILE_MIN_FEEDBACK,
+                    len(self._visual_profile_cache or []),
+                )
+            else:
+                logger.warning(
+                    "Visual profile rebuild produced 0 centroids from %d pos / %d neg "
+                    "feedback covers (transient embed failure or all singletons); "
+                    "preserving existing %d centroids",
+                    len(pos_urls), len(neg_urls),
+                    len(self._visual_profile_cache or []),
+                )
             return 0
 
         try:

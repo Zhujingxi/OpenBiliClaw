@@ -375,8 +375,10 @@ async def test_rebuild_persists_centroids_from_feedback() -> None:
     """rebuild_visual_profile reads feedback, clusters, persists, refreshes cache."""
     dim = 8
     # Two liked covers (same style → one cluster) + two disliked (another style).
-    liked_urls = [f"https://i0.hdslb.com/bfs/archive/liked{i}.jpg" for i in range(2)]
-    disliked_urls = [f"https://i0.hdslb.com/bfs/archive/disliked{i}.jpg" for i in range(2)]
+    # Each polarity must clear the cold-start floor (_VISUAL_PROFILE_MIN_FEEDBACK),
+    # so seed >=8 covers per side (all same style → one cluster each).
+    liked_urls = [f"https://i0.hdslb.com/bfs/archive/liked{i}.jpg" for i in range(8)]
+    disliked_urls = [f"https://i0.hdslb.com/bfs/archive/disliked{i}.jpg" for i in range(8)]
     key_map: dict[str, list[float]] = {}
     for u in liked_urls:
         key_map[image_embedding_cache_key_for_url(u)] = _cover_vec_for_cosine(0.95, dim)
@@ -400,6 +402,77 @@ async def test_rebuild_persists_centroids_from_feedback() -> None:
         # Cache was refreshed.
         assert engine._visual_profile_cache is not None
         assert len(engine._visual_profile_cache) == len(rows)
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_cold_start_below_floor_builds_nothing() -> None:
+    """Below the cold-start floor, no centroids are built and none persisted.
+
+    A handful of feedback covers (3 pos / 3 neg, all below the 8-cover floor)
+    must NOT produce centroids — a 2-cover mean is a fragile, noise-dominated
+    centroid and the kNN cross-clean is degenerate below ~4. The safe cold start
+    is to abstain: no centroids -> bonus map returns {} -> ranking unchanged.
+    """
+    dim = 8
+    liked_urls = [f"https://i0.hdslb.com/bfs/archive/liked{i}.jpg" for i in range(3)]
+    disliked_urls = [f"https://i0.hdslb.com/bfs/archive/disliked{i}.jpg" for i in range(3)]
+    key_map: dict[str, list[float]] = {}
+    for u in liked_urls:
+        key_map[image_embedding_cache_key_for_url(u)] = _cover_vec_for_cosine(0.95, dim)
+    for u in disliked_urls:
+        key_map[image_embedding_cache_key_for_url(u)] = _cover_vec_for_cosine(0.0, dim)
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        for i, u in enumerate(liked_urls):
+            _seed_feedback(db, f"BVLIK{i}", u, "like")
+        for i, u in enumerate(disliked_urls):
+            _seed_feedback(db, f"BVDIS{i}", u, "dislike")
+        engine = _engine(db, _ProfileEmb(key_map))
+        n = await engine.rebuild_visual_profile()
+        assert n == 0
+        assert db.get_user_visual_clusters() == []
+        # Bonus map is a no-op with no centroids -> ranking byte-identical.
+        cand = DiscoveredContent(
+            bvid="BVCAND",
+            cover_url=liked_urls[0],
+            relevance_score=0.80,
+        )
+        assert await engine._visual_profile_bonus_map([cand]) == {}
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_partial_cold_start_builds_only_the_warm_side() -> None:
+    """pos clears the floor, neg doesn't -> only pos centroids built.
+
+    Per-polarity floor: the warm side scores (pure-pos cold start — net = s_pos
+    with no neg centroids, so candidates matching liked style boost and nothing
+    suppresses); the sub-floor side abstains. This is the honest cold start —
+    act where there's data, abstain where there isn't.
+    """
+    dim = 8
+    liked_urls = [f"https://i0.hdslb.com/bfs/archive/liked{i}.jpg" for i in range(8)]
+    disliked_urls = [f"https://i0.hdslb.com/bfs/archive/disliked{i}.jpg" for i in range(3)]
+    key_map: dict[str, list[float]] = {}
+    for u in liked_urls:
+        key_map[image_embedding_cache_key_for_url(u)] = _cover_vec_for_cosine(0.95, dim)
+    for u in disliked_urls:
+        key_map[image_embedding_cache_key_for_url(u)] = _cover_vec_for_cosine(0.0, dim)
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        for i, u in enumerate(liked_urls):
+            _seed_feedback(db, f"BVLIK{i}", u, "like")
+        for i, u in enumerate(disliked_urls):
+            _seed_feedback(db, f"BVDIS{i}", u, "dislike")
+        engine = _engine(db, _ProfileEmb(key_map))
+        n = await engine.rebuild_visual_profile()
+        assert n >= 1
+        rows = db.get_user_visual_clusters()
+        polarities = {r["polarity"] for r in rows}
+        assert polarities == {"pos"}  # neg below floor -> not built
         db.close()
 
 
