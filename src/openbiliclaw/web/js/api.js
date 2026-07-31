@@ -13,6 +13,7 @@ const QUICK_READ_TIMEOUT_MS = 5_000;
 const CONFIG_WRITE_TIMEOUT_MS = 60_000;
 const SAVED_READ_TIMEOUT_MS = 10_000;
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
+const FEEDBACK_SUBMIT_TIMEOUT_MS = 30_000;
 const CSRF_HEADER = "X-OBC-Auth";
 
 /** Notify the shell that the session is gone so it can show the login view. */
@@ -269,7 +270,7 @@ export async function fetchChatTurns({ session = "mobile", scope = "", limit = 5
 
 // ── Feedback ───────────────────────────────────────────────
 export async function submitFeedback(payload) {
-  return requestJson("/feedback", json(payload));
+  return requestJson("/feedback", { ...json(payload), timeoutMs: FEEDBACK_SUBMIT_TIMEOUT_MS });
 }
 
 // ── Content-based feedback (saved lists have no recommendation_id) ──

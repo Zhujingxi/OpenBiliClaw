@@ -923,7 +923,7 @@
           throw new Error("/auth/status 返回了无效数据。");
         }
         return status;
-      } catch (error) {
+      } catch {
         if (error?.name === "AbortError") throw new Error("/auth/status 请求超时，请稍后重试。");
         throw error;
       } finally {
@@ -5677,16 +5677,23 @@ ${cardFeedbackBarHtml()}`;
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          bvid: delight.bvid,
-          response,
-          title: delight.title,
-          message: ""
-        })
-      });
+      let feedbackResult;
+      try {
+        feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bvid: delight.bvid,
+            response,
+            title: delight.title,
+            message: ""
+          })
+        });
+      } catch (error) {
+        // 失败不假装成功：保留当前卡片，下次可再试。
+        showToast(response === "like" ? "这次喜欢还没记上，可以再试一次" : "这次还没记上，请再试一次");
+        return;
+      }
       if (response === "dismiss" && feedbackResult == null) {
         showToast("这次还没记上，请再试一次");
         setActiveDelight(state.delightIndex);
