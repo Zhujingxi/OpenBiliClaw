@@ -71,19 +71,53 @@ class KeyframeFetchResult:
     """Distinguishable outcome of a videoshot fetch and sprite extraction.
 
     ``no_data`` is a confirmed empty result (the API has no videoshot data).
-    ``transient_failure`` means the source, response, sprite, or parser failed
-    and must be retried.  A non-empty ``frames`` result is successful even when
-    another sampled sprite failed, because at least one frame can be embedded.
+    ``partial`` means some sampled slots were extracted but at least one
+    sprite/crop/task failed; its successful frames are safe to cache, but the
+    source must be retried. ``transient_failure`` means no usable frame was
+    extracted after a retryable failure. ``sampled_frames`` carries the stable
+    sampling-slot index separately from the compatibility ``frames`` view, so
+    a missing slot can never shift later vectors into the wrong cache key.
     """
 
-    status: Literal["success", "no_data", "transient_failure"]
+    status: Literal["success", "partial", "no_data", "transient_failure"]
     frames: list[bytes] = field(default_factory=list)
     reason: str = ""
+    sampled_frames: tuple[tuple[int, bytes], ...] = ()
+    sampled_slots: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Keep the old list-shaped view and make hand-built explicit results
+        # useful to callers that only provide one of the two representations.
+        samples = tuple((max(0, int(slot)), bytes(frame)) for slot, frame in self.sampled_frames)
+        if not samples and self.frames:
+            slots = tuple(max(0, int(slot)) for slot in self.sampled_slots)
+            if len(slots) == len(self.frames):
+                samples = tuple(
+                    (slot, bytes(frame)) for slot, frame in zip(slots, self.frames, strict=True)
+                )
+            else:
+                samples = tuple((index, bytes(frame)) for index, frame in enumerate(self.frames))
+        if samples and not self.frames:
+            object.__setattr__(self, "frames", [frame for _, frame in samples])
+        if samples != self.sampled_frames:
+            object.__setattr__(self, "sampled_frames", samples)
+        if not self.sampled_slots:
+            object.__setattr__(self, "sampled_slots", tuple(slot for slot, _ in samples))
 
     @property
     def definitive(self) -> bool:
         """Whether the outcome may safely advance persistent fetch state."""
         return self.status in {"success", "no_data"}
+
+    @property
+    def retryable(self) -> bool:
+        """Whether the source should remain eligible for the next prewarm."""
+        return self.status in {"partial", "transient_failure"}
+
+    @property
+    def incomplete(self) -> bool:
+        """Whether only a subset of the requested sampling slots was returned."""
+        return self.status == "partial"
 
     # Compatibility helpers for older callers that treated ``fetch_keyframes``
     # as a list.  New code must inspect ``status`` rather than infer failure
@@ -342,15 +376,34 @@ def crop_frames_from_sprite(
     Tiles that fall outside the actual image are skipped rather than raising —
     real sprite sheets are sometimes short on the final row.
     """
+    return [
+        frame
+        for _position, frame in _crop_frames_from_sprite_indexed(
+            sprite_bytes,
+            meta,
+            list(enumerate(local_positions)),
+            quality=quality,
+        )
+    ]
+
+
+def _crop_frames_from_sprite_indexed(
+    sprite_bytes: bytes,
+    meta: VideoshotMeta,
+    local_positions: list[tuple[int, int]],
+    *,
+    quality: int = 72,
+) -> list[tuple[int, bytes]]:
+    """Crop frames while retaining each caller-supplied stable slot index."""
     if not sprite_bytes or not local_positions or not meta.is_usable():
         return []
 
-    out: list[bytes] = []
+    out: list[tuple[int, bytes]] = []
     try:
         with Image.open(BytesIO(sprite_bytes)) as sheet:
             rgb = _coerce_rgb(sheet)
             sheet_w, sheet_h = rgb.size
-            for pos in local_positions:
+            for slot, pos in local_positions:
                 col = pos % meta.grid_x
                 row = pos // meta.grid_x
                 left = col * meta.tile_width
@@ -370,7 +423,7 @@ def crop_frames_from_sprite(
                 )
                 encoded = buffer.getvalue()
                 if encoded:
-                    out.append(encoded)
+                    out.append((slot, encoded))
     except (OSError, UnidentifiedImageError, ValueError):
         logger.debug("sprite crop failed", exc_info=True)
         return out
@@ -409,17 +462,20 @@ async def fetch_keyframes(
 
     # Group the globally-sampled positions by which sprite sheet holds them,
     # so each needed sheet is downloaded exactly once.
-    by_sheet: dict[int, list[int]] = {}
-    for pos in positions:
+    by_sheet: dict[int, list[tuple[int, int]]] = {}
+    for slot, pos in enumerate(positions):
         sheet_idx = pos // per_sheet
         if sheet_idx >= len(meta.image_urls):
             continue
-        by_sheet.setdefault(sheet_idx, []).append(pos % per_sheet)
+        # ``slot`` is the durable sampling position used by the embedding
+        # cache. It must not be recomputed by enumerating only successful
+        # sprite results when an earlier sheet fails.
+        by_sheet.setdefault(sheet_idx, []).append((slot, pos % per_sheet))
 
     async def _frames_for_sheet(
         sheet_idx: int,
-        local: list[int],
-    ) -> tuple[list[bytes], bool, str]:
+        local: list[tuple[int, int]],
+    ) -> tuple[list[tuple[int, bytes]], bool, str]:
         url = meta.image_urls[sheet_idx]
         try:
             # Reuses the shared image cache: hdslb.com is already whitelisted
@@ -430,17 +486,18 @@ async def fetch_keyframes(
             logger.warning("%s", reason, exc_info=True)
             return [], False, reason
         frames = await asyncio.to_thread(
-            crop_frames_from_sprite, sprite_bytes, meta, local, quality=quality
+            _crop_frames_from_sprite_indexed, sprite_bytes, meta, local, quality=quality
         )
-        return frames, True, "" if frames else "sprite_crop_empty"
+        if len(frames) != len(local):
+            return frames, True, "sprite_crop_incomplete"
+        return frames, True, ""
 
     results = await asyncio.gather(
         *(_frames_for_sheet(idx, local) for idx, local in sorted(by_sheet.items())),
         return_exceptions=True,
     )
 
-    frames: list[bytes] = []
-    successful_sheets = 0
+    sampled_frames: list[tuple[int, bytes]] = []
     failure_reasons: list[str] = []
     for outcome in results:
         if isinstance(outcome, BaseException):
@@ -448,20 +505,24 @@ async def fetch_keyframes(
             logger.warning("keyframe sheet task failed: %s", reason, exc_info=True)
             failure_reasons.append(reason)
             continue
-        sheet_frames, fetched, reason = outcome
-        if fetched:
-            successful_sheets += 1
+        sheet_frames, _fetched, reason = outcome
         if reason:
             failure_reasons.append(reason)
-        frames.extend(sheet_frames)
-    if frames:
+        sampled_frames.extend(sheet_frames)
+    sampled_frames.sort(key=lambda item: item[0])
+    if sampled_frames:
+        status: Literal["success", "partial"] = (
+            "success"
+            if not failure_reasons and len(sampled_frames) == len(positions)
+            else "partial"
+        )
         return KeyframeFetchResult(
-            "success",
-            frames=frames[:max_frames],
+            status,
+            frames=[frame for _, frame in sampled_frames[:max_frames]],
             reason=";".join(failure_reasons),
+            sampled_frames=tuple(sampled_frames[:max_frames]),
+            sampled_slots=tuple(range(len(positions))),
         )
     reason = ";".join(failure_reasons) or "sprite_crop_empty"
-    if successful_sheets and not failure_reasons:
-        reason = "sprite_crop_empty"
     logger.warning("keyframe extraction produced no frames for %s: %s", bvid, reason)
     return KeyframeFetchResult("transient_failure", reason=reason)

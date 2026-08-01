@@ -1052,6 +1052,14 @@ class BilibiliAPIClient:
                 return DanmakuFetchResult("transient_failure", reason=reason)
             # httpx transparently inflates the deflate-encoded body.
             root = ElementTree.fromstring(response.text)
+            root_name = str(root.tag).rsplit("}", 1)[-1].lower()
+            if root_name != "i":
+                # A 200 HTML challenge page is valid XML, but it is not a
+                # successful empty danmaku stream. Treating it as empty would
+                # permanently stamp this video as no-data.
+                reason = f"unexpected_root_{root_name or 'empty'}"
+                logger.warning("danmaku response invalid for cid=%s: %s", part_id, reason)
+                return DanmakuFetchResult("transient_failure", reason=reason)
         except Exception as exc:
             reason = f"{type(exc).__name__}"
             logger.warning("danmaku fetch/parse failed for cid=%s: %s", part_id, reason)

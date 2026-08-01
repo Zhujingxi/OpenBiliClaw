@@ -55,9 +55,7 @@ def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
 
 def test_mobile_failed_chat_turn_renders_durable_error() -> None:
     chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text()
-    dialogue_js = (
-        ROOT / "src/openbiliclaw/web/shared/dialogue-confirmation.js"
-    ).read_text()
+    dialogue_js = (ROOT / "src/openbiliclaw/web/shared/dialogue-confirmation.js").read_text()
 
     assert 'turn.status === "error" || turn.status === "failed"' in chat_js
     assert '["error", "failed"].includes(text(turn?.status).toLowerCase())' in dialogue_js

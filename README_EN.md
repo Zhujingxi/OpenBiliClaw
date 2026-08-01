@@ -679,13 +679,15 @@ When `[discovery].keyframe_enabled` is on and multimodal embedding is available,
 same visual centroids used by P1; the P1 cover bonus is still controlled only by
 `visual_profile_enabled`. Keyframe cache provenance includes the sampling algorithm,
 `keyframe_max_frames`, embedding fingerprint, and dimension, so a model or sampling change rebuilds
-safely. Keyframe and danmaku prewarming distinguish confirmed empty data from transient failures;
-transient failures remain eligible for the next cycle.
+safely. Partial keyframe results carry stable sampled slots: successful slots may enter cache first,
+but completion is recorded only for confirmed no-data or a complete sample whose every embedding
+succeeds. Failed slots remain eligible for the next cycle.
 
 `keyframe_fetch_limit`, `danmaku_fetch_limit`, and `danmaku_max_chars` are range-validated in both the
 config file and config API. Danmaku summaries use the full `danmaku_max_chars` value for document
-embedding rather than a silent fixed prefix. Cross-platform visual bonuses keep zero fixed and scale
-positive and negative sides separately, so zero / missing values stay zero. See
+embedding rather than a silent fixed prefix. Cross-platform visual bonuses keep zero fixed; on
+multi-platform batches both signs align to the observed global side maximum under the combined cap,
+while single-platform batches retain absolute magnitude. Zero / missing values stay zero. See
 [`docs/modules/recommendation.md`](docs/modules/recommendation.md) and [`docs/architecture.md`](docs/architecture.md) for the full contract.
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.

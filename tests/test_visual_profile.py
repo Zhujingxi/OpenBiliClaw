@@ -18,7 +18,6 @@ import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
-from openbiliclaw.recommendation import engine as engine_mod
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.recommendation.visual_profile import (
     VisualCluster,
@@ -529,6 +528,57 @@ async def test_rebuild_dispatch_uses_registry_track() -> None:
         db.close()
 
 
+def test_profile_rebuild_does_not_treat_unknown_dimension_as_stale() -> None:
+    """Dimension zero stays unknown until two positive dimensions differ."""
+
+    class _SpyRegistry:
+        def __init__(self) -> None:
+            self.tracked: list[str] = []
+
+        def track(self, name: str, coro: Any) -> None:
+            self.tracked.append(name)
+            coro.close()
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed_feedback(
+            db,
+            "BVUNKNOWNPROFILEDIM",
+            "https://i0.hdslb.com/bfs/archive/profile-dim.jpg",
+            "like",
+        )
+        emb = _ProfileEmb({})
+        emb.embedding_fingerprint = "profile-fp"  # type: ignore[attr-defined]
+        emb.embedding_dimension = 0  # type: ignore[attr-defined]
+        engine = _engine(db, emb)
+        spy = _SpyRegistry()
+        engine.task_registry = spy  # type: ignore[assignment]
+        feedback_at = db.latest_feedback_at()
+        db.record_user_visual_profile_rebuild(
+            embedding_fingerprint="profile-fp",
+            embedding_dimension=0,
+            feedback_at=feedback_at,
+        )
+
+        engine._maybe_rebuild_visual_profile()
+        assert spy.tracked == []
+
+        # Unknown stored dimension is not a mismatch when the first observed
+        # vector dimension appears. A positive-vs-positive change is stale.
+        emb.embedding_dimension = 8  # type: ignore[attr-defined]
+        engine._maybe_rebuild_visual_profile()
+        assert spy.tracked == []
+        db.record_user_visual_profile_rebuild(
+            embedding_fingerprint="profile-fp",
+            embedding_dimension=3,
+            feedback_at=feedback_at,
+        )
+        engine._maybe_rebuild_visual_profile()
+        assert spy.tracked == ["rebuild_visual_profile_detached"]
+        db.close()
+
+
 @pytest.mark.asyncio
 async def test_empty_delight_backlog_still_dispatches_profile_rebuild(
     monkeypatch: pytest.MonkeyPatch,
@@ -593,7 +643,7 @@ async def test_concurrent_profile_dispatches_coalesce_in_registry(
 
 
 def test_platform_bonus_normalization_preserves_zero_and_sign() -> None:
-    """Positive and negative sides scale independently around a fixed zero."""
+    """Positive and negative sides align around zero without inventing size."""
     candidates = [
         DiscoveredContent(bvid="BP", source_platform="bilibili"),
         DiscoveredContent(bvid="BN", source_platform="bilibili"),
@@ -620,7 +670,8 @@ def test_platform_bonus_normalization_preserves_zero_and_sign() -> None:
         {"PO1": 0.01, "PO2": 0.02, "PO0": 0.0},
     )
     assert 0.0 < positive_only["PO1"] < positive_only["PO2"]
-    assert positive_only["PO2"] == pytest.approx(engine_mod._COMBINED_BONUS_CAP)
+    assert positive_only["PO1"] == pytest.approx(0.01)
+    assert positive_only["PO2"] == pytest.approx(0.02)
     assert positive_only["PO0"] == 0.0
 
     negative_only = RecommendationEngine._normalize_bonus_per_platform(
@@ -633,8 +684,43 @@ def test_platform_bonus_normalization_preserves_zero_and_sign() -> None:
     )
     assert negative_only["NO1"] < 0.0
     assert negative_only["NO2"] < negative_only["NO1"]
-    assert negative_only["NO2"] == pytest.approx(-engine_mod._COMBINED_BONUS_CAP)
+    assert negative_only["NO1"] == pytest.approx(-0.01)
+    assert negative_only["NO2"] == pytest.approx(-0.02)
     assert negative_only["NO0"] == 0.0
+
+    multi_platform = RecommendationEngine._normalize_bonus_per_platform(
+        [
+            DiscoveredContent(bvid="A1", source_platform="a"),
+            DiscoveredContent(bvid="A2", source_platform="a"),
+            DiscoveredContent(bvid="B1", source_platform="b"),
+            DiscoveredContent(bvid="B2", source_platform="b"),
+            DiscoveredContent(bvid="Z", source_platform="b"),
+        ],
+        {"A1": 0.01, "A2": 0.02, "B1": 0.05, "B2": 0.025, "Z": 0.0},
+    )
+    # The shorter platform is aligned to the strongest observed positive
+    # side; the global cap is not a made-up target for the single platform.
+    assert multi_platform["A1"] == pytest.approx(0.025)
+    assert multi_platform["A2"] == pytest.approx(0.05)
+    assert multi_platform["B1"] == pytest.approx(0.05)
+    assert multi_platform["B2"] == pytest.approx(0.025)
+    assert multi_platform["Z"] == 0.0
+
+    multi_negative = RecommendationEngine._normalize_bonus_per_platform(
+        [
+            DiscoveredContent(bvid="NA1", source_platform="a"),
+            DiscoveredContent(bvid="NA2", source_platform="a"),
+            DiscoveredContent(bvid="NB1", source_platform="b"),
+            DiscoveredContent(bvid="NB2", source_platform="b"),
+            DiscoveredContent(bvid="NZ", source_platform="b"),
+        ],
+        {"NA1": -0.02, "NA2": -0.04, "NB1": -0.08, "NB2": -0.04, "NZ": 0.0},
+    )
+    assert multi_negative["NA1"] == pytest.approx(-0.04)
+    assert multi_negative["NA2"] == pytest.approx(-0.08)
+    assert multi_negative["NB1"] == pytest.approx(-0.08)
+    assert multi_negative["NB2"] == pytest.approx(-0.04)
+    assert multi_negative["NZ"] == 0.0
 
     all_zero = RecommendationEngine._normalize_bonus_per_platform(
         [DiscoveredContent(bvid="AZ", source_platform="bangumi")],
@@ -650,8 +736,8 @@ def test_platform_bonus_normalization_preserves_zero_and_sign() -> None:
         [DiscoveredContent(bvid="NEG", source_platform="bangumi")],
         {"NEG": -0.001},
     )
-    assert single_positive["ONE"] == pytest.approx(engine_mod._COMBINED_BONUS_CAP)
-    assert single_negative["NEG"] == pytest.approx(-engine_mod._COMBINED_BONUS_CAP)
+    assert single_positive["ONE"] == pytest.approx(0.001)
+    assert single_negative["NEG"] == pytest.approx(-0.001)
 
 
 @pytest.mark.asyncio

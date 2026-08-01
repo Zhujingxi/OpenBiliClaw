@@ -312,27 +312,30 @@ X 是第六个内容源，分两条独立通路：
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；`embedding.provider="ollama"` 且 embedding 凭据为空时直接使用本地 Ollama 默认地址，不再产生向后兼容 warning
 - `DashScopeEmbeddingProvider`（`provider="dashscope"`，阿里百炼原生 multimodal-embedding API，仅 embedding）加入 embedding provider 家族，其 `embed()` 文本向量与 openai/gemini/ollama 一样接入既有文本 embedding 消费方；出站走 `network.httpx_kwargs_for_endpoint(base_url)`——dashscope.aliyuncs.com 属国内 endpoint，即使 `[network].mode` 切到 system/custom 也强制直连（对齐 v0.3.167）。可选 `[llm.embedding].multimodal_enabled` + 多模态模型（`gemini-embedding-2` / `qwen3-vl-embedding`）时启用**封面视觉链路**：discovery 入池预热封面向量（按 URL 派生键），Recommendation 两条路径一致消费「封面↔兴趣锚点」跨模态余弦的有界正向加成——惊喜 `precompute_delight_scores`(加到 delight_score) 与正常 `serve()` 排序(并入 relevance 项;热路径只读缓存、不现抓)。跨模态 floor/ceil 已按真实部署数据标定（`_VISUAL_COVER_SIM_FLOOR/CEIL=0.35/0.48`，per-cover max anchor cosine 的 p50/p95，834 covers）。默认关闭、纯文本零成本、只加不减、默认路径逐字节一致
-- 弹幕文本（P2，`[discovery].danmaku_enabled`，**无需多模态**）：`BilibiliAPIClient.get_danmaku_texts_result()` 走 `comment.bilibili.com/{cid}.xml` 并返回 `success / no_data / transient_failure`；摘要仍存独立的 `content_cache.danmaku_text`，预热按完整摘要走 document embedding。只有确认空结果才推进 source 状态，HTTP/XML/embedding 失败保留原因并在下一轮重试；已有摘要在 fingerprint / 维度变化时只重嵌入，不重复抓取。
-- 视频关键帧（P3，`[discovery].keyframe_enabled` 叠加 `multimodal_enabled`）：`fetch_keyframes()` 从 B 站 videoshot 雪碧图跨全部 sprite 全局采样，返回带 `success / no_data / transient_failure` 的 `KeyframeFetchResult`。缓存键绑定 embedding fingerprint、采样算法版本和 `keyframe_max_frames`；只有确认无 videoshot 数据或至少一个 frame embedding 成功才推进 `keyframes_fetched_at`，HTTP、解析、精灵图和空向量失败留待重试。P3 使用与 P1 共用质心，但 P1 cover bonus 仍由 `visual_profile_enabled` 单独控制。
-- 用户视觉画像（P1，`[discovery].visual_profile_enabled` 叠加 `multimodal_enabled`）：`rebuild_visual_profile()` 从每条推荐反馈的封面构建质心，按 `feedback_at` 节流并通过 BackgroundTaskRegistry single-flight 调度；质心绑定 provider/model fingerprint 与维度，命名空间或维度变化时旧行不参与比较。只开 `keyframe_enabled` 也会构建该共享质心，但 P1 热路径 bonus 仍保持关闭。
+- 弹幕文本（P2，`[discovery].danmaku_enabled`，**无需多模态**）：`BilibiliAPIClient.get_danmaku_texts_result()` 走 `comment.bilibili.com/{cid}.xml` 并返回 `success / no_data / transient_failure`；摘要仍存独立的 `content_cache.danmaku_text`，预热按完整摘要走 document embedding。只有确认空结果才推进 source 状态，HTTP/XML/embedding 失败保留原因并在下一轮重试；HTTP 200 但根元素不是 B 站 `<i>`（例如 HTML challenge）也属于 transient failure；已有摘要在 fingerprint / 维度变化时只重嵌入，不重复抓取。
+- 视频关键帧（P3，`[discovery].keyframe_enabled` 叠加 `multimodal_enabled`）：`fetch_keyframes()` 从 B 站 videoshot 雪碧图跨全部 sprite 全局采样，返回带 `success / partial / no_data / transient_failure` 的 `KeyframeFetchResult`。每个返回帧携带稳定 sampled-slot，部分 sprite/crop/task 成功时成功槽位可安全缓存但结果仍 retryable，不会把后续槽位重编号。缓存键绑定 embedding fingerprint、采样算法版本和 `keyframe_max_frames`；只有确认无 videoshot 数据，或采样完整且所有返回槽位 embedding 成功才推进 `keyframes_fetched_at`，HTTP、解析、精灵图和空向量失败留待重试。P3 使用与 P1 共用质心，但 P1 cover bonus 仍由 `visual_profile_enabled` 单独控制。
+- 用户视觉画像（P1，`[discovery].visual_profile_enabled` 叠加 `multimodal_enabled`）：`rebuild_visual_profile()` 从每条推荐反馈的封面构建质心，按 `feedback_at` 节流并通过 BackgroundTaskRegistry single-flight 调度；质心绑定 provider/endpoint/model fingerprint 与维度，维度 0 表示未知，只有已知正维度不同时才触发重建。只开 `keyframe_enabled` 也会构建该共享质心，但 P1 热路径 bonus 仍保持关闭。
 - **margin 几何重设计（P1/P3 有符号评分）**：v0.3.185 的「去 neg 惩罚、纯正向」是对 neg 抵消问题的第一刀——安全但浪费了 neg 能说话的区域。本轮用几何方法把 neg 安全请回来，取代纯正向也取代被搁置的 C 方案（dislike 理由字段）。三点设计：①**聚类前 cross-cleaning**（`cross_clean_labels`，kNN k=3、`drop_margin=0.08`）剔除落在敌方势力范围的封面（misclick/love-hate 矛盾），绝不翻转极性；②**聚类后 contested 检测**（`contested_pairs`，cosine ≥ `_VISUAL_PROFILE_CONTESTED=0.45`）标记 love-hate 区；③**打分时 margin 判定**：`s_pos − s_neg ≥ margin → boost`、`s_neg − s_pos ≥ margin → suppress`（负值）、`|net| < margin → gray`。一个差值自标定（s_pos/s_neg 共享同一 embedding/管线，差值无需单独 τ，0.80 教训的一般化）。contested 区**不静默而是抬高门槛 2×**（raise-don't-mute）——"质心重叠就整对灰掉"会丢掉 ~40% 的 P3 信号，改成提高说服力门槛但保留 clear win。校准全部来自实测（`scripts/measure_visual_profile_geometry.py`，1366 候选），换 provider/模型后重测（铁律 3）。实测：vp +107/−280、kf +4/−3；方向验证 boost 的是 kigurumi/角色展示/MV。根因（反馈语义不分视觉维度）由几何方案处理，C 方案降级为未来 soul 层的解耦增强
-- **跨平台公平性归一化**：四路 bonus 在 `serve()` 叠加后按 `source_platform` 分组，以 0 为固定点做正负两侧分段归一化：正值按平台内 positive max 缩放到 `+cap`，负值按 negative magnitude 缩放到 `-cap`，0 / 缺失 / all-zero 保持 0。弱正向不会凭空变负；`combined_bonus` 为空时 no-op，排序逐字节一致。
+- **跨平台公平性归一化**：四路 bonus 在 `serve()` 叠加后按 `source_platform` 分组，以 0 为固定点做正负两侧分段对齐：多平台时正值按平台内 positive max 对齐到当前所有平台观测到的全局正向最大值，负值按全局负向最大幅度对齐，目标受 `_COMBINED_BONUS_CAP` 限制；单平台保持原始幅度（超 cap 时限幅）。0 / 缺失 / all-zero 保持 0，弱正向不会凭空变负；`combined_bonus` 为空时 no-op，排序逐字节一致。
 
 #### 本轮视觉 / 弹幕预热契约（覆盖上文历史归一化描述）
 
 以上视觉链路的持久化契约以当前实现为准：视觉质心的重建调度独立于 P1 cover bonus 开关，
 所以 `keyframe_enabled` 单独开启时也会构建共享质心；P1 bonus 仍只由
 `visual_profile_enabled` 控制。反馈更新时间负责节流，后台任务通过 registry / single-flight
-合并并发重建。质心、关键帧、弹幕 embedding 均绑定 provider / model fingerprint 与维度；关键帧
-还绑定采样算法和 `keyframe_max_frames`，任何 provenance 或维度不匹配都触发重建 / 重嵌入。
+合并并发重建。质心、关键帧、弹幕 embedding 均绑定 provider / endpoint / model fingerprint 与维度；维度 0 是
+未知值，只有两个已知正维度不同才触发维度重建。关键帧还绑定采样算法和 `keyframe_max_frames`；
+确认 no-data 且没有向量的 keyframe/danmaku 行不会因 namespace 或采样变化重抓。
 
-关键帧和弹幕源结果明确区分 `success`、`no_data`、`transient_failure`。只有确认无数据或至少一
-个 embedding 成功才推进完成状态，HTTP、解析、精灵图和空向量失败留待下轮重试；已有弹幕摘要
+关键帧和弹幕源结果明确区分 `success`、`partial`、`no_data`、`transient_failure`。关键帧只有确认
+无数据，或采样完整且每个返回槽位 embedding 成功才推进完成状态；HTTP、解析、精灵图、部分
+embedding 和空向量失败留待下轮重试，成功槽位会复用。已有弹幕摘要
 在模型切换时优先直接重嵌入，不重复抓取源数据。弹幕摘要使用完整 `danmaku_max_chars`，不截断
 固定前缀。预热查询复用当前 fresh / servable pool predicate 和配置的 fetch limit。
 
-跨平台归一化以 0 为固定点，正负两侧按各自平台极值分别缩放到 `+cap` / `-cap`，0 和缺失
-保持 0；因此弱正向不会被转换成负惩罚，离线报告与生产评分共享同一实现。
+跨平台归一化以 0 为固定点；多平台正负两侧分别对齐到当前全局观测极值并受组合 cap 限制，
+单平台不放大绝对幅度，0 和缺失保持 0。因此弱正向不会被转换成负惩罚，离线报告与生产评分
+共享同一实现。
 
 ### Storage (`storage/`)
 - SQLite 数据库管理

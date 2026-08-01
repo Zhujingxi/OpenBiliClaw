@@ -5,7 +5,9 @@ from pathlib import Path
 from openbiliclaw.llm.embedding import (
     EmbeddingCache,
     EmbeddingService,
+    build_embedding_provenance,
     image_embedding_cache_key,
+    normalize_embedding_endpoint,
 )
 from openbiliclaw.llm.gemini_provider import GeminiProvider
 
@@ -25,6 +27,72 @@ class _FakeEmbedProvider:
         if self._error is not None:
             raise self._error
         return list(self._vector)
+
+
+def test_embedding_endpoint_normalization_redacts_secret_url_parts() -> None:
+    endpoint = "HTTPS://user:api-secret@Relay.Example:443/v1/?token=secret#fragment"
+
+    assert normalize_embedding_endpoint(endpoint) == "https://relay.example/v1"
+    assert "secret" not in normalize_embedding_endpoint(endpoint)
+    assert normalize_embedding_endpoint("user:secret@relay.example/v1?token=secret") == (
+        "relay.example/v1"
+    )
+
+
+async def test_embedding_l2_namespace_isolated_by_endpoint_and_stable(
+    tmp_path: Path,
+) -> None:
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+    common = {
+        "logical_provider": "openai_compatible",
+        "model": "embed-v1",
+        "output_dimensionality": 3,
+        "persistent_cache": cache,
+    }
+    first_provider = _FakeEmbedProvider(vector=[0.1, 0.2, 0.3])
+    second_provider = _FakeEmbedProvider(vector=[0.7, 0.8, 0.9])
+    first = EmbeddingService(
+        first_provider,
+        endpoint="HTTPS://user:secret@Relay.Example:443/v1/?token=secret#fragment",
+        **common,
+    )
+    second = EmbeddingService(
+        second_provider,
+        endpoint="https://other.example/v1",
+        **common,
+    )
+    same_config = EmbeddingService(
+        _FakeEmbedProvider(),
+        endpoint="https://relay.example/v1/",
+        **common,
+    )
+
+    assert first.embedding_fingerprint != second.embedding_fingerprint
+    assert first.cache_model_namespace != second.cache_model_namespace
+    assert first.embedding_fingerprint == same_config.embedding_fingerprint
+    assert first.cache_model_namespace == same_config.cache_model_namespace
+    assert "secret" not in first.cache_model_namespace
+
+    assert await first.embed("same text") == [0.1, 0.2, 0.3]
+    assert second.lookup_cached("same text") == []
+    assert await second.embed("same text") == [0.7, 0.8, 0.9]
+    assert len(first_provider.calls) == 1
+    assert len(second_provider.calls) == 1
+    # A fresh service with the same normalized provenance can reuse the L2
+    # row, which pins cross-process stability without sharing other endpoints.
+    assert await same_config.embed("same text") == [0.1, 0.2, 0.3]
+
+
+def test_embedding_provenance_isolated_by_provider_model_and_dimension() -> None:
+    base = build_embedding_provenance("openai", "https://relay.example/v1", "embed-v1", 3)
+    other_provider = build_embedding_provenance("gemini", "https://relay.example/v1", "embed-v1", 3)
+    other_model = build_embedding_provenance("openai", "https://relay.example/v1", "embed-v2", 3)
+    other_dimension = build_embedding_provenance(
+        "openai", "https://relay.example/v1", "embed-v1", 4
+    )
+
+    assert len({base, other_provider, other_model, other_dimension}) == 4
 
 
 class _FakeImageEmbedProvider(_FakeEmbedProvider):

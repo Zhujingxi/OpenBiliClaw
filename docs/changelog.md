@@ -8,7 +8,8 @@
 
 - **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。
 - **失败可重试且缓存可追溯**：关键帧、弹幕和 embedding 的瞬时失败不再写永久完成戳；成功空结果与失败可区分，质心、关键帧、弹幕状态绑定 embedding fingerprint、维度和采样签名，模型切换会安全重建或重嵌入。
-- **跨平台公平保持零点与符号**：正负 bonus 以 0 为固定点按平台分段归一化，弱正向不会变成负惩罚；关键帧/弹幕预热范围、fetch limit 和完整摘要长度均遵循当前候选池与配置。
+- **跨平台公平保持零点与符号**：正负 bonus 以 0 为固定点按平台分段对齐，多平台只对齐到当前观测到的全局侧最大值并受组合 cap 限制，单平台不放大绝对幅度，弱正向不会变成负惩罚；关键帧/弹幕预热范围、fetch limit 和完整摘要长度均遵循当前候选池与配置。
+- **视觉结果不永久吞失败**：partial keyframe 结果携带 stable sampled-slot，成功槽位先入缓存但不落完成戳；只有 confirmed no-data 或完整采样且所有 embedding 成功才完成。Embedding provenance 同时隔离规范化 endpoint 的 fingerprint 与 L2 namespace；HTTP 200 的 HTML danmaku challenge 作为 transient failure 重试。
 - **配置与离线一致性**：`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_fetch_limit`、`danmaku_max_chars` 由文件和 `PUT /api/config` 共同校验并 round-trip；`scripts/ab_visual_bonus.py` 与生产评分共享 signed suppression 和零点保持归一化。
 
 ## 未发布：连接与 HTTPS 部署（2026-08-01）

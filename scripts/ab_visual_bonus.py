@@ -303,7 +303,11 @@ def _ndcg_at_k(order: list[str], relevance: dict[str, float], k: int) -> float:
 
 
 def _bonus_stats(bonus_map: dict[str, float], specs: list[CandidateSpec]) -> dict[str, Any]:
-    values = list(bonus_map.values())
+    # A map may contain explicit zero entries after zero-anchored platform
+    # alignment. They are observations, not nonzero bonus outcomes: excluding
+    # them keeps n_nonzero/min_nonzero meaningful and prevents min_nonzero from
+    # silently reporting the semantic anchor.
+    values = [value for value in bonus_map.values() if abs(value) > 0.0]
     all_bonus = [bonus_map.get(s.bvid, 0.0) for s in specs]
     # Per-bucket mean bonus.
     buckets: list[dict[str, Any]] = []
@@ -319,7 +323,7 @@ def _bonus_stats(bonus_map: dict[str, float], specs: list[CandidateSpec]) -> dic
                 "bucket": label,
                 "count": len(in_bucket),
                 "mean_bonus": round(statistics.fmean(bonused), 5) if bonused else 0.0,
-                "n_nonzero": sum(1 for b in bonused if b > 0.0),
+                "n_nonzero": sum(1 for b in bonused if abs(b) > 0.0),
             }
         )
     return {

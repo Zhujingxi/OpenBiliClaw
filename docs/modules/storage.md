@@ -17,7 +17,7 @@
 |------|------|------|
 | 观看完播判定（2026-07-27+） | ✅ | `events.inferred_satisfaction` 现在也覆盖 `view`：`sources/event_format._classify_view_completion` **只判正向**——完播 ≥`_FINISHED_WATCH_MIN_RATIO`（0.8）且观看 ≥15 秒记 `positive/finished_watch`，其余保持 `unknown/fallback`。低完播刻意不判负（自动播放 / 误点 / 预告 / 重看进度重置都长这样），否则会污染 `recent_negative_exemplars` 并影响内容评估。阈值校准见常量注释；改动 `watch_seconds` 来源后需重新校准 |
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史「已消费」事件（`view` / `favorite` / `like` / `coin`），不受旧版 2000 条窗口限制；类型集扩大时按 `scanned_event_types_version` 自动倒回重扫一次。 |
-| 视觉 / 弹幕 provenance 迁移 | ✅ | 旧 `content_cache` 自动补 keyframe/danmaku fingerprint、维度和采样签名列；旧 `user_visual_clusters` 补 provenance，另建单行 profile state。没有 provenance 的行在当前 embedding namespace 下视为待重建/重嵌入；keyframe/danmaku 查询复用 fresh servable pool predicate，模型切换时已有摘要可只重嵌入 |
+| 视觉 / 弹幕 provenance 迁移 | ✅ | 旧 `content_cache` 自动补 keyframe/danmaku fingerprint、维度和采样签名列；旧 `user_visual_clusters` 补 provenance，另建单行 profile state。keyframe/danmaku selector 只对已有向量（`keyframe_count > 0` / `danmaku_text` 非空）响应 provider/model namespace、维度变化；确认 source no-data 的行不会因 namespace 或采样签名变化反复抓取。请求或已存维度为 0 都表示未知，不当作已证实不兼容；只有两个正维度实际不同才重排 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
 | 实时事件并发写隔离 | ✅ | `insert_event()` 不再让 API、账号同步和后台任务跨线程共享 process-wide SQLite 隐式事务；每条事件使用独立短连接，把 event、`seen_items` 与 backfill cursor 在同一事务提交，锁冲突按既有有界策略重试，退出必关闭连接。这样不会再由其它线程的 commit/rollback 触发 `cannot commit - no transaction is active`。 |
@@ -53,8 +53,10 @@
 ### Visual enrichment persistence API
 
 `Database.get_candidates_needing_keyframes()` / `get_candidates_needing_danmaku()` 复用当前
-fresh servable pool predicate，并可按 embedding fingerprint、维度和 sampling signature 重新
-入队。`user_visual_clusters`、keyframe 状态和 danmaku 状态均保留 provenance；旧库初始化会
+fresh servable pool predicate，并可按 embedding fingerprint、正维度和 sampling signature 重新
+入队。确认 no-data 的 keyframe/danmaku 行不会因 provider/model 或采样算法变化重抓；已有向量
+才会因 fingerprint / sampling 变化重嵌入。维度 0 是未知值，只有当前与已存维度都为正且不同才
+重排。`user_visual_clusters`、keyframe 状态和 danmaku 状态均保留 provenance；旧库初始化会
 增量补列，旧的无 provenance 行不会被当作当前 embedding namespace 的完成结果。
 
 ## 公开 API

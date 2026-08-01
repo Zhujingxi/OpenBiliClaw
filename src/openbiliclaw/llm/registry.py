@@ -288,7 +288,12 @@ def build_embedding_service(
     try:
         from typing import cast
 
-        from openbiliclaw.llm.embedding import EmbeddingCache, EmbeddingService, SupportsEmbed
+        from openbiliclaw.llm.embedding import (
+            EmbeddingCache,
+            EmbeddingService,
+            SupportsEmbed,
+            build_embedding_provenance,
+        )
 
         emb_cfg = config.llm.embedding
         requested_name = emb_cfg.provider.strip().lower()
@@ -352,6 +357,22 @@ def build_embedding_service(
             chosen_model,
             output_dimensionality,
         )
+        endpoint = _embedding_endpoint(chosen_name, emb_cfg, config, chosen_provider)
+        # Only include a configured dimension when this provider/model actually
+        # sends it on the wire. For fixed-dimension or generic compatible
+        # backends, zero deliberately means "unknown"; the first observed
+        # vector is tracked separately by EmbeddingService/database provenance.
+        provenance_dimension = (
+            output_dimensionality
+            if _embedding_provider_honors_output_dimensionality(chosen_name, chosen_model)
+            else 0
+        )
+        provenance = build_embedding_provenance(
+            chosen_name,
+            endpoint,
+            chosen_model,
+            provenance_dimension,
+        )
 
         return EmbeddingService(
             cast("SupportsEmbed", chosen_provider),
@@ -360,6 +381,7 @@ def build_embedding_service(
             similarity_threshold=emb_cfg.similarity_threshold,
             persistent_cache=l2_cache,
             multimodal_enabled=bool(getattr(emb_cfg, "multimodal_enabled", False)),
+            provenance=provenance,
         )
     except Exception:
         return None
@@ -599,6 +621,66 @@ def _embedding_cache_model(
     ):
         return f"{model}#dim={output_dimensionality}"
     return model
+
+
+def _embedding_endpoint(
+    provider_name: str,
+    emb_cfg: Any,
+    config: Config,
+    provider: LLMProvider,
+) -> str:
+    """Return the endpoint actually used by a dedicated embedding provider."""
+    for attr in ("base_url", "_base_url"):
+        value = str(getattr(provider, attr, "") or "").strip()
+        if value:
+            return value
+
+    requested_name = str(getattr(emb_cfg, "provider", "") or "").strip().lower()
+    if provider_name == requested_name:
+        configured = str(getattr(emb_cfg, "base_url", "") or "").strip()
+        if configured:
+            return configured
+
+    # Fallback providers may borrow chat-side credentials. Resolve the same
+    # provider config used by _build_dedicated_embedding_provider, but never
+    # include its API key in provenance.
+    if bool(getattr(emb_cfg, "fallback_enabled", False)):
+        chat_cfg = getattr(config.llm, provider_name, None)
+        if bool(getattr(config.llm, "instance_routing", False)):
+            instance_ids = [
+                *getattr(config.llm, "default_chain", []),
+                *[
+                    instance_id
+                    for instance_id in getattr(config.llm, "instances", {})
+                    if instance_id not in getattr(config.llm, "default_chain", [])
+                ],
+            ]
+            chat_cfg = next(
+                (
+                    config.llm.instances[instance_id]
+                    for instance_id in instance_ids
+                    if instance_id in config.llm.instances
+                    and bool(getattr(config.llm.instances[instance_id], "enabled", True))
+                    and str(getattr(config.llm.instances[instance_id], "provider_type", "") or "")
+                    .strip()
+                    .lower()
+                    == provider_name
+                ),
+                None,
+            )
+        configured = str(getattr(chat_cfg, "base_url", "") or "").strip()
+        if configured:
+            return configured
+
+    defaults = {
+        "openai": "https://api.openai.com/v1",
+        "openai_compatible": "",
+        "gemini": "https://generativelanguage.googleapis.com",
+        "ollama": "http://127.0.0.1:11434/v1",
+        "dashscope": "https://dashscope.aliyuncs.com",
+        "openrouter": "https://openrouter.ai/api/v1",
+    }
+    return defaults.get(provider_name, "")
 
 
 def _embedding_provider_honors_output_dimensionality(

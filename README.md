@@ -681,11 +681,12 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 开启 `[discovery].keyframe_enabled` 时，只要多模态 embedding 可用，系统也会构建关键帧与 P1
 共用的视觉质心；P1 封面 bonus 仍只由 `visual_profile_enabled` 控制。关键帧按全局采样并把
 采样算法、`keyframe_max_frames`、embedding fingerprint 和维度写入缓存 provenance；换模型或
-采样配置会安全重建。关键帧 / 弹幕预热区分成功空结果和瞬时失败，后者保留下轮重试资格。
+采样配置会安全重建。partial 关键帧结果携带稳定 sampled-slot，成功槽位可先入缓存但不落完成戳；
+只有确认 no-data 或完整采样且所有 embedding 成功才完成，失败槽位保留下轮重试资格。
 
 `keyframe_fetch_limit`、`danmaku_fetch_limit` 和 `danmaku_max_chars` 同时受配置文件与配置 API
 范围校验；弹幕摘要按完整 `danmaku_max_chars` 做 document embedding，不静默截成固定前缀。
-跨平台视觉 bonus 以 0 为固定点，正负两侧分别按平台极值缩放，0 / 缺失保持 0。完整契约见
+跨平台视觉 bonus 以 0 为固定点；多平台正负两侧对齐到当前全局观测极值并受组合 cap 限制，单平台不放大绝对幅度，0 / 缺失保持 0。完整契约见
 [`docs/modules/recommendation.md`](docs/modules/recommendation.md) 与 [`docs/architecture.md`](docs/architecture.md)。
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。

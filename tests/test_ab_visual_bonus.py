@@ -24,6 +24,7 @@ run_ab_visual_bonus = _mod.run_ab_visual_bonus
 _compute_bonus_map = _mod._compute_bonus_map
 _spec_to_content = _mod._spec_to_content
 _rank = _mod._rank
+_bonus_stats = _mod._bonus_stats
 _SyntheticEmb = _mod._SyntheticEmb
 _unit_anchor = _mod._unit_anchor
 _cover_vec_for_cosine = _mod._cover_vec_for_cosine
@@ -160,3 +161,31 @@ def test_ab_report_has_expected_fields() -> None:
             "ndcg_delta",
         ):
             assert k in s, f"missing sweep key: {k}"
+
+
+def test_bonus_stats_excludes_zero_from_nonzero_and_minimum() -> None:
+    specs = [
+        CandidateSpec("BVZERO", 0.8, 0.0, "topic_0"),
+        CandidateSpec("BVSMALL", 0.8, 0.2, "topic_1"),
+        CandidateSpec("BVMISS", 0.8, 0.4, "topic_2"),
+    ]
+    stats = _bonus_stats({"BVZERO": 0.0, "BVSMALL": 0.02}, specs)
+
+    assert stats["n_nonzero"] == 1
+    assert stats["frac_nonzero"] == pytest.approx(1 / 3, abs=0.0001)
+    assert stats["mean"] == pytest.approx(0.00667, abs=0.00001)
+    assert stats["max"] == pytest.approx(0.02)
+    assert stats["min_nonzero"] == pytest.approx(0.02)
+
+
+def test_bonus_max_sweep_changes_observed_bonus() -> None:
+    report = run_ab_visual_bonus(ABConfig(pool=PoolConfig(n=20, seed=1), k=5))
+    sweep = {
+        float(row["bonus_max"]): row
+        for row in report["sweep"]
+        if float(row["bonus_max"]) in {0.05, 0.10, 0.20}
+    }
+
+    assert set(sweep) == {0.05, 0.10, 0.20}
+    assert len({row["mean_bonus"] for row in sweep.values()}) >= 2
+    assert sweep[0.05]["mean_bonus"] != sweep[0.20]["mean_bonus"]

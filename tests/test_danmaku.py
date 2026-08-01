@@ -165,7 +165,7 @@ async def test_get_danmaku_texts_rejects_bad_cid() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "body"),
-    [(503, ""), (200, "<broken")],
+    [(503, ""), (200, "<broken"), (200, "<html><body>challenge</body></html>")],
 )
 async def test_danmaku_http_or_parse_failure_is_retryable(
     status_code: int,
@@ -494,6 +494,36 @@ async def test_successful_empty_danmaku_result_is_persisted_as_no_data() -> None
         )
         assert await engine.prewarm_pool_danmaku(limit=10) == 1
         assert db.get_candidates_needing_danmaku(limit=10) == []
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_danmaku_list_remains_retryable() -> None:
+    """A legacy list cannot prove that an empty response was authoritative."""
+
+    class _Info:
+        cid = 123
+
+    class _LegacyClient:
+        async def get_video_info(self, _bvid: str) -> _Info:
+            return _Info()
+
+        async def get_danmaku_texts(self, _cid: int, **_kwargs: object) -> list[str]:
+            return []
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed(db, "BVLEGACYEMPTY")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextEmb(),  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=_LegacyClient(),
+        )
+        assert await engine.prewarm_pool_danmaku(limit=10) == 1
+        assert len(db.get_candidates_needing_danmaku(limit=10)) == 1
         db.close()
 
 

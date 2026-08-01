@@ -222,9 +222,9 @@ _DANMAKU_SIM_FLOOR = 0.30  # text↔text cosine at/below → zero bonus
 _DANMAKU_SIM_CEIL = 0.65  # text↔text cosine at/above → full bonus
 
 # Sum of every per-signal bonus cap — the ceiling the stacked combined_bonus
-# can reach before per-platform normalization. Normalization rescales each
-# platform's combined_bonus to [0, this], so a platform missing signals
-# (bangumi/xhs) still reaches the same height as Bilibili at its top.
+# may reach after per-platform normalization. Multi-platform normalization
+# aligns shorter groups to the observed global side maximum, never to this
+# fixed ceiling unless the observed value itself reaches it.
 # Visual signals are now SIGNED (margin scoring: boost +, suppress -), so the
 # cap is the sum of the positive boost caps; normalization scales positive and
 # negative sides independently around the semantic zero point.
@@ -885,16 +885,16 @@ class RecommendationEngine:
             for bvid, bonus in extra.items():
                 combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
 
-        # Cross-platform fairness: normalize the stacked bonus within each
+        # Cross-platform fairness: align the stacked bonus within each
         # platform's own pool around semantic zero. Without this, a
         # platform that lacks a signal (bangumi/xhs have no danmaku or
         # keyframes) is structurally shorter than Bilibili on combined_bonus
         # and gets squeezed out of the top — observed: enabling P2 dropped
-        # bangumi in the top-25 from 3 to 1 purely on height. Per-platform
-        # min-max normalization means a platform only loses *intra-platform*
+        # bangumi in the top-25 from 3 to 1 purely on height. Zero-anchored
+        # side alignment means a platform only loses *intra-platform*
         # discrimination for a missing signal, not *cross-platform* height:
-        # the strongest bangumi candidate still reaches the same bonus height
-        # as the strongest Bilibili candidate. No-op when combined_bonus is
+        # its strongest candidate reaches the current global side maximum,
+        # while a single-platform batch keeps its absolute signal. No-op when combined_bonus is
         # empty (all signals off / no centroids) — ranking stays byte-identical.
         combined_bonus = self._normalize_bonus_per_platform(candidates, combined_bonus)
 
@@ -2118,7 +2118,11 @@ class RecommendationEngine:
             current_fingerprint
             and (
                 str(state.get("embedding_fingerprint") or "") != current_fingerprint
-                or (stored_dimension > 0 and stored_dimension != current_dimension)
+                or (
+                    current_dimension > 0
+                    and stored_dimension > 0
+                    and stored_dimension != current_dimension
+                )
             )
         )
         if not stale_namespace and last_feedback and latest_feedback <= last_feedback:
@@ -2882,7 +2886,7 @@ class RecommendationEngine:
         candidates: list[DiscoveredContent],
         combined_bonus: dict[str, float],
     ) -> dict[str, float]:
-        """Rescale the stacked bonus per-platform to [-cap, +cap] (signed).
+        """Align structurally shorter platforms around the observed global range.
 
         Without this, platforms missing a signal (bangumi/xhs have no danmaku
         or keyframes) are structurally shorter on combined_bonus than Bilibili
@@ -2893,9 +2897,12 @@ class RecommendationEngine:
 
         Per-platform normalization fixes the height while treating zero as a
         semantic anchor: positive values are scaled by that platform's own
-        positive maximum, and negative values by its own negative magnitude.
-        Missing and zero signals remain exactly zero; a weak positive can never
-        become a negative penalty merely because another row is negative.
+        positive maximum toward the *observed global* positive maximum, and
+        negative values by their observed global negative magnitude. A single
+        platform is left at its original scale. Missing and zero signals remain
+        exactly zero; a weak positive can never become a negative penalty merely
+        because another row is negative. The global targets are capped by the
+        combined-bonus ceiling, rather than inventing a fixed-height signal.
 
         SIGNED because the visual signals (P1/P3) now use margin scoring that
         can suppress (negative) as well as boost. Zero is fixed at zero for
@@ -2938,14 +2945,39 @@ class RecommendationEngine:
         cap = _COMBINED_BONUS_CAP
         normalized = {bvid: 0.0 for bvid in platform_of}
         normalized.update({bvid: 0.0 for bvid in combined_bonus})
+        # A one-platform batch must preserve absolute semantics. With several
+        # platforms, only the structurally shorter groups are stretched toward
+        # the strongest currently observed group; no signal is inflated to the
+        # cap merely because it is the local maximum.
+        multi_platform = len(groups) > 1
+        global_positive_max = min(
+            cap,
+            max(
+                (value for items in groups.values() for _, value in items if value > 0.0),
+                default=0.0,
+            ),
+        )
+        global_negative_magnitude = min(
+            cap,
+            max(
+                (-value for items in groups.values() for _, value in items if value < 0.0),
+                default=0.0,
+            ),
+        )
         for items in groups.values():
             positive_max = max((value for _, value in items if value > 0.0), default=0.0)
             negative_magnitude = max((-value for _, value in items if value < 0.0), default=0.0)
             for bvid, bonus in items:
                 if bonus > 0.0 and positive_max > 0.0:
-                    normalized[bvid] = cap * bonus / positive_max
+                    target = global_positive_max if multi_platform else min(cap, positive_max)
+                    normalized[bvid] = min(cap, target * bonus / positive_max)
                 elif bonus < 0.0 and negative_magnitude > 0.0:
-                    normalized[bvid] = -cap * (-bonus) / negative_magnitude
+                    target = (
+                        global_negative_magnitude
+                        if multi_platform
+                        else min(cap, negative_magnitude)
+                    )
+                    normalized[bvid] = -min(cap, target * (-bonus) / negative_magnitude)
                 else:
                     normalized[bvid] = 0.0
         return normalized
@@ -3111,9 +3143,10 @@ class RecommendationEngine:
 
         Bilibili pre-generates keyframe sprite sheets, so this costs one small
         JPEG per video rather than a video download. Confirmed no-data results
-        and rows with at least one successful embedding advance their durable
-        state; transient source/sprite/embed failures remain eligible for the
-        next cycle. Returns the number of videos attempted.
+        and complete sampled runs whose every frame is embedded advance their
+        durable state; partial/transient source/sprite/embed failures remain
+        eligible for the next cycle. Successful cached slots are reused on the
+        retry. Returns the number of videos attempted.
         """
         if not self._keyframe_active():
             return 0
@@ -3149,6 +3182,7 @@ class RecommendationEngine:
         from openbiliclaw.discovery.keyframes import KeyframeFetchResult, fetch_keyframes
         from openbiliclaw.llm.embedding import keyframe_embedding_cache_key
 
+        lookup_image = getattr(embedding, "lookup_cached_image", None)
         processed = 0
         # Serial, like _prewarm_pool_covers: Bilibili rate-limits far more
         # aggressively than the embedding backend, so fan-out is the wrong
@@ -3157,32 +3191,57 @@ class RecommendationEngine:
             bvid = str(row.get("bvid") or "").strip()
             if not bvid:
                 continue
-            embedded = 0
             result_status = "transient_failure"
             result_reason = ""
-            frames: list[bytes] = []
+            sampled_frames: tuple[tuple[int, bytes], ...] = ()
+            sampled_slots: tuple[int, ...] = ()
+            successful_slots: set[int] = set()
             try:
                 result = await fetch_keyframes(bvid, max_frames=self._keyframe_max_frames)
                 if isinstance(result, KeyframeFetchResult):
-                    frames = result.frames
                     result_status = result.status
                     result_reason = result.reason
+                    sampled_frames = tuple(result.sampled_frames)
+                    sampled_slots = tuple(result.sampled_slots)
+                    if not sampled_frames and result.frames:
+                        sampled_frames = tuple(enumerate(result.frames))
+                    if not sampled_slots:
+                        sampled_slots = tuple(slot for slot, _ in sampled_frames)
                 else:
                     # Compatibility with third-party adapters and older tests
-                    # returning the pre-result ``list[bytes]`` contract.
-                    frames = list(result or [])
-                    result_status = "success" if frames else "no_data"
-                for frame_index, frame_bytes in enumerate(frames):
+                    # returning the pre-result ``list[bytes]`` contract. A
+                    # legacy list has no explicit completeness signal, so its
+                    # successful bytes can be cached but it is always
+                    # retryable; an empty list must never become permanent
+                    # no-data state.
+                    legacy_frames = list(result or [])
+                    sampled_frames = tuple(enumerate(legacy_frames))
+                    sampled_slots = tuple(slot for slot, _ in sampled_frames)
+                    result_status = "partial" if sampled_frames else "transient_failure"
+                    result_reason = "legacy_list_result"
+                for frame_index, frame_bytes in sampled_frames:
                     cache_key = keyframe_embedding_cache_key(
                         bvid,
                         frame_index,
                         sampling_signature,
                         embedding_fingerprint,
                     )
+                    vector: list[float] = []
+                    if callable(lookup_image):
+                        try:
+                            vector = lookup_image(cache_key) or []
+                        except Exception:
+                            logger.debug(
+                                "keyframe cache lookup failed for %s frame=%d",
+                                bvid,
+                                frame_index,
+                                exc_info=True,
+                            )
                     try:
-                        vector = await embed_image(
-                            frame_bytes, mime_type="image/jpeg", cache_key=cache_key
-                        )
+                        if not vector:
+                            vector = await embed_image(
+                                frame_bytes, mime_type="image/jpeg", cache_key=cache_key
+                            )
                     except Exception as exc:
                         logger.warning(
                             "keyframe embedding failed for %s frame=%d (%s)",
@@ -3204,7 +3263,7 @@ class RecommendationEngine:
                                 embedding_dimension,
                             )
                             continue
-                        embedded += 1
+                        successful_slots.add(frame_index)
                         if not embedding_dimension:
                             embedding_dimension = vector_dimension
                     else:
@@ -3218,18 +3277,23 @@ class RecommendationEngine:
                 result_reason = "fetch_or_parse_exception"
                 logger.warning("keyframe prewarm failed for %s", bvid, exc_info=True)
             try:
-                should_mark = result_status == "no_data" or embedded > 0
+                expected_slots = set(sampled_slots)
+                should_mark = result_status == "no_data" or (
+                    result_status == "success"
+                    and bool(expected_slots)
+                    and successful_slots >= expected_slots
+                )
                 if should_mark:
                     try:
                         mark(
                             bvid,
-                            keyframe_count=embedded,
+                            keyframe_count=len(successful_slots),
                             embedding_fingerprint=embedding_fingerprint,
                             embedding_dimension=embedding_dimension,
                             sampling_signature=sampling_signature,
                         )
                     except TypeError:
-                        mark(bvid, keyframe_count=embedded)
+                        mark(bvid, keyframe_count=len(successful_slots))
                 else:
                     logger.warning(
                         "keyframe prewarm left %s retryable: status=%s reason=%s",
@@ -3500,10 +3564,12 @@ class RecommendationEngine:
                         raw = list(getattr(result, "texts", []) or [])
                     else:
                         raw = list(await client.get_danmaku_texts(cid))
-                        # Legacy clients only return a list, so an empty list is
-                        # treated as a confirmed empty response for compatibility.
-                        source_status = "success"
-                        source_definitive = True
+                        # Legacy clients only return a list. A non-empty list
+                        # proves the request completed; an empty list cannot
+                        # distinguish confirmed no-data from a swallowed
+                        # transport/parser failure, so keep it retryable.
+                        source_status = "success" if raw else "transient_failure"
+                        source_definitive = bool(raw)
                     if source_status == "transient_failure":
                         logger.warning(
                             "danmaku fetch left %s retryable: %s",

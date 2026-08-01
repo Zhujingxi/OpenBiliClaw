@@ -8683,9 +8683,9 @@ class Database:
 
         Frame vectors live in the embedding cache under provenance-aware
         ``keyframe_embedding_cache_key`` keys. A completion timestamp is only
-        written for confirmed no-data or a run with at least one successful
-        frame embedding; transient fetch, sprite, parser, and embed failures
-        remain eligible for the next prewarm cycle.
+        written for confirmed no-data or a complete sampled run whose every
+        frame embedding succeeded; transient fetch, sprite, parser, and embed
+        failures remain eligible for the next prewarm cycle.
         """
         existing_columns = {
             str(row["name"])
@@ -8723,20 +8723,34 @@ class Database:
             xhs_self_nickname,
             pool_status="fresh",
         )
-        provenance_sql = "(keyframes_fetched_at IS NULL)"
+        provenance_parts = ["keyframes_fetched_at IS NULL"]
         params: list[Any] = [*clause_params]
         fingerprint = str(embedding_fingerprint or "").strip()
         signature = str(sampling_signature or "").strip()
+        # keyframe_count=0 is a confirmed source no-data result. A model /
+        # endpoint or sampling change must re-embed existing vectors, but it
+        # must not turn a confirmed empty source into an endless refetch loop.
+        enriched = "COALESCE(keyframe_count, 0) > 0"
         if fingerprint:
-            provenance_sql = (
-                "(keyframes_fetched_at IS NULL OR "
-                "COALESCE(keyframe_embedding_fingerprint, '') != ? OR "
-                "(COALESCE(keyframe_count, 0) > 0 AND "
-                "COALESCE(keyframe_embedding_dimension, 0) != ?) OR "
-                "(COALESCE(keyframe_count, 0) > 0 AND "
-                "COALESCE(keyframe_sampling_signature, '') != ?))"
+            provenance_parts.append(
+                f"({enriched} AND COALESCE(keyframe_embedding_fingerprint, '') != ?)"
             )
-            params.extend([fingerprint, max(0, int(embedding_dimension)), signature])
+            params.append(fingerprint)
+        requested_dimension = max(0, int(embedding_dimension))
+        if requested_dimension > 0:
+            # Stored zero is also unknown, not a proven incompatible vector
+            # space. Only two observed, positive dimensions can mismatch.
+            provenance_parts.append(
+                f"({enriched} AND COALESCE(keyframe_embedding_dimension, 0) > 0 "
+                "AND COALESCE(keyframe_embedding_dimension, 0) != ?)"
+            )
+            params.append(requested_dimension)
+        if signature:
+            provenance_parts.append(
+                f"({enriched} AND COALESCE(keyframe_sampling_signature, '') != ?)"
+            )
+            params.append(signature)
+        provenance_sql = "(" + " OR ".join(provenance_parts) + ")"
         cursor = self.conn.execute(
             f"""
             SELECT bvid, title, cover_url, keyframe_count,
@@ -8764,7 +8778,7 @@ class Database:
         embedding_dimension: int = 0,
         sampling_signature: str = "",
     ) -> None:
-        """Stamp a confirmed no-data or successfully embedded keyframe run."""
+        """Stamp a confirmed no-data or completely embedded keyframe run."""
         key = (bvid or "").strip()
         if not key:
             return
@@ -8834,17 +8848,28 @@ class Database:
             xhs_self_nickname,
             pool_status="fresh",
         )
-        provenance_sql = "(danmaku_fetched_at IS NULL)"
+        provenance_parts = ["danmaku_fetched_at IS NULL"]
         params: list[Any] = [*clause_params]
         fingerprint = str(embedding_fingerprint or "").strip()
         if fingerprint:
-            provenance_sql = (
-                "(danmaku_fetched_at IS NULL OR "
-                "COALESCE(danmaku_embedding_fingerprint, '') != ? OR "
-                "(COALESCE(danmaku_text, '') != '' AND "
-                "COALESCE(danmaku_embedding_dimension, 0) != ?))"
+            # A confirmed empty source has no vector to re-embed. Provider or
+            # dimension changes only requeue rows with a stored summary.
+            enriched = "COALESCE(danmaku_text, '') != ''"
+            provenance_parts.append(
+                f"({enriched} AND COALESCE(danmaku_embedding_fingerprint, '') != ?)"
             )
-            params.extend([fingerprint, max(0, int(embedding_dimension))])
+            params.append(fingerprint)
+        else:
+            enriched = "COALESCE(danmaku_text, '') != ''"
+        requested_dimension = max(0, int(embedding_dimension))
+        if requested_dimension > 0:
+            # Stored zero is unknown, not a proven incompatible vector space.
+            provenance_parts.append(
+                f"({enriched} AND COALESCE(danmaku_embedding_dimension, 0) > 0 "
+                "AND COALESCE(danmaku_embedding_dimension, 0) != ?)"
+            )
+            params.append(requested_dimension)
+        provenance_sql = "(" + " OR ".join(provenance_parts) + ")"
         cursor = self.conn.execute(
             f"""
             SELECT bvid, title, danmaku_text, danmaku_fetched_at,
@@ -11962,9 +11987,15 @@ class Database:
         if fingerprint:
             where = "WHERE COALESCE(embedding_fingerprint, '') = ?"
             params = (fingerprint,)
-            if embedding_dimension is not None:
-                where += " AND COALESCE(embedding_dimension, 0) = ?"
-                params = (fingerprint, max(0, int(embedding_dimension)))
+            if embedding_dimension is not None and int(embedding_dimension) > 0:
+                # Dimension zero is legacy/unknown provenance, not a vector
+                # space of its own. Keep it usable until a real observed
+                # dimension proves the stored centroid incompatible.
+                where += (
+                    " AND (COALESCE(embedding_dimension, 0) = 0 "
+                    "OR COALESCE(embedding_dimension, 0) = ?)"
+                )
+                params = (fingerprint, int(embedding_dimension))
         rows = self.conn.execute(
             "SELECT cluster_id, polarity, centroid, member_count, "
             "embedding_fingerprint, embedding_dimension, updated_at "

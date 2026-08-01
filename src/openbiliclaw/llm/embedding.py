@@ -24,10 +24,103 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE_KEY_PREFIX = "img:"
+
+
+def normalize_embedding_endpoint(endpoint: str) -> str:
+    """Return a stable, non-secret endpoint identity for embedding provenance.
+
+    Endpoint query strings and fragments commonly contain API keys, signed
+    parameters, or UI-only state, so they are deliberately discarded. User
+    info is also removed before the host is rendered. The result retains only
+    the transport, host/port, and path that identify the actual service.
+    """
+    raw = str(endpoint or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        # Keep malformed/custom endpoint strings useful without ever carrying
+        # query or fragment material into the namespace.
+        redacted = raw.split("?", 1)[0].split("#", 1)[0]
+        # Scheme-less endpoint strings are accepted by a few compatible
+        # clients. They can still contain ``userinfo@host``; discard that
+        # prefix before retaining the deterministic custom identity.
+        return redacted.rsplit("@", 1)[-1].rstrip("/")
+
+    try:
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        # An invalid port is not a usable URL, but the redacted path still
+        # gives callers a deterministic namespace rather than leaking the raw
+        # user-info/query-bearing string.
+        hostname = (parsed.netloc.rsplit("@", 1)[-1]).split(":", 1)[0]
+        port = None
+
+    hostname = hostname.lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    default_port = (parsed.scheme.lower() == "http" and port == 80) or (
+        parsed.scheme.lower() == "https" and port == 443
+    )
+    hostport = hostname
+    if port is not None and not default_port:
+        hostport = f"{hostport}:{port}"
+
+    path = parsed.path.rstrip("/")
+    redacted_url = SplitResult(parsed.scheme.lower(), hostport, path, "", "")
+    return urlunsplit(redacted_url)
+
+
+def build_embedding_provenance(
+    logical_provider: str,
+    endpoint: str,
+    model: str,
+    output_dimensionality: int = 0,
+) -> str:
+    """Build deterministic provenance without credentials or request data."""
+    payload = {
+        "provider": str(logical_provider or "").strip().lower(),
+        "endpoint": normalize_embedding_endpoint(endpoint),
+        "model": str(model or "").strip(),
+        "dimension": max(0, int(output_dimensionality or 0)),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _provider_endpoint(provider: SupportsEmbed) -> str:
+    """Best-effort endpoint discovery for direct ``EmbeddingService`` users."""
+    for name in ("base_url", "_base_url"):
+        value = getattr(provider, name, "")
+        if value:
+            return str(value)
+    return ""
+
+
+def _provider_logical_name(provider: SupportsEmbed) -> str:
+    value = getattr(provider, "name", "")
+    if value:
+        return str(value).strip().lower()
+    provider_type = type(provider)
+    return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+
+def _provider_output_dimensionality(provider: SupportsEmbed) -> int:
+    for name in ("embedding_output_dimensionality", "_embedding_output_dimensionality"):
+        value = getattr(provider, name, 0)
+        try:
+            dimension = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if dimension > 0:
+            return dimension
+    return 0
 
 
 class SupportsEmbed(Protocol):
@@ -265,10 +358,48 @@ class EmbeddingService:
         persistent_cache: EmbeddingCache | None = None,
         max_concurrent_provider_calls: int = 2,
         multimodal_enabled: bool = False,
+        provenance: str | None = None,
+        logical_provider: str = "",
+        endpoint: str = "",
+        output_dimensionality: int = 0,
     ) -> None:
         self._provider = provider
         self._model = model
         self._cache_model = cache_model or model
+        explicit_provenance = str(provenance or "").strip()
+        provider_endpoint = endpoint or _provider_endpoint(provider)
+        provider_name = logical_provider or _provider_logical_name(provider)
+        requested_dimension = max(0, int(output_dimensionality or 0))
+        if not requested_dimension:
+            requested_dimension = _provider_output_dimensionality(provider)
+        if explicit_provenance:
+            self._embedding_provenance = explicit_provenance
+        elif logical_provider or endpoint or requested_dimension > 0 or provider_endpoint:
+            self._embedding_provenance = build_embedding_provenance(
+                provider_name,
+                provider_endpoint,
+                model,
+                requested_dimension,
+            )
+        else:
+            # Preserve the compact legacy cache namespace for small provider
+            # doubles and callers that do not expose endpoint provenance. The
+            # fingerprint still remains stable and includes provider/model.
+            self._embedding_provenance = ""
+        self._cache_namespace = (
+            hashlib.sha256(self._embedding_provenance.encode("utf-8")).hexdigest()[:32]
+            if self._embedding_provenance
+            else ""
+        )
+        # Keep ``_cache_model`` as the caller-visible model identity for
+        # compatibility, but use a provenance-qualified model in SQLite. This
+        # is the actual L2 namespace and prevents identical text/image keys
+        # from crossing endpoint/provider/model boundaries.
+        self._l2_cache_model = (
+            f"{self._cache_model}#namespace={self._cache_namespace}"
+            if self._cache_namespace
+            else self._cache_model
+        )
         self._embedding_dimension = 0
         # OrderedDict + move_to_end on hit gives us proper LRU instead of
         # FIFO. With a 500-key cache and bursty access patterns (delight
@@ -305,9 +436,20 @@ class EmbeddingService:
 
     @property
     def embedding_fingerprint(self) -> str:
-        """Stable provider/model fingerprint, excluding runtime vector size."""
-        payload = f"{self.embedding_provider}|{self._model}|{self._cache_model}"
+        """Stable provider/endpoint/model fingerprint, excluding runtime size."""
+        provenance = self._embedding_provenance or build_embedding_provenance(
+            self.embedding_provider,
+            "",
+            self._model,
+            0,
+        )
+        payload = f"{provenance}|{self.embedding_provider}|{self._model}|{self._cache_model}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    @property
+    def cache_model_namespace(self) -> str:
+        """The provenance-qualified model key used by the persistent cache."""
+        return self._l2_cache_model
 
     @property
     def embedding_dimension(self) -> int:
@@ -341,7 +483,7 @@ class EmbeddingService:
                 self._embedding_dimension = len(cached)
             return cached
         if self._l2_cache is not None:
-            persisted = self._l2_cache.get(key, model=self._cache_model)
+            persisted = self._l2_cache.get(key, model=self._l2_cache_model)
             if persisted is not None:
                 self._l1_cache[key] = persisted
                 if persisted:
@@ -356,7 +498,7 @@ class EmbeddingService:
         self._embedding_dimension = len(vector)
         if self._l2_cache is not None:
             try:
-                self._l2_cache.put(key, vector, model=self._cache_model)
+                self._l2_cache.put(key, vector, model=self._l2_cache_model)
             except Exception:
                 logger.debug("L2 cache write failed", exc_info=True)
 
