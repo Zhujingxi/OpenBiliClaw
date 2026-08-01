@@ -244,7 +244,7 @@ export async function fetchActivityFeed({ limit, before } = {}) {
 }
 
 // ── Chat ────────────────────────────────────────────────────
-export async function startChatTurn({ turnId = "", session = "mobile", scope = "chat", subjectId = "", subjectTitle = "", message }) {
+export async function startChatTurn({ turnId = "", session = "popup", scope = "chat", subjectId = "", subjectTitle = "", message }) {
   return requestJson("/chat/turns", json({
     turn_id: turnId,
     session,
@@ -259,7 +259,7 @@ export async function fetchChatTurn(turnId) {
   return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`);
 }
 
-export async function fetchChatTurns({ session = "mobile", scope = "", limit = 50 } = {}) {
+export async function fetchChatTurns({ session = "popup", scope = "", limit = 50 } = {}) {
   const params = new URLSearchParams();
   params.set("session", session);
   if (scope) params.set("scope", scope);

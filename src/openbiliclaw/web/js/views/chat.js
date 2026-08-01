@@ -53,6 +53,10 @@ let sending = false;
 let pendingTurnId = null;
 let pollTimer = null;
 let userScrolledUp = false;
+const CHAT_HISTORY_REFRESH_INTERVAL_MS = 2500;
+let historyRefreshTimer = null;
+let historyRefreshInFlight = false;
+let lastHistorySignature = null;
 
 // Messages overlay state
 let overlayOpen = false;
@@ -224,6 +228,23 @@ function startPlaceholderCarousel() {
       input.placeholder = PLACEHOLDERS[placeholderIdx];
     }
   }, 4000);
+}
+
+function isChatMessagesNearBottom(messages) {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 48;
+}
+
+function chatHistorySignature(nextTurns) {
+  return JSON.stringify(nextTurns);
+}
+
+function trackPendingHistoryTurn(nextTurns) {
+  const last = nextTurns[nextTurns.length - 1];
+  if (!last || (last.status !== "pending" && last.status !== "processing")) return;
+  if (pendingTurnId === last.turn_id) return;
+  pendingTurnId = last.turn_id;
+  sending = true;
+  pollForResponse();
 }
 
 // ── Send ─────────────────────────────────────────────────────
@@ -495,19 +516,46 @@ function updateBadgeCount() {
 
 // ── Load ─────────────────────────────────────────────────────
 async function loadHistory() {
+  if (!state.online || historyRefreshInFlight) return;
+  historyRefreshInFlight = true;
+  const existingMessages = document.getElementById("chat-messages");
+  const shouldStickToBottom =
+    !(existingMessages instanceof HTMLElement) || isChatMessagesNearBottom(existingMessages);
+  const previousScrollTop = existingMessages instanceof HTMLElement ? existingMessages.scrollTop : 0;
   try {
     const data = await fetchChatTurns({ ...chatSession(), limit: 50 });
-    turns = Array.isArray(data?.items || data?.turns)
+    const nextTurns = Array.isArray(data?.items || data?.turns)
       ? (data.items || data.turns).map(normalizeChatTurn)
       : [];
-    const last = turns[turns.length - 1];
-    if (last && (last.status === "pending" || last.status === "processing")) {
-      pendingTurnId = last.turn_id;
-      sending = true;
-      pollForResponse();
+    trackPendingHistoryTurn(nextTurns);
+    const signature = chatHistorySignature(nextTurns);
+    if (signature === lastHistorySignature) return;
+    lastHistorySignature = signature;
+    turns = nextTurns;
+    render();
+    if (!shouldStickToBottom) {
+      const restoreScrollPosition = () => {
+        const messages = document.getElementById("chat-messages");
+        if (!(messages instanceof HTMLElement)) return;
+        messages.scrollTop = Math.min(
+          previousScrollTop,
+          Math.max(0, messages.scrollHeight - messages.clientHeight),
+        );
+      };
+      window.requestAnimationFrame(restoreScrollPosition);
     }
   } catch { /* ignore */ }
-  render();
+  finally {
+    historyRefreshInFlight = false;
+  }
+}
+
+function startChatHistorySync() {
+  if (historyRefreshTimer !== null) return;
+  historyRefreshTimer = window.setInterval(() => {
+    if (state.activeTab !== "chat" || document.hidden || !state.online) return;
+    void loadHistory();
+  }, CHAT_HISTORY_REFRESH_INTERVAL_MS);
 }
 
 async function refreshAfterChatTurn() {
@@ -555,6 +603,7 @@ export async function loadNotifications({ includeDelights = false } = {}) {
 // ── Public API ───────────────────────────────────────────────
 export function initChatView(root) {
   $root = root;
+  startChatHistorySync();
   if (!loaded) {
     loaded = true;
     loadNotifications();
