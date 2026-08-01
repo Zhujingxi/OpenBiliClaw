@@ -52,6 +52,18 @@ def test_backgrounding_closes_stream_and_cancels_retry_loops() -> None:
     assert "void startDesktopBackendSession();" in APP_JS
 
 
+def test_runtime_stream_heartbeat_and_close_use_reconnecting_state() -> None:
+    stream = _function_body("connectRuntimeStream")
+
+    assert 'payload?.type === "runtime.heartbeat"' in stream
+    assert '"实时连接正常"' in stream
+    assert '"实时流重连中"' in stream
+    assert "event.code" in stream
+    assert "event.reason" in stream
+    assert "scheduleDesktopRuntimeReconnect();" in stream
+    assert '"实时流断开"' not in stream
+
+
 def test_retry_schedulers_are_visibility_gated() -> None:
     for name in (
         "schedulePlatformAvailabilityRetry",

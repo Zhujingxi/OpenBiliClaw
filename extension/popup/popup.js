@@ -155,6 +155,7 @@ if (!dialogueConfirmation) {
 }
 const {
   executeCardAction,
+  executePendingConfirmationOpen,
   isCardTurn,
   isQuestionTurn,
   renderPendingListMarkup,
@@ -4856,7 +4857,7 @@ async function refreshPendingConfirmations() {
     return;
   }
   try {
-    const payload = await fetchPendingConfirmations();
+    const payload = await fetchPendingConfirmations({ session: CHAT_SESSION });
     state.pendingConfirmations = {
       ...state.pendingConfirmations,
       count: Math.max(0, Number(payload?.count) || 0),
@@ -6783,8 +6784,19 @@ async function handlePendingConfirmationOpen(button) {
   const ref = button.dataset.confirmationRef || "";
   if (!ref || button.disabled) return;
   button.disabled = true;
+  button.textContent = "打开中…";
   try {
-    const turn = await openPendingConfirmation(ref, { session: CHAT_SESSION });
+    const turn = await executePendingConfirmationOpen(ref, {
+      session: CHAT_SESSION,
+      signal: dialogueCardActionAbortController.signal,
+      request(_path, body, { signal } = {}) {
+        return openPendingConfirmation(ref, { session: body.session, signal });
+      },
+      onWaiting({ message }) {
+        button.textContent = "等待中…";
+        setHint(`${message}，空闲后会自动打开。`);
+      },
+    });
     if (turn?.turn_id) renderChatTurn(turn);
     await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
     setHint(
@@ -6792,9 +6804,16 @@ async function handlePendingConfirmationOpen(button) {
       "success",
     );
     elements.chatInput?.focus();
-  } catch {
+  } catch (error) {
     button.disabled = false;
-    setHint("这条待聊内容暂时打不开，请稍后重试。", "error");
+    button.textContent = "打开";
+    if (Number(error?.status) === 409) {
+      await refreshPendingConfirmations();
+      setHint("另一条疑惑正在聊，待聊列表已经同步。", "warning");
+    } else if (error?.name !== "AbortError") {
+      const detail = String(error?.details?.detail?.message || "").trim();
+      setHint(detail || "这条待聊内容暂时打不开，请稍后重试。", "error");
+    }
   }
 }
 

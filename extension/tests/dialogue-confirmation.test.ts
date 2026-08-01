@@ -22,6 +22,21 @@ const dialogue = (globalThis as typeof globalThis & {
         signal?: AbortSignal;
       },
     ) => Promise<{ turn: Record<string, unknown>; response: Record<string, unknown> }>;
+    executePendingConfirmationOpen: (
+      ref: string,
+      options: {
+        session?: string;
+        request: (
+          path: string,
+          body: Record<string, string>,
+          options?: { signal?: AbortSignal },
+        ) => Promise<Record<string, unknown>>;
+        onWaiting?: (state: { attempt: number; message: string }) => void;
+        sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+        now?: () => number;
+        deadlineMs?: number;
+      },
+    ) => Promise<Record<string, unknown>>;
     pendingConfirmationOpenPath: (ref: string) => string;
     renderPendingListMarkup: (items: Array<Record<string, unknown>>) => string;
     renderTurnMarkup: (
@@ -364,4 +379,58 @@ test("pending list markup opens an encoded ref and selected flow excludes probe/
     { turn_id: "delight", scope: "delight", created_at: "2026-07-22T08:04:00Z" },
   ]);
   assert.deepEqual(selected.map((turn) => turn.turn_id), ["chat", "card", "question"]);
+});
+
+test("pending open retries only the explicit dialogue-busy response", async () => {
+  const calls: string[] = [];
+  const waits: string[] = [];
+  const delays: number[] = [];
+  const turn = await dialogue!.executePendingConfirmationOpen("12", {
+    session: "webui",
+    async request(path, body) {
+      calls.push(`${path}:${body.session}`);
+      if (calls.length === 1) {
+        const error = new Error("busy") as Error & {
+          status: number;
+          details: Record<string, unknown>;
+        };
+        error.status = 503;
+        error.details = {
+          detail: { code: "dialogue_busy", message: "后台正在整理上一段对话" },
+        };
+        throw error;
+      }
+      return { turn_id: "confirmation-12", scope: "confusion" };
+    },
+    onWaiting(state) {
+      waits.push(state.message);
+    },
+    async sleep(milliseconds) {
+      delays.push(milliseconds);
+    },
+  });
+
+  assert.equal(turn.turn_id, "confirmation-12");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(waits, ["后台正在整理上一段对话"]);
+  assert.deepEqual(delays, [1_000]);
+});
+
+test("pending open does not retry unrelated 409 conflicts", async () => {
+  let calls = 0;
+  await assert.rejects(
+    dialogue!.executePendingConfirmationOpen("13", {
+      async request() {
+        calls += 1;
+        const error = new Error("conflict") as Error & { status: number };
+        error.status = 409;
+        throw error;
+      },
+      async sleep() {
+        throw new Error("must not sleep");
+      },
+    }),
+    /conflict/,
+  );
+  assert.equal(calls, 1);
 });

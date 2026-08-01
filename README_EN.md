@@ -189,9 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.190 (2026-07-30)**
+📌 Latest: **v0.3.191 (2026-07-30)**
 
-- **A refreshed Windows startup experience** — the new dark-gradient branded splash uses the latest pink claw icon and clearly shows startup status, activity progress, and the current version.
+- **Saving configuration no longer interrupts long-running dialogue work** — hot reload now waits for active jobs to finish safely and clearly reports when work continues beyond the frontend timeout.
+- **Pending-chat open and defer actions are more reliable** — busy workers trigger an automatic retry, and deferring one topic no longer blocks the next pending item.
+- **Web realtime connectivity is steadier** — idle heartbeats, transient-disconnect status, and automatic reconnection prevent brief network hiccups from looking like a backend outage.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -595,10 +597,14 @@ config recovery draft (normal or degraded; business APIs remain gated)
 durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
+                          ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
+                          ├→ active confusion: current holder only; hidden once this session has its turn
                           ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                           │                                                └→ publication-only retry → projection / exact release
                           ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
+config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
+realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 ```
 
 ```

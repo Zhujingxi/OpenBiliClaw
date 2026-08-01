@@ -107,6 +107,27 @@ def test_put_config_rolls_back_when_hot_reload_fails(
     assert (tmp_path / "config.toml.bak").read_bytes() == before
 
 
+def test_put_config_explains_blank_hot_reload_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = _make_client(monkeypatch, tmp_path, _valid_config())
+
+    async def timeout_rebuild(self: RuntimeContext, new_config: Config) -> None:  # noqa: ARG001
+        raise TimeoutError
+
+    monkeypatch.setattr(RuntimeContext, "rebuild_from_config", timeout_rebuild)
+
+    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reloaded"] is False
+    assert body["rollback_applied"] is True
+    assert "后台对话在 25 分钟内仍未整理完成" in body["message"]
+    assert "热重载失败（）" not in body["message"]
+
+
 def test_put_config_hot_reload_failure_file_log_keeps_traceback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

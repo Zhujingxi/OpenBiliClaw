@@ -42,6 +42,10 @@
   // non-durable restart spinner; it deliberately does not wait for a 300s
   // provider timeout or introduce a durable job table.
   const CARD_ACTION_POLL_DEADLINE_MS = 30_000;
+  const PENDING_OPEN_RETRY_BACKOFF_MS = Object.freeze([1_000, 2_000, 3_000, 5_000]);
+  // Match the backend's safe hot-reload drain window. The page/popup abort
+  // signal still stops retries immediately when its owner goes away.
+  const PENDING_OPEN_RETRY_DEADLINE_MS = 25 * 60_000;
   const DIALOGUE_SCOPES = new Set(["chat", "hypothesis", "confusion"]);
   // Backend refuses settlement when another card owns the dialogue anchor.
   // These outcomes are honest failures — never fall back to the optimistic
@@ -98,6 +102,50 @@
 
   function pendingConfirmationOpenPath(ref) {
     return `/chat/pending-confirmations/${encodeURIComponent(text(ref))}/open`;
+  }
+
+  function pendingOpenErrorCode(error) {
+    return text(error?.details?.detail?.code || error?.details?.code).toLowerCase();
+  }
+
+  async function executePendingConfirmationOpen(ref, options = {}) {
+    const {
+      request,
+      session = "popup",
+      signal,
+      onWaiting,
+      sleep = waitForPoll,
+      now = () => Date.now(),
+      deadlineMs = PENDING_OPEN_RETRY_DEADLINE_MS,
+    } = options;
+    if (typeof request !== "function") {
+      throw new TypeError("executePendingConfirmationOpen requires request");
+    }
+    const path = pendingConfirmationOpenPath(ref);
+    const startedAt = now();
+    let attempt = 0;
+    while (true) {
+      if (signal?.aborted) throw signal.reason || abortError();
+      try {
+        return await request(path, { session }, { signal });
+      } catch (error) {
+        if (Number(error?.status) !== 503 || pendingOpenErrorCode(error) !== "dialogue_busy") {
+          throw error;
+        }
+        if (now() - startedAt >= deadlineMs) throw error;
+        if (typeof onWaiting === "function") {
+          onWaiting({
+            attempt,
+            message: text(error?.details?.detail?.message) || "后台正在整理上一段对话",
+          });
+        }
+        const delay = PENDING_OPEN_RETRY_BACKOFF_MS[
+          Math.min(attempt, PENDING_OPEN_RETRY_BACKOFF_MS.length - 1)
+        ];
+        attempt += 1;
+        await sleep(delay, signal);
+      }
+    }
   }
 
   function applyOptimisticCardAction(turn, action) {
@@ -396,6 +444,7 @@
     applyOptimisticCardAction,
     cardActionPath,
     executeCardAction,
+    executePendingConfirmationOpen,
     isCardTurn,
     isQuestionTurn,
     pendingConfirmationOpenPath,

@@ -209,9 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.190（2026-07-30）**
+📌 最新版本：**v0.3.191（2026-07-30）**
 
-- **Windows 启动体验焕新** —— 全新深色渐变品牌启动卡使用最新粉色猫爪图标，清晰展示启动状态、活动进度与当前版本号。
+- **保存配置不再打断长时间对话任务** —— 热重载会等待已有任务安全结束，并在超过前端等待预算时明确提示后台仍在处理。
+- **待聊卡片打开与“稍后”操作更可靠** —— worker 忙时会自动重试，延后当前话题后下一条待聊内容也能正常出现。
+- **Web 实时连接更稳定** —— 空闲心跳、短暂断线状态和自动重连均已补齐，不再把网络抖动误报为后端离线。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -599,10 +601,14 @@ background ─ background admission (default 3) ──────┘
 持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
+                       ├→ worker忙：dialogue_busy + Retry-After → 两端等待态自动重试
+                       ├→ 已澄清疑惑：只展示当前持有者；当前 session 已有 turn 则隐藏
                        ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                        │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
                        ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
+实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 ```
 
 ```

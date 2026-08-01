@@ -2230,6 +2230,41 @@ async def test_queue_reload_handoff_old_finally_cannot_clear_new_permit() -> Non
     assert guard.registered_permit is None
 
 
+async def test_pause_and_drain_keeps_accepting_until_atomic_idle_pause() -> None:
+    """A hot reload must not drop an interactive command while LLM work drains."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    observed: list[str] = []
+
+    async def dispatcher(job: DialogueJob) -> DialogueJobResult:
+        label = str(job.payload["label"])
+        if label == "slow":
+            entered.set()
+            await release.wait()
+        observed.append(label)
+        return DialogueJobResult(outcome="completed")
+
+    queue = DialogueSettlementQueue(dispatcher)
+    queue.start()
+    slow = queue.submit(DialogueJobKind.LEARN, {"label": "slow"}, completion=True)
+    assert slow is not None and slow.completion is not None
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert queue.ready_for_interactive_submission is False
+
+    draining = asyncio.create_task(queue.pause_and_drain(timeout=1))
+    await asyncio.sleep(0)
+    late = queue.submit(DialogueJobKind.CARD_DEFER, {"label": "late"}, completion=True)
+    assert late is not None and late.completion is not None
+    release.set()
+    await asyncio.wait_for(draining, timeout=1)
+
+    assert observed == ["slow", "late"]
+    assert queue.accepting is False
+    assert queue.ready_for_interactive_submission is False
+    assert queue.submit(DialogueJobKind.CARD_DEFER, {"label": "rejected"}) is None
+    await queue.shutdown()
+
+
 async def test_queue_reload_start_registers_actual_worker_permit_before_publish() -> None:
     """R2-3: start returns only after the created Task owns the single permit."""
     from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard

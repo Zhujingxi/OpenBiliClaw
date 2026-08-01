@@ -5408,6 +5408,32 @@ class TestBackendAPI:
                 "message": "开始给你补候选了",
             }
 
+    def test_runtime_stream_sends_idle_heartbeat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime.events import RuntimeEventHub
+
+        monkeypatch.setattr(
+            "openbiliclaw.api.app._RUNTIME_STREAM_HEARTBEAT_SECONDS",
+            0.01,
+        )
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_event_hub=RuntimeEventHub(),
+        )
+        client = TestClient(app)
+
+        with client.websocket_connect("/api/runtime-stream") as websocket:
+            heartbeat = websocket.receive_json()
+
+        assert heartbeat["type"] == "runtime.heartbeat"
+        assert heartbeat["sent_at"]
+
     def test_extension_reload_reports_runtime_stream_delivery(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -12698,6 +12724,33 @@ class TestPendingDialogueConfirmations:
         }
         assert ref not in refs
 
+    def test_pending_open_hypothesis_defer_releases_pending_anchor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        ref = self._seed_hypothesis(memory, "主动打开后稍后聊也必须解锚", 0.73)
+        opened = client.post(
+            f"/api/chat/pending-confirmations/{ref}/open",
+            json={"session": "webui"},
+        )
+        assert opened.status_code == 200
+        turn_id = opened.json()["turn_id"]
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.origin_turn_id == turn_id
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "pending"
+
+        deferred = client.post(
+            f"/api/chat/cards/{turn_id}/action",
+            json={"action": "defer"},
+        )
+
+        assert deferred.status_code == 200
+        assert deferred.json()["state"] == "deferred"
+        assert engine._dialogue_anchor_manager.current() is None
+        assert memory._database.get_chat_turn(turn_id)["payload"]["state"] == "deferred"
+
     def test_confusion_open_ignores_ask_cooldown_and_builds_question_anchor(
         self,
         tmp_path: Path,
@@ -12736,6 +12789,104 @@ class TestPendingDialogueConfirmations:
         assert anchor.kind == "confusion"
         assert anchor.ref == str(confusion_id)
         assert anchor.origin_turn_id == turn["turn_id"]
+
+    def test_clarifying_confusion_replaces_unopenable_rows_across_sessions(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, engine, _dialogue = self._build(tmp_path)
+        active_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="已经在插件里聊的疑惑",
+            observation="它持有全局澄清位置",
+            interpretation_confidence=0.61,
+        )
+        blocked_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="下一条尚未开始的疑惑",
+            observation="当前不能取得全局位置",
+            interpretation_confidence=0.92,
+        )
+        popup = client.post(
+            f"/api/chat/pending-confirmations/{active_id}/open",
+            json={"session": "popup"},
+        )
+        assert popup.status_code == 200
+
+        pending = client.get(
+            "/api/chat/pending-confirmations",
+            params={"session": "webui"},
+        ).json()["items"]
+        confusion_refs = [item["ref"] for item in pending if item["kind"] == "confusion"]
+        assert confusion_refs == [str(active_id)]
+        assert str(blocked_id) not in {item["ref"] for item in pending}
+
+        desktop = client.post(
+            f"/api/chat/pending-confirmations/{active_id}/open",
+            json={"session": "webui"},
+        )
+        assert desktop.status_code == 200
+        assert desktop.json()["turn_id"] != popup.json()["turn_id"]
+        active = memory._database.get_confusion(active_id)
+        assert active is not None
+        assert active["ask_turn_id"] == desktop.json()["turn_id"]
+        anchor = engine._dialogue_anchor_manager.current()
+        assert anchor is not None
+        assert anchor.ref == str(active_id)
+        desktop_pending = client.get(
+            "/api/chat/pending-confirmations",
+            params={"session": "webui"},
+        ).json()["items"]
+        assert str(active_id) not in {item["ref"] for item in desktop_pending}
+
+    def test_pending_open_returns_retryable_busy_without_mutating_confusion(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        confusion_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="队列忙时先别落半截状态",
+            observation="应由前端自动重试",
+            interpretation_confidence=0.75,
+        )
+        orphan_id = memory._database.insert_confusion(
+            source="awareness",
+            topic="旧进程留下的半截澄清",
+            observation="只读列表不能排在长 LLM 后面",
+            interpretation_confidence=0.72,
+        )
+        memory._database.update_confusion(
+            orphan_id,
+            status="clarifying",
+            ask_turn_id="missing-turn",
+            asked_at=(datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        )
+        queue = client.app.state.runtime_context.dialogue_settlement_queue
+        queue.pause()
+        try:
+            pending = client.get(
+                "/api/chat/pending-confirmations",
+                params={"session": "webui"},
+            )
+            response = client.post(
+                f"/api/chat/pending-confirmations/{confusion_id}/open",
+                json={"session": "webui"},
+            )
+        finally:
+            queue.resume()
+
+        assert pending.status_code == 200
+        assert [item["ref"] for item in pending.json()["items"] if item["kind"] == "confusion"] == [
+            str(orphan_id)
+        ]
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "2"
+        assert response.json()["detail"]["code"] == "dialogue_busy"
+        confusion = memory._database.get_confusion(confusion_id)
+        assert confusion is not None
+        assert confusion["status"] == "open"
+        assert confusion["ask_turn_id"] == ""
 
     def test_pending_open_confusion_schedule_retarget_rollback_only_in_worker(
         self,
