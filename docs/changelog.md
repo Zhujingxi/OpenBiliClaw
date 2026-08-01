@@ -11,6 +11,8 @@
 
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 
+- **修复桌面端夜间模式下账号同步提示过淡**：同步异常提示改用主题前景色和明确的状态底色，深浅主题下都保持可读。
+- **修复桌面端惊喜推荐文字卡在夜间模式下难以辨认**：知乎、Reddit 等无封面内容不再把前景色当作渐变背景，改用主题表面色、轻平台色和明确的主题前景色；普通无封面文字卡也同步收敛到同一套高对比度样式。
 - **补充社区贡献者致谢**：在贡献指南中记录 [@RayeLouis](https://github.com/RayeLouis) 对扩展服务端认证权威判定（[#132](https://github.com/whiteguo233/OpenBiliClaw/pull/132)）和可选 TLS 反代初版（[#136](https://github.com/whiteguo233/OpenBiliClaw/pull/136)）的贡献。
 - **修复 Web 与插件聊天不同步，并补齐长页面回顶入口**：插件、移动 Web、桌面 Web 的主聊天统一使用 `session=popup&scope=chat`；聊天界面可见且在线时约每 2.5 秒增量读取共享 durable history，快照未变化不重绘，用户阅读旧消息时保留滚动位置。移动 Web 与桌面 Web 同时增加固定「顶部」按钮，页面滚动区和聊天内滚动区均可一键回到顶部。
 - **修复保存配置时待聊按钮失效、热重载误回滚和 Web 实时流反复报断开**：生产日志显示长达 235 秒的对话学习占住唯一结算 worker，旧热重载会先停接新任务、只等 30 秒，于是连续丢弃 `confusion.open.sync`，再用空白 `TimeoutError` 回滚配置；现在队列保持接单直到真正排空，再原子暂停交接，安全等待窗口与 20 分钟 LLM 上限对齐到 25 分钟，桌面/插件在超过前端 60 秒预算时明确显示“仍在后台热重载”。待聊 open 会在 worker 忙时返回带 `Retry-After` 的 `dialogue_busy`，两端显示等待态并自动重试，required local job 不再留下“已 claim、未建 turn”的半截状态；若已有跨 session 的 `clarifying` 疑惑，列表只给尚未展示该 turn 的 session 暴露当前持有者，不再列出必然 409 的下一条。真实浏览器 E2E 进一步发现 pending-open 卡片仍是 `pending` 状态，点“稍后”虽改成 deferred 却不会走旧 `discussing` 解锚分支；现在会按 origin turn 精确释放同代锚，下一条待聊不再被不可见旧锚挡住。`runtime-stream` 每 20 秒发送空闲心跳，桌面端短暂关闭显示“重连中”、记录 close code/reason 并按原 3 秒节奏续连，不再把 WebSocket 抖动误报成整个后端离线。
