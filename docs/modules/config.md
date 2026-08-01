@@ -62,6 +62,48 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 >
 > 撤销纪元 `auth_epoch` 与密码指纹 `password_fingerprint` 是运行时高频可变状态，**不在 config.toml**，由后端写在 SQLite `data/openbiliclaw.db` 的 `auth_state` 表（改密 / 登出所有设备 / 轮换密钥时自增，使旧登录态立即失效）。`session_secret` / `password_hash` 也**永不经 `GET /api/config` 返回**（即便 `reveal_keys=true`）。
 
+### `[tls_proxy]`
+
+默认关闭的局域网 / 自管 HTTPS 入口（`TlsProxyConfig`）。只由
+`openbiliclaw serve-api` 消费；普通 `start` 与未启用 TLS 的行为不变。完整安全与证书流程见
+[`TLS Proxy 模块`](tls-proxy.md) 和 [`HTTPS 部署`](../https-deployment.md)。
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否在 `serve-api` 启动可选 TLS listener |
+| `port` | int | `8443` | TLS 监听端口；严格限制 `1..65535`，不能与 API 端口相同 |
+| `cert_dir` | string | `""` | 空值解析为 `{data_dir}/certs`；相对路径按 runtime project root 解析；控制字符非法 |
+| `san_names` | list[string] | `[]` | 客户端实际使用的 DNS/IP；规范化大小写、IDNA/IP 并去重；非法 hostname、URL、带端口值会拒绝加载/保存 |
+
+`save_config()` 会完整渲染 `[tls_proxy]`，因此 enable/disable、端口、目录与 SAN 会经过
+load → save → load round-trip；保存其他已知配置表时也不会再丢掉 TLS 表。环境变量覆盖的字段
+始终从基础 `config.toml` 的磁盘值回写（基础文件没有该字段则省略），不会把临时有效值烘焙
+进去；默认路径加载时，`config.local.toml` 遮蔽的字段采用同一 provenance 规则。显式
+`load_config(path)` / `save_config(config, path)` 不合并也不咨询 project-root local 文件。
+
+显式支持的环境变量只有：
+
+| 环境变量 | 字段 |
+|---|---|
+| `OPENBILICLAW_TLS_PROXY_ENABLED` | `enabled` |
+| `OPENBILICLAW_TLS_PROXY_PORT` | `port` |
+| `OPENBILICLAW_TLS_PROXY_CERT_DIR` | `cert_dir` |
+| `OPENBILICLAW_TLS_SAN_NAMES` | `san_names`（逗号分隔） |
+
+这些多词变量绕过通用下划线拆分器，由 `_build_tls_proxy()` 显式读取。不要推断其它
+`OPENBILICLAW_TLS_*` 名称可用。若 `enabled` 被环境变量或 `config.local.toml` 覆盖，
+`tls-proxy enable/disable` 会拒绝报告虚假的持久化成功，并指出应修改的上层来源。
+
+#### Config 模块公开 TLS API
+
+| API | 说明 |
+|---|---|
+| `TlsProxyConfig` | 根 `Config.tls_proxy` 的 typed 配置对象 |
+| `normalize_tls_proxy_port()` | 严格验证 TLS TCP port |
+| `normalize_tls_cert_dir()` | 规范化目录并拒绝控制字符 |
+| `normalize_tls_san_names()` | 验证、规范化并去重 DNS/IP SAN |
+| `resolve_tls_cert_dir(config)` | 按 project root / data_dir 解析运行时证书目录 |
+
 ### `[saved_sync]`
 
 ```toml

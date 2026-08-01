@@ -6,6 +6,7 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -1348,6 +1349,24 @@ class ApiAuthConfig:
 
 
 @dataclass
+class TlsProxyConfig:
+    """Optional TLS reverse proxy for LAN / self-managed access.
+
+    When ``enabled`` is true and ``cryptography`` is installed,
+    ``serve-api`` prepares a TLS listener synchronously, then serves it in a
+    background thread and forwards to the API.
+
+    ``cert_dir`` defaults to ``{data_dir}/certs`` at runtime;
+    leave empty to use the default.
+    """
+
+    enabled: bool = False
+    port: int = 8443
+    cert_dir: str = ""
+    san_names: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ApiConfig:
     """Backend API server settings.
 
@@ -1386,6 +1405,7 @@ class Config:
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
     # provider override): this carries soul-engine behavior toggles.
     soul: SoulConfig = field(default_factory=SoulConfig)
+    tls_proxy: TlsProxyConfig = field(default_factory=TlsProxyConfig)
 
     @property
     def data_path(self) -> Path:
@@ -1477,7 +1497,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         # TypeError when an on-disk plaintext `password` string is descended into.
         # `_build_api_auth` reads every API_AUTH_ENV_VARS var explicitly, so skip
         # them here entirely (review r7#1).
-        if env_key in API_AUTH_ENV_VARS:
+        if env_key in API_AUTH_ENV_VARS or env_key in TLS_PROXY_ENV_VARS:
             continue
         parts = env_key[len(prefix) :].lower().split("_")
         current = raw
@@ -2181,6 +2201,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             )
         ),
         soul=soul,
+        tls_proxy=_build_tls_proxy(raw),
     )
 
 
@@ -2461,6 +2482,25 @@ API_AUTH_ENV_VARS: tuple[str, ...] = (
     "OPENBILICLAW_API_AUTH_TRUST_LOOPBACK",
 )
 
+# Explicit TLS environment contract. Multi-word keys cannot safely pass through
+# ``_apply_env_overrides`` because its generic underscore splitter would turn
+# ``TLS_PROXY_PORT`` into ``[tls.proxy].port`` instead of ``[tls_proxy].port``.
+# Docker's standalone proxy uses the shorter ``SAN_NAMES`` variable; that entry
+# point does not load Config and is documented separately.
+TLS_PROXY_ENV_VARS: tuple[str, ...] = (
+    "OPENBILICLAW_TLS_PROXY_ENABLED",
+    "OPENBILICLAW_TLS_PROXY_PORT",
+    "OPENBILICLAW_TLS_PROXY_CERT_DIR",
+    "OPENBILICLAW_TLS_SAN_NAMES",
+)
+
+_TLS_PROXY_ENV_TO_FIELD: dict[str, str] = {
+    "OPENBILICLAW_TLS_PROXY_ENABLED": "enabled",
+    "OPENBILICLAW_TLS_PROXY_PORT": "port",
+    "OPENBILICLAW_TLS_PROXY_CERT_DIR": "cert_dir",
+    "OPENBILICLAW_TLS_SAN_NAMES": "san_names",
+}
+
 
 def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
     """Assemble ``ApiAuthConfig`` from raw config + dedicated env vars.
@@ -2519,6 +2559,148 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         extension_access_keys=_coerce_str_list(auth_raw.get("extension_access_keys", [])),
         extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
             auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
+        ),
+    )
+
+
+_TLS_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def normalize_tls_proxy_port(value: object) -> int:
+    """Return a valid TCP port for the TLS listener, or raise ``ConfigError``."""
+    if isinstance(value, bool):
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, str):
+        try:
+            port = int(value.strip())
+        except ValueError as exc:
+            raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数") from exc
+    else:
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    if not 1 <= port <= 65535:
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    return port
+
+
+def normalize_tls_cert_dir(value: object) -> str:
+    """Normalize a TLS certificate directory without resolving relative paths."""
+    if value is None:
+        return ""
+    if not isinstance(value, (str, os.PathLike)):
+        raise ConfigError("tls_proxy.cert_dir: 必须是路径字符串")
+    raw_path = os.fspath(value)
+    if not isinstance(raw_path, str):
+        raise ConfigError("tls_proxy.cert_dir: 必须是路径字符串")
+    text = raw_path.strip()
+    if not text:
+        return ""
+    if any(ord(char) < 32 for char in text):
+        raise ConfigError("tls_proxy.cert_dir: 不能包含控制字符")
+    return os.path.normpath(os.path.expanduser(text))
+
+
+def normalize_tls_san_names(value: object) -> list[str]:
+    """Normalize and validate configured certificate DNS/IP SAN entries."""
+    if value is None:
+        raw_names: list[str] = []
+    elif isinstance(value, str):
+        raw_names = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        if any(not isinstance(item, str) for item in value):
+            raise ConfigError("tls_proxy.san_names: 必须是 hostname/IP 字符串列表")
+        raw_names = [item.strip() for item in value if item.strip()]
+    else:
+        raise ConfigError("tls_proxy.san_names: 必须是 hostname/IP 字符串列表")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_name in raw_names:
+        name = raw_name.strip()
+        if any(ord(char) < 33 for char in name) or any(char in name for char in "/\\@#"):
+            raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}")
+        try:
+            canonical = str(ipaddress.ip_address(name))
+        except ValueError:
+            if ":" in name:
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from None
+            try:
+                canonical = name.rstrip(".").encode("idna").decode("ascii").lower()
+            except UnicodeError as exc:
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from exc
+            if (
+                not canonical
+                or len(canonical) > 253
+                or any(_TLS_DNS_LABEL_RE.fullmatch(label) is None for label in canonical.split("."))
+            ):
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from None
+        key = canonical.casefold()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(canonical)
+    return normalized
+
+
+def normalize_tls_enabled(value: object) -> bool:
+    """Strictly normalize the TLS enable flag so typos cannot silently disable HTTPS."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().casefold()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ConfigError("tls_proxy.enabled: 必须是 true/false")
+
+
+def resolve_tls_cert_dir(config: Config) -> Path:
+    """Resolve the TLS certificate directory against the runtime project root."""
+    if not config.tls_proxy.cert_dir:
+        return config.data_path / "certs"
+    path = Path(config.tls_proxy.cert_dir).expanduser()
+    return path if path.is_absolute() else _project_root() / path
+
+
+def tls_proxy_enabled_override_source() -> str | None:
+    """Return the higher-precedence source controlling TLS enablement, if any."""
+    if (os.environ.get("OPENBILICLAW_TLS_PROXY_ENABLED") or "").strip():
+        return "OPENBILICLAW_TLS_PROXY_ENABLED"
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    table = raw.get("tls_proxy")
+    if isinstance(table, dict) and "enabled" in table:
+        return "config.local.toml [tls_proxy].enabled"
+    return None
+
+
+def _build_tls_proxy(raw: dict[str, Any]) -> TlsProxyConfig:
+    """Build ``TlsProxyConfig`` from TOML plus the explicit TLS env contract."""
+    tls_raw_val = raw.get("tls_proxy")
+    tls_raw: dict[str, Any] = tls_raw_val if isinstance(tls_raw_val, dict) else {}
+
+    def env_or_disk(name: str, key: str, default: object) -> object:
+        env_value = os.environ.get(name)
+        if env_value is not None and env_value.strip():
+            return env_value
+        return tls_raw.get(key, default)
+
+    return TlsProxyConfig(
+        enabled=normalize_tls_enabled(
+            env_or_disk("OPENBILICLAW_TLS_PROXY_ENABLED", "enabled", False)
+        ),
+        port=normalize_tls_proxy_port(env_or_disk("OPENBILICLAW_TLS_PROXY_PORT", "port", 8443)),
+        cert_dir=normalize_tls_cert_dir(
+            env_or_disk("OPENBILICLAW_TLS_PROXY_CERT_DIR", "cert_dir", "")
+        ),
+        san_names=normalize_tls_san_names(
+            env_or_disk("OPENBILICLAW_TLS_SAN_NAMES", "san_names", [])
         ),
     )
 
@@ -3451,10 +3633,10 @@ def _auth_overridden_fields(*, consult_local: bool) -> set[str]:
 
     Env vars apply to EVERY load, so env-governed fields always count. But
     ``config.local.toml`` is merged ONLY when ``load_config`` runs with no explicit
-    path (the production / default-path case); ``load_config(explicit_path)`` reads
-    that file alone. So ``consult_local`` must be False for an explicit-path save to
-    an unrelated file, or we would preserve/omit fields based on a project-root
-    local layer that was never merged into the config being saved (review r11).
+    path (the production / default-path invocation); ``load_config(explicit_path)``
+    reads that file alone, even when the explicit path happens to equal the runtime
+    default. So ``consult_local`` must be False for every explicit-path save, or we
+    would preserve/omit fields based on a layer that was never merged (review r11).
     """
     fields = {field for field, on in _auth_env_field_overrides().items() if on}
     if consult_local:
@@ -3475,6 +3657,46 @@ def _read_on_disk_auth(path: Path) -> dict[str, Any]:
     api = data.get("api")
     auth = api.get("auth") if isinstance(api, dict) else None
     return auth if isinstance(auth, dict) else {}
+
+
+def _tls_proxy_env_overridden_fields() -> set[str]:
+    """Return ``[tls_proxy]`` fields currently governed by explicit env vars."""
+    return {
+        field
+        for env_name, field in _TLS_PROXY_ENV_TO_FIELD.items()
+        if (os.environ.get(env_name) or "").strip()
+    }
+
+
+def _config_local_tls_proxy_keys() -> set[str]:
+    """Return ``[tls_proxy]`` keys shadowed by project-root config.local.toml."""
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    tls_proxy = data.get("tls_proxy")
+    return set(tls_proxy) if isinstance(tls_proxy, dict) else set()
+
+
+def _tls_proxy_overridden_fields(*, consult_local: bool) -> set[str]:
+    """Return TLS fields whose effective values come from an override layer."""
+    overridden = _tls_proxy_env_overridden_fields()
+    if consult_local:
+        overridden.update(_config_local_tls_proxy_keys())
+    return overridden
+
+
+def _read_on_disk_tls_proxy(path: Path) -> dict[str, Any]:
+    """Return the raw base-file ``[tls_proxy]`` table at ``path`` ({} if absent)."""
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    tls_proxy = data.get("tls_proxy")
+    return tls_proxy if isinstance(tls_proxy, dict) else {}
 
 
 def _read_on_disk_autostart(path: Path) -> dict[str, Any]:
@@ -3666,6 +3888,54 @@ def _api_auth_lines(
     return lines
 
 
+def _tls_proxy_lines(
+    config: Config,
+    on_disk_tls_proxy: dict[str, Any] | None,
+    *,
+    consult_local: bool,
+) -> list[str]:
+    """Render TLS config without baking env/config.local overrides into the base.
+
+    ``load_config`` returns effective values after higher-precedence layers are
+    merged. An unrelated whole-file save must preserve each shadowed field from
+    ``config.toml`` itself (or omit it when the base had no value), so deleting an
+    env var or ``config.local.toml`` restores the original base/default value.
+    """
+    tls_proxy = config.tls_proxy
+    overridden = _tls_proxy_overridden_fields(consult_local=consult_local)
+    disk = on_disk_tls_proxy or {}
+    lines = ["[tls_proxy]"]
+
+    def emit(field: str, memory_line: str, disk_repr: Callable[[Any], str]) -> None:
+        if field in overridden:
+            if field in disk:
+                lines.append(f"{field} = {disk_repr(disk[field])}")
+            return
+        lines.append(memory_line)
+
+    emit(
+        "enabled",
+        f"enabled = {_toml_bool(tls_proxy.enabled)}",
+        lambda value: _toml_bool(normalize_tls_enabled(value)),
+    )
+    emit(
+        "port",
+        f"port = {tls_proxy.port}",
+        lambda value: str(normalize_tls_proxy_port(value)),
+    )
+    emit(
+        "cert_dir",
+        f"cert_dir = {_toml_string(tls_proxy.cert_dir)}",
+        lambda value: _toml_string(normalize_tls_cert_dir(value)),
+    )
+    emit(
+        "san_names",
+        f"san_names = {_toml_str_list(tls_proxy.san_names)}",
+        lambda value: _toml_str_list(normalize_tls_san_names(value)),
+    )
+    return lines
+
+
 def _autostart_lines(
     config: Config,
     on_disk_autostart: dict[str, Any] | None,
@@ -3711,6 +3981,13 @@ def save_config(
     config.sources.bangumi.access_token = validate_bangumi_access_token(
         config.sources.bangumi.access_token
     )
+    # Reject invalid TLS writes at the persistence boundary. Keeping the
+    # normalized values in-memory also makes the rendered TOML and immediate
+    # runtime behavior agree (pitfall rule 7: fail with the real cause).
+    config.tls_proxy.port = normalize_tls_proxy_port(config.tls_proxy.port)
+    config.tls_proxy.enabled = normalize_tls_enabled(config.tls_proxy.enabled)
+    config.tls_proxy.cert_dir = normalize_tls_cert_dir(config.tls_proxy.cert_dir)
+    config.tls_proxy.san_names = normalize_tls_san_names(config.tls_proxy.san_names)
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -3719,14 +3996,17 @@ def save_config(
     # env-managed) so a normal settings/cookie write can't drop a plaintext
     # password and flip the reconcile fingerprint basis.
     on_disk_auth = _read_on_disk_auth(path) if path.exists() else None
+    on_disk_tls_proxy = _read_on_disk_tls_proxy(path) if path.exists() else None
     on_disk_autostart = _read_on_disk_autostart(path) if path.exists() else None
-    # config.local.toml is merged ONLY when load_config runs with no explicit path
-    # (production / default path). For a save to any other explicit file it was
-    # never merged, so its overrides must not gate this render (review r11).
-    consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
+    # config.local.toml is merged ONLY when load_config runs with no explicit
+    # path. Match that invocation contract exactly: even an explicit path that
+    # happens to equal the runtime default did not consult config.local.toml, so
+    # its save must not be provenance-gated by that file either.
+    consult_local = config_path is None
     rendered = _render_config_toml(
         config,
         on_disk_auth=on_disk_auth,
+        on_disk_tls_proxy=on_disk_tls_proxy,
         on_disk_autostart=on_disk_autostart,
         autostart_authoritative=autostart_authoritative,
         consult_local=consult_local,
@@ -3741,6 +4021,7 @@ def _render_config_toml(
     config: Config,
     *,
     on_disk_auth: dict[str, Any] | None = None,
+    on_disk_tls_proxy: dict[str, Any] | None = None,
     on_disk_autostart: dict[str, Any] | None = None,
     autostart_authoritative: bool = False,
     consult_local: bool = False,
@@ -3756,6 +4037,8 @@ def _render_config_toml(
         f"port = {config.api.port}",
         "",
         *_api_auth_lines(config, on_disk_auth, consult_local=consult_local),
+        "",
+        *_tls_proxy_lines(config, on_disk_tls_proxy, consult_local=consult_local),
         "",
     ]
     if config.llm.instance_routing:

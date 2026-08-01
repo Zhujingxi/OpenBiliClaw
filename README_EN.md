@@ -613,7 +613,8 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │  Behavior capture · MAIN-world taps (comment/  │
 │  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
-                       │ IPv4 0.0.0.0 + IPv6 [::] → REST API / WebSocket
+                       │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
+                       │ Optional HTTPS: TLS Proxy :8443 → loopback/Compose HTTP → same API
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
                        │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐
@@ -670,6 +671,12 @@ Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-key
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
 
+Trusted LAN and self-managed deployments may additionally enable the default-off
+[TLS Proxy](docs/https-deployment.md). It performs exact HTTPS Origin/Host validation, relays
+WebSockets, and manages explicit SANs for a local-CA certificate. With no remote SAN the generated
+certificate is localhost-only. This lightweight component is not a public-Internet production
+gateway, and the default HTTP path is unchanged.
+
 > Full architecture detail (runtime state machine, pool accounting, profile overrides, and more) lives in [Architecture](docs/architecture.md) and the [visual architecture diagrams](docs/index.md).
 
 ### Content Discovery Engine
@@ -718,6 +725,7 @@ OpenBiliClaw/
 │   ├── sources/               # Source adapters, Bangumi API, and XHS/Douyin/YouTube/Zhihu/Reddit task bridges
 │   ├── youtube/               # Google Takeout import parser
 │   ├── api/                   # Local FastAPI (config rollback / degraded mode / popup API)
+│   ├── tls_proxy.py           # Default-off LAN/self-managed HTTPS edge
 │   ├── runtime/               # Refresh, feedback coalescing, presence gate, shared CLI/desktop autostart reconcile, Ollama, degraded RuntimeContext
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
@@ -743,6 +751,7 @@ OpenBiliClaw/
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
+| Optional TLS | Python stdlib HTTP/TLS forwarding plus cryptography certificate generation from the `[tls]` extra; LAN/self-managed only and off by default |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
 | Agent Framework | Lightweight custom framework |
