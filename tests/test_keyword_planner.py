@@ -2862,7 +2862,7 @@ def _seed_consumed_keywords(
 
 
 def _tick_planner(spy_db: _RecordingDb, *, profile: SoulProfile) -> KeywordPlanner:
-    return _make_planner(
+    planner = _make_planner(
         spy_db,  # type: ignore[arg-type]
         llm=_SequentialLLM(payloads=[{"axes": [], "keywords": []}] * 4),
         profile=profile,
@@ -2873,6 +2873,8 @@ def _tick_planner(spy_db: _RecordingDb, *, profile: SoulProfile) -> KeywordPlann
         ),
         inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
     )
+    planner._inspiration_pipeline._clock = lambda: datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    return planner
 
 
 async def test_production_stage_runs_backfill_and_lifecycle_before_axis_fetch(
