@@ -579,7 +579,7 @@
     .delight > .status-line { grid-area: status; }
     .delight-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
     .delight-meta .eyebrow { margin: 0; }
-    .delight-queue-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: 6px; }
+    .delight-queue-tools { display: flex; flex-wrap: nowrap; align-items: center; justify-content: end; gap: 8px; }
     .delight-nav { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: var(--radius-pill); background: color-mix(in oklab, var(--accent-subtle), transparent 30%); border: 0; color: var(--accent); font-size: 12px; line-height: 1; transition: box-shadow var(--motion-fast) var(--ease-standard); }
     .delight-nav:hover { box-shadow: 0 0 8px 2px color-mix(in oklab, var(--accent), transparent 65%); }
     .delight-nav #delightCount { color: var(--accent); }
@@ -590,6 +590,12 @@
     .delight-nav .icon-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .delight-nav .icon-btn[data-delight]:hover { border-color: transparent; }
     .delight-nav .icon-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .delight-dismiss-btn { flex: 0 0 32px; width: 32px; height: 32px; min-height: 32px; display: inline-grid; place-items: center; padding: 0; border: 1px solid color-mix(in oklab, var(--muted), transparent 72%); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), transparent 18%); color: var(--muted); cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
+    .delight-dismiss-btn svg { width: 16px; height: 16px; }
+    .delight-dismiss-btn:hover { border-color: color-mix(in oklab, var(--accent), transparent 28%); background: var(--accent); color: var(--accent-on); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 48%); }
+    .delight-dismiss-btn:active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-on); transform: scale(0.97); }
+    .delight-dismiss-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .delight-dismiss-btn:disabled { cursor: wait; opacity: 0.58; }
     .delight-queue-tools .ghost-danger { height: 26px; min-height: 26px; padding: 0 9px; font-size: 12px; line-height: 1; }
     .thumb { aspect-ratio: 16 / 9; border-radius: var(--radius-lg); background: linear-gradient(135deg, var(--accent-strong), var(--fg)); position: relative; overflow: hidden; }
     .thumb::before { content: ""; position: absolute; inset: 18% 22%; border: 1px solid color-mix(in oklab, var(--surface), transparent 25%); border-radius: var(--radius-lg); }
@@ -916,8 +922,8 @@
     .profile-page-actions { margin-top: var(--space-5); justify-content: start; }
     .chat-page { width: min(100%, 920px); height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
     .chat-page .content-page-head { margin-bottom: var(--space-5); }
-    .dialogue-pending { margin-bottom: var(--space-2); border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 78%); border-radius: var(--radius-lg); background: linear-gradient(180deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 15%), var(--surface)); overflow: hidden; }
-    #desktopPendingToggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 0; border-radius: inherit; background: transparent; color: var(--fg); font: inherit; font-size: 12px; font-weight: 800; text-align: left; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+    .dialogue-pending { min-height: 0; max-height: min(32vh, 300px); display: flex; flex-direction: column; margin-bottom: var(--space-2); border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 78%); border-radius: var(--radius-lg); background: linear-gradient(180deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 15%), var(--surface)); overflow: hidden; }
+    #desktopPendingToggle { width: 100%; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 0; border-radius: inherit; background: transparent; color: var(--fg); font: inherit; font-size: 12px; font-weight: 800; text-align: left; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     #desktopPendingToggle:hover { background: color-mix(in oklab, var(--accent-subtle), transparent 48%); }
     #desktopPendingToggle:focus-visible, .dialogue-pending-item button:focus-visible, .dialogue-card-action:focus-visible, .dialogue-evidence summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .dialogue-pending-toggle-title { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); }
@@ -925,7 +931,7 @@
     .dialogue-pending-toggle-chevron { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; color: var(--muted); transition: transform var(--motion-base) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     .dialogue-pending-toggle-chevron svg { width: 15px; height: 15px; }
     #desktopPendingToggle.is-expanded .dialogue-pending-toggle-chevron { transform: rotate(180deg); color: var(--accent); }
-    #desktopPendingConfirmations { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 0 8px 8px; }
+    #desktopPendingConfirmations { min-height: 0; display: grid; grid-template-columns: 1fr; grid-auto-rows: max-content; gap: 7px; padding: 0 8px 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--accent), transparent 48%) transparent; }
     #desktopPendingConfirmations[hidden] { display: none; }
     .dialogue-pending-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--border); border-radius: 13px; background: color-mix(in oklab, var(--surface), var(--bg) 12%); }
     .dialogue-pending-copy { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px var(--space-2); }
@@ -936,8 +942,11 @@
     .dialogue-pending-item button { min-height: 30px; padding: 0 10px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 66%); border-radius: var(--radius-pill); background: var(--accent-subtle); color: color-mix(in oklab, var(--accent), var(--fg) 30%); font: inherit; font-size: var(--text-xs); font-weight: 800; white-space: nowrap; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     .dialogue-pending-item button:hover { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
     .dialogue-pending-empty { margin: 0; padding: 8px; color: var(--muted); font-size: var(--text-xs); text-align: center; }
-    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); padding: 2px 3px 4px 0; align-content: start; overflow: auto; scrollbar-width: none; }
-    .chat-page .chat-log::-webkit-scrollbar { display: none; }
+    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); padding: 2px 3px 4px 0; align-content: start; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--accent), transparent 48%) transparent; }
+    .chat-page .chat-log:focus-visible { outline: none; border-radius: var(--radius-md); box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent), transparent 42%); }
+    .chat-page .chat-log::-webkit-scrollbar, #desktopPendingConfirmations::-webkit-scrollbar { width: 8px; }
+    .chat-page .chat-log::-webkit-scrollbar-track, #desktopPendingConfirmations::-webkit-scrollbar-track { background: transparent; }
+    .chat-page .chat-log::-webkit-scrollbar-thumb, #desktopPendingConfirmations::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: var(--radius-pill); background: color-mix(in oklab, var(--accent), transparent 48%); background-clip: content-box; }
     .dialogue-card { position: relative; width: min(100%, 760px); display: grid; gap: 0; justify-self: start; padding: 22px 24px 20px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 68%); border-radius: 22px; background: linear-gradient(145deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 16%), var(--surface)); box-shadow: var(--elev-ring), 0 14px 34px var(--message-shadow); overflow: hidden; }
     .dialogue-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent); }
     .dialogue-card[data-card-state="confirmed"], .dialogue-card[data-card-state="revised"] { border-color: color-mix(in oklab, var(--success), var(--border-soft) 54%); }
@@ -1101,7 +1110,7 @@
     .drawer.is-open .drawer-panel.mobile-qr-panel { animation: drawer-mobile-panel-in 180ms var(--ease-standard); }
     .drawer.is-closing .drawer-panel.mobile-qr-panel { animation: drawer-mobile-panel-out 200ms var(--ease-standard) forwards; }
     .drawer-head, .modal-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-5); }
-    .chat-log { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
+    .chat-log { display: grid; grid-auto-rows: max-content; gap: var(--space-3); margin: var(--space-4) 0; }
     .chat-bubble.user { margin-left: 12%; background: var(--surface-warm); }
     .chat-bubble.agent { margin-right: 12%; background: var(--surface); }
     .chat-input { display: grid; grid-template-columns: 1fr auto; gap: var(--space-2); position: sticky; bottom: 0; background: var(--bg); padding-top: var(--space-3); }
@@ -1452,6 +1461,7 @@
       .delight-actions { flex-wrap: wrap; justify-content: stretch; }
       .delight-main-actions { flex: 1 1 212px; grid-template-columns: minmax(116px, 1fr) 88px; }
       .delight-feedback-actions.card-feedback-icons { flex: 0 0 128px; margin-left: auto; }
+      .delight-dismiss-btn { flex-basis: 44px; width: 44px; height: 44px; min-height: 44px; }
     }
     @container desktop-main (max-width: 430px) {
       .delight { padding: 20px; border-radius: 22px; }

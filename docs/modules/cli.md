@@ -587,7 +587,7 @@ $ openbiliclaw questions
   疑惑  为什么最近跳过熟悉主题  61%  —                  42
 ```
 
-输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认仍只能在插件或桌面端的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
+输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认可在插件、移动 Web 或桌面 Web 的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
 
 ### `openbiliclaw profile-consolidate`
 
@@ -1223,7 +1223,7 @@ openbiliclaw init
 `legacy_direct`：得到回复后仍按既有 detached direct learning 学习，既不提交 API
 runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
 但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒
-卡片轮询只服务 popup/桌面卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
+卡片轮询只服务 popup、移动 Web 与桌面 Web 卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
 `exit`、`quit` 或空行可结束。聊天内容
 仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
 单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。

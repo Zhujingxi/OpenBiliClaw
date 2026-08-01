@@ -34,3 +34,11 @@ def test_docs_homepage_mentions_macos_first_launch_security_bypass() -> None:
     assert "已损坏" in html
     assert "xattr -dr com.apple.quarantine /Applications/OpenBiliClaw.app" in html
     assert "README bypass steps" not in html
+
+
+def test_docs_homepage_does_not_call_github_rest_from_the_browser() -> None:
+    html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
+
+    assert "api.github.com" not in html
+    assert "stargazers_count" not in html
+    assert "https://github.com/whiteguo233/OpenBiliClaw" in html

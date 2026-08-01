@@ -5,8 +5,9 @@
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
-LAN clients ─ HTTP（默认）→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
-            └ HTTPS（可选）→ TLS Proxy :8443 ─ loopback/Compose HTTP ─────────────┘
+LAN clients ─ HTTP（默认）────────────→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+public clients ─ HTTPS（可选）→ Caddy :443 ─ shared-loopback HTTP ─────────────────────────────┤
+trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose HTTP ───────────────────────┘
 
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
@@ -74,12 +75,14 @@ manual `discover --source douyin` → same Douyin producer as daemon
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
 7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
-TLS Proxy 是用户交互层前的**可选传输适配器**，不是新的业务 API 层：默认 HTTP 仍直接进入
-FastAPI；只有 `[tls_proxy].enabled=true` 的 `serve-api` 或 Docker `tls` profile 才建立
-`:8443 → :8420` 路径。它精确校验 HTTPS Origin 与 Host、兼容 Chrome/Firefox 扩展 Origin、
-转发 WebSocket、给 TLS cookie 补 `Secure`，并把已验证的 Web Origin 做最小 `https→http`
-适配以复用后端同源契约。证书生成依赖可选 `cryptography`；代理主体的 HTTP/TLS 转发使用
-Python 标准库。该组件只定位于可信 LAN / self-managed 环境，不承担公网生产网关职责。
+HTTPS 有两个互斥的**可选传输边缘**，都不是新的业务 API 层。公网域名的 Docker 部署叠加
+`docker-compose.https.yml`：Caddy 在 `:443` 自动终止受信 TLS，与后端共享 network namespace，
+只经 `127.0.0.1:8420` 转发 REST / WebSocket；宿主机 `8420` 同时收紧为 loopback，Uvicorn 只
+信任该 loopback hop 的 forwarded headers。可信 LAN / self-managed 部署则使用
+`[tls_proxy].enabled=true` 的 `serve-api` 或 Docker `tls` profile 建立 `:8443 → :8420` 路径；
+它精确校验 HTTPS Origin 与 Host、兼容 Chrome/Firefox 扩展 Origin、转发 WebSocket、给 TLS
+cookie 补 `Secure`，并把已验证的 Web Origin 做最小 `https→http` 适配。证书生成依赖可选
+`cryptography`，转发主体使用 Python 标准库。默认 HTTP 仍直接进入 FastAPI。
 
 海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> 每个 LLM 实例 endpoint / YouTube / X twitter-cli / Reddit rdt-cli·OpenCLI / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（CLI 会收到物化后的代理环境变量；海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 对 SDK 注入 `trust_env=False` 并从 CLI 环境剥离代理变量，`custom` 注入指定 URL；LLM 链中每个实例按自己的 Base URL 独立裁决国内直连或海外代理。X / Reddit 的浏览器扩展 fallback 仍跟随浏览器网络设置。B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
 
@@ -199,6 +202,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/ping`、`/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status`、`/api/runtime-stream`，精确放行 `/api/config/probe-service`、`/api/config/discover-models`、来源比例建议及 `/`、`/web`、`/setup`、`/m` 静态恢复 surface 与资源；草稿 probe 从提交配置临时建 registry 并经过稳定 total gate，不依赖失败的 active registry。`/api/ping` 仅在降级时附带 reason / issues，桌面 Web 以此先行识别恢复态、停止业务 hydration，再读取配置并自动打开模型设置。修复配置写盘后复用 degraded context 的 stable 层原子构造完整 swappable runtime、同步解除 503 guard 并启动后台任务，无需重启；构造失败则回滚并继续保持恢复态。其他业务 API 在修复前返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会注入同一份 `[llm.instances]`、`default_chain` 与 `[llm.routes.*]`；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
+- `GitHubStarCountService` — 桌面 Web / 扩展只读公开 `/api/project-stats`；服务端经 `[network].mode` 海外网络策略访问 GitHub repo metadata，持久化 12 小时 count + ETag，403 / 429 按响应头退避，网络或上游错误只投影 stale cache / unavailable 的本地 200，避免每个浏览器实例匿名直连并制造失败资源日志
 - `runtime.autostart` — 当前用户作用域开机自启动 manager：macOS LaunchAgent、Windows HKCU Run（源码 `pythonw + .pyw` / 冻结包直接 `OpenBiliClaw.exe`，兼容旧双路径项）、Linux XDG autostart；`reconcile()` 由 CLI 与冻结桌面入口共用，API / CLI / 插件设置页通过 `GET /api/autostart-status` 与 `POST /api/autostart/apply` 管理，带 env-managed / `config.local.toml` shadow guard，并用开启「先写 config 后注册 OS」、关闭「先注销 OS 后写 config」的方向化事务避免崩溃残留
 - `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从所有启用的 chat 实例和独立 embedding 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
 - `ContinuousRefreshController` — 管理补货、来源 producer 与 API daemon 的 `CandidateEvalCoordinator` 子任务；幂等 `run_startup_maintenance()` 是 host 暴露服务前的统一零 LLM 库存恢复边界。API daemon 的 `run_forever()` 先调用它再启动 delight/candidate/background loops，pipeline 的单次 enqueue callback 是 coordinator 唯一即时唤醒；OpenClaw direct bootstrap 不运行该 loop，因此不 attach dormant candidate / expression coordinator，而将 `recommend(refresh_if_needed=True)` 的首轮 source/evaluation 限为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），在 commit 后同步 drain ≤4 expression copy、禁用本次 split retry。库存维护使用独立单线程 worker/连接，每事务最多 50 行、每 tick 最多 8 批，批间释放 SQLite 写锁并让出 event loop；75ms 锁冲突直接延后。fresh history 为空时该 operation 直接 serve 首 batch 已复制的 canonical subset；其 one-shot callback 不创建 prewarm/provider background task，剩余 pending 由后续请求续补。热重载的新 controller 也先恢复；同一 controller 后续进入 loop 不重复维护。
@@ -224,6 +228,19 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - 自动证书始终包含 localhost/127.0.0.1，远程 IP/hostname 必须显式配置；已有证书缺 SAN
   时拒绝启动且绝不覆盖。详见 [TLS Proxy 模块](modules/tls-proxy.md)。
 
+### Public HTTPS Gateway (`docker-compose.https.yml`)
+
+- 默认不参与普通 Compose；用户显式把 overlay 叠加到源码或预构建 compose 后，固定版本 Caddy
+  才启动，并按 `OPENBILICLAW_DOMAIN` 自动申请、续期公网证书。
+- Caddy 使用 `network_mode: service:openbiliclaw-backend` 与后端共享 loopback；overlay 通过
+  `!override` 把宿主机 `8420` 改为仅 `127.0.0.1` 可达，并发布 TCP `80/443`、UDP `443`。
+- `FORWARDED_ALLOW_IPS=127.0.0.1` 让 Uvicorn 只接受该 hop 的 client/scheme 转发头；外部 HTTPS
+  scheme 因此贯穿 auth Origin、Secure cookie 和 WSS 契约。Caddy 直接反代 HTTP/1.1 与
+  WebSocket，不修改 FastAPI 路由。
+- Caddy data/config 使用独立 named volumes。公网部署必须另开 Web 密码门禁，远程扩展必须
+  使用默认关闭的设备密钥认证；Caddy 启动脚本在 `/api/auth/status` 明确返回
+  `enabled=true` 前不绑定公网端口，首次配置 fail closed。详见 [HTTPS 部署](https-deployment.md)。
+
 ### API Auth Gateway (`auth_core.py` + `api/auth.py`)
 
 - 局域网 / 远程访问的**可选密码门禁**。`create_app()` 在 degraded-mode guard 之后用 `@app.middleware("http")` 注册鉴权中间件（更外层、最先执行），挡所有 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/qr-info`、`/api/auth/*` 与静态壳（`/`、`/m`、`/web`）保持公开。桌面 / 插件二维码只通过 `/api/qr-info` 取 `lan_ip`，避免扫码入口触发 `/api/health` 的 embedding readiness probe。
@@ -236,9 +253,9 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
 1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
-2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
+2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup、移动 Web 与桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
 3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker。confirm/reject、legacy、discuss/defer 与 reconciliation 均只 submit frozen-snapshot worker executor；旧 discuss attempt-token/CAS/scanner 已删除。action 最多 shield 等本地 job 1 秒：完成保持 200，队头阻塞返回 202 且 job 继续。
-4. popup 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。主聊天在插件、移动 Web、桌面 Web 统一使用 `session=popup&scope=chat`，初始化时按该 session hydrate；三个界面在聊天可见且在线时约每 2.5 秒检查共享历史，只有快照变化才重绘，并保留用户正在阅读的滚动位置。Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。移动 Web 没有卡片 action UI，保持只读。
+4. popup、移动 Web 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。主聊天统一使用 `session=popup`，三端初始化按该 session hydrate 完整 `chat/hypothesis/confusion` 可见历史，再由共享 renderer 过滤其它 contextual scope；聊天可见且在线时约每 2.5 秒检查共享历史，只有快照变化才重绘，并保留用户正在阅读的滚动位置。Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。只有画像/认知更新区保持只读。
 
 历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 

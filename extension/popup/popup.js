@@ -118,6 +118,7 @@ import {
   fetchPendingDelightBatch,
   fetchPendingConfirmations,
   fetchProfileSummary,
+  fetchProjectStats,
   fetchRecommendations,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
@@ -229,6 +230,7 @@ let activityFeedRefreshTimer = null;
 let activityFeedRefreshInFlight = false;
 let activityFeedRefreshPending = false;
 let dialogueConfirmationRefreshTimer = null;
+let suppressChatAutoScroll = false;
 
 const elements = {
   content: document.querySelector(".content"),
@@ -2861,7 +2863,6 @@ const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
 
 // Wire the persistent header Star button: always present, opens the repo so the
 // user can give a GitHub Star.
-const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
 const STAR_COUNT_CACHE_KEY = "obc:starCount";
 const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -2887,9 +2888,9 @@ function _showStarCount(n) {
   }
 }
 
-// Fetch + cache the GitHub stargazers count for the count box (the GitHub-Buttons
-// look). api.github.com sends CORS `*`, so no host permission is needed; the
-// count is cached in localStorage so we don't hit the unauthenticated rate limit.
+// Fetch + cache the GitHub stargazers count through the local backend. The
+// backend owns GitHub ETag/rate-limit handling so the extension never emits a
+// failed cross-origin request in DevTools.
 async function loadStarCount() {
   if (!(elements.starCount instanceof HTMLElement)) {
     return;
@@ -2911,14 +2912,8 @@ async function loadStarCount() {
     return; // cached value is fresh enough
   }
   try {
-    const res = await fetch(`https://api.github.com/repos/${STAR_REPO_SLUG}`, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) {
-      return;
-    }
-    const data = await res.json();
-    const n = data?.stargazers_count;
+    const data = await fetchProjectStats();
+    const n = data?.github_stars;
     if (typeof n === "number") {
       _showStarCount(n);
       try {
@@ -4848,8 +4843,13 @@ function renderPendingConfirmations() {
     elements.chatPendingToggle.classList.toggle("is-expanded", expanded);
   }
   if (elements.chatPendingList instanceof HTMLElement) {
+    const previousScrollTop = elements.chatPendingList.scrollTop;
     elements.chatPendingList.hidden = !expanded;
     elements.chatPendingList.innerHTML = renderPendingListMarkup(items);
+    elements.chatPendingList.scrollTop = Math.min(
+      previousScrollTop,
+      Math.max(0, elements.chatPendingList.scrollHeight - elements.chatPendingList.clientHeight),
+    );
   }
 }
 
@@ -4888,8 +4888,30 @@ function scheduleDialogueConfirmationRefresh() {
   }, 300);
 }
 
-function renderStructuredDialogueTurn(turn) {
+function isChatMessagesNearBottom(messages = elements.chatMessages) {
+  if (!(messages instanceof HTMLElement)) return true;
+  return (
+    messages.scrollHeight -
+      messages.clientHeight -
+      messages.scrollTop <=
+    40
+  );
+}
+
+function openChatEvidenceTurnIds() {
+  if (!(elements.chatMessages instanceof HTMLElement)) return new Set();
+  return new Set(
+    Array.from(elements.chatMessages.querySelectorAll(".dialogue-evidence[open]"))
+      .map((details) => details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "")
+      .filter(Boolean),
+  );
+}
+
+function renderStructuredDialogueTurn(turn, { forceBottom = false } = {}) {
   if (!(elements.chatMessages instanceof HTMLElement) || !turn?.turn_id) return;
+  const shouldStickToBottom = forceBottom || isChatMessagesNearBottom();
+  const previousScrollTop = elements.chatMessages.scrollTop;
+  const openEvidence = openChatEvidenceTurnIds();
   dialogueTurnsById.set(turn.turn_id, turn);
   const selector = `[data-dialogue-turn-container="${CSS.escape(turn.turn_id)}"]`;
   let container = elements.chatMessages.querySelector(selector);
@@ -4900,7 +4922,12 @@ function renderStructuredDialogueTurn(turn) {
     elements.chatMessages.append(container);
   }
   container.innerHTML = renderTurnMarkup(turn, { surface: "popup" });
-  scrollChatMessagesToBottom();
+  for (const details of container.querySelectorAll(".dialogue-evidence")) {
+    const turnId = details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "";
+    if (openEvidence.has(turnId)) details.open = true;
+  }
+  if (shouldStickToBottom) scrollChatMessagesToBottom();
+  else elements.chatMessages.scrollTop = previousScrollTop;
 }
 
 function updateDialogueTurn(turn) {
@@ -4910,7 +4937,7 @@ function updateDialogueTurn(turn) {
 }
 
 function scrollChatMessagesToBottom() {
-  if (!(elements.chatMessages instanceof HTMLElement)) {
+  if (!(elements.chatMessages instanceof HTMLElement) || suppressChatAutoScroll) {
     return;
   }
   const scroll = () => {
@@ -4918,10 +4945,6 @@ function scrollChatMessagesToBottom() {
   };
   scroll();
   window.requestAnimationFrame(scroll);
-}
-
-function isChatMessagesNearBottom(messages) {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 48;
 }
 
 function chatHistorySignature(turns) {
@@ -5223,16 +5246,26 @@ async function hydrateChatHistory() {
     const signature = chatHistorySignature(nextTurns);
     if (signature === lastChatHistorySignature) return;
     lastChatHistorySignature = signature;
-    elements.chatMessages.replaceChildren();
-    dialogueTurnsById.clear();
-    for (const turn of nextTurns) {
-      renderChatTurn(turn);
-      if (turn.scope === "chat" && turn.status === "pending") {
-        pollChatTurnUntilSettled(turn.turn_id, {
-          onUpdate: renderChatTurn,
-          onDone: refreshAfterChatTurn,
-        });
+    const openEvidence = openChatEvidenceTurnIds();
+    suppressChatAutoScroll = true;
+    try {
+      elements.chatMessages.replaceChildren();
+      dialogueTurnsById.clear();
+      for (const turn of nextTurns) {
+        renderChatTurn(turn);
+        if (turn.scope === "chat" && turn.status === "pending") {
+          pollChatTurnUntilSettled(turn.turn_id, {
+            onUpdate: renderChatTurn,
+            onDone: refreshAfterChatTurn,
+          });
+        }
       }
+    } finally {
+      suppressChatAutoScroll = false;
+    }
+    for (const details of elements.chatMessages.querySelectorAll(".dialogue-evidence")) {
+      const turnId = details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "";
+      if (openEvidence.has(turnId)) details.open = true;
     }
     if (shouldStickToBottom) {
       scrollChatMessagesToBottom();

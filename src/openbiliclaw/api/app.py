@@ -105,6 +105,7 @@ from openbiliclaw.api.models import (
     PlatformAvailabilityResponse,
     ProfileEditIn,
     ProfileSummaryResponse,
+    ProjectStatsResponse,
     RecommendationAppendIn,
     RecommendationClickIn,
     RecommendationClickResponse,
@@ -1474,6 +1475,7 @@ def create_app(
     runtime_event_hub: Any | None = None,
     account_sync_service: Any | None = None,
     auto_update_service: Any | None = None,
+    project_stats_service: Any | None = None,
 ) -> FastAPI:
     """Create the local backend API app."""
     from openbiliclaw.api.runtime_context import (
@@ -1530,6 +1532,13 @@ def create_app(
         getattr(network_config, "proxy", "") or "",
         mode=getattr(network_config, "mode", "system") or "system",
     )
+
+    if project_stats_service is None:
+        from openbiliclaw.runtime.github_stars import GitHubStarCountService
+
+        project_stats_service = GitHubStarCountService(
+            cache_path=config.data_path / "cache" / "github-stars.json",
+        )
 
     # Topic-lifecycle serialization switch (spec Phase 4). Off by default keeps
     # the LLM-facing profile byte-identical; on excludes archived topics.
@@ -2087,6 +2096,7 @@ def create_app(
             method == "OPTIONS"
             or path == "/api/ping"
             or path == "/api/qr-info"
+            or path == "/api/project-stats"
             or path == "/api/health"
             or path == "/api/runtime-status"
             or path == "/favicon.ico"
@@ -3709,6 +3719,16 @@ def create_app(
         behind.
         """
         return JSONResponse({"lan_ip": await _fresh_lan_ip()})
+
+    @app.get(
+        "/api/project-stats",
+        response_model=ProjectStatsResponse,
+        response_model_exclude_none=True,
+    )
+    async def project_stats() -> ProjectStatsResponse:
+        """Return cached public project metadata without exposing GitHub failures."""
+        snapshot = await project_stats_service.get_snapshot()
+        return ProjectStatsResponse.model_validate(snapshot)
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
@@ -12395,14 +12415,6 @@ def create_app(
 
         status = payload.get("status", "")
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
-        # TEMP DEBUG: surface incoming partial debug field for the dy
-        # bootstrap e2e probe (will be reverted before release).
-        logger.info(
-            "[dy-debug] task_result IN: status=%s videos=%d debug=%s",
-            status,
-            len(videos),
-            payload.get("debug"),
-        )
         scope_counts = payload.get("scope_counts")
         if not isinstance(scope_counts, dict):
             scope_counts = None
@@ -12475,18 +12487,6 @@ def create_app(
     # /api/runtime-stream WebSocket so the dispatcher polls immediately
     # instead of waiting for the next alarm. The 60s alarm stays as
     # fallback for the WS-down case.
-
-    # TEMP DEBUG: extension-side log relay. Lets the service-worker
-    # dispatcher POST debug events here so they end up in the daemon
-    # log alongside backend-side activity. Will be reverted before
-    # release.
-    @app.post("/api/sources/_debug/log")
-    async def ext_debug_log(payload: dict[str, Any]) -> dict[str, Any]:
-        source = str(payload.get("source", "?"))[:8]
-        event = str(payload.get("event", "?"))[:80]
-        data = payload.get("data")
-        logger.debug("[ext-debug] [%s] %s data=%s", source, event, data)
-        return {"ok": True}
 
     @app.post("/api/sources/xhs/kick")
     async def xhs_task_kick() -> dict[str, Any]:
@@ -15677,11 +15677,12 @@ def create_app(
             digest = hashlib.sha256()
             # Paths are relative to the desktop root except the shared modules,
             # which live outside it — an upgrade that only changed
-            # source-status.js would otherwise be served from cache forever.
+            # shared renderers would otherwise be served from cache forever.
             for relative, root in (
                 ("assets/css/app.css", _desktop_dir),
                 ("assets/css/classic.css", _desktop_dir),
                 ("assets/js/app.js", _desktop_dir),
+                ("dialogue-confirmation.js", _shared_web_dir),
                 ("source-status.js", _shared_web_dir),
             ):
                 path = root / relative
@@ -15709,6 +15710,10 @@ def create_app(
             html = html.replace(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/shared/dialogue-confirmation.js"',
+                f'src="/shared/dialogue-confirmation.js?v={version}"',
             )
             html = html.replace(
                 'src="/shared/source-status.js"',

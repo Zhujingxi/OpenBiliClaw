@@ -84,6 +84,33 @@ test("payload.type=card renders four semantic actions and expandable evidence", 
   assert.match(markup, /完整看完了三条长视频/);
 });
 
+test("evidence hides opaque ids, deduplicates readable lines, and disappears when nothing useful remains", () => {
+  const mixed = cardTurn();
+  (mixed.payload as Record<string, unknown>).evidence_refs = [
+    "20",
+    "event-7",
+    "e3617163",
+    "550e8400-e29b-41d4-a716-446655440000",
+    "BV1abcdefghij",
+    "完整看完了三条长视频",
+    "完整看完了三条长视频",
+    "https://example.test/context",
+  ];
+  const mixedMarkup = dialogue!.renderTurnMarkup(mixed, { surface: "popup" });
+
+  assert.match(mixedMarkup, /<summary>依据（2）<\/summary>/);
+  assert.equal((mixedMarkup.match(/完整看完了三条长视频/g) ?? []).length, 1);
+  assert.match(mixedMarkup, /https:\/\/example\.test\/context/);
+  for (const opaque of ["event-7", "e3617163", "550e8400", "BV1abcdefghij"]) {
+    assert.doesNotMatch(mixedMarkup, new RegExp(opaque));
+  }
+
+  const opaqueOnly = cardTurn();
+  (opaqueOnly.payload as Record<string, unknown>).evidence_refs = ["42", "note-1"];
+  const opaqueMarkup = dialogue!.renderTurnMarkup(opaqueOnly, { surface: "popup" });
+  assert.doesNotMatch(opaqueMarkup, /dialogue-evidence|依据（/);
+});
+
 test("terminal card state replaces actions in place", () => {
   const markup = dialogue!.renderTurnMarkup(cardTurn("confirmed"), { surface: "popup" });
 

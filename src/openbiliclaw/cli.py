@@ -5020,7 +5020,7 @@ def questions() -> None:
     _print_status_panel(
         "info",
         f"共 {snapshot['count']} 条",
-        "此命令只读；请在插件或桌面端的对话确认入口继续处理。",
+        "此命令只读；请在桌面、移动 Web 或插件的对话确认入口继续处理。",
     )
 
 

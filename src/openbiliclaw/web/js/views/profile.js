@@ -251,7 +251,7 @@ function render() {
     }).join("");
     html += section(
       "\u6D3B\u8DC3\u6D1E\u5BDF",
-      `<p class="insight-readonly-note">请在插件或桌面端的对话入口确认</p>${insHtml}`,
+      `<p class="insight-readonly-note">请在「聊聊口味」的待聊确认入口处理</p>${insHtml}`,
     );
   }
 

@@ -233,6 +233,10 @@ export async function fetchHealth() {
   return promise;
 }
 
+export async function fetchProjectStats() {
+  return requestJson("/project-stats", { method: "GET", timeoutMs: 6000 });
+}
+
 export function __resetPopupHealthCacheForTests() {
   healthCacheBaseUrl = "";
   healthCacheCheckedAt = 0;

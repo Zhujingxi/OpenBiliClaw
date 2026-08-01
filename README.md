@@ -316,6 +316,8 @@ AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定�
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
+有公网域名时，最短路径是叠加 [`docker-compose.https.yml`](docker-compose.https.yml)，由 Caddy 自动申请和续期证书；PC、手机和插件共用 `https://<域名>`。命令与安全门禁见 [HTTPS 部署指南](docs/https-deployment.md)。
+
 ### 3. 在同一个浏览器登录内容平台
 
 默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以在初始化来源选择里取消它，改勾已登录的 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) / [知乎](https://www.zhihu.com) / [Reddit](https://www.reddit.com)，或选择无需登录的 Bangumi 并填写公开用户名。至少保留一个能拉到画像信号的来源；未填用户名的 Bangumi 仍可做匿名 discovery，但不能单独完成画像初始化。
@@ -618,7 +620,7 @@ background ─ background admission (default 3) ──────┘
 │   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
                        │ HTTP 默认：IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
-                       │ HTTPS 可选：TLS Proxy :8443 → loopback/Compose HTTP → 同一 API
+                       │ HTTPS 可选：公网 Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → 同一 API
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
                        │ + ping 预检降级 → /web · /setup · /m → 配置后原地恢复
 ┌──────────────────────▼─────────────────────────┐
@@ -670,7 +672,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
-海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新；国内平台保持独立直连
+海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
 
@@ -688,9 +690,11 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
 
-可信局域网 / 自管环境可额外启用默认关闭的 [TLS Proxy](docs/https-deployment.md)：精确校验
-HTTPS Origin/Host、转发 WebSocket，并为本地 CA 证书管理显式 SAN。无远程 SAN 时证书只适合
-localhost；该轻量组件不定位为公网生产网关，默认 HTTP 路径完全不变。
+公网域名的 Docker 部署可叠加默认关闭的 [Caddy HTTPS overlay](docs/https-deployment.md)：自动
+申请 / 续期受信证书，通过共享 loopback 代理 REST 与 WebSocket，并把宿主机 `8420` 收紧为
+仅本机可达。可信局域网 / 自管环境仍可选择内置 TLS Proxy：精确校验 HTTPS Origin/Host，
+并为本地 CA 证书管理显式 SAN；无远程 SAN 时证书只适合 localhost。两种入口互斥，默认 HTTP
+路径完全不变。
 
 > 完整架构细节（runtime 状态机、候选池计数、画像覆盖层等）见 [架构设计](docs/architecture.md) 与 [可视化架构图](docs/index.md#可视化架构图)。
 
@@ -776,7 +780,7 @@ OpenBiliClaw/
 | 知乎交互 | 扩展任务调度在已登录浏览器内读取事件 smoke / 初始化画像信号和 search / hot / feed / creator / related 候选；回答 / 文章 / 问题为纯文本卡片 |
 | Reddit 交互 | 默认安装内置 rdt-cli，读取 search / hot / subreddit / related 候选；插件自动同步 `reddit_session` 到 rdt credential，`rdt login` 仅作手动 fallback；rdt 未登录 / 不可用或显式选择 extension 时，扩展任务调度在已登录浏览器内读取 discovery；bootstrap saved/upvoted/subscribed 始终走插件；帖子 / 评论为纯文本卡片 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
-| 可选 TLS | Python 标准库 HTTP/TLS 转发 + `[tls]` extra 的 cryptography 证书生成；仅 LAN/self-managed，默认关闭 |
+| 可选 HTTPS | 公网域名使用固定版本 Caddy Docker overlay 自动管理证书；LAN/self-managed 使用 Python TLS Proxy + `[tls]` extra，本地 CA/SAN；默认关闭且两种入口互斥 |
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
 | Agent 框架 | 自研轻量框架 |

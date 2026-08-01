@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from openbiliclaw import auth_core as ac
 from openbiliclaw.api.app import create_app
@@ -664,6 +665,34 @@ def test_genuine_local_behind_trusted_proxy_is_allowed(tmp_path, monkeypatch) ->
         headers={"x-forwarded-for": "127.0.0.1"},
     )
     assert r.status_code == 200
+
+
+def test_loopback_caddy_hop_preserves_external_https_auth_contract(tmp_path, monkeypatch) -> None:
+    app, _ = _build_app(tmp_path, monkeypatch)
+    proxied = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1")
+    client = TestClient(
+        proxied,
+        client=("127.0.0.1", 5000),
+        base_url="http://obc.example.com",
+    )
+    forwarded = {
+        "host": "obc.example.com",
+        "origin": "https://obc.example.com",
+        "x-forwarded-for": "203.0.113.9",
+        "x-forwarded-proto": "https",
+    }
+
+    unauthenticated = client.get("/api/favorites/BV1AUTH", headers=forwarded)
+    assert unauthenticated.status_code == 401
+
+    response = client.post(
+        "/api/auth/login",
+        json={"password": "hunter2"},
+        headers=forwarded,
+    )
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]
 
 
 # ── password fingerprint: no false revoke; real change revokes ──────────────

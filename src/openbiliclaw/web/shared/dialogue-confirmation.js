@@ -332,9 +332,32 @@
     }
   }
 
+  function isOpaqueEvidenceId(value) {
+    const item = text(value);
+    if (!item) return false;
+    if (/^\d{1,24}$/.test(item)) return true;
+    if (/^[0-9a-f]{8,64}$/i.test(item)) return true;
+    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){2,4}-[0-9a-f]{8,12}$/i.test(item)) return true;
+    if (/^(?:BV[0-9A-Za-z]{10,}|av\d+|cv\d+)$/i.test(item)) return true;
+    if (/^(?:event|evt|note|content|awareness|hypothesis|confusion|insight|turn)[#:/_-][A-Za-z0-9._:/-]+$/i.test(item)) {
+      return true;
+    }
+    return (
+      item.length >= 20 &&
+      !/^https?:\/\//i.test(item) &&
+      /^[A-Za-z0-9._:/+-]+$/.test(item)
+    );
+  }
+
   function evidenceRefs(payload) {
     if (!Array.isArray(payload?.evidence_refs)) return [];
-    return payload.evidence_refs.map(text).filter(Boolean);
+    return [
+      ...new Set(
+        payload.evidence_refs
+          .map((item) => (typeof item === "string" || typeof item === "number" ? text(item) : ""))
+          .filter((item) => item && !isOpaqueEvidenceId(item)),
+      ),
+    ];
   }
 
   function evidenceMarkup(payload) {
@@ -393,7 +416,7 @@
   }
 
   function renderTextTurnMarkup(turn, surface) {
-    const failed = text(turn?.status).toLowerCase() === "failed";
+    const failed = ["error", "failed"].includes(text(turn?.status).toLowerCase());
     const reply = failed
       ? text(turn?.error) || "这句还没发出去，稍后再试。"
       : text(turn?.reply) || text(turn?.assistant_message);

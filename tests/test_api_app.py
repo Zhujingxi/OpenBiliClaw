@@ -24,6 +24,13 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
 
 
+def test_extension_debug_relay_route_is_not_registered() -> None:
+    """Temporary extension debug events must not have a production API route."""
+    source = inspect.getsource(create_app)
+    assert "/api/sources/_debug/log" not in source
+    assert "ext_debug_log" not in source
+
+
 def _dialogue_entry_source(symbol: str, branch_predicate: str = "") -> str:
     """Return one current entry function without matching unrelated branches."""
     if symbol.startswith("SoulEngine."):
@@ -892,6 +899,25 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 class TestBackendAPI:
     """Route-level tests for the plugin backend API."""
+
+    def test_project_stats_returns_local_success_when_github_is_unavailable(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeProjectStatsService:
+            async def get_snapshot(self) -> dict[str, object]:
+                return {"github_stars": None, "stale": True, "source": "unavailable"}
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            project_stats_service=FakeProjectStatsService(),
+        )
+
+        response = TestClient(app).get("/api/project-stats")
+
+        assert response.status_code == 200
+        assert response.json() == {"stale": True, "source": "unavailable"}
 
     def test_recommendation_and_delight_models_default_publication_fields(self) -> None:
         from openbiliclaw.api.models import PendingDelightOut, RecommendationOut
