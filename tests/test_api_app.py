@@ -24,6 +24,13 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
 
 
+def test_extension_debug_relay_route_is_not_registered() -> None:
+    """Temporary extension debug events must not have a production API route."""
+    source = inspect.getsource(create_app)
+    assert "/api/sources/_debug/log" not in source
+    assert "ext_debug_log" not in source
+
+
 def _dialogue_entry_source(symbol: str, branch_predicate: str = "") -> str:
     """Return one current entry function without matching unrelated branches."""
     if symbol.startswith("SoulEngine."):

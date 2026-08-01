@@ -7,13 +7,17 @@ const protectedCallers = [
   "src/background/service-worker.ts",
   "src/background/bili-task-dispatcher.ts",
   "src/background/cookie-sync.ts",
-  "src/background/debug-log.ts",
   "src/background/dy-task-dispatcher.ts",
   "src/background/e2e-runner.ts",
   "src/background/reddit-task-dispatcher.ts",
   "src/background/xhs-task-dispatcher.ts",
   "src/background/yt-task-dispatcher.ts",
   "src/background/zhihu-task-dispatcher.ts",
+  "src/content/douyin.ts",
+];
+
+const temporaryDebugRelayCallers = [
+  "src/background/dy-task-dispatcher.ts",
   "src/content/douyin.ts",
 ];
 
@@ -27,5 +31,13 @@ test("protected extension API calls adopt authenticatedFetch", () => {
     if (source.includes("apiUrl(")) {
       assert.match(source, /authenticatedFetch|\/ping|\/health/);
     }
+  }
+});
+
+test("production extension sources do not ship the daemon debug relay", () => {
+  for (const relativePath of temporaryDebugRelayCallers) {
+    const source = readFileSync(resolve(relativePath), "utf8");
+    assert.doesNotMatch(source, /\/sources\/_debug\/log/, `${relativePath} still relays debug logs`);
+    assert.doesNotMatch(source, /\bdebugLog\s*\(/, `${relativePath} still calls debugLog`);
   }
 });
