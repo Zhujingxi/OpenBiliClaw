@@ -105,7 +105,7 @@ def test_desktop_sync_error_chip_uses_readable_theme_foreground() -> None:
     """The generic sync error must remain readable outside the dark hero panel."""
     app_css = Path("src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
     error_rule = re.search(
-        r"\.account-sync-status\.is-error \{(?P<body>.*?)\}",
+        r"\.account-sync-status\.is-error\s*\{(?P<body>.*?)\}",
         app_css,
         flags=re.S,
     )
