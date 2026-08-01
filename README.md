@@ -617,7 +617,8 @@ background ─ background admission (default 3) ──────┘
 │   行为采集 · MAIN-world tap（评论/弹幕·xhs强信号）│
 │   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
-                       │ IPv4 0.0.0.0 + IPv6 [::] → REST API / WebSocket
+                       │ HTTP 默认：IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
+                       │ HTTPS 可选：TLS Proxy :8443 → loopback/Compose HTTP → 同一 API
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
                        │ + ping 预检降级 → /web · /setup · /m → 配置后原地恢复
 ┌──────────────────────▼─────────────────────────┐
@@ -672,6 +673,10 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
+
+可信局域网 / 自管环境可额外启用默认关闭的 [TLS Proxy](docs/https-deployment.md)：精确校验
+HTTPS Origin/Host、转发 WebSocket，并为本地 CA 证书管理显式 SAN。无远程 SAN 时证书只适合
+localhost；该轻量组件不定位为公网生产网关，默认 HTTP 路径完全不变。
 
 > 完整架构细节（runtime 状态机、候选池计数、画像覆盖层等）见 [架构设计](docs/architecture.md) 与 [可视化架构图](docs/index.md#可视化架构图)。
 
@@ -731,6 +736,7 @@ OpenBiliClaw/
 │   │   └── web_adapter        # 通用 Web (Playwright + LLM)
 │   ├── youtube/               # YouTube Takeout 离线导入解析
 │   ├── api/                   # 本地 FastAPI (配置回滚 / 降级模式 / popup API)
+│   ├── tls_proxy.py           # 默认关闭的 LAN/self-managed HTTPS 入口
 │   ├── runtime/               # 后台刷新、feedback 合并、presence gate、CLI/桌面共享 autostart 对账、Ollama、降级 RuntimeContext
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
 │   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
@@ -756,6 +762,7 @@ OpenBiliClaw/
 | 知乎交互 | 扩展任务调度在已登录浏览器内读取事件 smoke / 初始化画像信号和 search / hot / feed / creator / related 候选；回答 / 文章 / 问题为纯文本卡片 |
 | Reddit 交互 | 默认安装内置 rdt-cli，读取 search / hot / subreddit / related 候选；插件自动同步 `reddit_session` 到 rdt credential，`rdt login` 仅作手动 fallback；rdt 未登录 / 不可用或显式选择 extension 时，扩展任务调度在已登录浏览器内读取 discovery；bootstrap saved/upvoted/subscribed 始终走插件；帖子 / 评论为纯文本卡片 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
+| 可选 TLS | Python 标准库 HTTP/TLS 转发 + `[tls]` extra 的 cryptography 证书生成；仅 LAN/self-managed，默认关闭 |
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
 | Agent 框架 | 自研轻量框架 |

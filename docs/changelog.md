@@ -7,8 +7,8 @@
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 
 - **修复保存配置时待聊按钮失效、热重载误回滚和 Web 实时流反复报断开**：生产日志显示长达 235 秒的对话学习占住唯一结算 worker，旧热重载会先停接新任务、只等 30 秒，于是连续丢弃 `confusion.open.sync`，再用空白 `TimeoutError` 回滚配置；现在队列保持接单直到真正排空，再原子暂停交接，安全等待窗口与 20 分钟 LLM 上限对齐到 25 分钟，桌面/插件在超过前端 60 秒预算时明确显示“仍在后台热重载”。待聊 open 会在 worker 忙时返回带 `Retry-After` 的 `dialogue_busy`，两端显示等待态并自动重试，required local job 不再留下“已 claim、未建 turn”的半截状态；若已有跨 session 的 `clarifying` 疑惑，列表只给尚未展示该 turn 的 session 暴露当前持有者，不再列出必然 409 的下一条。真实浏览器 E2E 进一步发现 pending-open 卡片仍是 `pending` 状态，点“稍后”虽改成 deferred 却不会走旧 `discussing` 解锚分支；现在会按 origin turn 精确释放同代锚，下一条待聊不再被不可见旧锚挡住。`runtime-stream` 每 20 秒发送空闲心跳，桌面端短暂关闭显示“重连中”、记录 close code/reason 并按原 3 秒节奏续连，不再把 WebSocket 抖动误报成整个后端离线。
-- **Docker Compose 新增可选 TLS 反代组件 `openbiliclaw-tls-proxy`**：通过 profile `tls` 按需启用（`docker compose --profile tls up`），不影响现有无 HTTPS 部署。纯 Python 标准库实现，自包含构建，支持 TLS 终止、浏览器扩展跨源 Origin 校验/改写、WebSocket 中继、证书自动生成。详见 `docs/https-deployment.md`。
-- **TLS 反代默认端口改为 8443，`serve-api` 新增 `--tls-port` 可覆盖**：清除残留的开发者本机端口 2119 和 hostname `sushe`。端口配置方式与 `--port` 一致（CLI 参数 + config.toml）。Docker 容器的 healthcheck 改用 `LISTEN_PORT` 环境变量动态读取端口，不再硬编码。
+- **新增默认关闭的 LAN/self-managed TLS 反代，并补齐可持久化配置/CLI/Docker 入口**：`[tls_proxy]` 现可完整 load/save round-trip，环境变量 / `config.local.toml` 逐字段覆盖不会被无关保存烘焙进基础配置；`tls-proxy enable/disable/status` 会真实持久化。`serve-api --tls-port` 可临时覆盖 8443。源码 Compose 通过 `tls` profile opt-in，使用 `OPENBILICLAW_TLS_SAN_NAMES` 明确传入逗号分隔远程 SAN、`OPENBILICLAW_TLS_PORT` 同步端口映射；非默认 build-time `CERT_DIR` 会作为容器运行时证书根目录完整传入，未提供远程 SAN 的自动证书只承诺 localhost。插件手机版二维码和 `/api/qr-info` 探测现在保留已配置的 HTTPS scheme，不再把明文 HTTP 发往 TLS 端口；未知 scheme 安全回落 HTTP。转发主体使用 Python 标准库，自动证书生成来自可选 `[tls]` extra / 容器内 `cryptography`，不再误称“纯标准库”。
+- **TLS 安全与启动可靠性加固**：HTTPS Web Origin 必须与请求 Host 的 host+port 精确同源（覆盖 IPv4/IPv6/默认端口），合法 Chrome/Firefox 扩展 Origin 继续放行；TLS 出口保留重复 `Set-Cookie` 并补 `Secure`，CA/服务器私钥路径硬拒绝，HTTP/1.1 HEAD/空响应/hop-by-hop header 与真实 WebSocket 双向 relay 有本地集成测试。已有证书缺新 SAN、cert/key 半残、SSL context 或端口 bind 失败都会在 uvicorn 启动前 fail loudly，绝不静默覆盖自有证书或假报 HTTPS 成功。详见 `docs/modules/tls-proxy.md` 与 `docs/https-deployment.md`。
 
 ## v0.3.190：启动体验升级（2026-07-30）
 

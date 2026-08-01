@@ -549,10 +549,11 @@ satisfaction_filter_enabled = true
 # ──────────────────────────────────────────────────────────────
 # TLS Proxy
 # ──────────────────────────────────────────────────────────────
-# Optional HTTPS reverse proxy for remote device access. When enabled
+# Optional HTTPS reverse proxy for trusted LAN / self-managed access. When enabled
 # and ``cryptography`` is installed (``pip install "openbiliclaw[tls]"``),
-# ``openbiliclaw serve-api`` automatically starts a background thread that
-# terminates TLS and forwards to the API port.
+# ``openbiliclaw serve-api`` synchronously validates/binds TLS, then starts its
+# serving thread. Any TLS startup error makes serve-api fail; it never silently
+# claims HTTPS is available. This is not a public-Internet production proxy.
 #
 # Enable:  ``openbiliclaw tls-proxy enable``
 # Disable: ``openbiliclaw tls-proxy disable``
@@ -568,4 +569,8 @@ port = 8443
 # Subject Alternative Names: hostnames/IPs clients use to access this server.
 # Collected interactively by `openbiliclaw tls-proxy enable`.
 # localhost and 127.0.0.1 are always included; add remote-access names here.
+# Without an explicit remote SAN, the generated certificate is localhost-only.
 # san_names = ["192.168.1.100", "mybili.lan"]
+# Explicit env overrides only: OPENBILICLAW_TLS_PROXY_ENABLED,
+# OPENBILICLAW_TLS_PROXY_PORT, OPENBILICLAW_TLS_PROXY_CERT_DIR, and the
+# comma-separated OPENBILICLAW_TLS_SAN_NAMES.

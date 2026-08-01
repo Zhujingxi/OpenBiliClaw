@@ -285,7 +285,8 @@ dislike writeback，精确清池与后续语义精判不等待完整画像重建
 runtime 与次级 hydration 是独立分支。
 
 ```
-LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+LAN clients ─ HTTP（默认）→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+            └ HTTPS（可选）→ TLS Proxy :8443 ─ loopback/Compose HTTP ─────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │
@@ -324,7 +325,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 │  │ 配置离线缓存 + 降级模式静态恢复 UI（/web /setup /m，保存后原地恢复）│   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 手机版二维码：桌面/插件 -> /api/qr-info(lan_ip) -> /m        │   │
+│  │ 手机版二维码：桌面/插件 -> 同 scheme /api/qr-info -> /m      │   │
 │  │ 跳过 /api/health readiness / embedding probe                 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -492,6 +493,12 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 
 远程浏览器扩展认证独立于平台登录态：管理员通过 CLI 生成设备密钥，后端只保存摘要；扩展向 `/api/auth/extension-token` 换取短会话。普通 HTTP 使用 Bearer Header，WebSocket 与图片代理只携带短会话 query。该能力默认关闭，撤销设备密钥会使全部现有会话立即失效。
 
+可选 TLS Proxy 只增加传输入口，不改变 FastAPI 业务数据流：Web Origin 必须与 Host 的
+host+port 精确同源，Chrome/Firefox 扩展 Origin 走现有扩展认证契约；代理把 TLS cookie
+标为 `Secure` 并转发真实 WebSocket。证书生成使用 `[tls]` extra 的 `cryptography`，首次
+远程部署必须显式给出访问 IP/hostname SAN；缺少远程 SAN 时只承诺 localhost。该组件是
+LAN/self-managed convenience layer，不是公网生产网关。
+
 ---
 
 ## 4. 技术选型
@@ -503,6 +510,7 @@ LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 | B 站交互 | **API 优先** (bilibili-api-python)（实际实现使用自研 `BilibiliAPIClient`，不依赖此库）+ **agent-browser** (浏览器操作) | API 快速高效，agent-browser 补充复杂交互 |
 | 浏览器操作 | **[agent-browser](https://github.com/vercel-labs/agent-browser)** | Vercel 的 AI Agent 专用浏览器 CLI |
 | 浏览器插件 | **Chrome Extension** (Manifest V3) | 行为采集 + 交互 UI + LUI |
+| 可选 TLS 入口 | **Python stdlib HTTP/TLS proxy + cryptography `[tls]` extra** | 默认关闭；LAN/self-managed HTTPS、WebSocket 与本地 CA/SAN 管理 |
 | Agent 框架 | **自研轻量框架**，按需扩展 | 灵活可控，支持 Skill 系统 |
 | 记忆存储 | **SQLite** + **向量索引** + **JSON** | 分层存储，匹配不同记忆类型需求 |
 | 任务调度 | **asyncio runtime loops** + `[scheduler]` 配置 | 按前端可换候选缺口、raw-material headroom、行为阈值和策略间隔执行内容发现；pending raw 评估有独立 loop；推荐 serve 与 pool maintenance 使用分离的单线程 SQLite worker，维护按 ≤50 行事务分批让锁；不依赖 cron |

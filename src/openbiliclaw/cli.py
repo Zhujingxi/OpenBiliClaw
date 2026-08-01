@@ -522,6 +522,7 @@ _EXTENSION_PRESENCE_REQUIRED_WARNING = (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping
+    from http.server import ThreadingHTTPServer
 
 
 def _print_page_title(title: str, subtitle: str = "") -> None:
@@ -5864,7 +5865,20 @@ def tls_proxy_enable(
     san: list[str] = _TLS_PROXY_SAN_OPTION,
 ) -> None:
     """开启 TLS 反代（启动 API 时将自动监听 HTTPS 端口）。"""
-    from openbiliclaw.config import load_config, save_config
+    from openbiliclaw.config import (
+        load_config,
+        save_config,
+        tls_proxy_enabled_override_source,
+    )
+
+    override = tls_proxy_enabled_override_source()
+    if override is not None:
+        _print_status_panel(
+            "error",
+            "无法持久化开启状态",
+            f"TLS 开关由 {override} 覆盖，请在该来源中修改 enabled。",
+        )
+        raise typer.Exit(code=1)
 
     cfg = load_config()
 
@@ -5887,11 +5901,13 @@ def tls_proxy_enable(
         _print_status_panel("info", "已开启", "TLS 反代已是开启状态。")
         return
     cfg.tls_proxy.enabled = True
-    save_config(cfg)
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "开启 TLS 反代失败", str(exc))
+        raise typer.Exit(code=1) from exc
     san_hint = (
-        f"，SAN: {', '.join(cfg.tls_proxy.san_names)}"
-        if cfg.tls_proxy.san_names
-        else "（仅本机）"
+        f"，SAN: {', '.join(cfg.tls_proxy.san_names)}" if cfg.tls_proxy.san_names else "（仅本机）"
     )
     _print_status_panel(
         "success",
@@ -5903,14 +5919,31 @@ def tls_proxy_enable(
 @tls_proxy_app.command("disable")
 def tls_proxy_disable() -> None:
     """关闭 TLS 反代。"""
-    from openbiliclaw.config import load_config, save_config
+    from openbiliclaw.config import (
+        load_config,
+        save_config,
+        tls_proxy_enabled_override_source,
+    )
+
+    override = tls_proxy_enabled_override_source()
+    if override is not None:
+        _print_status_panel(
+            "error",
+            "无法持久化关闭状态",
+            f"TLS 开关由 {override} 覆盖，请在该来源中修改 enabled。",
+        )
+        raise typer.Exit(code=1)
 
     cfg = load_config()
     if not cfg.tls_proxy.enabled:
         _print_status_panel("info", "已关闭", "TLS 反代已是关闭状态。")
         return
     cfg.tls_proxy.enabled = False
-    save_config(cfg)
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "关闭 TLS 反代失败", str(exc))
+        raise typer.Exit(code=1) from exc
     _print_status_panel("success", "已关闭", "TLS 反代已关闭。")
 
 
@@ -5933,54 +5966,72 @@ def tls_proxy_status() -> None:
     _print_status_panel("info", "TLS 反代配置", "\n".join(lines) + extra)
 
 
-def _start_tls_proxy_if_enabled(api_host: str, api_port: int, tls_port: int | None = None) -> None:
-    """Start the TLS proxy in a daemon thread if ``[tls_proxy].enabled``.
+def _start_tls_proxy_if_enabled(
+    api_host: str, api_port: int, tls_port: int | None = None
+) -> ThreadingHTTPServer | None:
+    """Synchronously prepare TLS, then start its serving thread when enabled.
 
     If ``tls_port`` is given (from ``serve-api --tls-port``), it overrides the
-    port in ``config.toml``.
+    port in ``config.toml``. Any certificate, SSL-context, or bind failure is a
+    fatal startup error: an enabled HTTPS endpoint must never fail silently.
     """
-    from openbiliclaw.config import load_config
+    from openbiliclaw.config import load_config, resolve_tls_cert_dir
 
     cfg = load_config()
     if not cfg.tls_proxy.enabled:
         if tls_port is not None:
             _print_status_panel(
-                "warning", "TLS 反代未启用",
+                "warning",
+                "TLS 反代未启用",
                 "已指定 --tls-port 但 [tls_proxy].enabled 为 false。\n"
                 "执行 `openbiliclaw tls-proxy enable` 或在 config.toml"
                 " 中设置 enabled=true 后重试。",
             )
-        return
+        return None
     try:
-        from openbiliclaw.tls_proxy import start_tls_proxy
-    except ImportError:
+        from openbiliclaw.tls_proxy import backend_connect_host, create_tls_proxy_server
+    except ImportError as exc:
         _print_status_panel(
-            "warning", "TLS 代理未启动",
-            "cryptography 未安装。安装后 TLS 代理将自动启用。（pip install cryptography）",
+            "error",
+            "TLS 代理启动失败",
+            'cryptography 未安装。请安装 `pip install "openbiliclaw[tls]"` 后重试。',
         )
-        return
+        raise typer.Exit(code=1) from exc
     effective_port = tls_port if tls_port is not None else cfg.tls_proxy.port
-    cert_dir = cfg.tls_proxy.cert_dir or os.path.join(cfg.data_dir, "certs")
+    if effective_port == api_port:
+        _print_status_panel(
+            "error",
+            "TLS 代理启动失败",
+            f"TLS 端口 {effective_port} 与 API 端口相同，请配置不同端口。",
+        )
+        raise typer.Exit(code=1)
+    cert_dir = str(resolve_tls_cert_dir(cfg))
+    try:
+        server = create_tls_proxy_server(
+            host="0.0.0.0",
+            port=effective_port,
+            backend_host=backend_connect_host(api_host),
+            backend_port=api_port,
+            cert_dir=cert_dir,
+            auto_gen_certs=True,
+            san_names=cfg.tls_proxy.san_names,
+        )
+    except Exception as exc:
+        _print_status_panel("error", "TLS 代理启动失败", str(exc))
+        raise typer.Exit(code=1) from exc
     thread = threading.Thread(
-        target=start_tls_proxy,
-        kwargs={
-            "host": "0.0.0.0",
-            "port": effective_port,
-            "backend_host": "127.0.0.1",
-            "backend_port": api_port,
-            "cert_dir": cert_dir,
-            "auto_gen_certs": True,
-            "san_names": cfg.tls_proxy.san_names,
-        },
+        target=server.serve_forever,
         daemon=True,
         name="tls-proxy",
     )
     thread.start()
     _print_status_panel(
-        "info", "TLS 反代已启动",
+        "info",
+        "TLS 反代已启动",
         f"HTTPS 端口 {effective_port} → 后端 {api_port}。\n"
         f"浏览器/插件可连接 https://<本机地址>:{effective_port}",
     )
+    return server
 
 
 _SERVE_API_TLS_PORT_OPTION = typer.Option(

@@ -5,7 +5,8 @@
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
-LAN clients → IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+LAN clients ─ HTTP（默认）→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
+            └ HTTPS（可选）→ TLS Proxy :8443 ─ loopback/Compose HTTP ─────────────┘
 
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
@@ -72,6 +73,13 @@ manual `discover --source douyin` → same Douyin producer as daemon
 5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
 7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
+
+TLS Proxy 是用户交互层前的**可选传输适配器**，不是新的业务 API 层：默认 HTTP 仍直接进入
+FastAPI；只有 `[tls_proxy].enabled=true` 的 `serve-api` 或 Docker `tls` profile 才建立
+`:8443 → :8420` 路径。它精确校验 HTTPS Origin 与 Host、兼容 Chrome/Firefox 扩展 Origin、
+转发 WebSocket、给 TLS cookie 补 `Secure`，并把已验证的 Web Origin 做最小 `https→http`
+适配以复用后端同源契约。证书生成依赖可选 `cryptography`；代理主体的 HTTP/TLS 转发使用
+Python 标准库。该组件只定位于可信 LAN / self-managed 环境，不承担公网生产网关职责。
 
 海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> 每个 LLM 实例 endpoint / YouTube / X twitter-cli / Reddit rdt-cli·OpenCLI / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（CLI 会收到物化后的代理环境变量；海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 对 SDK 注入 `trust_env=False` 并从 CLI 环境剥离代理变量，`custom` 注入指定 URL；LLM 链中每个实例按自己的 Base URL 独立裁决国内直连或海外代理。X / Reddit 的浏览器扩展 fallback 仍跟随浏览器网络设置。B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
 
@@ -204,6 +212,17 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - `/api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` — 插件 bootstrap / search partial / final 结果完整保留在任务表；XHS / 抖音 / YouTube 传播到 memory / profile pipeline 前读取 `source_bootstrap_state.json`，跳过跨任务已见 note/video/item key，避免旧收藏 / 历史再次触发画像更新；知乎 `task-result` 自身不直接写 memory，`fetch-zhihu` 保持 smoke，guided init 会显式收集完成的 `bootstrap_events` 结果并在 init pipeline 内持久化 / 建模；知乎 search / hot / feed / creator / related 只转换为 discovery raw candidate；Reddit search / hot / subreddit / related 同样只转换为 discovery raw candidate
 - `runtime-stream` — 浏览器扩展 background 以 `client=background` 连接后，后端先推送 `xhs_login_state_sync_requested` / `zhihu_login_state_sync_requested`，扩展只读取本地浏览器 Cookie store 中 `web_session` / `z_c0` 是否存在，并分别向登录态端点回传布尔值；这一步不打开、刷新或请求平台页面。若后端本地没有 B 站 Cookie，还会推送 `bilibili_cookie_sync_requested`，扩展立即通过 `/api/bilibili/cookie` 回传当前浏览器 Cookie；后端持久化 Cookie、热重载 runtime 组件，并重新启动 refresh / account sync / auto update 后台任务，避免热重载取消后台循环后小红书 / 抖音 producer 停止；重复同步相同 Cookie 时不再重建 runtime，避免打断正在等待扩展回写的抖音 discovery。B 站扩展搜索兜底任务入队后会通过同一 stream 广播 `bili_task_available` 唤醒扩展 poll，扩展在后台打开真实 B 站搜索页、抓渲染后的 DOM 结果并 POST 回 `/api/sources/bili/task-result`；知乎事件 / discovery 任务入队后会广播 `zhihu_task_available`，扩展打开带 `openbiliclaw_zhihu_task` 标记的已登录知乎任务 tab 并回写 `/api/sources/zhihu/task-result`，其中 `bootstrap_events` 初始化 / 事件 smoke 使用前台 tab，search / hot / feed / creator / related discovery 使用后台 tab；Reddit bootstrap、命令后端 fallback 和显式 `backend="extension"` 的 discovery 任务入队后会广播 `reddit_task_available`，扩展打开带 `openbiliclaw_reddit_task` 标记的已登录 Reddit 任务 tab 并回写 `/api/sources/reddit/task-result`，其中 `bootstrap_events` 读取 saved / upvoted / subscribed，search / hot / subreddit / related discovery 读取同源 `.json` endpoint；默认 Reddit discovery 在 rdt-cli ready 时不走 stream，而由命令后端完成。本机 `/api/extension/e2e/run` 也复用同一 stream 投递 `extension_e2e_run`，让已安装扩展打开 / 复用真实抖音、小红书、X 标签页执行白名单 DOM 操作；复用同域 tab 时先导航回平台稳定入口，事件仍由 content collector 自然进入 `/api/events`，runner flush buffer 后再由后端匹配。若 `[sources.douyin].enabled=true` 且后端没有环境变量或 `data/douyin_cookie.json`，会推送 `douyin_cookie_sync_requested` 并通过 `/api/sources/dy/cookie` 回传抖音 Cookie。后续推荐、惊喜、画像更新和探针确认仍复用同一条 WebSocket 事件流；`interest.probe` / `avoidance.probe` 只有实际进入至少一个 stream 订阅者队列后才写入对应 domain / axis 冷却状态，正向 probe 还会写入 `probed_distance_bands`，并在 payload 里暴露 `probe_mode/challenge`；正向和负向 probe 通过 `last_probe_kind` 每轮最多投递一条；同一连接也驱动 `PresenceTracker`，服务端 reader 会 `receive()` 检测 idle disconnect，避免浏览器断开后 presence 卡住
 - `/api/image-proxy` — 移动 Web 和扩展 side panel 的推荐、惊喜和消息封面图统一走 `UI -> /api/image-proxy -> 白名单 CDN -> bounded spool -> UI`，后端在发送响应前完成 URL、redirect、Content-Type 和 10MB 实际字节校验
+
+### TLS Proxy (`tls_proxy.py`)
+
+- 默认关闭的传输边缘；`create_tls_proxy_server()` 在返回前完成证书/SAN 校验、SSL context
+  加载和 socket bind，CLI 只在成功后创建 `serve_forever` daemon thread。
+- 插件 endpoint 设为 HTTPS 后，手机版二维码及其 `/api/qr-info` LAN-IP 探测沿用同一 scheme；
+  未知 scheme 只会安全回落 HTTP，不会把固定明文请求误发到 TLS listener。
+- 请求侧解析 authority 后比较 Web Origin 与 Host 的 host+port；响应侧保留重复 header、过滤
+  hop-by-hop header，并给 `Set-Cookie` 补 `Secure`。WebSocket 在 101 后进入双向 byte relay。
+- 自动证书始终包含 localhost/127.0.0.1，远程 IP/hostname 必须显式配置；已有证书缺 SAN
+  时拒绝启动且绝不覆盖。详见 [TLS Proxy 模块](modules/tls-proxy.md)。
 
 ### API Auth Gateway (`auth_core.py` + `api/auth.py`)
 
