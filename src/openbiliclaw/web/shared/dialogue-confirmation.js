@@ -416,7 +416,7 @@
   }
 
   function renderTextTurnMarkup(turn, surface) {
-    const failed = text(turn?.status).toLowerCase() === "failed";
+    const failed = ["error", "failed"].includes(text(turn?.status).toLowerCase());
     const reply = failed
       ? text(turn?.error) || "这句还没发出去，稍后再试。"
       : text(turn?.reply) || text(turn?.assistant_message);
