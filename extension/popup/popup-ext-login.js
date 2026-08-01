@@ -1,7 +1,6 @@
 import {
   pairDeviceKey,
   popupAuthenticatedFetch,
-  readPopupSessionToken,
 } from "./popup-device-auth.js";
 
 const AUTH_ERRORS = {
@@ -34,7 +33,7 @@ export function initExtLogin(els = {}, opts = {}) {
       if (!data.enabled) {
         setStatus("后端未开启访问控制，无需配对", true);
         showFields(false);
-      } else if (data.authenticated || await readPopupSessionToken()) {
+      } else if (data.authenticated) {
         setStatus("设备已配对", true);
         showFields(false);
       } else {
