@@ -9503,8 +9503,15 @@ ${cardFeedbackBarHtml()}`;
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
-      const host = lanIp || typedHost || def.host;
-      const url = qr.buildMobileWebUrl({ host, port: typedPort || def.port });
+      // A non-loopback page origin is already the address that reached this
+      // backend (including a public HTTPS gateway). Keep that origin instead
+      // of replacing it with the backend's private LAN IP. Loopback pages still
+      // need the existing LAN-IP fallback so a phone can reach the machine.
+      const pageHostIsReachable = !qr.isLoopbackMobileHost(def.host);
+      const host = pageHostIsReachable ? def.host : (lanIp || typedHost || def.host);
+      const port = pageHostIsReachable ? def.port : (typedPort || def.port);
+      const scheme = window.location.protocol === "https:" ? "https" : "http";
+      const url = qr.buildMobileWebUrl({ scheme, host, port });
       urlEl.textContent = url;
       if (qr.isLoopbackMobileHost(host)) {
         hintEl.textContent =

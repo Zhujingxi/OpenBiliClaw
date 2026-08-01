@@ -13,9 +13,9 @@
 | 路由 | SPA hash routing（`#/recommend`、`#/profile`、`#/chat`） |
 | 文件位置 | `src/openbiliclaw/web/` — 随 pip install 分发 |
 | 静态服务 | FastAPI `StaticFiles` mount at `/m/` |
-| 入口 URL | `http://<局域网IP>:8420/m/` |
+| 入口 URL | 默认 `http://<局域网IP>:8420/m/`；公网 Caddy 为 `https://<域名>/m/` |
 | 鉴权 | 可选密码门禁：`[api.auth].enabled`；本机免登录，局域网 / 远程设备需密码（详见 [`docs/plans/2026-05-30-web-password-auth-design.md`](plans/2026-05-30-web-password-auth-design.md)）。仍需 `start --host 0.0.0.0` 才能被手机访问 |
-| 安全边界 | 默认面向可信局域网；开启 `[api.auth]` 后局域网 / 远程访问需密码。LAN HTTP 仍为明文，介意嗅探请上 HTTPS（反代），不建议直接暴露公网 |
+| 安全边界 | 默认面向可信局域网；开启 `[api.auth]` 后局域网 / 远程访问需密码。LAN HTTP 仍为明文；公网必须走 HTTPS，并使用 Caddy overlay + Web 密码门禁，不能直接暴露 `8420` |
 | PWA | 提供 manifest.json + iOS Web Clip 元数据，支持添加到主屏幕（暂不做 service worker / 离线缓存） |
 | 行为采集 | 不做（无 bilibili 页面上下文） |
 | 源管理/爬取 | 不做 |
@@ -267,8 +267,13 @@ http://<电脑局域网IP>:8420/m/
 
 # 仅有 IPv6 时（方括号不可省略）
 http://[电脑局域网IPv6]:8420/m/
+
+# 公网域名（Docker Caddy overlay）
+https://obc.example.com/m/
 ```
 
 打开 `/m/` 后可在 iOS Safari 通过「分享 → 添加到主屏幕」保存为桌面图标；Android Chrome / Chromium 浏览器可通过菜单里的「安装应用」或「添加到主屏幕」保存。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；完整 PWA 安装提示对 HTTPS 更稳定。
 
-不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成）；后端地址仍是 loopback 时，桌面抽屉会调用轻量端点 `GET /api/qr-info` 并读取响应中的 `lan_ip` 字段，插件入口也使用同一轻量端点生成局域网地址。两个入口都在**每次打开时重新请求**该端点，端点自身也绕过 `/api/health` 的 30 秒 `lan_ip` TTL 实时探测：局域网地址会随换 Wi-Fi / 插拔网卡改变，任何一层缓存住都会让二维码继续编码手机已经打不开的旧地址。桌面侧仍保留首屏预取值，但只在这次请求失败时兜底使用，避免退化成 loopback 地址。
+不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成）。当桌面页通过公网 / 局域网非 loopback 地址打开时，二维码保留当前页面的 scheme、host 和端口，因此 `https://obc.example.com/web` 会生成 `https://obc.example.com:443/m/`，不会替换为后端私网 IP 或退回 HTTP。只有页面仍是 loopback 时，桌面抽屉才调用轻量端点 `GET /api/qr-info` 并读取响应中的 `lan_ip` 字段；插件入口同样只在配置 host 为 loopback 时探测 LAN IP，并始终保留插件配置的 HTTP/HTTPS scheme。两个入口都在**每次打开时重新请求**该端点，端点自身也绕过 `/api/health` 的 30 秒 `lan_ip` TTL 实时探测：局域网地址会随换 Wi-Fi / 插拔网卡改变，任何一层缓存住都会让二维码继续编码手机已经打不开的旧地址。桌面侧仍保留首屏预取值，但只在这次请求失败时兜底使用，避免退化成 loopback 地址。
+
+公网部署和认证步骤见 [`docs/https-deployment.md`](https-deployment.md)。

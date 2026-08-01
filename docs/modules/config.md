@@ -67,6 +67,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 默认关闭的局域网 / 自管 HTTPS 入口（`TlsProxyConfig`）。只由
 `openbiliclaw serve-api` 消费；普通 `start` 与未启用 TLS 的行为不变。完整安全与证书流程见
 [`TLS Proxy 模块`](tls-proxy.md) 和 [`HTTPS 部署`](../https-deployment.md)。
+公网域名的 Docker Caddy overlay 不读取本表；它只消费部署变量 `OPENBILICLAW_DOMAIN`。
 
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
@@ -1031,6 +1032,7 @@ OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；�
 - 容器内运行时会把 `/app/runtime` 视为项目根目录，因此 `config-show` 中看到的路径应为 `/app/runtime/config.toml` 和 `/app/runtime/data`
 - 容器启动时会自动尝试探测 `host.docker.internal:$OPENBILICLAW_PROXY_PORT`；可达时自动注入代理，不可达时直接回退直连
 - 容器内每次执行 `openbiliclaw ...` 时也会重复这层探测，因此 `docker exec` 场景不需要额外手动补 `HTTP_PROXY`
+- 可选 `docker-compose.https.yml` 只消费 `OPENBILICLAW_DOMAIN`，将 `8420` 收紧到宿主机 loopback，并通过 Caddy 发布 `80/443`；它不写入 `config.toml`，完整流程见 [HTTPS 部署](../https-deployment.md)
 
 如果你修改了 `[general].data_dir` 或 `[logging].directory` 为自定义绝对路径，需要同步调整 Docker volume 的挂载目标路径。
 

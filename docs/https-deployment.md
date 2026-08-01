@@ -1,12 +1,101 @@
-# 可选 HTTPS / TLS 反代部署
+# 可选 HTTPS 部署
+
+默认的 `http://127.0.0.1:8420` 和局域网 HTTP 行为不变。按访问场景选择一个入口：
+
+| 场景 | 推荐入口 | 证书 | 客户端地址 |
+|---|---|---|---|
+| 有公网域名，PC / 手机 / 远程插件访问 | `docker-compose.https.yml` + Caddy | 自动申请、续期，浏览器直接信任 | `https://obc.example.com` |
+| 仅可信局域网或自管网络 | 内置 TLS Proxy / Docker `tls` profile | 本地 CA 或自有证书，客户端需手动信任 | `https://192.168.1.20:8443` |
+
+两种模式都只增加传输入口，不替代 OpenBiliClaw 的密码门禁或扩展设备认证，也不要同时启用。
+
+## 最简公网方案：Caddy 自动 HTTPS（推荐）
+
+仓库提供可叠加到源码和预构建 Compose 的 `docker-compose.https.yml`。Caddy 自动完成
+证书申请、HTTPS 重定向、续期及 WebSocket 反代；桌面 Web、移动 Web 和浏览器插件共用同一
+域名。后端 `8420` 只绑定宿主机 loopback，公网只开放 `80/443`。Caddy 会先检查后端密码
+门禁；`enabled=false` 时仅在容器 loopback 等待，不绑定 `80/443`，避免首次配置产生裸奔窗口。
+
+### 前置条件
+
+- 一个公网 DNS 名称，例如 `obc.example.com`，其 A/AAAA 记录指向这台服务器。只有服务器
+  确实能接收公网 IPv6 时才发布 AAAA。
+- 防火墙和云安全组放行 TCP `80`、TCP `443`；overlay 同时发布 UDP `443` 供 HTTP/3 使用。
+- Docker Compose `2.24.4+`，因为 overlay 使用 `!override` 精确替换后端端口列表。
+- 公网暴露前必须开启 Web 密码门禁；远程插件还必须启用独立的 `ext-key` 设备认证。
+
+### 预构建镜像
+
+```bash
+mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.https.yml
+
+# 只填 DNS 名称，不带 https://、端口或路径
+export OPENBILICLAW_DOMAIN=obc.example.com
+docker compose -f docker-compose.prebuilt.yml -f docker-compose.https.yml up -d
+```
+
+### 源码构建
+
+在仓库根目录执行：
+
+```bash
+export OPENBILICLAW_DOMAIN=obc.example.com
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+
+首次签发证书需要密码门禁已启用、DNS 已生效且公网 `80/443` 能到达该主机。Caddy 的证书
+状态与配置目录分别持久化在 `openbiliclaw_caddy_data`、`openbiliclaw_caddy_config` volume，
+重建容器不会丢失。
+
+### 开启访问门禁
+
+```bash
+# 交互式设置 Web 登录密码
+docker exec -it openbiliclaw-backend openbiliclaw set-password
+
+# 为远程插件生成设备密钥并开启交换；完整密钥只显示一次
+docker exec -it openbiliclaw-backend openbiliclaw ext-key generate
+docker exec -it openbiliclaw-backend openbiliclaw ext-key enable
+
+# CLI 写入的是持久配置；重启后端加载门禁，再重启 Caddy 重新附着共享网络命名空间
+docker restart openbiliclaw-backend
+docker restart openbiliclaw-caddy
+```
+
+如果只需要 PC / 手机 Web，不用运行两条 `ext-key` 命令；Web 密码仍是公网入口的硬前置。
+Caddy 在密码启用前会持续打印等待提示，并且不会申请证书或监听公网端口。
+
+然后使用：
+
+- PC Web：`https://obc.example.com/web`
+- 手机 Web / PWA：`https://obc.example.com/m/`
+- 插件设置：协议选 `HTTPS`，主机填 `obc.example.com`，端口填 `443`，再填上一步生成的设备密钥
+
+桌面 Web 的手机版二维码会保留当前 HTTPS 域名和端口；插件二维码也沿用插件配置的 HTTPS
+地址，因此扫码不会再退回私网 IP 或明文 HTTP。
+
+### 状态与排错
+
+```bash
+docker compose -f docker-compose.prebuilt.yml -f docker-compose.https.yml ps
+docker compose -f docker-compose.prebuilt.yml -f docker-compose.https.yml logs openbiliclaw-caddy
+curl https://obc.example.com/api/health
+```
+
+源码部署把上面命令的第一个 `-f` 改成 `docker-compose.yml`。签发失败时依次检查 DNS、云安全组、
+主机防火墙，以及 `80/443` 是否被其他进程占用。不要同时启动源码 Compose 的 `tls` profile；
+公网 Caddy 与 LAN TLS Proxy 是两种互斥入口。
+
+## LAN / self-managed TLS Proxy
 
 > 面向可信局域网或自管网络的轻量 TLS 入口。默认关闭，不是公网生产级反向代理。
 
-默认的 `http://127.0.0.1:8420` 和局域网 HTTP 行为不变。只有远程浏览器策略要求
-HTTPS、且你愿意在客户端安装本地 CA（或提供自己的证书）时，才需要启用本组件。
-公网入口应使用 Caddy、nginx、Traefik 等成熟网关并完成防火墙、限流和证书自动续期。
+只有远程浏览器策略要求 HTTPS、且你愿意在客户端安装本地 CA（或提供自己的证书）时，才需要
+启用本组件。公网域名优先使用上面的 Caddy overlay。
 
-## 访问路径与安全边界
+### 访问路径与安全边界
 
 ```text
 HTTP（默认）: 客户端 ───────────────→ FastAPI :8420
@@ -24,7 +113,7 @@ HTTPS（可选）: 客户端 → TLS Proxy :8443 → FastAPI :8420（本机/Comp
 - TLS 不替代密码门禁。局域网暴露时仍建议配置 `openbiliclaw set-password`；远程扩展
   仍需默认关闭的 `ext-key` 设备认证。
 
-## 非 Docker 部署
+### 非 Docker 部署
 
 ```bash
 # 1. 安装可选证书依赖
@@ -47,7 +136,7 @@ uv run openbiliclaw serve-api
 `openbiliclaw start` 当前不启动 TLS 入口；使用该功能时应运行 `serve-api`。TLS 已启用时，
 证书解析、SSL context 或端口绑定失败会让 `serve-api` 以非零状态退出，不会静默退回 HTTP。
 
-## Docker Compose（源码 compose）
+### Docker Compose（源码 compose）
 
 首次启动前设置远程客户端会使用的 SAN：
 
@@ -68,7 +157,7 @@ hostname/IP 列表。`OPENBILICLAW_TLS_PORT` 同时控制宿主机映射端口�
 docker compose logs openbiliclaw-tls-proxy
 ```
 
-## 证书与 SAN
+### 证书与 SAN
 
 自动生成必须显式开启（CLI 集成与 Compose profile 已明确开启）。首次生成包含：
 
@@ -91,7 +180,7 @@ docker compose logs openbiliclaw-tls-proxy
 
 只存在 cert 或 key 其中一个时，代理会 fail loudly，不会在半残目录里补写另一半。
 
-### 信任本地 CA
+#### 信任本地 CA
 
 首次可用忽略校验的命令下载 CA（只下载公钥证书）：
 
@@ -105,7 +194,7 @@ curl --insecure https://192.168.1.20:8443/ca.crt -o openbiliclaw-ca.crt
 
 不要复制、下载或分享 `ca.key` / `srv.key`。
 
-## 配置与环境变量
+### 配置与环境变量
 
 非 Docker `Config` 的显式覆盖范围只有：
 
@@ -120,7 +209,7 @@ curl --insecure https://192.168.1.20:8443/ca.crt -o openbiliclaw-ca.crt
 `CERT_FILE`、`KEY_FILE`、`CA_CERT_FILE`、`CRL_FILE`、`AUTO_GEN_CERTS` 与 `SAN_NAMES`。这些是
 容器入口参数，不是通用 `Config` 环境变量；不要假设任意 `[tls_proxy]` 字段都能自动映射。
 
-## 端口与客户端切换
+### 端口与客户端切换
 
 `openbiliclaw serve-api --tls-port 9443` 可临时覆盖 TOML 端口，但只有
 `[tls_proxy].enabled=true` 时才会启动。Docker 则设置 `OPENBILICLAW_TLS_PORT` 后重建/重启

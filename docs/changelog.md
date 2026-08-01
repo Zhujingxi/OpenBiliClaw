@@ -4,13 +4,15 @@
 
 ---
 
-## 未发布：X 来源连接验证与 Cookie 同步（2026-08-01）
+## 未发布：连接与 HTTPS 部署（2026-08-01）
 
 - **修复 GitHub Star 数量请求偶发 403**：桌面 Web 和扩展不再从浏览器匿名直连 GitHub REST API，统一改走公开同源 `GET /api/project-stats`；后端持久化 12 小时缓存、使用 ETag 条件请求，并在 403 / 429、断网或 GitHub 异常时按响应头退避、返回旧缓存或无数量的本地 200。GitHub Pages 静态官网没有可用的同源后端，因此保留 Star CTA、停止动态请求数量；所有浏览器入口都不再产生 GitHub 失败资源日志，点击仓库行为保持不变。
 - **桌面惊喜推荐把“× / 看过了，不再推荐”移到卡片右上角**：关闭动作不再夹在喜欢、不感兴趣、稍后看和收藏之间，避免被误认成同级反馈或误触；按钮保留原有永久已读语义、可见键盘焦点与禁用态，窄屏触控区域不小于 44×44。
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
 - **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
 - **移除扩展临时调试日志中继**：抖音任务仍通过正常的 `task-result` 回传结构化诊断，但不再向 `/api/sources/_debug/log` 额外发起请求；废弃 helper 和后端 relay 路由同步删除。
+- **新增最简公网 HTTPS Compose overlay**：`docker-compose.https.yml` 可叠加到源码或预构建部署，使用固定版本 Caddy 自动申请 / 续期公网证书并转发 REST / WebSocket；Caddy 与后端共享 network namespace，宿主机 `8420` 收紧到 loopback，Uvicorn 仅信任 `127.0.0.1` 的 forwarded headers，证书数据使用 named volumes 持久化。Caddy 在 `/api/auth/status` 明确返回密码门禁已启用前不绑定公网端口，首次配置 fail closed；远程扩展仍使用独立设备密钥，现有 LAN/self-managed `tls` profile 保持独立、默认关闭。
+- **修复桌面 Web 的 HTTPS 手机二维码降级**：从非 loopback 的 HTTPS 页面打开「手机版」时，二维码现在保留当前 scheme、host 和端口，不再被 `/api/qr-info` 的后端私网 IP 覆盖或硬编码成 HTTP；IPv4、裸 IPv6 与 URL 方括号 IPv6 loopback 都继续实时探测 LAN IP，插件和桌面局域网扫码行为保持一致。
 
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 

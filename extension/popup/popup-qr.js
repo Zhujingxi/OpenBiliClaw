@@ -32,7 +32,13 @@ export function buildMobileWebUrl({ scheme, host, port } = {}) {
 
 export function isLoopbackMobileHost(host) {
   const value = String(host || "").trim().toLowerCase();
-  return value === "" || value === "localhost" || value === "::1" || value.startsWith("127.");
+  return (
+    value === "" ||
+    value === "localhost" ||
+    value === "::1" ||
+    value === "[::1]" ||
+    value.startsWith("127.")
+  );
 }
 
 export function getMobileQrViewState(endpoint = {}) {
