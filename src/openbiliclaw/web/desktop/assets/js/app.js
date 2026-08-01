@@ -4,6 +4,7 @@
       ping: "/ping",
       health: "/health",
       qrInfo: "/qr-info",
+      projectStats: "/project-stats",
       initStatus: "/init-status",
       startInit: "/init",
       cancelInit: "/init/cancel",
@@ -58,6 +59,7 @@
       selectDialogueTurns
     } = dialogueConfirmation;
     const dialogueCardActionAbortController = new AbortController();
+    const CHAT_SCROLL_BOTTOM_TOLERANCE_PX = 48;
 
     const state = {
       query: "",
@@ -724,7 +726,6 @@
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
-    const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
     // 加载更多一次向后端请求的条数（后端 append 端点固定 limit=10）；
@@ -781,12 +782,8 @@
       }
       if (Date.now() - cachedTime < STAR_COUNT_TTL_MS) return;
       try {
-        const res = await fetch(`https://api.github.com/repos/${STAR_REPO_SLUG}`, {
-          headers: { Accept: "application/vnd.github+json" },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const n = data?.stargazers_count;
+        const data = await requestJson(ENDPOINTS.projectStats, { timeoutMs: 6000 });
+        const n = data?.github_stars;
         if (typeof n === "number") {
           showStarCount(n);
           storageSet(STAR_COUNT_CACHE_KEY, JSON.stringify({ n, t: Date.now() }));
@@ -2299,7 +2296,7 @@
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
       showMainPage("chatPage");
-      renderChat();
+      renderChat({ forceBottom: true });
       scheduleDialogueConfirmationRefresh();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -5789,7 +5786,7 @@ ${cardFeedbackBarHtml()}`;
         input.value = "";
         input.placeholder = "继续写你想补充的问题、偏好或例子";
       }
-      renderChat();
+      renderChat({ forceBottom: true });
       if (panel) panel.scrollTop = 0;
       window.setTimeout(() => input?.focus(), 80);
     }
@@ -5816,6 +5813,42 @@ ${cardFeedbackBarHtml()}`;
       }).join("");
     }
 
+    function isNearScrollBottom(element) {
+      return element.scrollHeight - element.clientHeight - element.scrollTop
+        <= CHAT_SCROLL_BOTTOM_TOLERANCE_PX;
+    }
+
+    function openDialogueEvidenceTurnIds(element) {
+      return new Set(
+        Array.from(element.querySelectorAll(".dialogue-evidence[open]"))
+          .map((details) => details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "")
+          .filter(Boolean)
+      );
+    }
+
+    function renderChatLogElement(element, markup, { forceBottom = false } = {}) {
+      if (!element) return;
+      const hadContent = element.childElementCount > 0;
+      const shouldStickToBottom = forceBottom || !hadContent || isNearScrollBottom(element);
+      const previousScrollTop = element.scrollTop;
+      const openEvidenceTurnIds = openDialogueEvidenceTurnIds(element);
+
+      element.innerHTML = markup;
+
+      for (const details of element.querySelectorAll(".dialogue-evidence")) {
+        const turnId = details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "";
+        if (openEvidenceTurnIds.has(turnId)) details.open = true;
+      }
+      if (shouldStickToBottom) {
+        element.scrollTop = element.scrollHeight;
+      } else {
+        element.scrollTop = Math.min(
+          previousScrollTop,
+          Math.max(0, element.scrollHeight - element.clientHeight)
+        );
+      }
+    }
+
     function renderDesktopPendingConfirmations() {
       const pending = state.pendingConfirmations;
       const count = Math.max(0, Number(pending.count) || 0);
@@ -5829,8 +5862,16 @@ ${cardFeedbackBarHtml()}`;
         toggle.classList.toggle("is-expanded", Boolean(pending.expanded));
       }
       if (list) {
+        const wasVisible = !list.hidden;
+        const previousScrollTop = list.scrollTop;
         list.hidden = !pending.expanded;
         list.innerHTML = renderPendingListMarkup(pending.items);
+        if (wasVisible && pending.expanded) {
+          list.scrollTop = Math.min(
+            previousScrollTop,
+            Math.max(0, list.scrollHeight - list.clientHeight)
+          );
+        }
       }
     }
 
@@ -6010,36 +6051,17 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
-    function renderChat() {
+    function renderChat({ forceBottom = false } = {}) {
       renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
+      renderChatLogElement(chatLog, chatHtml(state.chat), { forceBottom });
       const messageChatLog = $("#messageChatLog");
-      const scrollState = (element) => {
-        if (!(element instanceof HTMLElement)) return null;
-        return {
-          top: element.scrollTop,
-          atBottom: element.scrollHeight - element.scrollTop - element.clientHeight <= 48,
-        };
-      };
-      const chatScrollState = scrollState(chatLog);
-      const messageChatScrollState = scrollState(messageChatLog);
-      const restoreScroll = (element, previous) => {
-        if (!(element instanceof HTMLElement) || !previous) return;
-        element.scrollTop = previous.atBottom
-          ? element.scrollHeight
-          : Math.min(previous.top, Math.max(0, element.scrollHeight - element.clientHeight));
-      };
-      if (chatLog) {
-        chatLog.innerHTML = chatHtml(state.chat);
-        restoreScroll(chatLog, chatScrollState);
-      }
       if (messageChatLog) {
         const baseMessages = state.messageChatPrompt
           ? state.chat.filter((msg) => msg.text !== "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。")
           : state.chat;
         const messages = state.messageChatPrompt ? [{ role: "user", text: state.messageChatPrompt }, ...baseMessages] : baseMessages;
-        messageChatLog.innerHTML = chatHtml(messages);
-        restoreScroll(messageChatLog, messageChatScrollState);
+        renderChatLogElement(messageChatLog, chatHtml(messages), { forceBottom });
       }
     }
 
@@ -6077,7 +6099,7 @@ ${cardFeedbackBarHtml()}`;
       const payloadMessage = options.contextPrefix ? `${options.contextPrefix}\n\n${message}` : message;
       state.chat.push({ role: "user", text: message });
       state.chat.push({ role: "agent", text: "正在提交给后端，并等待 durable chat turn 完成。" });
-      renderChat();
+      renderChat({ forceBottom: true });
       const payload = {
         session: SHARED_CHAT_SESSION,
         scope: options.scope || "chat",

@@ -379,7 +379,9 @@ def test_desktop_web_shows_github_star_cta() -> None:
     assert "gh-star-left" in app_css
     assert "gh-star-count" in app_css
     assert 'STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw"' in app_js
-    assert "https://api.github.com/repos/${STAR_REPO_SLUG}" in app_js
+    assert 'projectStats: "/project-stats"' in app_js
+    assert "requestJson(ENDPOINTS.projectStats" in app_js
+    assert "api.github.com" not in app_js
     assert "openbiliclaw.webui.starCount" in app_js
     assert "bindStarButton();" in app_js
 

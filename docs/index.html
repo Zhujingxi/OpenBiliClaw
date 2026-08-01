@@ -863,20 +863,6 @@
       line-height: 1;
     }
 
-    .star-count {
-      display: inline-flex;
-      align-items: center;
-      padding: 1px 8px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.14);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .star-count[hidden] {
-      display: none;
-    }
-
     .star-cta {
       text-align: center;
       background:
@@ -946,24 +932,6 @@
     .star-btn:focus-visible {
       border-color: transparent;
       box-shadow: 0 16px 34px rgba(224, 119, 110, 0.32);
-    }
-
-    .star-count-big {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--muted);
-      font-weight: 850;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .star-count-big::before {
-      content: "★";
-      color: var(--yellow);
-    }
-
-    .star-count-big[hidden] {
-      display: none;
     }
 
     .footer {
@@ -1177,7 +1145,6 @@
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
           <span class="star-ico" aria-hidden="true">★</span>
           <span class="star-label" data-i18n="starLinkLabel">Star</span>
-          <span class="star-count" data-star-count hidden>—</span>
         </a>
         <div class="lang-toggle" aria-label="语言切换" data-i18n-attr="aria-label:langToggleAria">
           <button class="lang-btn" type="button" data-lang="zh" aria-pressed="true">中文</button>
@@ -1514,7 +1481,6 @@ docker compose -f docker-compose.prebuilt.yml up -d
           <p class="lead" data-i18n="starLead">OpenBiliClaw 是一个开源、个人维护的项目，没有公司、没有融资。你的一颗 ⭐ 是对它最直接的鼓励，也能让更多想夺回推荐主权的人发现它。</p>
           <div class="star-cta-actions">
             <a class="btn star-btn" href="https://github.com/whiteguo233/OpenBiliClaw" data-i18n="starButton">⭐ 去 GitHub 点亮 Star</a>
-            <span class="star-count-big" data-star-count hidden>—</span>
           </div>
         </div>
       </div>
@@ -1925,37 +1891,6 @@ docker compose -f docker-compose.prebuilt.yml up -d
       });
     });
 
-    const starCountNodes = document.querySelectorAll("[data-star-count]");
-    if (starCountNodes.length) {
-      const formatStars = (value) => {
-        if (typeof value !== "number" || !isFinite(value) || value < 0) return "";
-        if (value >= 1000) {
-          return (value / 1000).toFixed(value >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k";
-        }
-        return String(value);
-      };
-      const paintStars = (value) => {
-        const label = formatStars(value);
-        if (!label) return;
-        starCountNodes.forEach((node) => {
-          node.textContent = label;
-          node.hidden = false;
-        });
-      };
-      const cached = sessionStorage.getItem("openbiliclaw-star-count");
-      if (cached && /^\d+$/.test(cached)) paintStars(Number(cached));
-      fetch("https://api.github.com/repos/whiteguo233/OpenBiliClaw", {
-        headers: { Accept: "application/vnd.github+json" },
-      })
-        .then((response) => (response.ok ? response.json() : null))
-        .then((data) => {
-          if (data && typeof data.stargazers_count === "number") {
-            sessionStorage.setItem("openbiliclaw-star-count", String(data.stargazers_count));
-            paintStars(data.stargazers_count);
-          }
-        })
-        .catch(() => {});
-    }
   </script>
 </body>
 </html>

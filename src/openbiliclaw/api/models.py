@@ -125,6 +125,14 @@ class HealthResponse(BaseModel):
     embedding_ready: bool | None = None
 
 
+class ProjectStatsResponse(BaseModel):
+    """Public project metadata shown by local browser surfaces."""
+
+    github_stars: int | None = None
+    stale: bool = False
+    source: Literal["github", "cache", "unavailable"] = "unavailable"
+
+
 class InitStageProgressOut(BaseModel):
     """Fine-grained progress inside a running stage (init-progress spec).
 

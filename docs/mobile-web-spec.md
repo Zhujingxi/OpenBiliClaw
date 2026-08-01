@@ -53,6 +53,9 @@
    - 文本输入 & 发送
    - AI 思考中状态
    - 与插件、桌面 Web 共享 `session=popup&scope=chat` 的主聊天历史；聊天页可见且在线时约每 2.5 秒检查一次新 turn，历史未变化不重绘，用户阅读旧消息时保留滚动位置
+   - 与插件共享 `session=popup` 的 durable 对话历史；普通文字写入 `scope=chat`，历史读取不限定 scope，同时展示 `hypothesis` 觉察卡与 `confusion` 澄清问题
+   - 「待聊确认」列表、主动打开、假设卡「准 / 不准 / 聊聊 / 稍后」四动作与按需结算轮询；纯 ID / 哈希型依据不展示
+   - 待聊列表和消息历史各自限高滚动；后台刷新保留读者位置、已展开依据、输入草稿与焦点
    - 聊天回复完成后刷新画像摘要与活动流
    - 底部固定两行输入框，优先保留聊天上下文浏览空间
    - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针非聊天动作按归一化后的 `type + domain` 键记录独立的 in-flight 状态，关闭再打开 overlay 或其它重渲染仍从该状态恢复整卡禁用、`is-processing` 与 `aria-busy=true`，避免重复提交；只有服务端接受结算或返回终态 no-op 后才写入 terminal handled key 并移除卡片，传输/服务端失败则清除 pending、保留卡片并恢复全部动作供重试；空态提示保持 X 关闭入口可用）
@@ -164,7 +167,7 @@ if web_dir.is_dir():
 | 推荐 | `GET /api/recommendations`, `POST /api/recommendations/reshuffle`, `POST /api/recommendations/append`, `POST /api/recommendation-click`, `GET /api/runtime-status` |
 | Delight | `GET /api/delight/pending-batch`, `POST /api/delight/respond` |
 | 画像 | `GET /api/profile-summary` |
-| 对话 | `POST /api/chat/turns`, `GET /api/chat/turns`, `GET /api/chat/turns/{id}`；主聊天使用 `session=popup&scope=chat` 与插件、桌面 Web 共享历史，三个可见聊天界面都会在打开时和可见期间刷新历史 |
+| 对话 | `POST /api/chat/turns`, `GET /api/chat/turns`, `GET /api/chat/turns/{id}`, `GET /api/chat/pending-confirmations`, `POST /api/chat/pending-confirmations/{ref}/open`, `POST /api/chat/cards/{turn_id}/action`；主对话按 `session=popup` 读取全部对话 scope，与插件、桌面 Web 共享历史，三个可见聊天界面都会在打开时和可见期间刷新历史 |
 | 消息 | `GET /api/notifications/pending`, `POST /api/notifications/sent` |
 | 认知通知 | `GET /api/cognition-updates/pending`, `POST /api/cognition-updates/seen` |
 | 活动流 | `GET /api/activity-feed` |
@@ -193,7 +196,7 @@ Delight UI 投影矩阵：
 - MBTI 会保留后端 `confidence` 显示为“可信度”；内容口味将 `long/slow` 等 raw 枚举映射为“长视频 / 慢节奏”等中文标签；使用场景会显示 `session_type` 为“模式”。
 - 认知更新卡片会保留后端 `context_line` 与 `source_label`，即使前端已做过一次 normalize 后再次渲染，也不回退成泛化上下文。
 - 对话 turn 兼容 `response` 和后端当前返回的 `reply` 字段，统一映射成聊天气泡使用的 `response`。
-- 移动端主聊天与插件读取同一 `session=popup&scope=chat`；contextual delight/probe 聊天通过 `scope=delight/probe` 标识主题上下文。惊喜推荐内联聊天也复用 `session=popup&scope=delight`，按 `subject_id=bvid` hydrate 每条候选自己的 `turns` 历史，pending turn 通过 `/api/chat/turns/{turn_id}` 轮询恢复。
+- 移动端主对话与插件读取同一 `session=popup`，不在历史 GET 上限定 `scope=chat`，否则会把同一 durable 流里的 `hypothesis/confusion` 卡片隐藏；普通用户消息仍写入 `scope=chat`。contextual delight/probe 聊天通过 `scope=delight/probe` 标识主题上下文。惊喜推荐内联聊天也复用 `session=popup&scope=delight`，按 `subject_id=bvid` hydrate 每条候选自己的 `turns` 历史，pending turn 通过 `/api/chat/turns/{turn_id}` 轮询恢复。
 - 封面图会在渲染前归一化：B 站 `http` / protocol-relative 地址升级为 HTTPS，推荐、惊喜推荐和消息封面统一走本地 `/api/image-proxy`，加载失败时保留固定比例 fallback。推荐列表当前批次默认预热 12 张封面，前 12 张使用 eager 加载，追加批次会先等待封面预热/解码或短超时再插入卡片；封面 frame 使用粉蓝渐变骨架占位，真实图片 decode 完成后淡入，减少高速滑动过程中的白屏。
 
 ### 静态资源
