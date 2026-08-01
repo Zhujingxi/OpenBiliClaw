@@ -40,6 +40,11 @@
       profileEdit: "/profile/edit",
       profileEditState: "/profile/edit-state"
     };
+    const SHARED_CHAT_SESSION = "popup";
+    const CHAT_HISTORY_REFRESH_INTERVAL_MS = 2500;
+    let chatHistoryRefreshTimer = null;
+    let chatHistoryRefreshInFlight = false;
+    let lastDialogueChatSignature = null;
 
     const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
     if (!dialogueConfirmation) throw new Error("dialogue-confirmation shared helper did not load");
@@ -109,6 +114,52 @@
     };
 
     const $ = (selector) => document.querySelector(selector);
+
+    const BACK_TO_TOP_THRESHOLD = 240;
+
+    function initBackToTop() {
+      const button = $("#backToTop");
+      if (!(button instanceof HTMLButtonElement)) return;
+
+      const getScrollTargets = () => {
+        const chatPage = $("#chatPage");
+        const chatPageVisible = chatPage instanceof HTMLElement && !chatPage.hidden;
+        return [
+          chatPageVisible ? null : document.scrollingElement,
+          $("#chatLog"),
+          $("#messageChatLog"),
+        ].filter((target, index, targets) => {
+          if (!(target instanceof HTMLElement) || targets.indexOf(target) !== index) return false;
+          if (target.closest("[hidden]") || window.getComputedStyle(target).display === "none") return false;
+          return true;
+        });
+      };
+
+      const getScrollTopTarget = () => {
+        const targets = getScrollTargets();
+        return targets.reduce(
+          (current, target) => (target.scrollTop > (current?.scrollTop || 0) ? target : current),
+          targets[0] || null,
+        );
+      };
+
+      const sync = () => {
+        const target = getScrollTopTarget();
+        button.hidden = (target?.scrollTop || 0) < BACK_TO_TOP_THRESHOLD;
+      };
+
+      const scrollToTop = () => {
+        const target = getScrollTopTarget();
+        if (!target) return;
+        const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth";
+        target.scrollTo({ top: 0, behavior });
+      };
+
+      document.addEventListener("scroll", sync, true);
+      window.addEventListener("resize", sync, { passive: true });
+      button.addEventListener("click", scrollToTop);
+      sync();
+    }
     const grid = $("#videoGrid");
     const sourceFilterDefinitions = [
       { key: "bilibili", label: "B 站" },
@@ -5151,7 +5202,7 @@ ${cardFeedbackBarHtml()}`;
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               turn_id: turnId,
-              session: "webui",
+              session: SHARED_CHAT_SESSION,
               scope: isAvoidance ? "avoidance_probe" : "probe",
               subject_id: domain,
               subject_title: domain || (isAvoidance ? "这个避雷方向" : "这个兴趣方向"),
@@ -5639,7 +5690,7 @@ ${cardFeedbackBarHtml()}`;
           return;
         }
         const turnId = createClientTurnId("delight");
-        const pendingTurn = { turn_id: turnId, session: "webui", scope: "delight", subject_id: delight.bvid, subject_title: delight.title || "", message: note, reply: "", status: "pending", error: "" };
+        const pendingTurn = { turn_id: turnId, session: SHARED_CHAT_SESSION, scope: "delight", subject_id: delight.bvid, subject_title: delight.title || "", message: note, reply: "", status: "pending", error: "" };
         applyTurnToDelight(pendingTurn);
         if (input) input.value = "";
         closeDelightComposer();
@@ -5786,6 +5837,9 @@ ${cardFeedbackBarHtml()}`;
     function applyDialogueChatSnapshot(snapshot) {
       const items = selectDialogueTurns(Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items));
       if (!items.length) return;
+      const signature = JSON.stringify(items);
+      if (signature === lastDialogueChatSignature) return;
+      lastDialogueChatSignature = signature;
       state.chat = items.flatMap((turn) => {
         if (isCardTurn(turn) || isQuestionTurn(turn)) return [{ turn }];
         const failed = String(turn.status || "").toLowerCase() === "failed";
@@ -5802,7 +5856,7 @@ ${cardFeedbackBarHtml()}`;
 
     async function refreshDialogueTurns() {
       const snapshot = await requestJsonStrict(
-        `${ENDPOINTS.chatTurns}?session=webui&limit=100`,
+        `${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&limit=100`,
         { cache: "no-store" }
       );
       applyDialogueChatSnapshot(snapshot);
@@ -5827,7 +5881,7 @@ ${cardFeedbackBarHtml()}`;
 
     async function refreshDesktopPendingConfirmations() {
       const payload = await requestJsonStrict(
-        `${ENDPOINTS.pendingConfirmations}?session=webui`,
+        `${ENDPOINTS.pendingConfirmations}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}`,
         { cache: "no-store" }
       );
       state.pendingConfirmations = {
@@ -5840,6 +5894,31 @@ ${cardFeedbackBarHtml()}`;
 
     async function refreshDialogueConfirmationSurface() {
       await Promise.allSettled([refreshDialogueTurns(), refreshDesktopPendingConfirmations()]);
+    }
+
+    async function refreshSharedChatSurface() {
+      const chatPage = $("#chatPage");
+      if (
+        chatHistoryRefreshInFlight ||
+        document.hidden ||
+        !(chatPage instanceof HTMLElement) ||
+        chatPage.hidden
+      ) {
+        return;
+      }
+      chatHistoryRefreshInFlight = true;
+      try {
+        await refreshDialogueConfirmationSurface();
+      } finally {
+        chatHistoryRefreshInFlight = false;
+      }
+    }
+
+    function startSharedChatSurfaceSync() {
+      if (chatHistoryRefreshTimer !== null) return;
+      chatHistoryRefreshTimer = window.setInterval(() => {
+        void refreshSharedChatSurface();
+      }, CHAT_HISTORY_REFRESH_INTERVAL_MS);
     }
 
     function updateDesktopDialogueTurn(turn) {
@@ -5899,7 +5978,7 @@ ${cardFeedbackBarHtml()}`;
       button.textContent = "打开中…";
       try {
         const turn = await executePendingConfirmationOpen(ref, {
-          session: "webui",
+          session: SHARED_CHAT_SESSION,
           signal: dialogueCardActionAbortController.signal,
           request(path, body, { signal } = {}) {
             return requestJsonStrict(path, {
@@ -5934,18 +6013,33 @@ ${cardFeedbackBarHtml()}`;
     function renderChat() {
       renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
+      const messageChatLog = $("#messageChatLog");
+      const scrollState = (element) => {
+        if (!(element instanceof HTMLElement)) return null;
+        return {
+          top: element.scrollTop,
+          atBottom: element.scrollHeight - element.scrollTop - element.clientHeight <= 48,
+        };
+      };
+      const chatScrollState = scrollState(chatLog);
+      const messageChatScrollState = scrollState(messageChatLog);
+      const restoreScroll = (element, previous) => {
+        if (!(element instanceof HTMLElement) || !previous) return;
+        element.scrollTop = previous.atBottom
+          ? element.scrollHeight
+          : Math.min(previous.top, Math.max(0, element.scrollHeight - element.clientHeight));
+      };
       if (chatLog) {
         chatLog.innerHTML = chatHtml(state.chat);
-        chatLog.scrollTop = chatLog.scrollHeight;
+        restoreScroll(chatLog, chatScrollState);
       }
-      const messageChatLog = $("#messageChatLog");
       if (messageChatLog) {
         const baseMessages = state.messageChatPrompt
           ? state.chat.filter((msg) => msg.text !== "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。")
           : state.chat;
         const messages = state.messageChatPrompt ? [{ role: "user", text: state.messageChatPrompt }, ...baseMessages] : baseMessages;
         messageChatLog.innerHTML = chatHtml(messages);
-        messageChatLog.scrollTop = messageChatLog.scrollHeight;
+        restoreScroll(messageChatLog, messageChatScrollState);
       }
     }
 
@@ -5985,7 +6079,7 @@ ${cardFeedbackBarHtml()}`;
       state.chat.push({ role: "agent", text: "正在提交给后端，并等待 durable chat turn 完成。" });
       renderChat();
       const payload = {
-        session: "webui",
+        session: SHARED_CHAT_SESSION,
         scope: options.scope || "chat",
         subject_id: options.subjectId || "",
         subject_title: options.subjectTitle || "",
@@ -8674,8 +8768,8 @@ ${cardFeedbackBarHtml()}`;
         requestJson(ENDPOINTS.profile).then(applyProfileSnapshot),
         requestJson(ENDPOINTS.delightBatch).then(applyDelightSnapshot),
         requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=chat&limit=20`).then(applyChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=delight&limit=80`).then(applyDelightChatSnapshot),
         requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
         refreshPlatformAvailability(),
       ];
@@ -9716,6 +9810,8 @@ ${cardFeedbackBarHtml()}`;
     restoreBackendEndpoint();
     restoreFrontendSettings();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
+    initBackToTop();
+    startSharedChatSurfaceSync();
     startChatPlaceholderRotation();
     toastManager.init();
     setupThemeNotice();

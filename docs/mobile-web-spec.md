@@ -52,7 +52,7 @@
    - 消息历史
    - 文本输入 & 发送
    - AI 思考中状态
-   - 与插件共享 `session=popup&scope=chat` 的主聊天历史
+   - 与插件、桌面 Web 共享 `session=popup&scope=chat` 的主聊天历史；聊天页可见且在线时约每 2.5 秒检查一次新 turn，历史未变化不重绘，用户阅读旧消息时保留滚动位置
    - 聊天回复完成后刷新画像摘要与活动流
    - 底部固定两行输入框，优先保留聊天上下文浏览空间
    - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针非聊天动作按归一化后的 `type + domain` 键记录独立的 in-flight 状态，关闭再打开 overlay 或其它重渲染仍从该状态恢复整卡禁用、`is-processing` 与 `aria-busy=true`，避免重复提交；只有服务端接受结算或返回终态 no-op 后才写入 terminal handled key 并移除卡片，传输/服务端失败则清除 pending、保留卡片并恢复全部动作供重试；空态提示保持 X 关闭入口可用）
@@ -60,6 +60,7 @@
 4. **通用**
    - 底部 Tab 导航栏（推荐/画像/对话）
    - 顶部状态栏（连接状态、消息提醒角标）
+   - 页面或聊天滚动容器下滑超过阈值后显示「顶部」按钮，一键回到当前可见滚动区顶部
    - WebSocket 实时更新（池变化、delight、画像更新）
    - 下拉刷新手势（推荐页）
    - PWA manifest（添加到主屏幕，不做 service worker 离线缓存）
@@ -163,7 +164,7 @@ if web_dir.is_dir():
 | 推荐 | `GET /api/recommendations`, `POST /api/recommendations/reshuffle`, `POST /api/recommendations/append`, `POST /api/recommendation-click`, `GET /api/runtime-status` |
 | Delight | `GET /api/delight/pending-batch`, `POST /api/delight/respond` |
 | 画像 | `GET /api/profile-summary` |
-| 对话 | `POST /api/chat/turns`, `GET /api/chat/turns`, `GET /api/chat/turns/{id}`；主聊天使用 `session=popup&scope=chat` 与插件共享历史 |
+| 对话 | `POST /api/chat/turns`, `GET /api/chat/turns`, `GET /api/chat/turns/{id}`；主聊天使用 `session=popup&scope=chat` 与插件、桌面 Web 共享历史，三个可见聊天界面都会在打开时和可见期间刷新历史 |
 | 消息 | `GET /api/notifications/pending`, `POST /api/notifications/sent` |
 | 认知通知 | `GET /api/cognition-updates/pending`, `POST /api/cognition-updates/seen` |
 | 活动流 | `GET /api/activity-feed` |

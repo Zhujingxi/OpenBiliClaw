@@ -88,6 +88,50 @@ body {
   padding-bottom: max(6px, var(--safe-bottom));
 }
 
+.back-to-top {
+  position: fixed;
+  right: max(14px, env(safe-area-inset-right, 0px));
+  bottom: calc(74px + var(--safe-bottom));
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 50px;
+  min-height: 46px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--brand) 34%, var(--line));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-strong) 92%, var(--brand-soft));
+  box-shadow: 0 8px 20px rgba(52, 72, 110, 0.16);
+  color: var(--brand-strong);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.back-to-top svg {
+  width: 16px;
+  height: 16px;
+}
+
+.back-to-top:active {
+  transform: translateY(1px);
+  background: var(--brand-soft);
+}
+
+.back-to-top:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring), 0 8px 20px rgba(52, 72, 110, 0.16);
+}
+
+.back-to-top[hidden] {
+  display: none;
+}
+
 /* ── Status Bar ───────────────────────────────────────────── */
 .status-title {
   display: inline-flex;
