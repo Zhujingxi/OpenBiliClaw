@@ -118,18 +118,11 @@ def build_centroids(
             counts.append(1)
 
     # Step 3: prune small clusters, keep top-k by membership.
-    kept = [
-        (counts[i], centroids[i])
-        for i in range(len(centroids))
-        if counts[i] >= min_members
-    ]
+    kept = [(counts[i], centroids[i]) for i in range(len(centroids)) if counts[i] >= min_members]
     kept.sort(key=lambda item: item[0], reverse=True)
-    kept = kept[:max(0, int(max_clusters))]
+    kept = kept[: max(0, int(max_clusters))]
 
-    return [
-        VisualCluster(centroid=tuple(centroid), member_count=count)
-        for count, centroid in kept
-    ]
+    return [VisualCluster(centroid=tuple(centroid), member_count=count) for count, centroid in kept]
 
 
 def best_centroid_similarity(
@@ -241,7 +234,11 @@ def cross_clean_labels(
     pos = [v for v in pos_vecs if v and not all(abs(x) < 1e-12 for x in v)]
     neg = [v for v in neg_vecs if v and not all(abs(x) < 1e-12 for x in v)]
 
-    def _split(group: list[list[float]], own: list[list[float]], opp: list[list[float]]):
+    def _split(
+        group: list[list[float]],
+        own: list[list[float]],
+        opp: list[list[float]],
+    ) -> tuple[list[list[float]], list[list[float]]]:
         kept: list[list[float]] = []
         dropped: list[list[float]] = []
         for i, vec in enumerate(group):

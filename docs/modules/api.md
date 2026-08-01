@@ -8,6 +8,11 @@
 
 `POST /api/config/probe-service` 只在内存副本上应用设置页草稿并真实探测 LLM、默认链、embedding 或网络策略，不写 `config.toml`、不热重载 runtime。它因此不受 guided init 的 HTTP 写端 409 门控；初始化运行时仍可测试，LLM 请求继续经过进程级稳定 total gate。`PUT /api/config` 仍在初始化期间返回 `409 init_running`，避免替换本轮任务正在使用的组件。
 
+视觉预热配置也属于同一事务契约：`PUT /api/config` 对 `keyframe_max_frames (1..12)`、
+`keyframe_fetch_limit (1..200)`、`danmaku_fetch_limit (1..200)` 和
+`danmaku_max_chars (100..2000)` 做范围校验，保存后由 RuntimeContext 透传到推荐引擎；配置文件
+与 API round-trip 保持这些数值。配置字段仍默认关闭视觉 / 弹幕功能，不会改变默认排序。
+
 ## 惊喜推荐消费契约
 
 | 方法与路径 | 状态 | 契约 |

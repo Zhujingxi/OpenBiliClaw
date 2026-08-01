@@ -194,6 +194,13 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     from openbiliclaw.recommendation.curator import PoolCurator
 
     embedding_service = build_embedding_service(config, llm_registry)
+    bilibili_client = BilibiliAPIClient(
+        cookie=resolve_runtime_cookie(
+            data_dir=config.data_path,
+            configured_cookie=config.bilibili.cookie,
+        ),
+        proxy=config.bilibili.proxy or None,
+    )
 
     curator = PoolCurator(database)
     recommendation_engine = RecommendationEngine(
@@ -201,13 +208,14 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         database=database,
         curator=curator,
         embedding_service=embedding_service,
-    )
-    bilibili_client = BilibiliAPIClient(
-        cookie=resolve_runtime_cookie(
-            data_dir=config.data_path,
-            configured_cookie=config.bilibili.cookie,
-        ),
-        proxy=config.bilibili.proxy or None,
+        visual_profile_enabled=config.discovery.visual_profile_enabled,
+        keyframe_enabled=config.discovery.keyframe_enabled,
+        keyframe_max_frames=config.discovery.keyframe_max_frames,
+        keyframe_fetch_limit=config.discovery.keyframe_fetch_limit,
+        danmaku_enabled=config.discovery.danmaku_enabled,
+        danmaku_fetch_limit=config.discovery.danmaku_fetch_limit,
+        danmaku_max_chars=config.discovery.danmaku_max_chars,
+        bilibili_client=bilibili_client,
     )
 
     from openbiliclaw.discovery.engine import DiscoveryConcurrencyController

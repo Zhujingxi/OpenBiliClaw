@@ -233,3 +233,17 @@ async def test_text_only_provider_has_no_image_support() -> None:
     )
     assert service.supports_image_embedding is False
     assert service.image_embedding_active() is False
+
+
+async def test_document_embedding_does_not_collide_on_shared_200_char_prefix() -> None:
+    provider = _FakeEmbedProvider()
+    service = EmbeddingService(provider, model="bge-m3")
+    first = "a" * 200 + "-first-document"
+    second = "a" * 200 + "-second-document"
+
+    await service.embed_document(first)
+    await service.embed_document(second)
+
+    assert len(provider.calls) == 2
+    assert service.lookup_cached_document(first)
+    assert service.lookup_cached_document(second)

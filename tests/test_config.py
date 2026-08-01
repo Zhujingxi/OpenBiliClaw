@@ -2388,6 +2388,10 @@ class TestDiscoveryConfig:
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
         assert config.discovery.multimodal_image_timeout_seconds == 6
+        assert config.discovery.keyframe_max_frames == 4
+        assert config.discovery.keyframe_fetch_limit == 50
+        assert config.discovery.danmaku_fetch_limit == 50
+        assert config.discovery.danmaku_max_chars == 500
 
     def test_discovery_defaults_from_empty_dict(self) -> None:
         config = _build_config({})
@@ -2407,6 +2411,22 @@ class TestDiscoveryConfig:
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
+
+    def test_visual_enrichment_numeric_fields_round_trip(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config()
+        config.discovery.keyframe_max_frames = 9
+        config.discovery.keyframe_fetch_limit = 17
+        config.discovery.danmaku_fetch_limit = 23
+        config.discovery.danmaku_max_chars = 1800
+
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+
+        assert loaded.discovery.keyframe_max_frames == 9
+        assert loaded.discovery.keyframe_fetch_limit == 17
+        assert loaded.discovery.danmaku_fetch_limit == 23
+        assert loaded.discovery.danmaku_max_chars == 1800
 
     def test_top_level_discovery_is_distinct_from_llm_discovery(self) -> None:
         """`[discovery]` (planner knobs) must not collide with `[llm.discovery]`

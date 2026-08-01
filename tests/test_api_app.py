@@ -2101,6 +2101,7 @@ class TestBackendAPI:
                 embedding_service: object = None,
                 task_registry: object = None,
                 xhs_self_info_provider: object = None,
+                **_extras: object,
             ) -> None:
                 self.llm = llm
                 self.database = database
@@ -13929,6 +13930,35 @@ class TestEmbeddingAndCompatProviderE2E:
         assert discovery["multimodal_image_max_px"] == 512
         assert discovery["multimodal_image_quality"] == 80
         assert discovery["multimodal_image_timeout_seconds"] == 10
+
+    def test_put_config_round_trips_visual_enrichment_limits(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={
+                "discovery": {
+                    "keyframe_max_frames": 9,
+                    "keyframe_fetch_limit": 17,
+                    "danmaku_fetch_limit": 23,
+                    "danmaku_max_chars": 1800,
+                }
+            },
+        )
+
+        assert response.status_code == 200
+        assert cfg.discovery.keyframe_max_frames == 9
+        assert cfg.discovery.keyframe_fetch_limit == 17
+        assert cfg.discovery.danmaku_fetch_limit == 23
+        assert cfg.discovery.danmaku_max_chars == 1800
+        discovery = response.json()["config"]["discovery"]
+        assert discovery["keyframe_max_frames"] == 9
+        assert discovery["keyframe_fetch_limit"] == 17
+        assert discovery["danmaku_fetch_limit"] == 23
+        assert discovery["danmaku_max_chars"] == 1800
 
     def test_put_config_normalizes_bad_multimodal_discovery_settings(
         self, monkeypatch, tmp_path

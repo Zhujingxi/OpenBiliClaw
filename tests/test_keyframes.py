@@ -12,11 +12,13 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from PIL import Image
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.discovery.keyframes import (
+    KeyframeFetchResult,
     VideoshotMeta,
     crop_frames_from_sprite,
     parse_videoshot_payload,
@@ -27,6 +29,7 @@ from openbiliclaw.llm.embedding import (
     keyframe_embedding_cache_key,
 )
 from openbiliclaw.recommendation.engine import RecommendationEngine
+from openbiliclaw.runtime.image_cache import CoverFetchError
 from openbiliclaw.storage.database import Database
 
 # ---------------------------------------------------------------------------
@@ -88,6 +91,59 @@ def test_parse_videoshot_rejects_unusable(payload: Any) -> None:
     assert parse_videoshot_payload(payload) is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "body"),
+    [(503, ""), (200, "not-json")],
+)
+async def test_videoshot_http_or_parse_failure_is_retryable(
+    status_code: int,
+    body: str,
+) -> None:
+    import openbiliclaw.discovery.keyframes as kf_mod
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text=body, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await kf_mod._fetch_videoshot_meta_result("BVFAIL", client=client)
+
+    assert result.status == "transient_failure"
+    assert result.definitive is False
+
+
+@pytest.mark.asyncio
+async def test_sprite_fetch_failure_is_retryable() -> None:
+    import openbiliclaw.discovery.keyframes as kf_mod
+
+    meta = VideoshotMeta(
+        image_urls=("https://i0.hdslb.com/bfs/videoshot/1.jpg",),
+        grid_x=1,
+        grid_y=1,
+        tile_width=16,
+        tile_height=9,
+    )
+
+    async def _meta(*_args: object, **_kwargs: object) -> object:
+        return kf_mod._VideoshotMetaResult("success", meta=meta)
+
+    async def _fetch(*_args: object, **_kwargs: object) -> object:
+        raise CoverFetchError(503, "temporarily unavailable")
+
+    original_meta = kf_mod._fetch_videoshot_meta_result
+    original_fetch = kf_mod.get_or_fetch_cover_bytes
+    kf_mod._fetch_videoshot_meta_result = _meta  # type: ignore[assignment]
+    kf_mod.get_or_fetch_cover_bytes = _fetch  # type: ignore[assignment]
+    try:
+        result = await kf_mod.fetch_keyframes("BVSPIREFAIL", max_frames=1)
+    finally:
+        kf_mod._fetch_videoshot_meta_result = original_meta
+        kf_mod.get_or_fetch_cover_bytes = original_fetch
+
+    assert result.status == "transient_failure"
+    assert result.definitive is False
+
+
 # ---------------------------------------------------------------------------
 # Frame sampling
 # ---------------------------------------------------------------------------
@@ -139,7 +195,10 @@ def _sprite_bytes(grid_x: int, grid_y: int, tile_w: int, tile_h: int) -> bytes:
 def test_crop_frames_extracts_requested_tiles() -> None:
     meta = VideoshotMeta(
         image_urls=("https://x/1.jpg",),
-        grid_x=4, grid_y=4, tile_width=32, tile_height=18,
+        grid_x=4,
+        grid_y=4,
+        tile_width=32,
+        tile_height=18,
     )
     frames = crop_frames_from_sprite(_sprite_bytes(4, 4, 32, 18), meta, [0, 5, 15])
     assert len(frames) == 3
@@ -152,7 +211,10 @@ def test_crop_frames_skips_out_of_bounds_tiles() -> None:
     """Real sheets are sometimes short on the final row — skip, don't raise."""
     meta = VideoshotMeta(
         image_urls=("https://x/1.jpg",),
-        grid_x=10, grid_y=10, tile_width=32, tile_height=18,
+        grid_x=10,
+        grid_y=10,
+        tile_width=32,
+        tile_height=18,
     )
     # Sheet only actually holds a 2x2 grid.
     frames = crop_frames_from_sprite(_sprite_bytes(2, 2, 32, 18), meta, [0, 1, 99])
@@ -162,7 +224,10 @@ def test_crop_frames_skips_out_of_bounds_tiles() -> None:
 def test_crop_frames_returns_empty_on_garbage() -> None:
     meta = VideoshotMeta(
         image_urls=("https://x/1.jpg",),
-        grid_x=4, grid_y=4, tile_width=32, tile_height=18,
+        grid_x=4,
+        grid_y=4,
+        tile_width=32,
+        tile_height=18,
     )
     assert crop_frames_from_sprite(b"not-an-image", meta, [0]) == []
     assert crop_frames_from_sprite(b"", meta, [0]) == []
@@ -181,6 +246,9 @@ def test_keyframe_cache_keys_are_distinct_and_stable() -> None:
     assert a0 == keyframe_embedding_cache_key("BV1", 0)  # stable
     assert a0 != image_embedding_cache_key_for_url("BV1")  # no cover collision
     assert a0.startswith("img:")  # same vector space as covers
+    assert keyframe_embedding_cache_key("BV1", 0, "sampling-v1", "model-a") != (
+        keyframe_embedding_cache_key("BV1", 0, "sampling-v1", "model-b")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +385,8 @@ async def test_keyframe_bonus_clear_pos_boosts_clear_neg_suppresses() -> None:
         pos_cand = DiscoveredContent(bvid="BVPOS", title="t", relevance_score=0.8)
         neg_cand = DiscoveredContent(bvid="BVNEG", title="t", relevance_score=0.8)
         bonus = await engine._keyframe_bonus_map([pos_cand, neg_cand])
-        assert bonus.get("BVPOS", 0.0) > 0.0   # leans liked → boost
-        assert bonus.get("BVNEG", 0.0) < 0.0   # leans disliked → suppress
+        assert bonus.get("BVPOS", 0.0) > 0.0  # leans liked → boost
+        assert bonus.get("BVNEG", 0.0) < 0.0  # leans disliked → suppress
         db.close()
 
 
@@ -362,9 +430,15 @@ async def test_prewarm_marks_even_when_no_frames() -> None:
         db = Database(Path(d) / "t.db")
         db.initialize()
         db.cache_content(
-            bvid="BVNONE", title="t", cover_url="", relevance_score=0.8,
-            source="search", pool_expression="e", pool_topic_label="t",
-            topic_group="g", style_key="s",
+            bvid="BVNONE",
+            title="t",
+            cover_url="",
+            relevance_score=0.8,
+            source="search",
+            pool_expression="e",
+            pool_topic_label="t",
+            topic_group="g",
+            style_key="s",
         )
         engine = _engine(db, _KeyframeEmb({}))
 
@@ -398,9 +472,15 @@ async def test_prewarm_does_not_stamp_when_embed_fails_on_real_frames() -> None:
         db = Database(Path(d) / "t.db")
         db.initialize()
         db.cache_content(
-            bvid="BVEMBFAIL", title="t", cover_url="", relevance_score=0.8,
-            source="search", pool_expression="e", pool_topic_label="t",
-            topic_group="g", style_key="s",
+            bvid="BVEMBFAIL",
+            title="t",
+            cover_url="",
+            relevance_score=0.8,
+            source="search",
+            pool_expression="e",
+            pool_topic_label="t",
+            topic_group="g",
+            style_key="s",
         )
         # embed_image returns [] for every frame (simulates backend down /
         # rate-limited / transient failure — embed_image's own contract is to
@@ -431,4 +511,82 @@ async def test_prewarm_does_not_stamp_when_embed_fails_on_real_frames() -> None:
         remaining = db.get_candidates_needing_keyframes(limit=10)
         assert len(remaining) == 1
         assert remaining[0]["bvid"] == "BVEMBFAIL"
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_does_not_stamp_transient_keyframe_fetch_failure() -> None:
+    """An empty transient result is retryable, unlike confirmed no-data."""
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        db.cache_content(
+            bvid="BVFETCHFAIL",
+            title="t",
+            cover_url="",
+            relevance_score=0.8,
+            source="search",
+            pool_expression="e",
+            pool_topic_label="t",
+            topic_group="g",
+            style_key="s",
+        )
+        engine = _engine(db, _KeyframeEmb({}))
+        import openbiliclaw.discovery.keyframes as kf_mod
+
+        async def _transient(*_args: object, **_kwargs: object) -> KeyframeFetchResult:
+            return KeyframeFetchResult("transient_failure", reason="http_503")
+
+        original = kf_mod.fetch_keyframes
+        kf_mod.fetch_keyframes = _transient  # type: ignore[assignment]
+        try:
+            assert await engine.prewarm_pool_keyframes(limit=10) == 1
+        finally:
+            kf_mod.fetch_keyframes = original  # type: ignore[assignment]
+        assert len(db.get_candidates_needing_keyframes(limit=10)) == 1
+        db.close()
+
+
+def test_keyframe_sampling_signature_change_requeues_processed_row() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        db.cache_content(
+            bvid="BVSAMPLE",
+            title="t",
+            cover_url="",
+            relevance_score=0.8,
+            source="search",
+            pool_expression="e",
+            pool_topic_label="t",
+            topic_group="g",
+            style_key="s",
+        )
+        db.mark_keyframes_fetched(
+            "BVSAMPLE",
+            keyframe_count=2,
+            embedding_fingerprint="fp",
+            embedding_dimension=3,
+            sampling_signature="algorithm|max_frames=4",
+        )
+        assert (
+            db.get_candidates_needing_keyframes(
+                limit=10,
+                embedding_fingerprint="fp",
+                embedding_dimension=3,
+                sampling_signature="algorithm|max_frames=4",
+            )
+            == []
+        )
+        assert (
+            len(
+                db.get_candidates_needing_keyframes(
+                    limit=10,
+                    embedding_fingerprint="fp",
+                    embedding_dimension=3,
+                    sampling_signature="algorithm|max_frames=8",
+                )
+            )
+            == 1
+        )
         db.close()

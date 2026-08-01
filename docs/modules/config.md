@@ -834,15 +834,22 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `multimodal_evaluation_enabled` | bool | `false` | 是否在 discovery batch evaluator 中加入候选封面图。默认关闭；开启后仅当当前 evaluation 路由支持图像输入且候选有 `cover_url` 时使用，否则自动退回纯文本评估 |
 | `danmaku_enabled` | bool | `false` | 是否启用**弹幕文本**加成（P2）：B 站候选喂给推荐的语义只有 `title` + `description`，而 description 常是"求三连"之类的无信息文本、`body_text` 在 B 站路径恒为空；弹幕是 B 站独有信号，反映观众实际在讨论什么。抓取走 `comment.bilibili.com/{cid}.xml`（**无需鉴权**，`cid` 直接从已有的 `/x/web-interface/view` 响应读，零额外请求），清洗后嵌入为独立排序信号。**纯文本信号，无需多模态嵌入模型**（与 P1/P3 不同）；仅对 B 站视频有效。默认关闭时加成恒 0，排序逐字节一致 |
 | `danmaku_fetch_limit` | int | `50` | 每轮预热处理的视频数上限。合法范围 `1..200` |
-| `danmaku_max_chars` | int | `500` | 弹幕摘要字数上限。合法范围 `100..2000` |
-| `keyframe_enabled` | bool | `false` | 是否启用**视频关键帧**加成（P3）：封面是 UP 主手选的营销图、常常标题党，不代表视频内容；B 站已为每个视频预生成关键帧雪碧图（进度条悬停预览），一次请求即可取到，**无需下载视频、无需 ffmpeg**。用 P1 建好的口味质心去匹配真实画面而非封面，帧向量取 max-pool。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；仅对 B 站视频有效（实测 30/30 覆盖率，时长 45s–5106s）。默认关闭时加成恒 0，排序与旧版逐字节一致 |
+| `danmaku_max_chars` | int | `500` | 弹幕摘要字数上限。合法范围 `100..2000`；摘要以完整配置长度走稳定 document-embedding/cache 路径，不会静默截成固定 200 字前缀 |
+| `keyframe_enabled` | bool | `false` | 是否启用**视频关键帧**加成（P3）：封面是 UP 主手选的营销图、常常标题党，不代表视频内容；B 站已为每个视频预生成关键帧雪碧图（进度条悬停预览），一次请求即可取到，**无需下载视频、无需 ffmpeg**。关键帧与共享视觉画像共用质心；因此即使只开 `keyframe_enabled`，也会在多模态 embedding 可用时构建质心，但 P1 封面 bonus 仍只由 `visual_profile_enabled` 控制。帧向量取 max-pool。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；仅对 B 站视频有效（实测 30/30 覆盖率，时长 45s–5106s）。默认关闭时加成恒 0，排序与旧版逐字节一致 |
 | `keyframe_max_frames` | int | `4` | 每个视频采样的关键帧数。合法范围 `1..12`，超范围回退默认值。相邻关键帧高度冗余，4 帧已能覆盖正片（采样跨全部雪碧图均匀分布并跳过片头片尾） |
 | `keyframe_fetch_limit` | int | `50` | 每轮预热处理的视频数上限。合法范围 `1..200` |
-| `visual_profile_enabled` | bool | `false` | 是否启用**用户视觉画像**加成（P1）：把点赞/踩过的推荐封面聚成 k 个均值质心，候选封面↔质心同模态余弦经 **margin 评分**映射为**有符号**加成（能分清 like/dislike 的区域 boost/suppress，分不清的 contested 区弃权；聚类前 cross-clean 标签噪声、聚类后 contested 检测），在 `serve()` 排序上与封面↔文本锚点加成并行叠加。**冷启动门控**：per-polarity 不足 8 个封面时不建质心（排序不变）。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；与 `multimodal_evaluation_enabled` 互相独立。默认关闭/无反馈数据时加成恒 0，排序与旧版逐字节一致 |
+| `visual_profile_enabled` | bool | `false` | 是否启用**用户视觉画像**加成（P1）：把点赞/踩过的推荐封面聚成 k 个均值质心，候选封面↔质心同模态余弦经 **margin 评分**映射为**有符号**加成（能分清 like/dislike 的区域 boost/suppress，分不清的 contested 区弃权；聚类前 cross-clean 标签噪声、聚类后 contested 检测），在 `serve()` 排序上与封面↔文本锚点加成并行叠加。质心构建调度与 P1 bonus 开关分离：`visual_profile_enabled` 关闭时仍可为已开启的 P3 构建共享质心。**冷启动门控**：per-polarity 不足 8 个封面时不建质心（排序不变）。质心和反馈更新时间绑定当前 embedding fingerprint / 维度；切换模型会重建。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；与 `multimodal_evaluation_enabled` 互相独立。默认关闭/无反馈数据时加成恒 0，排序与旧版逐字节一致 |
 | `multimodal_batch_size` | int | `8` | 图文评估 batch 上限。合法范围 `1..12`，超范围回退默认值；纯文本评估仍使用调用方原 batch size |
 | `multimodal_image_max_px` | int | `384` | 送入评估器前封面图压缩后的最大边。合法范围 `128..768`，超范围回退默认值 |
 | `multimodal_image_quality` | int | `72` | JPEG 压缩质量。合法范围 `40..90`，超范围回退默认值 |
 | `multimodal_image_timeout_seconds` | int | `6` | 单张封面抓取与压缩超时秒数。合法范围 `1..20`，超范围回退默认值 |
+
+视觉 / 弹幕预热的四个数量字段（`keyframe_max_frames`、`keyframe_fetch_limit`、
+`danmaku_fetch_limit`、`danmaku_max_chars`）由配置文件和 `PUT /api/config` 使用同一组范围
+校验，并在 load → save → load 后保持原值。预热只查询当前 fresh、可服务的候选池；网络、HTTP、
+解析或 embedding 的瞬时失败不写完成状态，确认无数据或成功产生向量后才会推进状态。关键帧状态还
+绑定采样算法签名；视觉质心、关键帧和弹幕 embedding 绑定 provider / model / dimension fingerprint，
+因此换模型或维度会重建 / 重嵌入，不会把旧向量与新向量比较。
 
 默认 `[llm].concurrency=4`、`[discovery].candidate_eval_concurrency=3`，因此有效候选 worker 为 3，并为对话等交互保留一个总槽。高吞吐本地 profile 还可配合 `[scheduler].pool_target_count=600`、`[scheduler].discovery_limit=60`；显式旧值 `[llm].concurrency=3` 会保留为 3，此时后台与有效候选 worker 为 2。该 profile 不改变任何平台 `request_interval_seconds` / `min_interval_minutes`、daily budget、来源 share、raw ceiling 公式或 `admission_min_score`。
 

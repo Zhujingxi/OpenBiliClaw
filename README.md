@@ -635,6 +635,8 @@ background ─ background admission (default 3) ──────┘
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
+│   可选视觉预热：封面 / 画像质心 / 关键帧 + 弹幕 document embedding     │
+│   provenance（provider/model/dim/采样）→ 成功空 / 瞬时失败 → 下轮重试   │
 │   配置恢复草稿（正常/降级）→ 临时探测 / 精确实例 /models（不写盘）│
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
@@ -671,6 +673,18 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新；国内平台保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
+
+### 可选视觉与弹幕预热
+
+开启 `[discovery].keyframe_enabled` 时，只要多模态 embedding 可用，系统也会构建关键帧与 P1
+共用的视觉质心；P1 封面 bonus 仍只由 `visual_profile_enabled` 控制。关键帧按全局采样并把
+采样算法、`keyframe_max_frames`、embedding fingerprint 和维度写入缓存 provenance；换模型或
+采样配置会安全重建。关键帧 / 弹幕预热区分成功空结果和瞬时失败，后者保留下轮重试资格。
+
+`keyframe_fetch_limit`、`danmaku_fetch_limit` 和 `danmaku_max_chars` 同时受配置文件与配置 API
+范围校验；弹幕摘要按完整 `danmaku_max_chars` 做 document embedding，不静默截成固定前缀。
+跨平台视觉 bonus 以 0 为固定点，正负两侧分别按平台极值缩放，0 / 缺失保持 0。完整契约见
+[`docs/modules/recommendation.md`](docs/modules/recommendation.md) 与 [`docs/architecture.md`](docs/architecture.md)。
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
 

@@ -9,6 +9,7 @@
 - **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。
 - **失败可重试且缓存可追溯**：关键帧、弹幕和 embedding 的瞬时失败不再写永久完成戳；成功空结果与失败可区分，质心、关键帧、弹幕状态绑定 embedding fingerprint、维度和采样签名，模型切换会安全重建或重嵌入。
 - **跨平台公平保持零点与符号**：正负 bonus 以 0 为固定点按平台分段归一化，弱正向不会变成负惩罚；关键帧/弹幕预热范围、fetch limit 和完整摘要长度均遵循当前候选池与配置。
+- **配置与离线一致性**：`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_fetch_limit`、`danmaku_max_chars` 由文件和 `PUT /api/config` 共同校验并 round-trip；`scripts/ab_visual_bonus.py` 与生产评分共享 signed suppression 和零点保持归一化。
 
 
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。

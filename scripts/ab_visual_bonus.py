@@ -182,7 +182,9 @@ def _build_key_map(specs: list[CandidateSpec], dim: int) -> dict[str, list[float
     key_map: dict[str, list[float]] = {}
     for spec in specs:
         url = f"https://i0.hdslb.com/bfs/archive/{spec.bvid}.jpg"
-        key_map[image_embedding_cache_key_for_url(url)] = _cover_vec_for_cosine(spec.target_cos, dim)
+        key_map[image_embedding_cache_key_for_url(url)] = _cover_vec_for_cosine(
+            spec.target_cos, dim
+        )
     return key_map
 
 
@@ -209,23 +211,39 @@ def _compute_bonus_map(
     return bonus
 
 
+def _production_bonus_map(
+    contents: list[DiscoveredContent], bonus: dict[str, float]
+) -> dict[str, float]:
+    """Apply the same zero-preserving cross-platform normalization as serve()."""
+    return RecommendationEngine._normalize_bonus_per_platform(contents, bonus)
+
+
 # ---------------------------------------------------------------------------
 # Ranking — reuse the REAL _select_diversified_batch (no MMR, no DB needed).
 # ---------------------------------------------------------------------------
 
 
-def _rank(contents: list[DiscoveredContent], limit: int, bonus: dict[str, float]) -> list[DiscoveredContent]:
+def _rank(
+    contents: list[DiscoveredContent], limit: int, bonus: dict[str, float]
+) -> list[DiscoveredContent]:
+    production_bonus = _production_bonus_map(contents, bonus)
     return RecommendationEngine._select_diversified_batch(
         list(contents),
         limit=limit,
         embeddings=None,  # skip MMR — pure tuple ranking, bonus in the relevance term
-        relevance_bonus=bonus,
+        relevance_bonus=production_bonus,
     )
 
 
-def _rank_raw(contents: list[DiscoveredContent], limit: int, bonus: dict[str, float]) -> list[DiscoveredContent]:
+def _rank_raw(
+    contents: list[DiscoveredContent], limit: int, bonus: dict[str, float]
+) -> list[DiscoveredContent]:
     """Raw sort by _ranking_key only — no topic cap / interleave. Cleanest effect signal."""
-    ranked = sorted(contents, key=lambda item: RecommendationEngine._ranking_key(item, bonus))
+    production_bonus = _production_bonus_map(contents, bonus)
+    ranked = sorted(
+        contents,
+        key=lambda item: RecommendationEngine._ranking_key(item, production_bonus),
+    )
     return ranked[:limit]
 
 
@@ -290,7 +308,11 @@ def _bonus_stats(bonus_map: dict[str, float], specs: list[CandidateSpec]) -> dic
     # Per-bucket mean bonus.
     buckets: list[dict[str, Any]] = []
     for label, lo, hi in SIM_BUCKETS:
-        in_bucket = [s for s in specs if lo <= s.target_cos < hi or (label == "[0.45,0.60]" and s.target_cos >= lo)]
+        in_bucket = [
+            s
+            for s in specs
+            if lo <= s.target_cos < hi or (label == "[0.45,0.60]" and s.target_cos >= lo)
+        ]
         bonused = [bonus_map.get(s.bvid, 0.0) for s in in_bucket]
         buckets.append(
             {
@@ -345,7 +367,9 @@ def _effect_metrics(
         "n_flips": _n_flips(off_full, on_full),
         "ndcg_off": round(_ndcg_at_k(off_full, relevance, k), 4),
         "ndcg_on": round(_ndcg_at_k(on_full, relevance, k), 4),
-        "ndcg_delta": round(_ndcg_at_k(on_full, relevance, k) - _ndcg_at_k(off_full, relevance, k), 4),
+        "ndcg_delta": round(
+            _ndcg_at_k(on_full, relevance, k) - _ndcg_at_k(off_full, relevance, k), 4
+        ),
         "off_topk": off_bvids,
         "on_topk": on_bvids,
     }
@@ -379,7 +403,7 @@ def _run_one(
     return {
         "bonus": bonus,
         "effect": _effect_metrics(specs, contents, bonus, k),
-        "bonus_stats": _bonus_stats(bonus, specs),
+        "bonus_stats": _bonus_stats(_production_bonus_map(contents, bonus), specs),
     }
 
 
@@ -478,7 +502,7 @@ def _build_profile_centroids(
     sorted_specs = sorted(specs, key=lambda s: s.target_cos)
     n = len(sorted_specs)
     # Top 25% cosine = "liked", bottom 25% = "disliked".
-    liked = sorted_specs[max(0, int(n * 0.75)):]
+    liked = sorted_specs[max(0, int(n * 0.75)) :]
     disliked = sorted_specs[: max(0, int(n * 0.25))]
     pos_vecs = [_cover_vec_for_cosine(s.target_cos, dim) for s in liked]
     neg_vecs = [_cover_vec_for_cosine(s.target_cos, dim) for s in disliked]
@@ -496,20 +520,24 @@ def _profile_bonus_map(
 ) -> dict[str, float]:
     """Per-bvid visual-profile bonus using the real engine helper."""
     engine = RecommendationEngine
+    from openbiliclaw.recommendation.visual_profile import VisualCluster, contested_pairs
+
+    contested = contested_pairs(
+        [VisualCluster(tuple(vec), 1) for vec in pos_centroids],
+        [VisualCluster(tuple(vec), 1) for vec in neg_centroids],
+        threshold=engine_mod._VISUAL_PROFILE_CONTESTED,
+    )
     bonus: dict[str, float] = {}
     for content in contents:
-        cover_vec = emb.lookup_cached_image(
-            image_embedding_cache_key_for_url(content.cover_url)
-        )
+        cover_vec = emb.lookup_cached_image(image_embedding_cache_key_for_url(content.cover_url))
         if not cover_vec:
             continue
-        b = engine._visual_profile_bonus_from_vec(cover_vec, pos_centroids, neg_centroids)
-        if b > 0.0:
+        b = engine._visual_profile_bonus_from_vec(
+            cover_vec, pos_centroids, neg_centroids, contested
+        )
+        if abs(b) > 0.0:
             bonus[content.bvid] = b
     return bonus
-
-
-
 
 
 @dataclass
@@ -541,7 +569,7 @@ def run_ab_visual_bonus(config: ABConfig | None = None) -> dict[str, Any]:
     for bvid, b in profile_bonus.items():
         combined[bvid] = combined.get(bvid, 0.0) + b
     profile_effect = _effect_metrics(specs, contents, combined, cfg.k)
-    profile_stats = _bonus_stats(combined, specs)
+    profile_stats = _bonus_stats(_production_bonus_map(contents, combined), specs)
 
     return {
         "config": {
@@ -598,42 +626,56 @@ def _print_report(report: dict[str, Any]) -> None:
         f"relevance∈[{cfg['relevance_range'][0]},{cfg['relevance_range'][1]}]  "
         f"cosine∈[{cfg['cosine_range'][0]},{cfg['cosine_range'][1]}]  seed={cfg['seed']}"
     )
-    print(
-        f"production: BONUS_MAX={pc['bonus_max']}  floor={pc['floor']}  ceil={pc['ceil']}"
-    )
+    print(f"production: BONUS_MAX={pc['bonus_max']}  floor={pc['floor']}  ceil={pc['ceil']}")
     print("-" * 72)
     print("EFFECT (bonus ON vs OFF, production constants):")
-    print(f"  top-{eff['k']} overlap      : {eff['topk_overlap']}/{eff['k']}  "
-          f"(jaccard={eff['topk_jaccard']}, changed={eff['topk_changed']})")
+    print(
+        f"  top-{eff['k']} overlap      : {eff['topk_overlap']}/{eff['k']}  "
+        f"(jaccard={eff['topk_jaccard']}, changed={eff['topk_changed']})"
+    )
     print(f"  Kendall tau (full)  : {eff['kendall_tau_full']}")
     print(f"  adjacent flips      : {eff['n_flips']}")
-    print(f"  nDCG@{eff['k']} (proxy)    : OFF={eff['ndcg_off']}  ON={eff['ndcg_on']}  "
-          f"Δ={eff['ndcg_delta']:+.4f}")
+    print(
+        f"  nDCG@{eff['k']} (proxy)    : OFF={eff['ndcg_off']}  ON={eff['ndcg_on']}  "
+        f"Δ={eff['ndcg_delta']:+.4f}"
+    )
     print("-" * 72)
     print("BONUS DISTRIBUTION:")
-    print(f"  nonzero : {bs['n_nonzero']}/{cfg['n_candidates']} ({bs['frac_nonzero']*100:.0f}%)")
-    print(f"  mean={bs['mean']}  median={bs['median']}  max={bs['max']}  min(nonzero)={bs['min_nonzero']}")
+    print(f"  nonzero : {bs['n_nonzero']}/{cfg['n_candidates']} ({bs['frac_nonzero'] * 100:.0f}%)")
+    print(
+        f"  mean={bs['mean']}  median={bs['median']}  max={bs['max']}  min(nonzero)={bs['min_nonzero']}"
+    )
     print("  per cosine bucket:")
     for b in bs["buckets"]:
-        print(f"    {b['bucket']:14s}  n={b['count']:3d}  mean_bonus={b['mean_bonus']:.5f}  "
-              f"nonzero={b['n_nonzero']}")
+        print(
+            f"    {b['bucket']:14s}  n={b['count']:3d}  mean_bonus={b['mean_bonus']:.5f}  "
+            f"nonzero={b['n_nonzero']}"
+        )
     print("-" * 72)
     print("SENSITIVITY SWEEP:")
-    print(f"  {'variant':24s} {'overlap':>8s} {'jaccard':>8s} {'flips':>6s} {'mean_b':>8s} {'ndcgΔ':>9s}")
+    print(
+        f"  {'variant':24s} {'overlap':>8s} {'jaccard':>8s} {'flips':>6s} {'mean_b':>8s} {'ndcgΔ':>9s}"
+    )
     for s in report["sweep"]:
-        print(f"  {s['label']:24s} {s['topk_overlap']:>8d} {s['topk_jaccard']:>8.3f} "
-              f"{s['n_flips']:>6d} {s['mean_bonus']:>8.5f} {s['ndcg_delta']:>+9.4f}")
+        print(
+            f"  {s['label']:24s} {s['topk_overlap']:>8d} {s['topk_jaccard']:>8.3f} "
+            f"{s['n_flips']:>6d} {s['mean_bonus']:>8.5f} {s['ndcg_delta']:>+9.4f}"
+        )
     print("-" * 72)
     vp = report.get("visual_profile")
     if vp:
         ve = vp["effect"]
         print("P1 VARIANT: +visual_profile (cover bonus + user liked-cover centroids)")
         print(f"  pos_centroids={vp['pos_centroids']}  neg_centroids={vp['neg_centroids']}")
-        print(f"  top-{ve['k']} overlap (vs OFF)  : {ve['topk_overlap']}/{ve['k']}  "
-              f"(jaccard={ve['topk_jaccard']})")
-        print(f"  nDCG@{ve['k']} (proxy)          : ON={ve['ndcg_on']}  "
-              f"Δ vs OFF={vp['ndcg_delta_vs_off']:+.4f}  "
-              f"Δ vs cover-bonus-only={vp['ndcg_delta_vs_cover_bonus']:+.4f}")
+        print(
+            f"  top-{ve['k']} overlap (vs OFF)  : {ve['topk_overlap']}/{ve['k']}  "
+            f"(jaccard={ve['topk_jaccard']})"
+        )
+        print(
+            f"  nDCG@{ve['k']} (proxy)          : ON={ve['ndcg_on']}  "
+            f"Δ vs OFF={vp['ndcg_delta_vs_off']:+.4f}  "
+            f"Δ vs cover-bonus-only={vp['ndcg_delta_vs_cover_bonus']:+.4f}"
+        )
         print(f"  mean bonus (combined)   : {vp['bonus_stats']['mean']}")
     print("-" * 72)
     print(f"CAVEAT: {report['caveat']}")
@@ -642,8 +684,11 @@ def _print_report(report: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="data/ab_visual_bonus_report.json",
-                        help="JSON report path (default: data/ab_visual_bonus_report.json)")
+    parser.add_argument(
+        "--out",
+        default="data/ab_visual_bonus_report.json",
+        help="JSON report path (default: data/ab_visual_bonus_report.json)",
+    )
     parser.add_argument("--n", type=int, default=DEFAULT_N_CANDIDATES, help="candidate pool size")
     parser.add_argument("--k", type=int, default=DEFAULT_K, help="top-K for effect metrics")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="RNG seed")

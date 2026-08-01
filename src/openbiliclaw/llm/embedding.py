@@ -45,8 +45,16 @@ class SupportsEmbeddingService(Protocol):
 
     async def embed(self, text: str) -> list[float]: ...
 
+    async def embed_document(self, text: str) -> list[float]:
+        """Embed full text without the bounded semantic-key contract."""
+        return []
+
     def lookup_cached(self, text: str) -> list[float]:
         """Cache-only lookup; default returns ``[]`` for protocol compatibility."""
+        return []
+
+    def lookup_cached_document(self, text: str) -> list[float]:
+        """Cache-only lookup for an untruncated document embedding."""
         return []
 
     def image_embedding_active(self) -> bool:
@@ -88,11 +96,17 @@ def image_embedding_cache_key_for_url(cover_url: str) -> str:
     return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
 
 
-def keyframe_embedding_cache_key(bvid: str, frame_index: int) -> str:
+def keyframe_embedding_cache_key(
+    bvid: str,
+    frame_index: int,
+    sampling_signature: str = "global-even-midpoint-v1|max_frames=4|edge_skip=0.1",
+    embedding_fingerprint: str = "",
+) -> str:
     """Stable L1/L2 key for one sampled video keyframe.
 
-    Keyed by ``(bvid, frame_index)`` rather than frame bytes so the prewarm
-    writer and the ranking reader agree without re-downloading and re-cropping
+    Keyed by ``(embedding_fingerprint, sampling_signature, bvid, frame_index)``
+    rather than frame bytes so the prewarm writer and ranking reader agree
+    without re-downloading and re-cropping
     the sprite sheet just to hash the pixels — the same reason
     :func:`image_embedding_cache_key_for_url` is URL-keyed.
 
@@ -101,7 +115,9 @@ def keyframe_embedding_cache_key(bvid: str, frame_index: int) -> str:
     colliding with a cover key.
     """
     normalized = (bvid or "").strip()
-    payload = f"kf|{normalized}|{max(0, int(frame_index))}"
+    signature = (sampling_signature or "").strip() or "legacy"
+    fingerprint = (embedding_fingerprint or "").strip() or "legacy"
+    payload = f"kf|{fingerprint}|{signature}|{normalized}|{max(0, int(frame_index))}"
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
     return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
 
@@ -253,6 +269,7 @@ class EmbeddingService:
         self._provider = provider
         self._model = model
         self._cache_model = cache_model or model
+        self._embedding_dimension = 0
         # OrderedDict + move_to_end on hit gives us proper LRU instead of
         # FIFO. With a 500-key cache and bursty access patterns (delight
         # scoring iterates the same like_texts repeatedly), FIFO would
@@ -274,6 +291,28 @@ class EmbeddingService:
         self._provider_semaphore = asyncio.Semaphore(max_concurrent_provider_calls)
         self.multimodal_enabled = bool(multimodal_enabled)
         self.supports_image_embedding = self._detect_image_embedding_support()
+
+    @property
+    def embedding_model(self) -> str:
+        """Configured provider model used for both text and image vectors."""
+        return self._model
+
+    @property
+    def embedding_provider(self) -> str:
+        """Stable provider implementation identifier for provenance records."""
+        provider_type = type(self._provider)
+        return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+    @property
+    def embedding_fingerprint(self) -> str:
+        """Stable provider/model fingerprint, excluding runtime vector size."""
+        payload = f"{self.embedding_provider}|{self._model}|{self._cache_model}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    @property
+    def embedding_dimension(self) -> int:
+        """Observed vector dimension, or zero before the first successful call."""
+        return self._embedding_dimension
 
     def image_embedding_active(self) -> bool:
         """True when config opts in and the provider/model can embed images."""
@@ -298,11 +337,15 @@ class EmbeddingService:
         cached = self._l1_cache.get(key)
         if cached is not None:
             self._l1_cache.move_to_end(key)
+            if cached:
+                self._embedding_dimension = len(cached)
             return cached
         if self._l2_cache is not None:
             persisted = self._l2_cache.get(key, model=self._cache_model)
             if persisted is not None:
                 self._l1_cache[key] = persisted
+                if persisted:
+                    self._embedding_dimension = len(persisted)
                 return persisted
         return []
 
@@ -310,6 +353,7 @@ class EmbeddingService:
         if len(self._l1_cache) >= self._cache_size and key not in self._l1_cache:
             self._l1_cache.popitem(last=False)
         self._l1_cache[key] = vector
+        self._embedding_dimension = len(vector)
         if self._l2_cache is not None:
             try:
                 self._l2_cache.put(key, vector, model=self._cache_model)
@@ -373,6 +417,45 @@ class EmbeddingService:
             )
             return []
 
+        self._store_vector(key, vector)
+        return vector
+
+    def lookup_cached_document(self, text: str) -> list[float]:
+        """Look up a full document key without the normal 200-char cap.
+
+        Recommendation/MMR text intentionally uses a bounded key.  Danmaku
+        summaries are a separate document contract: silently reducing them to
+        the same prefix would make distinct long summaries collide.
+        """
+        key = text.strip().lower()
+        return self._lookup_cache_key(key) if key else []
+
+    async def embed_document(self, text: str) -> list[float]:
+        """Embed and cache the complete normalized document text.
+
+        This mirrors :meth:`embed` but deliberately keeps the full summary in
+        both the provider request and cache key.  Empty provider results are
+        never cached, so a transient failure remains retryable.
+        """
+        key = text.strip().lower()
+        if not key:
+            return []
+        cached = self.lookup_cached_document(text)
+        if cached:
+            return cached
+        async with self._provider_semaphore:
+            try:
+                vector = await self._provider.embed(key, model=self._model)
+            except Exception:
+                logger.warning("Document embedding failed for: %s", key[:80], exc_info=True)
+                return []
+        if not vector:
+            logger.warning(
+                "Embedding service got empty document vector for key=%r — "
+                "skipping cache write so the next call retries.",
+                key[:80],
+            )
+            return []
         self._store_vector(key, vector)
         return vector
 

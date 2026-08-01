@@ -7,6 +7,7 @@ Covers: clustering (mean centroids, multi-peak, noise pruning), the bonus map
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import tempfile
@@ -17,14 +18,15 @@ import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+from openbiliclaw.recommendation import engine as engine_mod
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.recommendation.visual_profile import (
+    VisualCluster,
     best_centroid_similarity,
     build_centroids,
     contested_pairs,
     cross_clean_labels,
 )
-from openbiliclaw.recommendation.visual_profile import VisualCluster
 from openbiliclaw.storage.database import Database
 
 # Reuse the A/B harness vector helpers (exact-cosine cover vectors).
@@ -221,6 +223,7 @@ def _engine(db: Database, emb: _ProfileEmb) -> RecommendationEngine:
 class _DummyLLM:
     async def complete_structured_task(self, **kwargs: object) -> Any:
         from openbiliclaw.llm.base import LLMResponse
+
         return LLMResponse(content="{}", provider="test", model="dummy", usage={})
 
 
@@ -243,6 +246,7 @@ async def test_bonus_map_positive_nudge_for_liked_style() -> None:
         # Manually build centroids from the liked cover vec (rebuild would
         # cold-fetch; tested separately). Inject via the DB so the cache loads.
         from openbiliclaw.recommendation.visual_profile import build_centroids
+
         clusters = build_centroids([_cover_vec_for_cosine(0.95, dim)], min_members=1)
         db.replace_user_visual_clusters(
             [{"polarity": "pos", "centroid": list(clusters[0].centroid), "member_count": 1}]
@@ -280,12 +284,15 @@ async def test_bonus_map_contested_pair_grays_out() -> None:
         emb = _ProfileEmb(key_map)
         engine = _engine(db, emb)
         from openbiliclaw.recommendation.visual_profile import build_centroids
+
         pos_c = build_centroids([_cover_vec_for_cosine(0.95, dim)], min_members=1)[0]
         neg_c = build_centroids([_cover_vec_for_cosine(0.95, dim)], min_members=1)[0]
-        db.replace_user_visual_clusters([
-            {"polarity": "pos", "centroid": list(pos_c.centroid), "member_count": 1},
-            {"polarity": "neg", "centroid": list(neg_c.centroid), "member_count": 1},
-        ])
+        db.replace_user_visual_clusters(
+            [
+                {"polarity": "pos", "centroid": list(pos_c.centroid), "member_count": 1},
+                {"polarity": "neg", "centroid": list(neg_c.centroid), "member_count": 1},
+            ]
+        )
         engine._visual_profile_cache = None
         cand = DiscoveredContent(bvid="BVCAND", cover_url=cand_url, relevance_score=0.80)
         bonus = await engine._visual_profile_bonus_map([cand])
@@ -320,18 +327,21 @@ async def test_bonus_map_clear_pos_boosts_clear_neg_suppresses() -> None:
         emb = _ProfileEmb(key_map)
         engine = _engine(db, emb)
         from openbiliclaw.recommendation.visual_profile import build_centroids
+
         pos_c = build_centroids([_cover_vec_for_cosine(0.95, dim)], min_members=1)[0]
         neg_c = build_centroids([_cover_vec_for_cosine(0.0, dim)], min_members=1)[0]
-        db.replace_user_visual_clusters([
-            {"polarity": "pos", "centroid": list(pos_c.centroid), "member_count": 1},
-            {"polarity": "neg", "centroid": list(neg_c.centroid), "member_count": 1},
-        ])
+        db.replace_user_visual_clusters(
+            [
+                {"polarity": "pos", "centroid": list(pos_c.centroid), "member_count": 1},
+                {"polarity": "neg", "centroid": list(neg_c.centroid), "member_count": 1},
+            ]
+        )
         engine._visual_profile_cache = None
         pos_cand = DiscoveredContent(bvid="BVPOS", cover_url=pos_cand_url, relevance_score=0.80)
         neg_cand = DiscoveredContent(bvid="BVNEG", cover_url=neg_cand_url, relevance_score=0.80)
         bonus = await engine._visual_profile_bonus_map([pos_cand, neg_cand])
-        assert bonus.get("BVPOS", 0.0) > 0.0   # clearly leans liked → boost
-        assert bonus.get("BVNEG", 0.0) < 0.0   # clearly leans disliked → suppress
+        assert bonus.get("BVPOS", 0.0) > 0.0  # clearly leans liked → boost
+        assert bonus.get("BVNEG", 0.0) < 0.0  # clearly leans disliked → suppress
         db.close()
 
 
@@ -346,7 +356,9 @@ async def test_bonus_map_empty_when_feature_off() -> None:
         db.initialize()
         emb = _ProfileEmb(key_map, active=True)
         engine = RecommendationEngine(
-            llm=_DummyLLM(), database=db, embedding_service=emb,  # type: ignore[arg-type]
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
             visual_profile_enabled=False,
         )
         cand = DiscoveredContent(bvid="BVX", cover_url=url, relevance_score=0.80)
@@ -500,9 +512,7 @@ async def test_rebuild_dispatch_uses_registry_track() -> None:
 
     dim = 8
     url = "https://i0.hdslb.com/bfs/archive/x.jpg"
-    key_map = {
-        _mod.image_embedding_cache_key_for_url(url): _cover_vec_for_cosine(0.95, dim)
-    }
+    key_map = {_mod.image_embedding_cache_key_for_url(url): _cover_vec_for_cosine(0.95, dim)}
     with tempfile.TemporaryDirectory() as d:
         db = Database(Path(d) / "t.db")
         db.initialize()
@@ -516,4 +526,154 @@ async def test_rebuild_dispatch_uses_registry_track() -> None:
         engine.task_registry = _SpyRegistry()  # type: ignore[assignment]
         engine._maybe_rebuild_visual_profile()
         assert tracked == ["rebuild_visual_profile_detached"]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_delight_backlog_still_dispatches_profile_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile freshness is independent from the delight work queue."""
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        engine = _engine(db, _ProfileEmb({}))
+        monkeypatch.setattr(
+            db,
+            "get_pool_candidates_needing_delight_score",
+            lambda **_kwargs: [],
+        )
+        dispatched: list[bool] = []
+        monkeypatch.setattr(
+            engine,
+            "_maybe_rebuild_visual_profile",
+            lambda: dispatched.append(True),
+        )
+
+        assert await engine.precompute_delight_scores(profile=object(), limit=10) == 0
+        assert dispatched == [True]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_profile_dispatches_coalesce_in_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two feedback-triggered calls share one in-flight background rebuild."""
+    from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        url = "https://i0.hdslb.com/bfs/archive/feedback.jpg"
+        _seed_feedback(db, "BVFEEDBACK", url, "like")
+        registry = BackgroundTaskRegistry()
+        engine = _engine(db, _ProfileEmb({}))
+        engine.task_registry = registry
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def _rebuild() -> int:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return 0
+
+        monkeypatch.setattr(engine, "rebuild_visual_profile", _rebuild)
+        engine._maybe_rebuild_visual_profile()
+        engine._maybe_rebuild_visual_profile()
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert calls == 1
+        release.set()
+        await asyncio.sleep(0)
+        await registry.cancel_all()
+        db.close()
+
+
+def test_platform_bonus_normalization_preserves_zero_and_sign() -> None:
+    """Positive and negative sides scale independently around a fixed zero."""
+    candidates = [
+        DiscoveredContent(bvid="BP", source_platform="bilibili"),
+        DiscoveredContent(bvid="BN", source_platform="bilibili"),
+        DiscoveredContent(bvid="BZ", source_platform="bilibili"),
+        DiscoveredContent(bvid="XP", source_platform="xiaohongshu"),
+        DiscoveredContent(bvid="XZ", source_platform="xiaohongshu"),
+    ]
+    normalized = RecommendationEngine._normalize_bonus_per_platform(
+        candidates,
+        {"BP": 0.01, "BN": -0.08, "BZ": 0.0, "XP": 0.2},
+    )
+    assert normalized["BP"] > 0.0
+    assert normalized["BN"] < 0.0
+    assert normalized["BZ"] == 0.0
+    assert normalized["XP"] > 0.0
+    assert normalized["XZ"] == 0.0
+
+    positive_only = RecommendationEngine._normalize_bonus_per_platform(
+        [
+            DiscoveredContent(bvid="PO1", source_platform="bilibili"),
+            DiscoveredContent(bvid="PO2", source_platform="bilibili"),
+            DiscoveredContent(bvid="PO0", source_platform="bilibili"),
+        ],
+        {"PO1": 0.01, "PO2": 0.02, "PO0": 0.0},
+    )
+    assert 0.0 < positive_only["PO1"] < positive_only["PO2"]
+    assert positive_only["PO2"] == pytest.approx(engine_mod._COMBINED_BONUS_CAP)
+    assert positive_only["PO0"] == 0.0
+
+    negative_only = RecommendationEngine._normalize_bonus_per_platform(
+        [
+            DiscoveredContent(bvid="NO1", source_platform="bilibili"),
+            DiscoveredContent(bvid="NO2", source_platform="bilibili"),
+            DiscoveredContent(bvid="NO0", source_platform="bilibili"),
+        ],
+        {"NO1": -0.01, "NO2": -0.02, "NO0": 0.0},
+    )
+    assert negative_only["NO1"] < 0.0
+    assert negative_only["NO2"] < negative_only["NO1"]
+    assert negative_only["NO2"] == pytest.approx(-engine_mod._COMBINED_BONUS_CAP)
+    assert negative_only["NO0"] == 0.0
+
+    all_zero = RecommendationEngine._normalize_bonus_per_platform(
+        [DiscoveredContent(bvid="AZ", source_platform="bangumi")],
+        {"AZ": 0.0},
+    )
+    assert all_zero == {"AZ": 0.0}
+
+    single_positive = RecommendationEngine._normalize_bonus_per_platform(
+        [DiscoveredContent(bvid="ONE", source_platform="bangumi")],
+        {"ONE": 0.001},
+    )
+    single_negative = RecommendationEngine._normalize_bonus_per_platform(
+        [DiscoveredContent(bvid="NEG", source_platform="bangumi")],
+        {"NEG": -0.001},
+    )
+    assert single_positive["ONE"] == pytest.approx(engine_mod._COMBINED_BONUS_CAP)
+    assert single_negative["NEG"] == pytest.approx(-engine_mod._COMBINED_BONUS_CAP)
+
+
+@pytest.mark.asyncio
+async def test_keyframe_only_flag_builds_shared_visual_profile() -> None:
+    """P3 may depend on centroids even when the P1 cover bonus is disabled."""
+    dim = 8
+    urls = [f"https://i0.hdslb.com/bfs/archive/only-kf-{i}.jpg" for i in range(8)]
+    key_map = {
+        image_embedding_cache_key_for_url(url): _cover_vec_for_cosine(0.95, dim) for url in urls
+    }
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        for i, url in enumerate(urls):
+            _seed_feedback(db, f"BVKF{i}", url, "like")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_ProfileEmb(key_map),  # type: ignore[arg-type]
+            visual_profile_enabled=False,
+            keyframe_enabled=True,
+        )
+        assert await engine.rebuild_visual_profile() >= 1
+        assert db.get_user_visual_clusters()
         db.close()

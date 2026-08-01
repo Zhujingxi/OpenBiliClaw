@@ -2415,6 +2415,52 @@ async def test_prewarm_pool_mmr_embeddings_signals_distinguish_states() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prewarm_uses_configured_keyframe_and_danmaku_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Embedding:
+        similarity_threshold = 0.82
+
+        async def embed(self, _text: str) -> list[float]:
+            return [0.1, 0.2, 0.3]
+
+        def lookup_cached(self, _text: str) -> list[float] | None:
+            return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "limits.db")
+        db.initialize()
+        _seed_visible(db, "BVLIMIT", title="测试视频", up_name="UP", source="search")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_Embedding(),  # type: ignore[arg-type]
+            keyframe_enabled=True,
+            keyframe_fetch_limit=7,
+            danmaku_enabled=True,
+            danmaku_fetch_limit=9,
+            bilibili_client=object(),
+        )
+        monkeypatch.setattr(engine, "_keyframe_active", lambda: True)
+        monkeypatch.setattr(engine, "_danmaku_active", lambda: True)
+        seen: dict[str, int] = {}
+
+        async def _keyframes(*, limit: int) -> int:
+            seen["keyframes"] = limit
+            return 0
+
+        async def _danmaku(*, limit: int) -> int:
+            seen["danmaku"] = limit
+            return 0
+
+        monkeypatch.setattr(engine, "prewarm_pool_keyframes", _keyframes)
+        monkeypatch.setattr(engine, "prewarm_pool_danmaku", _danmaku)
+        assert await engine.prewarm_pool_mmr_embeddings() > 0
+        assert seen == {"keyframes": 7, "danmaku": 9}
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_classify_pool_backlog_accepts_jsonl_output(caplog: pytest.LogCaptureFixture) -> None:
     class _JsonlClassifyLLM:
         async def complete_structured_task(

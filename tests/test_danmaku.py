@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+import httpx
 import pytest
 
 from openbiliclaw.discovery.danmaku import collapse_repeats, condense_danmaku
@@ -161,6 +162,33 @@ async def test_get_danmaku_texts_rejects_bad_cid() -> None:
         await client.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "body"),
+    [(503, ""), (200, "<broken")],
+)
+async def test_danmaku_http_or_parse_failure_is_retryable(
+    status_code: int,
+    body: str,
+) -> None:
+    """The source client must expose transport/parser failures explicitly."""
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text=body, request=request)
+
+    client = BilibiliAPIClient(min_request_interval=0)
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    try:
+        result = await client.get_danmaku_texts_result(123)
+    finally:
+        await client.close()
+
+    assert result.status == "transient_failure"
+    assert result.definitive is False
+
+
 # ---------------------------------------------------------------------------
 # Storage + bonus
 # ---------------------------------------------------------------------------
@@ -172,6 +200,8 @@ class _TextEmb:
     multimodal_enabled = False
     supports_image_embedding = False
     similarity_threshold = 0.82
+    embedding_fingerprint = "text-test-v1"
+    embedding_dimension = 3
 
     def __init__(self) -> None:
         self.store: dict[str, list[float]] = {}
@@ -186,6 +216,14 @@ class _TextEmb:
 
     def lookup_cached(self, text: str) -> list[float]:
         return list(self.store.get(text.strip().lower()[:200], []))
+
+    async def embed_document(self, text: str) -> list[float]:
+        vec = self._vec(text)
+        self.store[text.strip().lower()] = vec
+        return vec
+
+    def lookup_cached_document(self, text: str) -> list[float]:
+        return list(self.store.get(text.strip().lower(), []))
 
     def image_embedding_active(self) -> bool:
         return False
@@ -356,4 +394,138 @@ async def test_danmaku_prewarm_stamps_and_embeds() -> None:
         assert "电池寿命衰减曲线的问题讨论" in stored.get("BV1", "")
         assert "难说" not in stored.get("BV1", "")  # meme filtered
         assert db.get_candidates_needing_danmaku(limit=10) == []  # idempotent
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_danmaku_transient_fetch_failure_remains_retryable() -> None:
+    from openbiliclaw.bilibili.api import DanmakuFetchResult
+
+    class _Info:
+        cid = 123
+
+    class _Client:
+        async def get_video_info(self, _bvid: str) -> _Info:
+            return _Info()
+
+        async def get_danmaku_texts_result(
+            self, _cid: int, **_kwargs: object
+        ) -> DanmakuFetchResult:
+            return DanmakuFetchResult("transient_failure", reason="http_503")
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed(db, "BVDMFAIL")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextEmb(),  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=_Client(),
+        )
+        assert await engine.prewarm_pool_danmaku(limit=10) == 1
+        assert len(db.get_candidates_needing_danmaku(limit=10)) == 1
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_danmaku_empty_embedding_does_not_stamp_source_success() -> None:
+    from openbiliclaw.bilibili.api import DanmakuFetchResult
+
+    class _Info:
+        cid = 123
+
+    class _Client:
+        async def get_video_info(self, _bvid: str) -> _Info:
+            return _Info()
+
+        async def get_danmaku_texts_result(
+            self, _cid: int, **_kwargs: object
+        ) -> DanmakuFetchResult:
+            return DanmakuFetchResult("success", texts=["这是一条足够长的主题讨论弹幕"])
+
+    class _Empty(_TextEmb):
+        async def embed_document(self, _text: str) -> list[float]:
+            return []
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed(db, "BVEMPTYEMB")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_Empty(),  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=_Client(),
+        )
+        assert await engine.prewarm_pool_danmaku(limit=10) == 1
+        assert len(db.get_candidates_needing_danmaku(limit=10)) == 1
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_empty_danmaku_result_is_persisted_as_no_data() -> None:
+    from openbiliclaw.bilibili.api import DanmakuFetchResult
+
+    class _Info:
+        cid = 123
+
+    class _Client:
+        async def get_video_info(self, _bvid: str) -> _Info:
+            return _Info()
+
+        async def get_danmaku_texts_result(
+            self, _cid: int, **_kwargs: object
+        ) -> DanmakuFetchResult:
+            return DanmakuFetchResult("success", texts=[])
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed(db, "BVNODATA")
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextEmb(),  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=_Client(),
+        )
+        assert await engine.prewarm_pool_danmaku(limit=10) == 1
+        assert db.get_candidates_needing_danmaku(limit=10) == []
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_danmaku_summary_reembeds_after_model_switch_without_fetch() -> None:
+    class _Client:
+        async def get_video_info(self, _bvid: str) -> object:
+            raise AssertionError("existing summary must not refetch source data")
+
+    emb = _TextEmb()
+    with tempfile.TemporaryDirectory() as d:
+        db = Database(Path(d) / "t.db")
+        db.initialize()
+        _seed(db, "BVREEMBED")
+        db.update_danmaku_text(
+            "BVREEMBED",
+            danmaku_text="这是一条已经保存的完整弹幕摘要",
+            embedding_fingerprint="old-model",
+            embedding_dimension=3,
+        )
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+            danmaku_enabled=True,
+            bilibili_client=_Client(),
+        )
+        assert await engine.prewarm_pool_danmaku(limit=10) == 1
+        assert db.get_candidates_needing_danmaku(limit=10) == []
+        row = db.conn.execute(
+            "SELECT danmaku_embedding_fingerprint FROM content_cache WHERE bvid = ?",
+            ("BVREEMBED",),
+        ).fetchone()
+        assert row[0] == emb.embedding_fingerprint
         db.close()

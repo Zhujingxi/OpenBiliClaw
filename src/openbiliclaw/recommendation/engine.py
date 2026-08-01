@@ -226,13 +226,10 @@ _DANMAKU_SIM_CEIL = 0.65  # text↔text cosine at/above → full bonus
 # platform's combined_bonus to [0, this], so a platform missing signals
 # (bangumi/xhs) still reaches the same height as Bilibili at its top.
 # Visual signals are now SIGNED (margin scoring: boost +, suppress -), so the
-# cap is the sum of the boost caps (the positive ceiling); signed normalization
-# maps each platform's [g_min, g_max] -> [-cap, +cap].
+# cap is the sum of the positive boost caps; normalization scales positive and
+# negative sides independently around the semantic zero point.
 _COMBINED_BONUS_CAP = (
-    _VISUAL_COVER_BONUS_MAX
-    + _VISUAL_PROFILE_BOOST_MAX
-    + _KEYFRAME_BOOST_MAX
-    + _DANMAKU_BONUS_MAX
+    _VISUAL_COVER_BONUS_MAX + _VISUAL_PROFILE_BOOST_MAX + _KEYFRAME_BOOST_MAX + _DANMAKU_BONUS_MAX
 )
 
 
@@ -468,7 +465,9 @@ class RecommendationEngine:
         visual_profile_enabled: bool = False,
         keyframe_enabled: bool = False,
         keyframe_max_frames: int = _KEYFRAME_DEFAULT_MAX_FRAMES,
+        keyframe_fetch_limit: int = 50,
         danmaku_enabled: bool = False,
+        danmaku_fetch_limit: int = 50,
         danmaku_max_chars: int = 500,
         bilibili_client: Any | None = None,
     ) -> None:
@@ -479,7 +478,9 @@ class RecommendationEngine:
         self._visual_profile_enabled = bool(visual_profile_enabled)
         self._keyframe_enabled = bool(keyframe_enabled)
         self._keyframe_max_frames = max(1, min(12, int(keyframe_max_frames)))
+        self._keyframe_fetch_limit = max(1, min(200, int(keyframe_fetch_limit)))
         self._danmaku_enabled = bool(danmaku_enabled)
+        self._danmaku_fetch_limit = max(1, min(200, int(danmaku_fetch_limit)))
         self._danmaku_max_chars = max(100, min(2000, int(danmaku_max_chars)))
         # Optional Bilibili client for the danmaku prewarm. None = the danmaku
         # prewarm no-ops (the bonus path still works off already-stored text).
@@ -490,6 +491,8 @@ class RecommendationEngine:
         # None = "not loaded yet / disabled"; an empty list = loaded but no
         # clusters (too little feedback). See _visual_profile_bonus_map.
         self._visual_profile_cache: list[dict[str, Any]] | None = None
+        self._visual_profile_rebuild_lock = asyncio.Lock()
+        self._visual_profile_rebuild_inflight = False
         self._xhs_self_info_provider = xhs_self_info_provider
         self._pool_inventory_commit_callback = pool_inventory_commit_callback
         self._copy_pending_callback: Callable[[str], None] | None = None
@@ -883,7 +886,7 @@ class RecommendationEngine:
                 combined_bonus[bvid] = combined_bonus.get(bvid, 0.0) + bonus
 
         # Cross-platform fairness: normalize the stacked bonus within each
-        # platform's own pool to [0, _COMBINED_BONUS_CAP]. Without this, a
+        # platform's own pool around semantic zero. Without this, a
         # platform that lacks a signal (bangumi/xhs have no danmaku or
         # keyframes) is structurally shorter than Bilibili on combined_bonus
         # and gets squeezed out of the top — observed: enabling P2 dropped
@@ -1396,7 +1399,7 @@ class RecommendationEngine:
         # MMR return value above. No-op when the flag or multimodal is off.
         if self._keyframe_active():
             try:
-                await self.prewarm_pool_keyframes()
+                await self.prewarm_pool_keyframes(limit=self._keyframe_fetch_limit)
             except Exception:
                 logger.debug("Pool keyframe prewarm raised (ignored)", exc_info=True)
         # P2: fetch + condense + embed danmaku for pool rows that lack them.
@@ -1404,7 +1407,7 @@ class RecommendationEngine:
         # client was injected.
         if self._danmaku_active():
             try:
-                await self.prewarm_pool_danmaku()
+                await self.prewarm_pool_danmaku(limit=self._danmaku_fetch_limit)
             except Exception:
                 logger.debug("Pool danmaku prewarm raised (ignored)", exc_info=True)
         return warmed
@@ -1995,6 +1998,15 @@ class RecommendationEngine:
             xhs_self_nickname=self._xhs_self_nickname(),
         )
         if not rows:
+            # Visual-profile rebuild scheduling is driven by feedback freshness,
+            # not by whether the delight backlog happens to contain rows.  A
+            # feedback event can arrive while all candidates already have
+            # delight scores, and P3 still depends on the shared P1 centroids.
+            if self._visual_profile_rebuild_active():
+                try:
+                    self._maybe_rebuild_visual_profile()
+                except Exception:
+                    logger.debug("visual profile rebuild dispatch failed", exc_info=True)
             return 0
 
         candidates = self._rows_to_discovered(rows)
@@ -2064,7 +2076,7 @@ class RecommendationEngine:
         # background tick. Throttled — only when feedback is newer than the
         # last centroid rebuild — so an idle feedback state doesn't re-embed
         # covers every cycle. Best-effort; never raises into the caller.
-        if self._visual_profile_active():
+        if self._visual_profile_rebuild_active():
             try:
                 self._maybe_rebuild_visual_profile()
             except Exception:
@@ -2081,6 +2093,8 @@ class RecommendationEngine:
         when present, else a bare create_task — same pattern as the delight
         detached tasks.
         """
+        if self._visual_profile_rebuild_inflight:
+            return
         try:
             latest_feedback = self._database.latest_feedback_at()
         except Exception:
@@ -2088,25 +2102,49 @@ class RecommendationEngine:
             return
         if not latest_feedback:
             return
+
+        current_fingerprint = self._embedding_fingerprint()
+        current_dimension = self._embedding_dimension()
+        state_reader = getattr(self._database, "get_user_visual_profile_state", None)
         try:
-            existing = self._database.get_user_visual_clusters()
+            state = state_reader() if callable(state_reader) else {}
         except Exception:
-            logger.debug("get_user_visual_clusters query failed", exc_info=True)
+            logger.warning("visual profile state lookup failed", exc_info=True)
+            state = {}
+        latest_rebuild = str(state.get("updated_at") or "")
+        last_feedback = str(state.get("feedback_at") or "")
+        stored_dimension = max(0, int(state.get("embedding_dimension") or 0))
+        stale_namespace = bool(
+            current_fingerprint
+            and (
+                str(state.get("embedding_fingerprint") or "") != current_fingerprint
+                or (stored_dimension > 0 and stored_dimension != current_dimension)
+            )
+        )
+        if not stale_namespace and last_feedback and latest_feedback <= last_feedback:
             return
-        if existing:
+        if not stale_namespace and not last_feedback:
+            try:
+                existing = self._database.get_user_visual_clusters()
+            except Exception:
+                logger.debug("get_user_visual_clusters query failed", exc_info=True)
+                return
             latest_rebuild = max(
                 (str(r.get("updated_at") or "") for r in existing),
-                default="",
+                default=latest_rebuild,
             )
             if latest_rebuild and latest_feedback <= latest_rebuild:
-                return  # feedback not newer than the last rebuild
+                return
 
         async def _run() -> None:
             try:
                 await self.rebuild_visual_profile()
             except Exception:
-                logger.debug("rebuild_visual_profile failed", exc_info=True)
+                logger.warning("rebuild_visual_profile failed", exc_info=True)
+            finally:
+                self._visual_profile_rebuild_inflight = False
 
+        self._visual_profile_rebuild_inflight = True
         # BackgroundTaskRegistry's method is ``track`` (runtime/task_registry.py),
         # not ``create_task``. Probing for the wrong name silently fell through
         # to a bare create_task, leaving the rebuild untracked and surviving
@@ -2114,13 +2152,26 @@ class RecommendationEngine:
         # cancel detached work before swapping runtimes.
         registry = self.task_registry
         if registry is not None and hasattr(registry, "track"):
+            coro = _run()
             try:
-                registry.track("rebuild_visual_profile_detached", _run())
+                task = registry.track("rebuild_visual_profile_detached", coro)
+                if isinstance(task, asyncio.Task):
+                    task.add_done_callback(
+                        lambda _task: setattr(self, "_visual_profile_rebuild_inflight", False)
+                    )
+                else:
+                    # Small test doubles may close the coroutine without
+                    # running it; don't leave the coalescing flag stuck.
+                    self._visual_profile_rebuild_inflight = False
                 return
             except Exception:
+                coro.close()
                 logger.debug("task_registry dispatch failed; falling back", exc_info=True)
         loop = asyncio.get_event_loop()
-        loop.create_task(_run())
+        task = loop.create_task(_run())
+        task.add_done_callback(
+            lambda _task: setattr(self, "_visual_profile_rebuild_inflight", False)
+        )
 
     async def _visual_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
         """Embed the profile's top interest names once for cover alignment.
@@ -2309,6 +2360,42 @@ class RecommendationEngine:
         """True only when the flag is on AND image embedding is active."""
         return self._visual_profile_enabled and self._cover_embedding_active()
 
+    def _visual_profile_rebuild_active(self) -> bool:
+        """Whether P1 or P3 needs the shared visual centroid dependency."""
+        return (
+            self._visual_profile_enabled or self._keyframe_enabled
+        ) and self._cover_embedding_active()
+
+    def _embedding_fingerprint(self) -> str:
+        """Read the provider/model namespace when the service exposes it."""
+        embedding = self._embedding_service
+        value = getattr(embedding, "embedding_fingerprint", "")
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                logger.warning("embedding fingerprint lookup failed", exc_info=True)
+                return ""
+        return str(value or "").strip()
+
+    def _embedding_dimension(self) -> int:
+        """Read the observed vector dimension, if the service exposes it."""
+        value = getattr(self._embedding_service, "embedding_dimension", 0)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                return 0
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _keyframe_sampling_signature(self) -> str:
+        from openbiliclaw.discovery.keyframes import keyframe_sampling_signature
+
+        return keyframe_sampling_signature(self._keyframe_max_frames)
+
     def _load_visual_profile_cache(self) -> list[dict[str, Any]]:
         """Lazily load centroids from the DB into ``_visual_profile_cache``.
 
@@ -2325,13 +2412,32 @@ class RecommendationEngine:
         """
         if self._visual_profile_cache is None:
             try:
-                self._visual_profile_cache = self._database.get_user_visual_clusters()
+                reader = self._database.get_user_visual_clusters
+                fingerprint = self._embedding_fingerprint()
+                dimension = self._embedding_dimension()
+                if fingerprint:
+                    try:
+                        self._visual_profile_cache = reader(
+                            embedding_fingerprint=fingerprint,
+                            embedding_dimension=dimension if dimension > 0 else None,
+                        )
+                    except TypeError:
+                        # Keep older database adapters/test doubles usable while
+                        # the provenance-aware reader rolls out.
+                        self._visual_profile_cache = reader()
+                else:
+                    self._visual_profile_cache = reader()
             except Exception:
                 logger.warning("visual profile load failed; will retry next call", exc_info=True)
                 # Leave None — do NOT cache [] (would permanently disable P1/P3).
         return self._visual_profile_cache or []
 
     async def rebuild_visual_profile(self) -> int:
+        """Serialize visual-profile rebuilds and return stored centroid count."""
+        async with self._visual_profile_rebuild_lock:
+            return await self._rebuild_visual_profile_impl()
+
+    async def _rebuild_visual_profile_impl(self) -> int:
         """Rebuild liked/disliked cover centroids from recommendation feedback.
 
         Queries feedback rows (like/dislike/save) → embeds each cover (URL-keyed
@@ -2344,12 +2450,15 @@ class RecommendationEngine:
         inactive, or there is no feedback yet. Throttled by the caller
         (only fires when feedback is newer than the last rebuild).
         """
-        if not self._visual_profile_active():
+        if not self._visual_profile_rebuild_active():
             return 0
         embedding = self._embedding_service
         embed_image = getattr(embedding, "embed_image", None)
         if not callable(embed_image):
             return 0
+
+        embedding_fingerprint = self._embedding_fingerprint()
+        embedding_dimension = self._embedding_dimension()
 
         from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
         from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
@@ -2367,9 +2476,7 @@ class RecommendationEngine:
         rows = (
             fetch_covers(limit=500)
             if callable(fetch_covers)
-            else self._database.get_recommendations(
-                limit=500, exclude_processed=False
-            )
+            else self._database.get_recommendations(limit=500, exclude_processed=False)
         )
         pos_urls: list[str] = []
         neg_urls: list[str] = []
@@ -2383,9 +2490,10 @@ class RecommendationEngine:
             elif ftype in ("like", "save"):
                 pos_urls.append(cover_url)
 
-        async def _vecs_for(urls: list[str]) -> list[list[float]]:
+        async def _vecs_for(urls: list[str]) -> tuple[list[list[float]], int]:
             lookup = getattr(embedding, "lookup_cached_image", None)
             out: list[list[float]] = []
+            failures = 0
             for url in urls:
                 key = image_embedding_cache_key_for_url(url)
                 vec: list[float] = []
@@ -2396,29 +2504,62 @@ class RecommendationEngine:
                         prepared = await prepare_cover_bytes_for_embedding(
                             url, max_px=384, quality=72, timeout_seconds=6
                         )
-                    except Exception:
-                        logger.debug(
-                            "visual profile cover prepare failed: %s",
-                            url[:80], exc_info=True,
+                    except Exception as exc:
+                        failures += 1
+                        logger.warning(
+                            "visual profile cover prepare failed: %s (%s)",
+                            url[:80],
+                            type(exc).__name__,
+                            exc_info=True,
                         )
                         continue
                     if prepared is None:
+                        failures += 1
+                        logger.warning("visual profile cover fetch returned no bytes: %s", url[:80])
                         continue
                     image_bytes, mime_type = prepared
                     try:
                         vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=key)
-                    except Exception:
-                        logger.debug(
-                            "visual profile embed_image failed: %s",
-                            url[:80], exc_info=True,
+                    except Exception as exc:
+                        failures += 1
+                        logger.warning(
+                            "visual profile embed_image failed: %s (%s)",
+                            url[:80],
+                            type(exc).__name__,
+                            exc_info=True,
                         )
                         continue
                 if vec:
                     out.append(vec)
-            return out
+                else:
+                    failures += 1
+                    logger.warning("visual profile embedding returned empty vector: %s", url[:80])
+            return out, failures
 
-        pos_vecs = await _vecs_for(pos_urls)
-        neg_vecs = await _vecs_for(neg_urls)
+        pos_vecs, pos_failures = await _vecs_for(pos_urls)
+        neg_vecs, neg_failures = await _vecs_for(neg_urls)
+        all_vecs = pos_vecs + neg_vecs
+        if all_vecs:
+            observed_dimensions = Counter(len(vec) for vec in all_vecs if vec)
+            target_dimension = embedding_dimension or observed_dimensions.most_common(1)[0][0]
+            if embedding_dimension and any(
+                len(vec) != embedding_dimension for vec in all_vecs if vec
+            ):
+                target_dimension = embedding_dimension
+            pos_before = len(pos_vecs)
+            neg_before = len(neg_vecs)
+            pos_vecs = [vec for vec in pos_vecs if len(vec) == target_dimension]
+            neg_vecs = [vec for vec in neg_vecs if len(vec) == target_dimension]
+            dimension_failures = (pos_before - len(pos_vecs)) + (neg_before - len(neg_vecs))
+            if dimension_failures:
+                logger.warning(
+                    "visual profile skipped %d vector(s) with dimension != %d",
+                    dimension_failures,
+                    target_dimension,
+                )
+                pos_failures += dimension_failures
+                neg_failures += 0
+            embedding_dimension = target_dimension
         # Cross-clean label noise BEFORE clustering: drop liked/disliked covers
         # that sit in the enemy's territory (misclicks / love-hate contradictions).
         # Done before clustering so noise can't pollute a centroid first. The
@@ -2431,8 +2572,10 @@ class RecommendationEngine:
             logger.info(
                 "Visual profile cross-clean dropped %d pos / %d neg covers (label noise "
                 "in enemy territory); clustering %d pos / %d neg",
-                len(cleaned.dropped_pos), len(cleaned.dropped_neg),
-                len(cleaned.kept_pos), len(cleaned.kept_neg),
+                len(cleaned.dropped_pos),
+                len(cleaned.dropped_neg),
+                len(cleaned.kept_pos),
+                len(cleaned.kept_neg),
             )
         # Cold-start floor: only build centroids for a polarity that has enough
         # embedded covers. Below the floor the kNN cross-clean is degenerate and
@@ -2460,13 +2603,17 @@ class RecommendationEngine:
             logger.info(
                 "Visual profile partial cold-start: pos built (%d clusters), neg below "
                 "the %d-cover floor (%d covers); neg abstains",
-                len(pos_clusters), _VISUAL_PROFILE_MIN_FEEDBACK, len(neg_vecs),
+                len(pos_clusters),
+                _VISUAL_PROFILE_MIN_FEEDBACK,
+                len(neg_vecs),
             )
         elif neg_clusters and not pos_clusters and pos_urls:
             logger.info(
                 "Visual profile partial cold-start: neg built (%d clusters), pos below "
                 "the %d-cover floor (%d covers); pos abstains",
-                len(neg_clusters), _VISUAL_PROFILE_MIN_FEEDBACK, len(pos_vecs),
+                len(neg_clusters),
+                _VISUAL_PROFILE_MIN_FEEDBACK,
+                len(pos_vecs),
             )
 
         stored: list[dict[str, Any]] = []
@@ -2489,6 +2636,15 @@ class RecommendationEngine:
         # hot path keeps using the last good centroids until a rebuild
         # succeeds (pitfall rule 2: never persist failed/empty results).
         has_feedback = bool(pos_urls or neg_urls)
+        total_failures = pos_failures + neg_failures
+        if has_feedback and total_failures:
+            logger.warning(
+                "Visual profile rebuild had %d transient cover/embed failure(s); "
+                "preserving existing %d centroids for retry",
+                total_failures,
+                len(self._visual_profile_cache or []),
+            )
+            return 0
         if not stored and has_feedback:
             # Distinguish cold-start (expected: below the feedback floor) from a
             # genuine transient failure (enough data, but embeds failed / every
@@ -2501,7 +2657,8 @@ class RecommendationEngine:
                 logger.info(
                     "Visual profile cold-start: %d pos / %d neg covers below the %d-cover "
                     "floor; no centroids built (preserving any existing %d)",
-                    len(pos_vecs), len(neg_vecs),
+                    len(pos_vecs),
+                    len(neg_vecs),
                     _VISUAL_PROFILE_MIN_FEEDBACK,
                     len(self._visual_profile_cache or []),
                 )
@@ -2510,20 +2667,53 @@ class RecommendationEngine:
                     "Visual profile rebuild produced 0 centroids from %d pos / %d neg "
                     "feedback covers (transient embed failure or all singletons); "
                     "preserving existing %d centroids",
-                    len(pos_urls), len(neg_urls),
+                    len(pos_urls),
+                    len(neg_urls),
                     len(self._visual_profile_cache or []),
+                )
+            record_state = getattr(self._database, "record_user_visual_profile_rebuild", None)
+            latest_feedback_reader = getattr(self._database, "latest_feedback_at", None)
+            feedback_at = latest_feedback_reader() if callable(latest_feedback_reader) else ""
+            if callable(record_state):
+                record_state(
+                    embedding_fingerprint=embedding_fingerprint,
+                    embedding_dimension=embedding_dimension,
+                    feedback_at=str(feedback_at or ""),
+                    status="cold_start",
                 )
             return 0
 
         try:
-            self._database.replace_user_visual_clusters(stored)
-            self._visual_profile_cache = self._database.get_user_visual_clusters()
+            replace = self._database.replace_user_visual_clusters
+            try:
+                replace(
+                    stored,
+                    embedding_fingerprint=embedding_fingerprint,
+                    embedding_dimension=embedding_dimension,
+                )
+            except TypeError:
+                replace(stored)
+            self._visual_profile_cache = None
+            self._load_visual_profile_cache()
+            record_state = getattr(self._database, "record_user_visual_profile_rebuild", None)
+            if callable(record_state):
+                latest_feedback_reader = getattr(self._database, "latest_feedback_at", None)
+                feedback_at = latest_feedback_reader() if callable(latest_feedback_reader) else ""
+                record_state(
+                    embedding_fingerprint=embedding_fingerprint,
+                    embedding_dimension=embedding_dimension,
+                    feedback_at=str(feedback_at or ""),
+                    status="success",
+                )
         except Exception:
-            logger.debug("visual profile persist failed", exc_info=True)
+            logger.warning("visual profile persist failed; will retry", exc_info=True)
             return 0
         logger.info(
             "Visual profile rebuilt: %d pos / %d neg centroids (from %d/%d feedback covers)",
-            len(pos_clusters), len(neg_clusters), len(pos_vecs), len(neg_vecs),
+            len(pos_clusters),
+            len(neg_clusters),
+            len(pos_vecs),
+            len(neg_vecs),
         )
         return len(stored)
 
@@ -2625,18 +2815,8 @@ class RecommendationEngine:
             return {}
         pos_rows = [r for r in cache if r.get("polarity") == "pos"]
         neg_rows = [r for r in cache if r.get("polarity") == "neg"]
-        pos_centroids = [r["centroid"] for r in pos_rows]
-        neg_centroids = [r["centroid"] for r in neg_rows]
-        if not pos_centroids and not neg_centroids:
+        if not pos_rows and not neg_rows:
             return {}
-
-        # Contested pairs: pos/neg centroid index pairs whose cosine >= threshold
-        # (love-hate regions where the cover has no say). Computed once per batch.
-        contested = contested_pairs(
-            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in pos_rows],
-            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in neg_rows],
-            threshold=_VISUAL_PROFILE_CONTESTED,
-        )
 
         with_cover = 0
         warmed = 0
@@ -2651,6 +2831,34 @@ class RecommendationEngine:
             if not cover_vec:
                 continue
             warmed += 1
+            dimension = len(cover_vec)
+            matching_pos_rows = [
+                row
+                for row in pos_rows
+                if not int(row.get("embedding_dimension") or 0)
+                or int(row.get("embedding_dimension") or 0) == dimension
+            ]
+            matching_neg_rows = [
+                row
+                for row in neg_rows
+                if not int(row.get("embedding_dimension") or 0)
+                or int(row.get("embedding_dimension") or 0) == dimension
+            ]
+            pos_centroids = [row["centroid"] for row in matching_pos_rows]
+            neg_centroids = [row["centroid"] for row in matching_neg_rows]
+            if not pos_centroids and not neg_centroids:
+                continue
+            contested = contested_pairs(
+                [
+                    VisualCluster(tuple(row["centroid"]), int(row.get("member_count", 1)))
+                    for row in matching_pos_rows
+                ],
+                [
+                    VisualCluster(tuple(row["centroid"]), int(row.get("member_count", 1)))
+                    for row in matching_neg_rows
+                ],
+                threshold=_VISUAL_PROFILE_CONTESTED,
+            )
             bonus = self._visual_profile_bonus_from_vec(
                 cover_vec, pos_centroids, neg_centroids, contested
             )
@@ -2683,24 +2891,20 @@ class RecommendationEngine:
         candidates were worse but because Bilibili rows gained a +0.05 channel
         they could never match.
 
-        Per-platform min-max normalization fixes the height: within each
-        platform's own pool, the strongest candidate's bonus is stretched to
-        ``+cap`` and the weakest to ``-cap``. A platform that lacks a signal
-        only loses *intra-platform* discrimination for it (its rows still
-        spread across the same [-cap, +cap] range by their remaining signals),
-        not *cross-platform* height.
+        Per-platform normalization fixes the height while treating zero as a
+        semantic anchor: positive values are scaled by that platform's own
+        positive maximum, and negative values by its own negative magnitude.
+        Missing and zero signals remain exactly zero; a weak positive can never
+        become a negative penalty merely because another row is negative.
 
         SIGNED because the visual signals (P1/P3) now use margin scoring that
-        can suppress (negative) as well as boost. Mapping the full [g_min,
-        g_max] range to [-cap, +cap] keeps a gray/zero candidate near 0 when
-        the platform's range is roughly symmetric, and levels both the top
-        (boost) and bottom (suppress) per platform.
+        can suppress (negative) as well as boost. Zero is fixed at zero for
+        cross-platform fairness.
 
-        A platform group whose max == min (all equal, including all-zero) is
-        left as-is — stretching a zero span would NaN, and an all-equal group
-        carries no intra-platform information to rescale anyway. Empty input
-        returns empty, so the all-signals-off / no-centroids case stays
-        byte-identical (no bonus keys -> no normalization -> empty dict).
+        A platform group with no positive or no negative values still scales the
+        available side independently. An all-zero group stays zero. Empty
+        input returns empty, so the all-signals-off / no-centroids case stays
+        byte-identical.
         """
         if not combined_bonus:
             return combined_bonus
@@ -2715,29 +2919,35 @@ class RecommendationEngine:
             platform = str(getattr(cand, "source_platform", "") or "").strip() or "bilibili"
             platform_of[bvid] = platform
 
-        # Group ALL bonus values (incl. negative suppressions) by platform.
-        groups: dict[str, list[float]] = {}
+        # Group every current candidate, including missing bonus entries (which
+        # are semantic zeroes), so a platform with only one signal still gets a
+        # fair positive/negative scale without inventing a value for the
+        # missing rows. Unknown keys remain supported for legacy callers.
+        groups: dict[str, list[tuple[str, float]]] = {}
+        seen: set[str] = set()
+        for bvid, platform in platform_of.items():
+            seen.add(bvid)
+            groups.setdefault(platform, []).append((bvid, float(combined_bonus.get(bvid, 0.0))))
         for bvid, bonus in combined_bonus.items():
-            groups.setdefault(platform_of.get(bvid, "bilibili"), []).append(bonus)
+            if bvid not in seen:
+                groups.setdefault("bilibili", []).append((bvid, float(bonus)))
 
         if not groups:
             return combined_bonus
 
         cap = _COMBINED_BONUS_CAP
-        normalized: dict[str, float] = dict(combined_bonus)
-        for platform, vals in groups.items():
-            g_max = max(vals)
-            g_min = min(vals)
-            span = g_max - g_min
-            if span <= 0.0:
-                # All bonuses in this platform are equal (incl. all-zero) — no
-                # intra-platform information to rescale; leave as-is.
-                continue
-            for bvid, bonus in combined_bonus.items():
-                if platform_of.get(bvid, "bilibili") != platform:
-                    continue
-                # Map [g_min, g_max] -> [-cap, +cap].
-                normalized[bvid] = cap * (2.0 * (bonus - g_min) / span - 1.0)
+        normalized = {bvid: 0.0 for bvid in platform_of}
+        normalized.update({bvid: 0.0 for bvid in combined_bonus})
+        for items in groups.values():
+            positive_max = max((value for _, value in items if value > 0.0), default=0.0)
+            negative_magnitude = max((-value for _, value in items if value < 0.0), default=0.0)
+            for bvid, bonus in items:
+                if bonus > 0.0 and positive_max > 0.0:
+                    normalized[bvid] = cap * bonus / positive_max
+                elif bonus < 0.0 and negative_magnitude > 0.0:
+                    normalized[bvid] = -cap * (-bonus) / negative_magnitude
+                else:
+                    normalized[bvid] = 0.0
         return normalized
 
     def _keyframe_bonus_from_vecs(
@@ -2834,17 +3044,10 @@ class RecommendationEngine:
             return {}
         pos_rows = [r for r in cache if r.get("polarity") == "pos"]
         neg_rows = [r for r in cache if r.get("polarity") == "neg"]
-        pos_centroids = [r["centroid"] for r in pos_rows]
-        neg_centroids = [r["centroid"] for r in neg_rows]
-        if not pos_centroids and not neg_centroids:
+        if not pos_rows and not neg_rows:
             return {}
-
-        # P3 shares P1's centroids and contested set (same geometry).
-        contested = contested_pairs(
-            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in pos_rows],
-            [VisualCluster(tuple(r["centroid"]), int(r.get("member_count", 1))) for r in neg_rows],
-            threshold=_KEYFRAME_CONTESTED,
-        )
+        sampling_signature = self._keyframe_sampling_signature()
+        embedding_fingerprint = self._embedding_fingerprint()
 
         bonuses: dict[str, float] = {}
         for candidate in candidates:
@@ -2853,11 +3056,49 @@ class RecommendationEngine:
                 continue
             frame_vecs: list[list[float]] = []
             for frame_index in range(self._keyframe_max_frames):
-                vec = lookup(keyframe_embedding_cache_key(bvid, frame_index)) or []
+                vec = (
+                    lookup(
+                        keyframe_embedding_cache_key(
+                            bvid,
+                            frame_index,
+                            sampling_signature,
+                            embedding_fingerprint,
+                        )
+                    )
+                    or []
+                )
                 if vec:
                     frame_vecs.append(vec)
             if not frame_vecs:
                 continue
+            dimension = len(frame_vecs[0])
+            matching_pos_rows = [
+                row
+                for row in pos_rows
+                if not int(row.get("embedding_dimension") or 0)
+                or int(row.get("embedding_dimension") or 0) == dimension
+            ]
+            matching_neg_rows = [
+                row
+                for row in neg_rows
+                if not int(row.get("embedding_dimension") or 0)
+                or int(row.get("embedding_dimension") or 0) == dimension
+            ]
+            pos_centroids = [row["centroid"] for row in matching_pos_rows]
+            neg_centroids = [row["centroid"] for row in matching_neg_rows]
+            if not pos_centroids and not neg_centroids:
+                continue
+            contested = contested_pairs(
+                [
+                    VisualCluster(tuple(row["centroid"]), int(row.get("member_count", 1)))
+                    for row in matching_pos_rows
+                ],
+                [
+                    VisualCluster(tuple(row["centroid"]), int(row.get("member_count", 1)))
+                    for row in matching_neg_rows
+                ],
+                threshold=_KEYFRAME_CONTESTED,
+            )
             bonus = self._keyframe_bonus_from_vecs(
                 frame_vecs, pos_centroids, neg_centroids, contested
             )
@@ -2869,9 +3110,10 @@ class RecommendationEngine:
         """Fetch + embed video keyframes for pool rows that lack them.
 
         Bilibili pre-generates keyframe sprite sheets, so this costs one small
-        JPEG per video rather than a video download. Best-effort: every failure
-        path still stamps ``keyframes_fetched_at`` so a video without videoshot
-        data is not retried every cycle. Returns the number of videos processed.
+        JPEG per video rather than a video download. Confirmed no-data results
+        and rows with at least one successful embedding advance their durable
+        state; transient source/sprite/embed failures remain eligible for the
+        next cycle. Returns the number of videos attempted.
         """
         if not self._keyframe_active():
             return 0
@@ -2884,15 +3126,27 @@ class RecommendationEngine:
         mark = getattr(self._database, "mark_keyframes_fetched", None)
         if not callable(needing) or not callable(mark):
             return 0
+        sampling_signature = self._keyframe_sampling_signature()
+        embedding_fingerprint = self._embedding_fingerprint()
+        embedding_dimension = self._embedding_dimension()
         try:
-            rows = needing(limit=limit)
+            try:
+                rows = needing(
+                    limit=limit,
+                    embedding_fingerprint=embedding_fingerprint,
+                    embedding_dimension=embedding_dimension,
+                    sampling_signature=sampling_signature,
+                    xhs_self_nickname=self._xhs_self_nickname(),
+                )
+            except TypeError:
+                rows = needing(limit=limit)
         except Exception:
-            logger.debug("get_candidates_needing_keyframes failed", exc_info=True)
+            logger.warning("get_candidates_needing_keyframes failed", exc_info=True)
             return 0
         if not rows:
             return 0
 
-        from openbiliclaw.discovery.keyframes import fetch_keyframes
+        from openbiliclaw.discovery.keyframes import KeyframeFetchResult, fetch_keyframes
         from openbiliclaw.llm.embedding import keyframe_embedding_cache_key
 
         processed = 0
@@ -2904,33 +3158,87 @@ class RecommendationEngine:
             if not bvid:
                 continue
             embedded = 0
+            result_status = "transient_failure"
+            result_reason = ""
+            frames: list[bytes] = []
             try:
-                frames = await fetch_keyframes(bvid, max_frames=self._keyframe_max_frames)
+                result = await fetch_keyframes(bvid, max_frames=self._keyframe_max_frames)
+                if isinstance(result, KeyframeFetchResult):
+                    frames = result.frames
+                    result_status = result.status
+                    result_reason = result.reason
+                else:
+                    # Compatibility with third-party adapters and older tests
+                    # returning the pre-result ``list[bytes]`` contract.
+                    frames = list(result or [])
+                    result_status = "success" if frames else "no_data"
                 for frame_index, frame_bytes in enumerate(frames):
-                    cache_key = keyframe_embedding_cache_key(bvid, frame_index)
-                    vector = await embed_image(
-                        frame_bytes, mime_type="image/jpeg", cache_key=cache_key
+                    cache_key = keyframe_embedding_cache_key(
+                        bvid,
+                        frame_index,
+                        sampling_signature,
+                        embedding_fingerprint,
                     )
+                    try:
+                        vector = await embed_image(
+                            frame_bytes, mime_type="image/jpeg", cache_key=cache_key
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "keyframe embedding failed for %s frame=%d (%s)",
+                            bvid,
+                            frame_index,
+                            type(exc).__name__,
+                            exc_info=True,
+                        )
+                        continue
                     if vector:
+                        vector_dimension = len(vector)
+                        if embedding_dimension and vector_dimension != embedding_dimension:
+                            logger.warning(
+                                "keyframe embedding dimension mismatch for %s frame=%d: "
+                                "got=%d expected=%d",
+                                bvid,
+                                frame_index,
+                                vector_dimension,
+                                embedding_dimension,
+                            )
+                            continue
                         embedded += 1
+                        if not embedding_dimension:
+                            embedding_dimension = vector_dimension
+                    else:
+                        logger.warning(
+                            "keyframe embedding returned empty vector for %s frame=%d",
+                            bvid,
+                            frame_index,
+                        )
             except Exception:
-                logger.debug("keyframe prewarm failed for %s", bvid, exc_info=True)
+                result_status = "transient_failure"
+                result_reason = "fetch_or_parse_exception"
+                logger.warning("keyframe prewarm failed for %s", bvid, exc_info=True)
             try:
-                # Only stamp when the result is definitive, so a TRANSIENT embed
-                # backend failure (frames were fetched but every embed_image
-                # returned []) is not persisted as "done" — that would permanently
-                # exclude the video from P3 re-prewarm (get_candidates_needing_keyframes
-                # filters keyframes_fetched_at IS NULL). Two cases are definitive:
-                #   - frames == []: the video genuinely has no videoshot data
-                #     (permanent) — stamp so it is not re-fetched every cycle.
-                #   - embedded > 0: at least one frame embedded — stamp the count.
-                # frames non-empty but embedded == 0 means a transient embed
-                # outage: leave keyframes_fetched_at NULL so it retries next
-                # cycle (pitfall rule 2: never persist failed/empty results).
-                if not frames or embedded > 0:
-                    mark(bvid, keyframe_count=embedded)
+                should_mark = result_status == "no_data" or embedded > 0
+                if should_mark:
+                    try:
+                        mark(
+                            bvid,
+                            keyframe_count=embedded,
+                            embedding_fingerprint=embedding_fingerprint,
+                            embedding_dimension=embedding_dimension,
+                            sampling_signature=sampling_signature,
+                        )
+                    except TypeError:
+                        mark(bvid, keyframe_count=embedded)
+                else:
+                    logger.warning(
+                        "keyframe prewarm left %s retryable: status=%s reason=%s",
+                        bvid,
+                        result_status,
+                        result_reason or "embedding_failed",
+                    )
             except Exception:
-                logger.debug("mark_keyframes_fetched failed for %s", bvid, exc_info=True)
+                logger.warning("mark_keyframes_fetched failed for %s", bvid, exc_info=True)
             processed += 1
         if processed:
             logger.info("Keyframe prewarm processed %d video(s)", processed)
@@ -2965,7 +3273,9 @@ class RecommendationEngine:
         embedding = self._embedding_service
         if embedding is None:
             return {}
-        lookup = getattr(embedding, "lookup_cached", None)
+        lookup = getattr(embedding, "lookup_cached_document", None)
+        if not callable(lookup):
+            lookup = getattr(embedding, "lookup_cached", None)
         if not callable(lookup):
             return {}
 
@@ -3050,14 +3360,14 @@ class RecommendationEngine:
     async def prewarm_pool_danmaku(self, *, limit: int = 50) -> int:
         """Fetch, condense, store and embed danmaku for pool rows lacking them.
 
-        Best-effort: every path still stamps ``danmaku_fetched_at`` so a video
-        with no danmaku is not retried each cycle. Returns rows processed.
+        Confirmed empty source responses advance ``danmaku_fetched_at``. HTTP,
+        parse, and embedding failures remain retryable. Existing summaries are
+        re-embedded directly when provenance changes, without fetching source
+        data again. Returns rows attempted.
         """
         if not self._danmaku_active():
             return 0
         client = self._bilibili_client
-        if client is None:
-            return 0
         embedding = self._embedding_service
         if embedding is None:
             return 0
@@ -3066,10 +3376,20 @@ class RecommendationEngine:
         update = getattr(self._database, "update_danmaku_text", None)
         if not callable(needing) or not callable(update):
             return 0
+        embedding_fingerprint = self._embedding_fingerprint()
+        embedding_dimension = self._embedding_dimension()
         try:
-            rows = needing(limit=limit)
+            try:
+                rows = needing(
+                    limit=limit,
+                    embedding_fingerprint=embedding_fingerprint,
+                    embedding_dimension=embedding_dimension,
+                    xhs_self_nickname=self._xhs_self_nickname(),
+                )
+            except TypeError:
+                rows = needing(limit=limit)
         except Exception:
-            logger.debug("get_candidates_needing_danmaku failed", exc_info=True)
+            logger.warning("get_candidates_needing_danmaku failed", exc_info=True)
             return 0
         if not rows:
             return 0
@@ -3083,25 +3403,177 @@ class RecommendationEngine:
             bvid = str(row.get("bvid") or "").strip()
             if not bvid:
                 continue
+            existing_text = str(row.get("danmaku_text") or "").strip()
+            if existing_text:
+                embed_document = getattr(embedding, "embed_document", None)
+                try:
+                    vector = (
+                        await embed_document(existing_text)
+                        if callable(embed_document)
+                        else await embedding.embed(existing_text)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "danmaku re-embedding failed for %s (%s)",
+                        bvid,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
+                    vector = []
+                if vector:
+                    vector_dimension = len(vector)
+                    if embedding_dimension and vector_dimension != embedding_dimension:
+                        logger.warning(
+                            "danmaku re-embedding dimension mismatch for %s: got=%d expected=%d",
+                            bvid,
+                            vector_dimension,
+                            embedding_dimension,
+                        )
+                        vector = []
+                    elif not embedding_dimension:
+                        embedding_dimension = vector_dimension
+                if vector:
+                    provenance = getattr(
+                        self._database, "update_danmaku_embedding_provenance", None
+                    )
+                    try:
+                        if callable(provenance):
+                            provenance(
+                                bvid,
+                                embedding_fingerprint=embedding_fingerprint,
+                                embedding_dimension=embedding_dimension,
+                            )
+                        else:
+                            try:
+                                update(
+                                    bvid,
+                                    danmaku_text=existing_text,
+                                    embedding_fingerprint=embedding_fingerprint,
+                                    embedding_dimension=embedding_dimension,
+                                )
+                            except TypeError:
+                                update(bvid, danmaku_text=existing_text)
+                    except Exception:
+                        logger.warning(
+                            "danmaku embedding provenance update failed for %s",
+                            bvid,
+                            exc_info=True,
+                        )
+                else:
+                    logger.warning(
+                        "danmaku re-embedding returned empty vector for %s; will retry",
+                        bvid,
+                    )
+                processed += 1
+                continue
+
+            if client is None:
+                logger.warning(
+                    "danmaku source client unavailable for %s; leaving fetch retryable", bvid
+                )
+                continue
+
             condensed = ""
+            source_status = "transient_failure"
+            source_reason = ""
+            source_definitive = False
             try:
                 info = await client.get_video_info(bvid)
                 cid = int(getattr(info, "cid", 0) or 0)
-                if cid > 0:
-                    raw = await client.get_danmaku_texts(cid)
-                    condensed = condense_danmaku(raw, max_chars=self._danmaku_max_chars)
-                    if condensed:
-                        # Text embeddings are keyed by the text itself, so the
-                        # serve() lookup uses the very same stored string.
-                        await embedding.embed(condensed)
-            except Exception:
-                logger.debug("danmaku prewarm failed for %s", bvid, exc_info=True)
-            try:
-                # Stamp even when empty — otherwise videos without danmaku are
-                # re-fetched on every prewarm cycle.
-                update(bvid, danmaku_text=condensed)
-            except Exception:
-                logger.debug("update_danmaku_text failed for %s", bvid, exc_info=True)
+                if cid <= 0:
+                    source_status = "no_data"
+                    source_reason = "invalid_cid"
+                    source_definitive = True
+                else:
+                    result_method = getattr(client, "get_danmaku_texts_result", None)
+                    if callable(result_method):
+                        result = await result_method(cid, limit=3000)
+                        source_status = str(getattr(result, "status", "transient_failure"))
+                        source_reason = str(getattr(result, "reason", "") or "")
+                        source_definitive = bool(
+                            getattr(
+                                result,
+                                "definitive",
+                                source_status in {"success", "no_data"},
+                            )
+                        )
+                        raw = list(getattr(result, "texts", []) or [])
+                    else:
+                        raw = list(await client.get_danmaku_texts(cid))
+                        # Legacy clients only return a list, so an empty list is
+                        # treated as a confirmed empty response for compatibility.
+                        source_status = "success"
+                        source_definitive = True
+                    if source_status == "transient_failure":
+                        logger.warning(
+                            "danmaku fetch left %s retryable: %s",
+                            bvid,
+                            source_reason or "transient_failure",
+                        )
+                    else:
+                        condensed = condense_danmaku(raw, max_chars=self._danmaku_max_chars)
+            except Exception as exc:
+                source_reason = type(exc).__name__
+                logger.warning("danmaku prewarm failed for %s", bvid, exc_info=True)
+
+            if source_status != "transient_failure" and condensed:
+                embed_document = getattr(embedding, "embed_document", None)
+                try:
+                    vector = (
+                        await embed_document(condensed)
+                        if callable(embed_document)
+                        else await embedding.embed(condensed)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "danmaku embedding failed for %s (%s)",
+                        bvid,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
+                    vector = []
+                if vector:
+                    vector_dimension = len(vector)
+                    if embedding_dimension and vector_dimension != embedding_dimension:
+                        logger.warning(
+                            "danmaku embedding dimension mismatch for %s: got=%d expected=%d",
+                            bvid,
+                            vector_dimension,
+                            embedding_dimension,
+                        )
+                        vector = []
+                    elif not embedding_dimension:
+                        embedding_dimension = vector_dimension
+                if vector:
+                    try:
+                        update(
+                            bvid,
+                            danmaku_text=condensed,
+                            embedding_fingerprint=embedding_fingerprint,
+                            embedding_dimension=embedding_dimension,
+                        )
+                    except TypeError:
+                        update(bvid, danmaku_text=condensed)
+                else:
+                    logger.warning(
+                        "danmaku embedding returned empty vector for %s; will retry", bvid
+                    )
+            elif source_definitive:
+                try:
+                    update(
+                        bvid,
+                        danmaku_text="",
+                        embedding_fingerprint=embedding_fingerprint,
+                        embedding_dimension=embedding_dimension,
+                    )
+                except TypeError:
+                    update(bvid, danmaku_text="")
+            elif source_status == "transient_failure":
+                logger.warning(
+                    "danmaku prewarm left %s retryable: %s",
+                    bvid,
+                    source_reason or "transient_failure",
+                )
             processed += 1
         if processed:
             logger.info("Danmaku prewarm processed %d video(s)", processed)

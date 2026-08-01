@@ -47,6 +47,7 @@
 | v0.3.0 Ollama embedding 兜底 | ✅ | `OllamaProvider.embed()` 走原生 `/api/embeddings`，配合 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需要额外的 embedding API Key |
 | v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；`build_embedding_service` 按 provider 自动选默认 model（gemini→gemini-embedding-001 / openai→text-embedding-3-small / ollama→bge-m3） |
 | 可选封面 image-only embedding | ✅ | `[llm.embedding].multimodal_enabled` + 多模态 embedding 模型（`gemini-embedding-2` 族，或 `dashscope` + `qwen3-vl-embedding` 等）时，`EmbeddingService.embed_image()` 把压缩封面打成向量，与文本同 `model`/维度空间；discovery 入池按封面 URL 派生键（`image_embedding_cache_key_for_url`）预热，Delight 线上 `precompute_delight_scores` 消费（见 [recommendation 模块](recommendation.md) 封面视觉加成）。默认关闭；provider/model 不支持图像或开关关闭时自动 no-op（纯文本模型零成本、打分与旧版逐字节一致） |
+| 视觉 / document embedding provenance | ✅ | `EmbeddingService` 暴露稳定的 provider/model fingerprint 与观测维度；`embed_document()` / `lookup_cached_document()` 对弹幕摘要使用完整文本 key，空向量不写缓存。关键帧 cache key 由 fingerprint + sampling signature + frame index 隔离，避免模型、维度或采样变更复用旧向量 |
 | DashScope 多模态 embedding | ✅ | `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API；`embed`/`embed_image` 独立向量（不 `enable_fusion`）；默认 `qwen3-vl-embedding`；`output_dimensionality` 对 qwen3-vl 透传 `dimension`；embedding-only（`complete` 拒绝） |
 | v0.3.113 Embedding 目标维度 | ✅ | `[llm.embedding].output_dimensionality` 默认 1024，与 Ollama `bge-m3` 对齐；Gemini 传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时传 `dimensions`，Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传。L2 cache 仅在 provider 确认支持目标维度时按 `model#dim=N` 签名隔离，同一文本的不同维度向量不会互相覆盖，也不会把未生效的兼容后端标成伪维度 |
 | v0.3.155 Ollama embedding 诊断 + 自修 | ✅ | `llm/ollama_diagnostics.py`：`diagnose_ollama_embedding()` 把向量模型不可用分类为 `not_running` / `model_missing` / `model_broken` / `model_path_encoding` / `disk_full` / `network` / `model_oom` / `error`（先 `/api/tags` 判定服务与模型在位，再真打一次 embed——覆盖"模型在列表里但加载失败"的 500 场景）。`model_path_encoding` 专指 Windows 非 ASCII 用户名 / mojibake 路径导致 `llama-server` 无法从 `.ollama\models` 加载模型的失败，重新拉取不会修复，需迁移模型目录或手动设置 `OLLAMA_MODELS` 到纯英文路径；`model_oom` 从旧 `model_broken` 中拆出，明确内存不足时重拉无效；`disk_full` 既识别 pull / probe 错误文本，也会在拉取前检查 `OLLAMA_MODELS` / 托管模型目录所在卷是否至少有约 2.0GB 空间；`network` 区分无法访问 registry 的下载源问题与本地模型损坏。`pull_ollama_model()` 经原生 `/api/pull` 流式拉取 / 重拉模型并回调进度；两者均 `trust_env=False` 且可注入 `httpx.MockTransport` 测试。`OllamaProvider.embed()` 失败日志附带响应体错误片段（此前只有裸状态码）。供 `/api/init-status` 的 `embedding_check`/`embedding_detail` 与 `POST /api/embedding/repair` 一键修复使用（见 [init 模块](init.md)） |
@@ -78,6 +79,13 @@
 | v0.3.166 国内网关代理豁免 | ✅ | registry 按每个实例的 `base_url` 独立裁决代理，委托 `network.is_domestic_endpoint()`。国内大模型网关与 localhost / 内网自建端点即使全局为 `system` / `custom` 也强制直连；同一链里的境外实例仍走全局代理策略 |
 | Issue #113 CA 环境防护 | ✅ | `network.set_outbound_proxy(..., mode="system")` 在任何继承环境的 SDK 客户端构造前检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`。只移除指向不存在目标的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store；有效私有 CA、`HTTPS_PROXY` 等代理变量和 TLS 验证均保持不变，避免 Windows 遗留 CA 路径导致所有客户端在发请求前直接 `FileNotFoundError`。 |
 | Issue #113 task-local 后台准入 bypass | ✅ | 内部 scope 通过 `ContextVar` 只影响当前异步上下文；scope 内 `LLMService.complete_with_core_memory()` 跳过库存敏感的后台 admission，但仍经过总 provider gate，退出 scope 后自动恢复。guided init 仅在阶段 2/3 使用，并行 discovery 不继承该 scope；既有公开 API 签名不变。 |
+
+### Embedding provenance API
+
+`EmbeddingService.embedding_fingerprint`、`embedding_model`、`embedding_provider` 和
+`embedding_dimension` 为推荐层提供当前向量命名空间；`embed_document()` 与
+`lookup_cached_document()` 保留完整文档 key，专供弹幕摘要使用。`embed()`、`embed_image()`
+和文档 embedding 在 provider 返回空向量时都不写完成缓存。
 
 ## 公开 API
 

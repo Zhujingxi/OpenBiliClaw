@@ -14511,10 +14511,14 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_DANMAKU_FETCH_LIMIT,
+            _DEFAULT_DANMAKU_MAX_CHARS,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
             _DEFAULT_EXPLORE_REFRESH_MINUTES,
             _DEFAULT_FEEDBACK_BATCH_THRESHOLD,
+            _DEFAULT_KEYFRAME_FETCH_LIMIT,
+            _DEFAULT_KEYFRAME_MAX_FRAMES,
             _DEFAULT_MULTIMODAL_BATCH_SIZE,
             _DEFAULT_MULTIMODAL_IMAGE_MAX_PX,
             _DEFAULT_MULTIMODAL_IMAGE_QUALITY,
@@ -15213,15 +15217,17 @@ def create_app(
                         1,
                         20,
                     ),
+                    "keyframe_max_frames": (_DEFAULT_KEYFRAME_MAX_FRAMES, 1, 12),
+                    "keyframe_fetch_limit": (_DEFAULT_KEYFRAME_FETCH_LIMIT, 1, 200),
+                    "danmaku_fetch_limit": (_DEFAULT_DANMAKU_FETCH_LIMIT, 1, 200),
+                    "danmaku_max_chars": (_DEFAULT_DANMAKU_MAX_CHARS, 100, 2000),
                 }
                 if "multimodal_evaluation_enabled" in ddata:
                     cfg.discovery.multimodal_evaluation_enabled = _as_bool(
                         ddata["multimodal_evaluation_enabled"]
                     )
                 if "visual_profile_enabled" in ddata:
-                    cfg.discovery.visual_profile_enabled = _as_bool(
-                        ddata["visual_profile_enabled"]
-                    )
+                    cfg.discovery.visual_profile_enabled = _as_bool(ddata["visual_profile_enabled"])
                 if "keyframe_enabled" in ddata:
                     cfg.discovery.keyframe_enabled = _as_bool(ddata["keyframe_enabled"])
                 if "danmaku_enabled" in ddata:

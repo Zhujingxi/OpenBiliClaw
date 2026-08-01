@@ -964,16 +964,16 @@ def _build_recommendation_engine() -> Any:
         visual_profile_enabled=bool(
             getattr(getattr(cfg, "discovery", None), "visual_profile_enabled", False)
         ),
-        keyframe_enabled=bool(
-            getattr(getattr(cfg, "discovery", None), "keyframe_enabled", False)
-        ),
-        keyframe_max_frames=int(
-            getattr(getattr(cfg, "discovery", None), "keyframe_max_frames", 4)
+        keyframe_enabled=bool(getattr(getattr(cfg, "discovery", None), "keyframe_enabled", False)),
+        keyframe_max_frames=int(getattr(getattr(cfg, "discovery", None), "keyframe_max_frames", 4)),
+        keyframe_fetch_limit=int(
+            getattr(getattr(cfg, "discovery", None), "keyframe_fetch_limit", 50)
         ),
         danmaku_enabled=_danmaku_on,
-        danmaku_max_chars=int(
-            getattr(getattr(cfg, "discovery", None), "danmaku_max_chars", 500)
+        danmaku_fetch_limit=int(
+            getattr(getattr(cfg, "discovery", None), "danmaku_fetch_limit", 50)
         ),
+        danmaku_max_chars=int(getattr(getattr(cfg, "discovery", None), "danmaku_max_chars", 500)),
         bilibili_client=_build_bilibili_client() if _danmaku_on else None,
     )
 

@@ -473,6 +473,7 @@ LAN clients ─ HTTP（默认）→ IPv4 0.0.0.0 + IPv6 [::] listeners → one u
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
 │  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
+│  可选视觉 / 弹幕预热：质心、关键帧、完整 document embedding；provenance + retry │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
 │  LLMService caller bucket → inherit global chain / custom chain │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
@@ -493,6 +494,24 @@ LAN clients ─ HTTP（默认）→ IPv4 0.0.0.0 + IPv6 [::] listeners → one u
 │          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### 3.1 视觉 embedding 与候选预热契约
+
+推荐的可选视觉链路由封面视觉加成（P1 cover）、用户视觉画像质心（P1 profile）和视频关键帧
+（P3）组成；弹幕是独立的纯文本 P2 信号。`keyframe_enabled` 单独开启时，只要多模态
+embedding 可用，仍会构建 P1/P3 共用的视觉质心；P1 cover bonus 仍只由
+`visual_profile_enabled` 控制。
+
+所有持久化向量都带 embedding provider / model fingerprint 与维度。质心命名空间、关键帧
+sampling signature（包含算法版本与 `keyframe_max_frames`）或维度变化时，旧行视为待重建；
+弹幕已有摘要时优先重嵌入，不重复抓取源数据。关键帧和弹幕 fetch / parse / embed 结果区分
+`success`、确认的 `no_data` 与 `transient_failure`，只有安全成功条件才写完成状态，瞬时失败
+保留下一轮重试资格。
+
+预热只处理当前 fresh、可服务候选池，并使用 `keyframe_fetch_limit` / `danmaku_fetch_limit`。
+`danmaku_max_chars` 控制完整摘要的 document embedding/cache 输入，不静默截断固定前缀。跨
+平台 bonus 以 0 为固定点，正负两侧分别按平台内极值缩放；0、缺失和全零保持 0，禁止凭空
+生成相反符号。离线视觉报告必须镜像生产评分。
 
 远程浏览器扩展认证独立于平台登录态：管理员通过 CLI 生成设备密钥，后端只保存摘要；扩展向 `/api/auth/extension-token` 换取短会话。普通 HTTP 使用 Bearer Header，WebSocket 与图片代理只携带短会话 query。该能力默认关闭，撤销设备密钥会使全部现有会话立即失效。
 

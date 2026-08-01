@@ -27,8 +27,8 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 - **admission.effective_admission_threshold()** — 评估、缓存收口和数据库展示出口共享的纯准入策略；精确 `explore=0.58` 是唯一低于全局门槛的例外
 - **DiscoveryCandidateWrite / discovery_candidates** — 原始候选的持久化队列结构，所有来源先落到 `pending_eval`，再由统一 evaluator claim
 - **DiscoveredContent** — 统一的候选内容数据结构
-- **danmaku.py** — 弹幕文本清洗模块（P2）：纯函数，无 I/O。`collapse_repeats` 压缩整串周期重复（`保护`×30 → `保护`）、字符 run（`还哈哈哈…` → `还哈哈`）与标点 run，**数字豁免**（否则 "5000电池" 会被压成 "500电池"，实测踩到）；`condense_danmaku` 剔除停用词梗与高频项（>3 次）后**按压缩后长度**取 top-N 拼成摘要。**选取按长度而非频次是实测结论**：高频弹幕（难说 613×、已取餐 350×）语义价值为零，有信息量的是只出现一次的长弹幕——按频次取会精准筛掉所有有用信息。全被过滤时返回 `""`，调用方据此跳过写入（不缓存空结果，铁律 2）
-- **keyframes.py** — 视频关键帧模块（P3）：从 B 站预生成的 videoshot 雪碧图取关键帧，`GET /x/player/videoshot`（无鉴权、无 WBI 签名）拿网格几何与雪碧图 URL，雪碧图经 `runtime.image_cache.get_or_fetch_cover_bytes()` 下载（`hdslb.com` 已在白名单且属 CN 直连），PIL 按 `img_x_size`/`img_y_size`（**必须从响应读，实测 160×90 与 480×270 并存**）切分。`select_frame_positions` **跨全部雪碧图**均匀采样并跳过片头片尾（长视频实测返回最多 11 张雪碧图 = 1100 帧，只取 `image[0]` 会让长视频只覆盖开头）；只下载真正含采样帧的那几张雪碧图。全链路 best-effort，任何失败返回空而不抛——关键帧是可选增强信号，绝不能拖垮 discovery 或推荐预热
+- **danmaku.py** — 弹幕文本清洗模块（P2）：纯函数，无 I/O。`collapse_repeats` 压缩整串周期重复（`保护`×30 → `保护`）、字符 run（`还哈哈哈…` → `还哈哈`）与标点 run，**数字豁免**（否则 "5000电池" 会被压成 "500电池"，实测踩到）；`condense_danmaku` 剔除停用词梗与高频项（>3 次）后**按压缩后长度**取 top-N 拼成摘要。**选取按长度而非频次是实测结论**：高频弹幕（难说 613×、已取餐 350×）语义价值为零，有信息量的是只出现一次的长弹幕——按频次取会精准筛掉所有有用信息。摘要为空时由上层保留成功空结果与瞬时失败的区别：成功空结果可推进 source 状态，HTTP/XML/embedding 失败不写完成戳（铁律 2）
+- **keyframes.py** — 视频关键帧模块（P3）：从 B 站预生成的 videoshot 雪碧图取关键帧，`GET /x/player/videoshot`（无鉴权、无 WBI 签名）拿网格几何与雪碧图 URL，雪碧图经 `runtime.image_cache.get_or_fetch_cover_bytes()` 下载（`hdslb.com` 已在白名单且属 CN 直连），PIL 按 `img_x_size`/`img_y_size`（**必须从响应读，实测 160×90 与 480×270 并存**）切分。`select_frame_positions` **跨全部雪碧图**均匀采样并跳过片头片尾（长视频实测返回最多 11 张雪碧图 = 1100 帧，只取 `image[0]` 会让长视频只覆盖开头）；只下载真正含采样帧的那几张雪碧图。`fetch_keyframes()` 返回带 `success / no_data / transient_failure` 的 `KeyframeFetchResult`；网络、HTTP、解析、精灵图失败不会伪装成空视频，预热只在确认无数据或至少一个 frame embedding 成功后推进状态
 - **multimodal.py** — 封面图准备模块：复用后端封面磁盘缓存与图片白名单抓取边界；`prepare_cover_image_input` 压缩为 JPEG data URL 交给支持图像输入的 evaluator，`prepare_cover_bytes_for_embedding` 压缩为 JPEG bytes 供 `EmbeddingService.embed_image()`（封面 image-only 向量预热与 delight 视觉加成共用同一抓取/压缩路径，不重复下载）
 - **SearchStrategy** — 基于画像生成搜索词并调用 B 站搜索的策略
 - **TrendingStrategy** — 从全站榜和相关分区榜中筛选高匹配热点内容
@@ -674,6 +674,12 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | Discovery 自动优化循环 | ✅ | SGD 风格优化循环：生成 persona → 生成 scenario → 运行发现 → 多维评估 → exploit/explore → accept/rollback |
 | Discovery 人工评估脚本 | ✅ | 交互式人工评估 + 可选触发优化 |
 | P1 统一关键词 planner / 背压（v0.3.124 起默认开） | ✅ | `[discovery].unified_keyword_planner_enabled`（v0.3.124 起默认 `true`）后面的双缓冲 + 缺口拉动背压：`discovery_keywords` 存储（pending→claimed→used/failed/executing 状态机 + 部分唯一 + 租约回收 + CAS 单飞锁）+ `KeywordPlanner`（一次合并 LLM 调用、画像发一份、按平台分块、digest 失效、稀疏回收、同画像/同池子需求块按 `plan_ttl_hours` 复用生成结果）+ `KeywordFetchCoordinator`（缺口驱动 claim + 三执行形态：内联 admit / fetch-only 交 pipeline / 异步插件任务）+ `source_keyword_id` 幂等 yield 回填 + 0 产出退役。接管 B站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 八个平台 search 关键词，`trending/explore/related/hot/feed/subreddit/ranked/latest` 不动；flag-off 逐字回退旧逐平台生成。flag-on 时 B 站主 refresh 若暂时 claim 不到关键词，会跳过本轮 `search` 子策略而不是回落到旧 `discovery.search.queries` caller。成本记单一 caller `discovery.keyword_planner`，per-platform 靠 planner 每轮 `cycle ledger`（`{platform: {generated, yield}}`）观测。E2E：`tests/test_keyword_backpressure_e2e.py` |
+
+### Visual enrichment API
+
+`fetch_keyframes()` 返回 `KeyframeFetchResult`，其 `status` 明确区分成功、确认无数据和瞬时
+失败；`keyframe_sampling_signature(max_frames)` 将算法版本与帧数写进 cache provenance。
+推荐预热只在安全成功条件下写完成状态，便于下一轮重试失败的 source / sprite / embedding。
 
 ## 公开 API
 

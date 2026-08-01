@@ -827,7 +827,7 @@ _EXPLORE_HIGH_RISK_CLUSTERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 # Schema version for migrations
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 -- Event log (behavioral data from browser extension)
@@ -8681,10 +8681,11 @@ class Database:
     def _ensure_content_cache_keyframe_columns(self) -> None:
         """Add video-keyframe prewarm bookkeeping for existing databases.
 
-        Only a timestamp is stored: the frame vectors live in the embedding
-        cache under ``keyframe_embedding_cache_key`` keys. The timestamp is
-        written even when a video yields no frames, so videos without
-        videoshot data are not re-fetched every prewarm cycle.
+        Frame vectors live in the embedding cache under provenance-aware
+        ``keyframe_embedding_cache_key`` keys. A completion timestamp is only
+        written for confirmed no-data or a run with at least one successful
+        frame embedding; transient fetch, sprite, parser, and embed failures
+        remain eligible for the next prewarm cycle.
         """
         existing_columns = {
             str(row["name"])
@@ -8693,35 +8694,77 @@ class Database:
         required_columns = {
             "keyframes_fetched_at": "TIMESTAMP",
             "keyframe_count": "INTEGER DEFAULT 0",
+            "keyframe_embedding_fingerprint": "TEXT DEFAULT ''",
+            "keyframe_embedding_dimension": "INTEGER DEFAULT 0",
+            "keyframe_sampling_signature": "TEXT DEFAULT ''",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
 
-    def get_candidates_needing_keyframes(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Bilibili pool rows whose keyframes have never been fetched.
+    def get_candidates_needing_keyframes(
+        self,
+        *,
+        limit: int = 50,
+        embedding_fingerprint: str = "",
+        embedding_dimension: int = 0,
+        sampling_signature: str = "",
+        xhs_self_nickname: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return current-pool Bilibili rows needing fetch or re-embedding.
 
         Videoshot data only exists for Bilibili videos, so non-Bilibili and
         text-shaped rows are excluded rather than retried forever.
         """
+        self._ensure_fresh_read()
+        clause, clause_params = self._pool_servable_where_clause_on(
+            self.conn,
+            xhs_self_nickname,
+            pool_status="fresh",
+        )
+        provenance_sql = "(keyframes_fetched_at IS NULL)"
+        params: list[Any] = [*clause_params]
+        fingerprint = str(embedding_fingerprint or "").strip()
+        signature = str(sampling_signature or "").strip()
+        if fingerprint:
+            provenance_sql = (
+                "(keyframes_fetched_at IS NULL OR "
+                "COALESCE(keyframe_embedding_fingerprint, '') != ? OR "
+                "(COALESCE(keyframe_count, 0) > 0 AND "
+                "COALESCE(keyframe_embedding_dimension, 0) != ?) OR "
+                "(COALESCE(keyframe_count, 0) > 0 AND "
+                "COALESCE(keyframe_sampling_signature, '') != ?))"
+            )
+            params.extend([fingerprint, max(0, int(embedding_dimension)), signature])
         cursor = self.conn.execute(
-            """
-            SELECT bvid, title, cover_url
+            f"""
+            SELECT bvid, title, cover_url, keyframe_count,
+                   keyframe_embedding_fingerprint, keyframe_embedding_dimension,
+                   keyframe_sampling_signature
             FROM content_cache
-            WHERE keyframes_fetched_at IS NULL
+            WHERE {clause}
+              AND {provenance_sql}
               AND COALESCE(bvid, '') != ''
-              AND COALESCE(source_platform, 'bilibili') = 'bilibili'
-              AND COALESCE(content_type, 'video') = 'video'
+              AND COALESCE(NULLIF(source_platform, ''), 'bilibili') = 'bilibili'
+              AND COALESCE(NULLIF(content_type, ''), 'video') = 'video'
             ORDER BY COALESCE(relevance_score, 0) DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (*params, max(1, int(limit))),
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def mark_keyframes_fetched(self, bvid: str, *, keyframe_count: int = 0) -> None:
-        """Stamp a row as keyframe-processed (also on a zero-frame result)."""
+    def mark_keyframes_fetched(
+        self,
+        bvid: str,
+        *,
+        keyframe_count: int = 0,
+        embedding_fingerprint: str = "",
+        embedding_dimension: int = 0,
+        sampling_signature: str = "",
+    ) -> None:
+        """Stamp a confirmed no-data or successfully embedded keyframe run."""
         key = (bvid or "").strip()
         if not key:
             return
@@ -8729,10 +8772,19 @@ class Database:
             """
             UPDATE content_cache
             SET keyframes_fetched_at = CURRENT_TIMESTAMP,
-                keyframe_count = ?
+                keyframe_count = ?,
+                keyframe_embedding_fingerprint = ?,
+                keyframe_embedding_dimension = ?,
+                keyframe_sampling_signature = ?
             WHERE bvid = ?
             """,
-            (max(0, int(keyframe_count)), key),
+            (
+                max(0, int(keyframe_count)),
+                str(embedding_fingerprint or "").strip(),
+                max(0, int(embedding_dimension)),
+                str(sampling_signature or "").strip(),
+                key,
+            ),
         )
         self.conn.commit()
 
@@ -8742,8 +8794,9 @@ class Database:
         Deliberately NOT reusing ``body_text``: that column renders into the
         card body on all three surfaces (extension / desktop / mobile web) and
         feeds five LLM prompts, so danmaku there would turn card bodies into
-        walls of "已取餐". The timestamp is written even when a video yields no
-        danmaku, so such videos are not re-fetched every prewarm cycle.
+        walls of "已取餐". The source timestamp is written for a confirmed
+        empty response, while HTTP, parse, and embedding failures remain
+        retryable; existing summaries can be re-embedded without refetching.
         """
         existing_columns = {
             str(row["name"])
@@ -8752,31 +8805,72 @@ class Database:
         required_columns = {
             "danmaku_text": "TEXT DEFAULT ''",
             "danmaku_fetched_at": "TIMESTAMP",
+            "danmaku_embedding_fingerprint": "TEXT DEFAULT ''",
+            "danmaku_embedding_dimension": "INTEGER DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
 
-    def get_candidates_needing_danmaku(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Bilibili pool rows whose danmaku have never been fetched."""
+    def get_candidates_needing_danmaku(
+        self,
+        *,
+        limit: int = 50,
+        embedding_fingerprint: str = "",
+        embedding_dimension: int = 0,
+        xhs_self_nickname: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return current-pool Bilibili rows needing fetch or re-embedding.
+
+        A model/provider change selects rows with an existing summary without
+        requiring another source fetch; the caller can embed ``danmaku_text``
+        directly. Rows with a blank summary still only enter the normal fetch
+        path when their source fetch has never completed.
+        """
+        self._ensure_fresh_read()
+        clause, clause_params = self._pool_servable_where_clause_on(
+            self.conn,
+            xhs_self_nickname,
+            pool_status="fresh",
+        )
+        provenance_sql = "(danmaku_fetched_at IS NULL)"
+        params: list[Any] = [*clause_params]
+        fingerprint = str(embedding_fingerprint or "").strip()
+        if fingerprint:
+            provenance_sql = (
+                "(danmaku_fetched_at IS NULL OR "
+                "COALESCE(danmaku_embedding_fingerprint, '') != ? OR "
+                "(COALESCE(danmaku_text, '') != '' AND "
+                "COALESCE(danmaku_embedding_dimension, 0) != ?))"
+            )
+            params.extend([fingerprint, max(0, int(embedding_dimension))])
         cursor = self.conn.execute(
-            """
-            SELECT bvid, title
+            f"""
+            SELECT bvid, title, danmaku_text, danmaku_fetched_at,
+                   danmaku_embedding_fingerprint, danmaku_embedding_dimension
             FROM content_cache
-            WHERE danmaku_fetched_at IS NULL
+            WHERE {clause}
+              AND {provenance_sql}
               AND COALESCE(bvid, '') != ''
-              AND COALESCE(source_platform, 'bilibili') = 'bilibili'
-              AND COALESCE(content_type, 'video') = 'video'
+              AND COALESCE(NULLIF(source_platform, ''), 'bilibili') = 'bilibili'
+              AND COALESCE(NULLIF(content_type, ''), 'video') = 'video'
             ORDER BY COALESCE(relevance_score, 0) DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (*params, max(1, int(limit))),
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def update_danmaku_text(self, bvid: str, *, danmaku_text: str = "") -> None:
-        """Store condensed danmaku and stamp the row (also on an empty result)."""
+    def update_danmaku_text(
+        self,
+        bvid: str,
+        *,
+        danmaku_text: str = "",
+        embedding_fingerprint: str = "",
+        embedding_dimension: int = 0,
+    ) -> None:
+        """Store a successful summary and stamp source + embedding provenance."""
         key = (bvid or "").strip()
         if not key:
             return
@@ -8784,10 +8878,43 @@ class Database:
             """
             UPDATE content_cache
             SET danmaku_text = ?,
-                danmaku_fetched_at = CURRENT_TIMESTAMP
+                danmaku_fetched_at = CURRENT_TIMESTAMP,
+                danmaku_embedding_fingerprint = ?,
+                danmaku_embedding_dimension = ?
             WHERE bvid = ?
             """,
-            (danmaku_text or "", key),
+            (
+                danmaku_text or "",
+                str(embedding_fingerprint or "").strip(),
+                max(0, int(embedding_dimension)),
+                key,
+            ),
+        )
+        self.conn.commit()
+
+    def update_danmaku_embedding_provenance(
+        self,
+        bvid: str,
+        *,
+        embedding_fingerprint: str,
+        embedding_dimension: int,
+    ) -> None:
+        """Mark an existing successful summary as embedded by this namespace."""
+        key = (bvid or "").strip()
+        if not key:
+            return
+        self.conn.execute(
+            """
+            UPDATE content_cache
+            SET danmaku_embedding_fingerprint = ?,
+                danmaku_embedding_dimension = ?
+            WHERE bvid = ? AND COALESCE(danmaku_text, '') != ''
+            """,
+            (
+                str(embedding_fingerprint or "").strip(),
+                max(0, int(embedding_dimension)),
+                key,
+            ),
         )
         self.conn.commit()
 
@@ -11785,13 +11912,42 @@ class Database:
                 polarity     TEXT NOT NULL,        -- 'pos' | 'neg'
                 centroid     TEXT NOT NULL,        -- JSON list[float]
                 member_count INTEGER NOT NULL DEFAULT 0,
+                embedding_fingerprint TEXT NOT NULL DEFAULT '',
+                embedding_dimension INTEGER NOT NULL DEFAULT 0,
                 updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_user_visual_clusters_polarity
                 ON user_visual_clusters(polarity);
+            CREATE TABLE IF NOT EXISTS user_visual_profile_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                embedding_fingerprint TEXT NOT NULL DEFAULT '',
+                embedding_dimension INTEGER NOT NULL DEFAULT 0,
+                feedback_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                status TEXT NOT NULL DEFAULT ''
+            );
+            INSERT OR IGNORE INTO user_visual_profile_state (singleton)
+            VALUES (1);
         """)
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(user_visual_clusters)").fetchall()
+        }
+        for column_name, column_type in {
+            "embedding_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "embedding_dimension": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column_name not in existing_columns:
+                self.conn.execute(
+                    f"ALTER TABLE user_visual_clusters ADD COLUMN {column_name} {column_type}"
+                )
 
-    def get_user_visual_clusters(self) -> list[dict[str, Any]]:
+    def get_user_visual_clusters(
+        self,
+        *,
+        embedding_fingerprint: str = "",
+        embedding_dimension: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return all stored visual centroids, newest-rebuilt ordering irrelevant.
 
         Each row: ``{cluster_id, polarity, centroid (list[float]), member_count,
@@ -11800,9 +11956,20 @@ class Database:
         """
         import json
 
+        params: tuple[Any, ...] = ()
+        where = ""
+        fingerprint = str(embedding_fingerprint or "").strip()
+        if fingerprint:
+            where = "WHERE COALESCE(embedding_fingerprint, '') = ?"
+            params = (fingerprint,)
+            if embedding_dimension is not None:
+                where += " AND COALESCE(embedding_dimension, 0) = ?"
+                params = (fingerprint, max(0, int(embedding_dimension)))
         rows = self.conn.execute(
-            "SELECT cluster_id, polarity, centroid, member_count, updated_at "
-            "FROM user_visual_clusters"
+            "SELECT cluster_id, polarity, centroid, member_count, "
+            "embedding_fingerprint, embedding_dimension, updated_at "
+            f"FROM user_visual_clusters {where}",
+            params,
         ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -11818,6 +11985,8 @@ class Database:
                     "polarity": row["polarity"],
                     "centroid": [float(x) for x in vec],
                     "member_count": row["member_count"],
+                    "embedding_fingerprint": str(row["embedding_fingerprint"] or ""),
+                    "embedding_dimension": int(row["embedding_dimension"] or 0),
                     "updated_at": row["updated_at"],
                 }
             )
@@ -11826,6 +11995,9 @@ class Database:
     def replace_user_visual_clusters(
         self,
         clusters: list[dict[str, Any]],
+        *,
+        embedding_fingerprint: str = "",
+        embedding_dimension: int = 0,
     ) -> None:
         """Atomically replace all visual centroids.
 
@@ -11845,14 +12017,61 @@ class Database:
             if not isinstance(vec, list) or not vec:
                 continue
             cur.execute(
-                "INSERT INTO user_visual_clusters (polarity, centroid, member_count) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO user_visual_clusters "
+                "(polarity, centroid, member_count, embedding_fingerprint, embedding_dimension) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     polarity,
                     json.dumps([float(x) for x in vec]),
                     int(c.get("member_count", 0) or 0),
+                    str(c.get("embedding_fingerprint", embedding_fingerprint) or "").strip(),
+                    max(
+                        0,
+                        int(
+                            c.get("embedding_dimension", embedding_dimension) or embedding_dimension
+                        ),
+                    ),
                 ),
             )
+        self.conn.commit()
+
+    def get_user_visual_profile_state(self) -> dict[str, Any]:
+        """Return the last visual-profile rebuild receipt, if present."""
+        row = self.conn.execute(
+            "SELECT singleton, embedding_fingerprint, embedding_dimension, feedback_at, "
+            "updated_at, status FROM user_visual_profile_state WHERE singleton = 1"
+        ).fetchone()
+        return dict(row) if row is not None else {}
+
+    def record_user_visual_profile_rebuild(
+        self,
+        *,
+        embedding_fingerprint: str,
+        embedding_dimension: int,
+        feedback_at: str,
+        status: str = "success",
+    ) -> None:
+        """Persist a successful/confirmed rebuild receipt for throttling."""
+        self.conn.execute(
+            """
+            INSERT INTO user_visual_profile_state (
+                singleton, embedding_fingerprint, embedding_dimension,
+                feedback_at, updated_at, status
+            ) VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                embedding_fingerprint = excluded.embedding_fingerprint,
+                embedding_dimension = excluded.embedding_dimension,
+                feedback_at = excluded.feedback_at,
+                updated_at = excluded.updated_at,
+                status = excluded.status
+            """,
+            (
+                str(embedding_fingerprint or "").strip(),
+                max(0, int(embedding_dimension)),
+                str(feedback_at or "").strip() or None,
+                str(status or "success").strip(),
+            ),
+        )
         self.conn.commit()
 
     def latest_feedback_at(self) -> str:
@@ -11862,8 +12081,7 @@ class Database:
         is newer than the last centroid ``updated_at``.
         """
         row = self.conn.execute(
-            "SELECT MAX(feedback_at) AS latest FROM recommendations "
-            "WHERE feedback_at IS NOT NULL"
+            "SELECT MAX(feedback_at) AS latest FROM recommendations WHERE feedback_at IS NOT NULL"
         ).fetchone()
         latest = row["latest"] if row is not None else None
         return str(latest) if latest is not None else ""

@@ -892,6 +892,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             database: object,
             curator: object = None,
             embedding_service: object = None,
+            **_extras: object,
         ) -> None:
             self.llm = llm
             self.database = database
@@ -967,7 +968,16 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             douyin=SimpleNamespace(enabled=True, mode="direct"),
             youtube=SimpleNamespace(enabled=True),
         ),
-        discovery=SimpleNamespace(admission_min_score=0.60),
+        discovery=SimpleNamespace(
+            admission_min_score=0.60,
+            visual_profile_enabled=False,
+            keyframe_enabled=False,
+            keyframe_max_frames=8,
+            keyframe_fetch_limit=50,
+            danmaku_enabled=False,
+            danmaku_fetch_limit=50,
+            danmaku_max_chars=500,
+        ),
         scheduler=SimpleNamespace(
             enabled=True,
             pause_on_extension_disconnect=False,
@@ -1611,7 +1621,16 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
         data_path=tmp_path,
         llm=SimpleNamespace(concurrency=3),
         bilibili=SimpleNamespace(cookie="", proxy=""),
-        discovery=SimpleNamespace(admission_min_score=0.60),
+        discovery=SimpleNamespace(
+            admission_min_score=0.60,
+            visual_profile_enabled=False,
+            keyframe_enabled=False,
+            keyframe_max_frames=8,
+            keyframe_fetch_limit=50,
+            danmaku_enabled=False,
+            danmaku_fetch_limit=50,
+            danmaku_max_chars=500,
+        ),
         scheduler=scheduler,
     )
 

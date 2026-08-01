@@ -35,6 +35,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；推荐文案 batch 默认 30 条、2 个 worker 并发生成，但仍受 `_expression_lock` 串行化多入口，避免重复消费同一批候选。推荐消费通过专属 serve DB worker 的独立短事务把推荐历史与 `pool_status='shown'` 原子提交；提交后 callback 直接携带 `pool_counts_after` 更新 gate 和事件订阅者，不再在响应关键路径同步重读共享连接。多次热重载后旧 engine 的迟到 callback 仍解析当前 controller/target；写或 subscriber 失败不伪报提交成功。 |
 | 候选池真实可换计数 | ✅ | `pool_available_count` 现在只表示后端当前可立即 `serve()` 的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数；runtime status / runtime stream 另带 `pool_raw_count`、`pool_pending_count`、`pool_pending_eval_count`、`pool_evaluated_pending_count` 区分素材库存、待评估和已评估待入池内容。换批先广播 `ServeResult.pool_counts_after`，精确 canonical 状态再由独立 serve worker 后台读取并收敛；runtime status 查询和 pool-status 发布同样不触碰维护连接，成熟库扫描不会同步阻塞事件循环。维护 INFO 日志只保留批次汇总，阶段明细与候选摘要下沉到 DEBUG，避免大对象格式化和终端日志锁放大尾延迟。 |
 | embedding 后台预热 | ✅ | refresh 完成前只保证候选入池与文案可用；`prewarm_supergroup_embeddings()` / `prewarm_pool_mmr_embeddings()` 作为后台 task 运行，慢本地 embedding 后端不会占住 refresh lock 或让界面长时间停在“正在补货”。v0.3.124+（lever 4）：`prewarm_pool_mmr_embeddings()` 返回值区分良性冷启动与真故障——`-1`（无 embedding service / 空池，没东西可暖）让启动重试包装器 `_safe_prewarm_pool_mmr_embeddings` 平静跳过(不再每次装机刷 5 行 `warmed=0 — retry`)，`0`（有候选但全嵌入失败＝后端不可达）才重试到底并在放弃时打 WARNING 点名 embedding 后端不可达、MMR 降级。v0.3.148+ search / trending / explore / `KeywordPlanner` 的 query profile summary 也只通过 `EmbeddingService.lookup_cached()` 读取已缓存向量来保持 interest / dislike 多样性；缺缓存时按权重顺序降级，绝不在查询生成热路径新发 embedding 请求。 |
+| 视觉 / 弹幕 prewarm wiring | ✅ | `RecommendationEngine`、CLI、RuntimeContext 和 OpenClaw 均透传 `keyframe_fetch_limit` / `danmaku_fetch_limit`；prewarm 只领取当前可服务池，结果区分成功空与瞬时失败，provenance 或 sampling 变化自动重建/重嵌入 |
 | YouTube 后台 discovery producer | ✅ | `YoutubeDiscoveryProducer` 独立运行 `yt_search` / `yt_trending` / `yt_channel`，只在 YouTube 平台族低于 quota 时由 `_loop_youtube_producer()` tick，按每日 ledger 和 `min_interval_minutes` 控制执行。 |
 | X 后台 discovery producer | ✅ | `XDiscoveryProducer.produce_if_due()` 在 X 平台族低于 quota 且源健康就绪时，由独立 loop tick 触发 `search` / `feed`（For-You）/ `creator`（账号订阅）三个策略；按 `daily_*_budget` / `min_interval_minutes` / `request_interval_seconds` 节流，For-You 压到很低的每日频次并在连续失败后自动暂停。只 enqueue raw candidates 进 `discovery_candidates`，不写 `content_cache`、不调评估器。`enabled=false` 时是 no-op，不 import `twitter_cli`。 |
 | Reddit 后台 discovery producer | ✅ | `RedditDiscoveryProducer.produce_if_due()` 在 Reddit 平台族低于 quota 且 `[sources.reddit].enabled=true` 时，默认通过随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端触发 `search` / `hot` / `subreddit` / `related` 四个分支；已连接插件会同步 `reddit_session` 到 rdt-cli credential store，命令后端不可用或未登录时 fallback 到已安装浏览器插件的真实 `reddit.com` 登录态任务。四个分支各自有独立 daily budget，默认每类 300。producer 只 enqueue raw candidates 到 `discovery_candidates`，不写 `content_cache`、不同步跑 LLM 评估，正式 admission 由共享 evaluator 异步完成。 |
@@ -95,6 +96,12 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
   ≤430px 保留窄屏内联输入框。操作行与状态行是 `.delight` 直接子节点，能脱离正文列约束跨整卡展开。
 - Delight 拖拽 10px 才进入拖动态，50px 才切换卡片；滚动自动加载仍使用 50px
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
+
+### Visual prewarm wiring API
+
+RuntimeContext 重建 RecommendationEngine 时透传视觉开关、帧数、两个 fetch limit 和摘要
+长度；后台 task 通过现有 BackgroundTaskRegistry 管理画像 single-flight rebuild。配置热重载
+后新 embedding provenance 会重新筛选待处理池。
 
 ## 公开 API
 
