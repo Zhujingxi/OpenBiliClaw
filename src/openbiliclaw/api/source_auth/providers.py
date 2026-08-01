@@ -612,11 +612,11 @@ def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
 
 
 def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
-    """X: the only platform whose verdict comes from real traffic.
+    """X: explicit verification uses a read-only authenticated-account probe.
 
-    ``passive_health`` reflects that nothing is probed on demand — the health
-    store records what genuine fetches ran into (401 / 403 / 429), so the
-    verdict is as fresh as the last real request and has no TTL of its own.
+    Discovery traffic still records 401 / 403 / 429 outcomes in the health
+    store, while the settings-page action can now refresh that verdict on
+    demand through ``twitter-cli``'s read-only ``fetch_me`` path.
     """
     cfg = ctx.cfg
     tw_cfg = ctx.source_cfg("twitter")
@@ -647,14 +647,13 @@ def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
         _X_HEALTH_VERIFICATION.get(state, "unverified") if credential == "present" else "unverified"
     )
 
-    # ``passive_health`` means "read off real traffic", so there has to have
-    # been some. The health row is *created* with ``state='ok'``, which made a
+    # ``ok`` means "a real request succeeded", so there has to have been some.
+    # The health row is *created* with ``state='ok'``, which made a
     # first-ever cookie — including one that expired months ago — report
-    # ``verified`` with ``verify_method="passive_health"`` before a single
-    # request had ever gone out. That is a fabricated verdict, and the one
-    # method that cannot correct itself on demand (invariant I3). ``ok`` is
-    # therefore only a verdict once ``record_success`` has stamped a real one;
-    # until then the honest answer is that we have not asked.
+    # ``verified`` before a single request had ever gone out. That is a
+    # fabricated verdict. ``ok`` is therefore only a verdict once
+    # ``record_success`` has stamped a real one; until then the honest answer
+    # is that we have not asked.
     #
     # The negative states need no such guard: they are only ever written by
     # ``record_error``, i.e. by traffic that genuinely happened.
@@ -703,7 +702,7 @@ def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
         credential=credential,
         credential_origin=origin,
         verification=verification,
-        verify_method="passive_health",
+        verify_method="live_probe",
         verified_at=verified_at,
         verify_ttl_seconds=None,
         can_verify_now=credential == "present",

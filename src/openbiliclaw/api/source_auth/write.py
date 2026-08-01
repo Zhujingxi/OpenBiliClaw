@@ -13,10 +13,10 @@ Everything here exists so that cannot happen again:
   with the same arguments, so "which endpoint did you use" can no longer change
   the verdict (invariant I5).
 * :data:`CREDENTIAL_SPECS` states, per platform, exactly how far a write-time
-  check can get. Where it cannot reach a verdict — X has no pollable liveness
-  endpoint, 小红书/知乎 store a bare boolean the backend can never audit — the
-  spec carries the *reason*, and the response says so out loud rather than
-  returning a bare success (invariant I3).
+  check can get. Where it cannot reach a verdict at save time — X deliberately
+  keeps extension sync structural-only, while 小红书/知乎 store a bare
+  boolean the backend can never audit — the spec carries the *reason*, and the
+  response says so out loud rather than returning a bare success (invariant I3).
 
 **Rejection requires evidence.** A structural failure is evidence (a B站 jar
 without ``DedeUserID`` cannot log anyone in). An explicit platform "not logged
@@ -181,8 +181,8 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "X Cookie 缺少 auth_token / ct0，未保存 —— twitter-cli 没有这两项会直接 401。"
         ),
         unverified_reason=(
-            "X 没有可主动轮询的登录端点，保存时只做结构校验；"
-            "真实登录态要等下一次真实请求的结果被动反推。"
+            "保存时只做 auth_token / ct0 结构校验；"
+            "可点击‘测试连接’使用只读账户状态请求确认真实登录态。"
         ),
         form_kind="cookie_textarea",
         form_label="X Cookie",
@@ -192,7 +192,7 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
         login_url="https://x.com/",
         help_text=(
             "登录 x.com 后插件会自动同步。保存时只检查 auth_token / ct0 是否齐全，"
-            "真实登录态要等下一次真实请求才知道。"
+            "点击‘测试连接’即可用只读请求确认登录态。"
         ),
     ),
     "reddit": CredentialSpec(

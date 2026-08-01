@@ -5350,6 +5350,19 @@ def create_app(
                         "source": "runtime-stream",
                     }
                 )
+                # X stores the complete browser Cookie server-side, so ask the
+                # extension for the current jar on every fresh runtime
+                # connection. This covers a backend restart/reconnect even
+                # when the browser's cookies.onChanged event happened earlier.
+                x_cfg = getattr(runtime_config.sources, "twitter", None)
+                if x_cfg is not None and bool(getattr(x_cfg, "enabled", False)):
+                    await websocket.send_json(
+                        {
+                            "type": "x_cookie_sync_requested",
+                            "reason": "runtime_connected",
+                            "source": "runtime-stream",
+                        }
+                    )
                 with suppress(Exception):
                     cookie = resolve_runtime_cookie(
                         data_dir=runtime_config.data_path,

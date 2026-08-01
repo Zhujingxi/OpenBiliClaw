@@ -302,11 +302,10 @@ class XSourceHealthStore:
         """
         feed_clear = self._is_feed(strategy)
         # The only writer of ``last_success_at`` / ``last_success_credential``.
-        # A real request came back clean, which is the sole evidence the
-        # ``passive_health`` verify method may rest on — and the fingerprint
-        # records *whose* evidence it is. Without that second half the marker
-        # says "this platform succeeded once", so swapping in a brand-new cookie
-        # silently inherited the previous one's verdict, timestamp and all.
+        # A real request came back clean, and the fingerprint records *whose*
+        # evidence it is. Without that second half the marker says "this
+        # platform succeeded once", so swapping in a brand-new cookie silently
+        # inherited the previous verdict, timestamp and all.
         with self._connection() as conn:
             conn.execute(
                 """
