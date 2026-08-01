@@ -12,7 +12,7 @@ import asyncio
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -2878,13 +2878,27 @@ def _tick_planner(spy_db: _RecordingDb, *, profile: SoulProfile) -> KeywordPlann
 async def test_production_stage_runs_backfill_and_lifecycle_before_axis_fetch(
     db: Database,
 ) -> None:
+    # Pin the pipeline clock and derive persisted timestamps from it. A literal
+    # 2026-07-01 keyword silently left the 30-day window when CI reached August,
+    # turning this ordering regression into a wall-clock-dependent test.
+    fixed_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
     profile = _profile(("Switch 独立游戏", 0.95))
     axis = _seed_axis(
-        db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z"
+        db,
+        "冷门佳作",
+        interest="Switch 独立游戏",
+        refreshed_at=(fixed_now - timedelta(days=11)).isoformat(),
     )
-    _seed_consumed_keywords(db, axis, count=2, yield_each=1)
+    _seed_consumed_keywords(
+        db,
+        axis,
+        count=2,
+        yield_each=1,
+        created_at=(fixed_now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S"),
+    )
     spy = _RecordingDb(db)
     planner = _tick_planner(spy, profile=profile)
+    planner._inspiration_pipeline._clock = lambda: fixed_now
 
     await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
 
