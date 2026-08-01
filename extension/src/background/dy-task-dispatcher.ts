@@ -65,21 +65,6 @@ function releaseDispatcherMutex(label: string): void {
   }
 }
 
-// TEMP DEBUG: extension-side log relay → daemon (see debug-log.ts).
-function debugLog(event: string, data?: unknown): void {
-  void (async () => {
-    try {
-      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source: "dy", event, data: data ?? null }),
-      });
-    } catch {
-      // ignore
-    }
-  })();
-}
-
 // buildScopeUrl is loaded lazily via dynamic import inside the
 // chrome-lifecycle code path (executeTask / navigateToCurrentScope).
 // Reason: node:test's --experimental-strip-types resolver can't follow
@@ -519,29 +504,14 @@ export function onTabReady(
  * an empty DY_SCOPE_RESULT so the state machine still advances and
  * the task eventually finalises rather than hanging until timeout.
  */
-// TEMP DEBUG: track the most recent injectFetchTapInto outcome so
-// it can be passed through DY_SCOPE_EXECUTE → content script →
-// DY_SCOPE_RESULT → backend logs. Lets us diagnose
-// install_messages_received=0 without needing the user's browser
-// console. Will be reverted before release.
+// Keep the latest injection outcome in the normal task-result diagnostics so
+// browser-side failures remain distinguishable from an empty source result.
 let _lastInjectStatus: string = "not_attempted";
 
 function sendScopeExecuteMessage(): void {
-  if (!progress || !taskTabId) {
-    debugLog("sendScopeExecute:no_progress_or_tab", {
-      hasProgress: !!progress,
-      taskTabId,
-    });
-    return;
-  }
+  if (!progress || !taskTabId) return;
   const scope = progress.scopes[progress.current_scope_idx];
-  if (!scope) {
-    debugLog("sendScopeExecute:no_scope_at_idx", {
-      idx: progress.current_scope_idx,
-    });
-    return;
-  }
-  debugLog("sendScopeExecute:start", { scope, idx: progress.current_scope_idx });
+  if (!scope) return;
   void chrome.tabs
     .sendMessage(taskTabId, {
       action: "DY_SCOPE_EXECUTE",
@@ -554,8 +524,7 @@ function sendScopeExecuteMessage(): void {
         debug_inject_status: _lastInjectStatus,
       },
     })
-    .catch((err) => {
-      debugLog("sendScopeExecute:sendMessage_failed", { error: String(err) });
+    .catch(() => {
       // Synthesise an empty per-scope result so the state machine
       // still advances; this is what we'd see if the user landed
       // on a Douyin login wall or risk-control page where our
@@ -656,7 +625,6 @@ function navigateToCurrentSearch(): void {
   chrome.tabs.update(taskTabId, { url: buildDyDiscoveryPageUrl("search", keyword) }, () => {
     onTabReady(taskTabId!, () => {
       void injectFetchTapInto(taskTabId!).then(() => {
-        debugLog("executeSearchTask:inject_done", { inject_status: _lastInjectStatus });
         sendSearchExecuteMessage();
       });
     }, { fallbackMs: 8_000 });
@@ -670,7 +638,6 @@ function navigateToCurrentHot(): void {
   chrome.tabs.update(taskTabId, { url: buildDyDiscoveryPageUrl("hot", hotItem.sentence_id) }, () => {
     onTabReady(taskTabId!, () => {
       void injectFetchTapInto(taskTabId!).then(() => {
-        debugLog("executeHotTask:inject_done", { inject_status: _lastInjectStatus });
         sendHotExecuteMessage();
       });
     }, { fallbackMs: 10_000 });
@@ -682,7 +649,6 @@ function navigateToFeed(): void {
   chrome.tabs.update(taskTabId, { url: buildDyDiscoveryPageUrl("feed") }, () => {
     onTabReady(taskTabId!, () => {
       void injectFetchTapInto(taskTabId!).then(() => {
-        debugLog("executeFeedTask:inject_done", { inject_status: _lastInjectStatus });
         sendFeedExecuteMessage();
       });
     }, { fallbackMs: 8_000 });
@@ -770,17 +736,12 @@ export async function executeTask(
     }
     return;
   }
-  debugLog("executeTask:start", { task_id: task.id, taskInFlight });
-  if (taskInFlight) {
-    debugLog("executeTask:already_in_flight");
-    return;
-  }
+  if (taskInFlight) return;
   // Cross-source mutex — bail if another dispatcher is currently
   // holding the task slot. The next alarm fires in 60s and we'll
   // retry then. Without this guard, daemon producers can race with
   // a user's manual fetch and both dispatchers may fight over tabs.
   const mutexAcquired = tryAcquireDispatcherMutex("dy");
-  debugLog("executeTask:mutex", { acquired: mutexAcquired });
   if (!mutexAcquired) return;
   taskInFlight = true;
   currentTask = task;
@@ -803,9 +764,7 @@ export async function executeTask(
         url: "https://www.douyin.com/",
         active: shouldOpenDyTaskActive(task),
       });
-      debugLog("executeSearchTask:tab_created", { tabId: tab.id, keywords: keywords.length });
     } catch (err) {
-      debugLog("executeSearchTask:tab_create_failed", { error: String(err) });
       await postTaskResult({
         task_id: task.id,
         status: "failed",
@@ -854,9 +813,7 @@ export async function executeTask(
         url: "https://www.douyin.com/",
         active: shouldOpenDyTaskActive(task),
       });
-      debugLog("executeHotTask:tab_created", { tabId: tab.id, hot_count: hotItems.length });
     } catch (err) {
-      debugLog("executeHotTask:tab_create_failed", { error: String(err) });
       await postTaskResult({
         task_id: task.id,
         status: "failed",
@@ -897,9 +854,7 @@ export async function executeTask(
         url: "https://www.douyin.com/",
         active: shouldOpenDyTaskActive(task),
       });
-      debugLog("executeFeedTask:tab_created", { tabId: tab.id });
     } catch (err) {
-      debugLog("executeFeedTask:tab_create_failed", { error: String(err) });
       await postTaskResult({
         task_id: task.id,
         status: "failed",
@@ -957,9 +912,7 @@ export async function executeTask(
       url: "https://www.douyin.com/",
       active: shouldOpenDyTaskActive(task),
     });
-    debugLog("executeTask:tab_created", { tabId: tab.id });
   } catch (err) {
-    debugLog("executeTask:tab_create_failed", { error: String(err) });
     await postTaskResult({
       task_id: task.id,
       status: "failed",
@@ -989,9 +942,7 @@ export async function executeTask(
   // session the whole time. No more chrome.tabs.update between
   // scopes; fetch-tap stays installed across SPA routes.
   onTabReady(taskTabId, () => {
-    debugLog("executeTask:tab_ready", { tabId: taskTabId });
     void injectFetchTapInto(taskTabId!).then(() => {
-      debugLog("executeTask:inject_done", { inject_status: _lastInjectStatus });
       sendScopeExecuteMessage();
     });
   });
@@ -1004,13 +955,6 @@ export async function executeTask(
  * next scope or finalises the task with status=ok.
  */
 export async function handleDyScopeResult(result: DyScopeResult): Promise<void> {
-  debugLog("handleDyScopeResult", {
-    scope: result.scope,
-    status: result.status,
-    items_count: result.items.length,
-    scope_count: result.scope_count,
-    debug: result.debug,
-  });
   if (!progress || result.task_id !== progress.task_id) return;
   // Reject results from outside the current scope (defensive; the
   // content script should only emit for the scope we asked it to).

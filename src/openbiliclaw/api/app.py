@@ -12415,14 +12415,6 @@ def create_app(
 
         status = payload.get("status", "")
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
-        # TEMP DEBUG: surface incoming partial debug field for the dy
-        # bootstrap e2e probe (will be reverted before release).
-        logger.info(
-            "[dy-debug] task_result IN: status=%s videos=%d debug=%s",
-            status,
-            len(videos),
-            payload.get("debug"),
-        )
         scope_counts = payload.get("scope_counts")
         if not isinstance(scope_counts, dict):
             scope_counts = None
@@ -12495,18 +12487,6 @@ def create_app(
     # /api/runtime-stream WebSocket so the dispatcher polls immediately
     # instead of waiting for the next alarm. The 60s alarm stays as
     # fallback for the WS-down case.
-
-    # TEMP DEBUG: extension-side log relay. Lets the service-worker
-    # dispatcher POST debug events here so they end up in the daemon
-    # log alongside backend-side activity. Will be reverted before
-    # release.
-    @app.post("/api/sources/_debug/log")
-    async def ext_debug_log(payload: dict[str, Any]) -> dict[str, Any]:
-        source = str(payload.get("source", "?"))[:8]
-        event = str(payload.get("event", "?"))[:80]
-        data = payload.get("data")
-        logger.debug("[ext-debug] [%s] %s data=%s", source, event, data)
-        return {"ok": True}
 
     @app.post("/api/sources/xhs/kick")
     async def xhs_task_kick() -> dict[str, Any]:
