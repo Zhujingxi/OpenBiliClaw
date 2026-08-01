@@ -4,10 +4,12 @@
 
 ---
 
-## 未发布：X 来源连接验证与 Cookie 同步（2026-08-01）
+## 未发布：连接与 HTTPS 部署（2026-08-01）
 
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
 - **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
+- **新增最简公网 HTTPS Compose overlay**：`docker-compose.https.yml` 可叠加到源码或预构建部署，使用固定版本 Caddy 自动申请 / 续期公网证书并转发 REST / WebSocket；Caddy 与后端共享 network namespace，宿主机 `8420` 收紧到 loopback，Uvicorn 仅信任 `127.0.0.1` 的 forwarded headers，证书数据使用 named volumes 持久化。Caddy 在 `/api/auth/status` 明确返回密码门禁已启用前不绑定公网端口，首次配置 fail closed；远程扩展仍使用独立设备密钥，现有 LAN/self-managed `tls` profile 保持独立、默认关闭。
+- **修复桌面 Web 的 HTTPS 手机二维码降级**：从非 loopback 的 HTTPS 页面打开「手机版」时，二维码现在保留当前 scheme、host 和端口，不再被 `/api/qr-info` 的后端私网 IP 覆盖或硬编码成 HTTP；IPv4、裸 IPv6 与 URL 方括号 IPv6 loopback 都继续实时探测 LAN IP，插件和桌面局域网扫码行为保持一致。
 
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 

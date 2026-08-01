@@ -8,6 +8,11 @@ TLS Proxy 是默认关闭的 LAN / self-managed HTTPS 入口。它在 `:8443` �
 HTTP/1.1 与 WebSocket 流量转发到本机或 Compose 内网的 FastAPI。它不提供公网网关所需的
 ACME、WAF、通用路由、限流或多 upstream 能力。
 
+公网域名部署使用仓库根目录的 `docker-compose.https.yml` Caddy overlay。它是部署层的并列
+入口，不调用 `tls_proxy.py`、不读取 `[tls_proxy]`，也不会改变本模块的默认关闭语义：Caddy
+自动管理公网证书并通过共享 loopback 转发到 FastAPI；本模块继续负责本地 CA / 自有证书的
+LAN 场景。两者不应同时启用。
+
 ## 已实现功能
 
 | 能力 | 状态 | 约束 |
@@ -21,6 +26,9 @@ ACME、WAF、通用路由、限流或多 upstream 能力。
 | 健康检查 | ✅ | `GET/HEAD /healthz` 不依赖 CA/CRL 下载文件且不返回秘密；其他方法 405 并关闭连接 |
 | SAN 漂移检测 | ✅ | 现有证书缺配置 SAN 时 fail loudly，从不静默覆盖 |
 | Docker profile | ✅ | `docker compose --profile tls`，SAN 与端口由明确环境变量传入 |
+
+公网 Caddy overlay 的 Compose 合并、证书持久化和访问门禁由
+[`docs/https-deployment.md`](../https-deployment.md) 记录，不属于本模块公开 API。
 
 ## 数据流
 

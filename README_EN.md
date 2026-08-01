@@ -312,6 +312,8 @@ The agent will clone the repo, install dependencies, start the backend with the 
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
+With a public DNS name, the shortest path is the [`docker-compose.https.yml`](docker-compose.https.yml) overlay: Caddy obtains and renews the certificate automatically, and desktop, mobile, and the extension share `https://<domain>`. Commands and required access controls are in the [HTTPS deployment guide](docs/https-deployment.md).
+
 ### 3. Log in to content platforms in the same browser
 
 By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), or [Reddit](https://www.reddit.com), or choose Bangumi and enter a public username. Keep at least one source that can return profile signals. Bangumi without a username still supports anonymous discovery, but cannot initialize a profile by itself.
@@ -614,7 +616,7 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
                        │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
-                       │ Optional HTTPS: TLS Proxy :8443 → loopback/Compose HTTP → same API
+                       │ Optional HTTPS: public Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → same API
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
                        │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐
@@ -671,11 +673,12 @@ Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-key
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
 
-Trusted LAN and self-managed deployments may additionally enable the default-off
-[TLS Proxy](docs/https-deployment.md). It performs exact HTTPS Origin/Host validation, relays
-WebSockets, and manages explicit SANs for a local-CA certificate. With no remote SAN the generated
-certificate is localhost-only. This lightweight component is not a public-Internet production
-gateway, and the default HTTP path is unchanged.
+Public-domain Docker deployments may add the default-off
+[Caddy HTTPS overlay](docs/https-deployment.md). It obtains and renews a trusted certificate,
+proxies REST and WebSockets through shared loopback, and restricts host port `8420` to loopback.
+Trusted LAN and self-managed deployments can instead use the built-in TLS Proxy for exact HTTPS
+Origin/Host checks and explicit local-CA SANs; with no remote SAN its generated certificate is
+localhost-only. The two edges are mutually exclusive, and the default HTTP path is unchanged.
 
 > Full architecture detail (runtime state machine, pool accounting, profile overrides, and more) lives in [Architecture](docs/architecture.md) and the [visual architecture diagrams](docs/index.md).
 
@@ -751,7 +754,7 @@ OpenBiliClaw/
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
-| Optional TLS | Python stdlib HTTP/TLS forwarding plus cryptography certificate generation from the `[tls]` extra; LAN/self-managed only and off by default |
+| Optional HTTPS | Pinned Caddy Docker overlay with automatic certificates for public domains; Python TLS Proxy + `[tls]` extra and local CA/SAN for LAN/self-managed use; off by default and mutually exclusive |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
 | Agent Framework | Lightweight custom framework |
