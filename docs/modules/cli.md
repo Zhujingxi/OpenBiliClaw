@@ -354,8 +354,11 @@ $ openbiliclaw start
 $ openbiliclaw serve-api
 
 $ openbiliclaw serve-api --host 0.0.0.0 --port 8420
+
+$ openbiliclaw serve-api --tls-port 9443   # 覆盖 config.toml 的 [tls_proxy].port
 ```
 
+`--tls-port` 覆盖 `[tls_proxy].port`（默认 8443），仅在 `enabled=true` 时生效。
 推荐容器内使用该命令作为启动入口。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。

@@ -1,0 +1,82 @@
+# HTTPS 部署指南
+
+> 使远程设备的浏览器扩展和 Web UI 能通过 HTTPS 连接后端。
+
+## 为什么需要
+
+浏览器扩展对公网 IP 的 HTTP 后端强制拒绝（`https_required`）。本机 `http://127.0.0.1:8420` 不受限制。
+
+## Docker 部署
+
+项目 `docker-compose.yml` 内置可选代理容器，通过 profile 启用：
+
+```bash
+docker compose --profile tls up -d    # 代理容器 + 后端一起启动
+```
+
+代理监听 `:8443`，后端 `:8420` 不变：
+- 网页：`https://<host>:8443/web`
+- Extension：`https://<host>:8443`
+
+## 非 Docker 部署
+
+```bash
+# 1) 安装（一次）
+pip install "openbiliclaw[tls]"
+
+# 2) 开启（一次，写入 config.toml）
+openbiliclaw tls-proxy enable
+
+# 3) 日常启动（代理自动跟随）
+openbiliclaw serve-api
+```
+
+> `openbiliclaw tls-proxy status` 查看，`tls-proxy disable` 关闭。
+> 代理随 `serve-api` 退出自动停止，无需单独管理。
+
+## 证书
+
+代理启动时自动检测 `cert_dir`（默认 `data/certs`）：
+- 已有 `srv.crt` + `srv.key` → 直接使用
+- 不存在 → 自动生成自签 CA + 服务器证书（RSA 2048，SAN: localhost/127.0.0.1 + 用户配置的主机名/IP，3650 天）
+
+### 客户端信任 CA
+
+从 `https://<host>:8443/ca.crt` 下载，导入系统信任库：
+
+- **Windows**：双击 `ca.crt` → 本地计算机 → 「受信任的根证书颁发机构」
+- **Linux（Chrome）**：`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n obc-ca -i ca.crt`
+
+### 使用自己的证书
+
+将 `srv.crt` / `srv.key`（以及可选 `ca.crt` / `ca.crl`）放入 `cert_dir` 目录（默认 `data/certs`），代理启动时自动检测到便跳过生成。
+
+Docker 用户：拷入 `openbiliclaw_certs` 卷。
+
+## 客户端配置
+
+启用 TLS 反代后，**客户端（浏览器扩展、Web UI）访问的地址和端口必须改为 TLS 反代的地址**，而不是后端原来的 `http://<host>:8420`：
+
+| 客户端 | 改为 |
+|--------|------|
+| 浏览器扩展后端地址 | `https://<host>:8443` |
+| 桌面 Web | `https://<host>:8443/web` |
+| 移动 Web | `https://<host>:8443/m` |
+
+> 不改客户端配置的话，扩展仍会连 `http://<host>:8420`，TLS 反代不生效。
+
+## 常见问题
+
+### 本机能同时用 HTTP 吗？
+
+能。`http://127.0.0.1:8420` 不受影响。
+
+### 改 HTTPS 端口？
+
+两种方式：
+- **CLI 临时覆盖**：`openbiliclaw serve-api --tls-port 9443`（仅在 `[tls_proxy].enabled=true` 时生效）
+- **持久化配置**：`config.toml` → `[tls_proxy].port`（默认 8443），重启。Docker 用户同步改 compose 端口映射。
+
+### 证书过期？
+
+代理自动生成的有效期 3650 天。重签：删除 `data/certs`（或你配的 `cert_dir`）下的证书文件，重启自动生成新证书，重新下载 `ca.crt` 到客户端。

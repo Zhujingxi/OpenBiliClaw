@@ -1348,6 +1348,24 @@ class ApiAuthConfig:
 
 
 @dataclass
+class TlsProxyConfig:
+    """Optional TLS reverse proxy for remote device access.
+
+    When ``enabled`` is true and ``cryptography`` is installed,
+    ``serve-api`` starts a background thread that terminates TLS
+    on ``port`` and forwards to the API.
+
+    ``cert_dir`` defaults to ``{data_dir}/certs`` at runtime;
+    leave empty to use the default.
+    """
+
+    enabled: bool = False
+    port: int = 8443
+    cert_dir: str = ""
+    san_names: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ApiConfig:
     """Backend API server settings.
 
@@ -1386,6 +1404,7 @@ class Config:
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
     # provider override): this carries soul-engine behavior toggles.
     soul: SoulConfig = field(default_factory=SoulConfig)
+    tls_proxy: TlsProxyConfig = field(default_factory=TlsProxyConfig)
 
     @property
     def data_path(self) -> Path:
@@ -2181,6 +2200,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             )
         ),
         soul=soul,
+        tls_proxy=_build_tls_proxy(raw),
     )
 
 
@@ -2520,6 +2540,22 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
             auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
         ),
+    )
+
+
+def _build_tls_proxy(raw: dict[str, Any]) -> TlsProxyConfig:
+    tls_raw_val = raw.get("tls_proxy")
+    tls_raw: dict[str, Any] = tls_raw_val if isinstance(tls_raw_val, dict) else {}
+    san_raw = tls_raw.get("san_names", [])
+    if isinstance(san_raw, str):
+        san_raw = [s.strip() for s in san_raw.split(",") if s.strip()]
+    return TlsProxyConfig(
+        enabled=_coerce_bool(
+            os.environ.get("OPENBILICLAW_TLS_PROXY_ENABLED") or tls_raw.get("enabled", False),
+        ),
+        port=_normalize_api_port(tls_raw.get("port", 8443)),
+        cert_dir=str(tls_raw.get("cert_dir", "") or ""),
+        san_names=list(san_raw) if isinstance(san_raw, list) else [],
     )
 
 

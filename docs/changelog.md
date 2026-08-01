@@ -7,6 +7,8 @@
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 
 - **修复保存配置时待聊按钮失效、热重载误回滚和 Web 实时流反复报断开**：生产日志显示长达 235 秒的对话学习占住唯一结算 worker，旧热重载会先停接新任务、只等 30 秒，于是连续丢弃 `confusion.open.sync`，再用空白 `TimeoutError` 回滚配置；现在队列保持接单直到真正排空，再原子暂停交接，安全等待窗口与 20 分钟 LLM 上限对齐到 25 分钟，桌面/插件在超过前端 60 秒预算时明确显示“仍在后台热重载”。待聊 open 会在 worker 忙时返回带 `Retry-After` 的 `dialogue_busy`，两端显示等待态并自动重试，required local job 不再留下“已 claim、未建 turn”的半截状态；若已有跨 session 的 `clarifying` 疑惑，列表只给尚未展示该 turn 的 session 暴露当前持有者，不再列出必然 409 的下一条。真实浏览器 E2E 进一步发现 pending-open 卡片仍是 `pending` 状态，点“稍后”虽改成 deferred 却不会走旧 `discussing` 解锚分支；现在会按 origin turn 精确释放同代锚，下一条待聊不再被不可见旧锚挡住。`runtime-stream` 每 20 秒发送空闲心跳，桌面端短暂关闭显示“重连中”、记录 close code/reason 并按原 3 秒节奏续连，不再把 WebSocket 抖动误报成整个后端离线。
+- **Docker Compose 新增可选 TLS 反代组件 `openbiliclaw-tls-proxy`**：通过 profile `tls` 按需启用（`docker compose --profile tls up`），不影响现有无 HTTPS 部署。纯 Python 标准库实现，自包含构建，支持 TLS 终止、浏览器扩展跨源 Origin 校验/改写、WebSocket 中继、证书自动生成。详见 `docs/https-deployment.md`。
+- **TLS 反代默认端口改为 8443，`serve-api` 新增 `--tls-port` 可覆盖**：清除残留的开发者本机端口 2119 和 hostname `sushe`。端口配置方式与 `--port` 一致（CLI 参数 + config.toml）。Docker 容器的 healthcheck 改用 `LISTEN_PORT` 环境变量动态读取端口，不再硬编码。
 
 ## v0.3.190：启动体验升级（2026-07-30）
 
