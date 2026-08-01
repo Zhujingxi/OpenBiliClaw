@@ -138,7 +138,7 @@
 
 - [ ] 先写失败测试：7 平台各调一次 verify，断言 200 且 `verify_method` 与 Task 4 声明一致。
 - [ ] 运行确认 FAIL（端点不存在）。
-- [ ] 按 `verify_method` 实现分派：`live_probe` 绕 TTL 真出网；`passive_health` 返回最近真实请求结论 + 时间；`browser_heartbeat` 经 WS 发 `*_sync_requested` 并等待至多 5s；`local_file` 重读文件；`none` 立即返回 `unverified` 并在 `message` 说明原因。
+- [ ] 按 `verify_method` 实现分派：`live_probe` 绕 TTL 真出网（X 使用只读 `fetch_me()`）；`passive_health` 保留给没有安全主动探针的来源并返回最近真实请求结论 + 时间；`browser_heartbeat` 经 WS 发 `*_sync_requested` 并等待至多 5s；`local_file` 重读文件；`none` 立即返回 `unverified` 并在 `message` 说明原因。
 - [ ] **B 站缓存一致性（要求已修订）**。原要求是"必须复用 `InitPrereqs.bilibili_check()` 的 TTL 缓存"。Task 4 实施时给出了成立的反驳并另建了 `source_auth/probe_cache.py`：`init_prereqs` 的缓存只暴露 `peek_bilibili() -> str`，**没有任何时间戳**，而 `check_legacy_consistency` 要求每个带 TTL 的 `verified` 必须有 `verified_at`；为一个可能几分钟前的结论合成"现在"正是 I3 禁止的编造证据。采纳该设计。
 
   但我原本担心的风险仍未解除，Task 6 必须处理：**现在 B 站有两条各自缓存的活体验证路径**（`init_prereqs` 喂 `/api/init-status`，`LiveProbeCache` 喂 `/api/sources/status`），两者互不知晓 —— 这就是 D3 的形状。二选一：

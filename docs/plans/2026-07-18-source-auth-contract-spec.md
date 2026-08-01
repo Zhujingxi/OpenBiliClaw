@@ -272,7 +272,7 @@ class SourceAuthContract(BaseModel):
     verification: Literal["verified", "failed", "stale", "unverified"]
     verify_method: Literal[
         "live_probe",         # 真的出网校验（bilibili nav）
-        "passive_health",     # 由真实请求的异常反推（twitter）
+        "passive_health",     # 由真实请求的异常反推（保留能力）
         "browser_heartbeat",  # 插件上报的登录 cookie 存在性（xhs / zhihu）
         "local_file",         # 只读本地凭据文件（reddit）
         "task_history",       # 由历史任务结果反推（zhihu 回落）
@@ -305,7 +305,7 @@ douyin     present     unverified     "unverified"   False
 | --- | --- | --- | --- |
 | bilibili | `live_probe` | 60s ok / 10s fail | 复用 `init_prereqs` 的 TTL 缓存，首次接入 sources/status |
 | **douyin** | **`live_probe`** | 60s ok / 10s fail | **D11 实测升级**：`/aweme/v1/web/user/profile/self/`，已登录 `status_code=0`+非空 uid，未登录 `status_code=8` "用户未登录"，均值 329ms |
-| twitter | `passive_health` | None | 由 `x_source_health` 反推 |
+| twitter | `live_probe` | None | `twitter-cli.fetch_me()` 只读账户状态；后台请求仍写入 `x_source_health` |
 | xiaohongshu | `browser_heartbeat` | 72h | 沿用 `_xhs_login_fresh_hours`；后端零 cookie，**架构上无法后端活体验证**，verify 只能走插件往返 |
 | zhihu | `browser_heartbeat` → `task_history` | 72h / None | 回落路径需在字段上体现，不能冒充心跳 |
 | reddit | `local_file` | 7d | 沿用 `_RDT_CREDENTIAL_TTL_SECONDS` |
@@ -320,7 +320,7 @@ POST /api/sources/{slug}/verify
 → 200 SourceAuthContract + {changed: bool, message: str}
 ```
 
-按 `verify_method` 分派：`live_probe` 真发请求（绕过 TTL 缓存）；`passive_health` 返回最近一次真实请求的结论并标注时间；`browser_heartbeat` 通过 WS 向插件发 `*_sync_requested` 并等待至多 5s；`local_file` 重读文件；`none` 立即返回 `verification="unverified"` 并在 `message` 说明原因。
+按 `verify_method` 分派：`live_probe` 真发请求（绕过 TTL 缓存，X 使用只读 `fetch_me()`）；`passive_health` 保留给没有安全主动探针的来源，返回最近一次真实请求的结论并标注时间；`browser_heartbeat` 通过 WS 向插件发 `*_sync_requested` 并等待至多 5s；`local_file` 重读文件；`none` 立即返回 `verification="unverified"` 并在 `message` 说明原因。
 
 **并发与限流**：每平台 10s 去抖，避免用户狂点触发风控。
 

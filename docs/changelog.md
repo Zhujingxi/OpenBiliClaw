@@ -4,9 +4,17 @@
 
 ---
 
+## 未发布：X 来源连接验证与 Cookie 同步（2026-08-01）
+
+- **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
+- **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
+
 ## v0.3.191：对话与实时连接稳定性修复（2026-07-30）
 
+- **修复桌面端夜间模式下账号同步提示过淡**：同步异常提示改用主题前景色和明确的状态底色，深浅主题下都保持可读。
+- **修复桌面端惊喜推荐文字卡在夜间模式下难以辨认**：知乎、Reddit 等无封面内容不再把前景色当作渐变背景，改用主题表面色、轻平台色和明确的主题前景色；普通无封面文字卡也同步收敛到同一套高对比度样式。
 - **补充社区贡献者致谢**：在贡献指南中记录 [@RayeLouis](https://github.com/RayeLouis) 对扩展服务端认证权威判定（[#132](https://github.com/whiteguo233/OpenBiliClaw/pull/132)）和可选 TLS 反代初版（[#136](https://github.com/whiteguo233/OpenBiliClaw/pull/136)）的贡献。
+- **修复 Web 与插件聊天不同步，并补齐长页面回顶入口**：插件、移动 Web、桌面 Web 的主聊天统一使用 `session=popup&scope=chat`；聊天界面可见且在线时约每 2.5 秒增量读取共享 durable history，快照未变化不重绘，用户阅读旧消息时保留滚动位置。移动 Web 与桌面 Web 同时增加固定「顶部」按钮，页面滚动区和聊天内滚动区均可一键回到顶部。
 - **修复保存配置时待聊按钮失效、热重载误回滚和 Web 实时流反复报断开**：生产日志显示长达 235 秒的对话学习占住唯一结算 worker，旧热重载会先停接新任务、只等 30 秒，于是连续丢弃 `confusion.open.sync`，再用空白 `TimeoutError` 回滚配置；现在队列保持接单直到真正排空，再原子暂停交接，安全等待窗口与 20 分钟 LLM 上限对齐到 25 分钟，桌面/插件在超过前端 60 秒预算时明确显示“仍在后台热重载”。待聊 open 会在 worker 忙时返回带 `Retry-After` 的 `dialogue_busy`，两端显示等待态并自动重试，required local job 不再留下“已 claim、未建 turn”的半截状态；若已有跨 session 的 `clarifying` 疑惑，列表只给尚未展示该 turn 的 session 暴露当前持有者，不再列出必然 409 的下一条。真实浏览器 E2E 进一步发现 pending-open 卡片仍是 `pending` 状态，点“稍后”虽改成 deferred 却不会走旧 `discussing` 解锚分支；现在会按 origin turn 精确释放同代锚，下一条待聊不再被不可见旧锚挡住。`runtime-stream` 每 20 秒发送空闲心跳，桌面端短暂关闭显示“重连中”、记录 close code/reason 并按原 3 秒节奏续连，不再把 WebSocket 抖动误报成整个后端离线。
 - **修复扩展认证状态以服务端判决为唯一权威**：服务端 `/api/auth/status` 返回 `authenticated: false` 时（如 `auth_epoch` 升级或密钥撤销后），扩展设置页过去因 `readPopupSessionToken()` 仅校验本地过期时间而误显“设备已配对”并隐藏密钥输入栏，与推荐 tab 的 401 状态矛盾。现在 `checkAuthStatus` 以服务端 `authenticated` 为唯一权威，服务端未认证时直接展示输入栏。新增 3 个回归测试。
 - **新增默认关闭的 LAN/self-managed TLS 反代，并补齐可持久化配置/CLI/Docker 入口**：`[tls_proxy]` 现可完整 load/save round-trip，环境变量 / `config.local.toml` 逐字段覆盖不会被无关保存烘焙进基础配置；`tls-proxy enable/disable/status` 会真实持久化。`serve-api --tls-port` 可临时覆盖 8443。源码 Compose 通过 `tls` profile opt-in，使用 `OPENBILICLAW_TLS_SAN_NAMES` 明确传入逗号分隔远程 SAN、`OPENBILICLAW_TLS_PORT` 同步端口映射；非默认 build-time `CERT_DIR` 会作为容器运行时证书根目录完整传入，未提供远程 SAN 的自动证书只承诺 localhost。插件手机版二维码和 `/api/qr-info` 探测现在保留已配置的 HTTPS scheme，不再把明文 HTTP 发往 TLS 端口；未知 scheme 安全回落 HTTP。转发主体使用 Python 标准库，自动证书生成来自可选 `[tls]` extra / 容器内 `cryptography`，不再误称“纯标准库”。

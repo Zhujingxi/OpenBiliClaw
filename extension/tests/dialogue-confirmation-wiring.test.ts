@@ -40,7 +40,7 @@ test("service worker reuses its 30s flush alarm for a debounced count-only badge
   assert.match(serviceWorker, /if \(backendReachable !== true \|\| backendUninitialized\)/);
 });
 
-test("desktop mirrors popup semantics with webui session and a visible pending count", () => {
+test("desktop mirrors popup semantics with the shared chat session and a visible pending count", () => {
   const app = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
   const html = projectFile("src/openbiliclaw/web/desktop/index.html");
 
@@ -49,7 +49,8 @@ test("desktop mirrors popup semantics with webui session and a visible pending c
   assert.match(app, /executeCardAction/);
   assert.match(app, /fetchTurn[\s\S]*ENDPOINTS\.chatTurns/);
   assert.match(app, /dialogueCardActionAbortController\.signal/);
-  assert.match(app, /session:\s*"webui"/);
+  assert.match(app, /SHARED_CHAT_SESSION\s*=\s*"popup"/);
+  assert.match(app, /session:\s*SHARED_CHAT_SESSION/);
   assert.match(html, /id="chatPendingCountBadge"/);
   assert.match(html, /id="desktopPendingConfirmations"/);
   assert.match(html, /\/shared\/dialogue-confirmation\.js/);

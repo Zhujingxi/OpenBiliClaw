@@ -5572,7 +5572,9 @@ class TestBackendAPI:
         from openbiliclaw.runtime.events import RuntimeEventHub
 
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-        save_config(Config(), tmp_path / "config.toml")
+        cfg = Config()
+        cfg.sources.twitter.enabled = True
+        save_config(cfg, tmp_path / "config.toml")
 
         hub = RuntimeEventHub()
         app = create_app(
@@ -5591,6 +5593,11 @@ class TestBackendAPI:
             }
             assert websocket.receive_json() == {
                 "type": "zhihu_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
+                "type": "x_cookie_sync_requested",
                 "reason": "runtime_connected",
                 "source": "runtime-stream",
             }

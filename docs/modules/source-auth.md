@@ -4,7 +4,7 @@
 
 `src/openbiliclaw/api/source_auth/` 回答一个问题：**每个平台来源的凭据现在能不能用，以及这个结论有多可信。**
 
-它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是七个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书和知乎是浏览器 72 小时内的心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 是上一次真实请求没返回 401，YouTube 是一个硬编码常量。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
+它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是七个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书和知乎是浏览器 72 小时内的心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 既有后台真实请求健康记录，也支持设置页发起只读账户状态探针，YouTube 是一个硬编码常量。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
 
 完整诊断与设计见 [`docs/plans/2026-07-18-source-auth-contract-spec.md`](../plans/2026-07-18-source-auth-contract-spec.md)。
 
@@ -46,8 +46,8 @@ class SourceAuthContract(BaseModel):
 
 | 取值 | 含义 | 当前平台 |
 | --- | --- | --- |
-| `live_probe` | 当场出网问平台 | bilibili、douyin、bangumi（配置了个人令牌时） |
-| `passive_health` | 由真实流量的错误反推 | twitter |
+| `live_probe` | 当场出网问平台 | bilibili、douyin、twitter、bangumi（配置了个人令牌时） |
+| `passive_health` | 由真实流量的错误反推 | 暂无当前平台（保留能力） |
 | `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu |
 | `local_file` | 只读了本地凭据文件 | reddit |
 | `task_history` | 由历史任务结果反推 | zhihu（无心跳时回落） |
@@ -133,7 +133,9 @@ class SourceAuthContract(BaseModel):
 
 **X 的成功属于某一份凭据，不属于这个平台。** 只记「成功过」不记「谁成功的」，换 cookie 就会继承上一份的结论——实测新 cookie 直接拿到旧 cookie 的 `verified`**连时间戳都一字未变**。这与上一条按平台取缓存是同一个错误，只是换了个 store。`last_success_credential` 记下产生该成功的凭据指纹（由 producer 在解析 cookie、构造 `XClient` 的同一处绑定，所以「记录成功的那份凭据」就是「发出请求的那份凭据」），读取时与当前 cookie 比对，不符即非证据。**不挂在写入路径上而是比对身份**：cookie 也可能经环境变量或直接改 data file 变更，那些路径一个钩子都不经过；`clear_relogin_block()` 更救不了——健康行本就是 `ok` 时它返回 `False`，什么都不清。build 期绑定也是安全方向：若 cookie 变了而 producer 未重建，指纹仍跟着**真正在发请求**的那份凭据走,新 cookie 显示 `unverified` 而非冒领他人战绩。
 
-**X 的 `ok` 不等于验证通过。** `x_source_health` 的行是以 `state='ok'` 为**默认值**建出来的,所以「从未发过任何请求」与「上次请求成功」在 `state` 上完全同形。照 `ok` 直接映射 `verified`,意味着全新数据库里第一次写入的 X cookie——哪怕它几个月前就过期了——会立刻宣称 `verification=verified` + `verify_method=passive_health`,而 `passive_health` 恰恰是唯一无法主动重跑来自证的方式。现新增 `last_success_at` 列(只由 `record_success` 写),没有它就报 `unverified`。`clear_relogin_block()` 会**清空**该列：它是凭新 cookie 给出的乐观解封,不是用新 cookie 拿到的结果,留着旧成功等于让新凭据继承别人的战绩。迁移**不回填**——老行里没有任何信号能区分这两种情况,猜一个就是把同一个伪造推迟一次迁移;代价是升级后 X 显示 `unverified` 直到下一轮 discovery 成功。
+**X 的 `ok` 不等于验证通过。** `x_source_health` 的行是以 `state='ok'` 为**默认值**建出来的,所以「从未发过任何请求」与「上次请求成功」在 `state` 上完全同形。照 `ok` 直接映射 `verified`,意味着全新数据库里第一次写入的 X cookie——哪怕它几个月前就过期了——会立刻宣称 `verification=verified`。现新增 `last_success_at` 列(只由 `record_success` 写),没有它就报 `unverified`；此时设置页的 `live_probe` 可以通过只读 `fetch_me()` 主动补上成功证据。`clear_relogin_block()` 会**清空**该列：它是凭新 cookie 给出的乐观解封,不是用新 cookie 拿到的结果,留着旧成功等于让新凭据继承别人的战绩。迁移**不回填**——老行里没有任何信号能区分这两种情况,猜一个就是把同一个伪造推迟一次迁移;代价是升级后 X 显示 `unverified` 直到下一轮 discovery 或显式测试连接成功。
+
+**X 的显式验证是只读探针。** `POST /api/sources/twitter/verify` 复用统一 `live_probe` 框架，调用 `XClient.probe()` → `twitter-cli.fetch_me()`；成功或明确 401 会写回与 discovery 共用的 `XSourceHealthStore`，403 / 429 与其它传输异常保持 `blocked` / `rate_limited` / 待判定语义，不把无法判定写成 Cookie 失效。保存 Cookie 本身仍只做 `auth_token` / `ct0` 结构校验，避免每次扩展同步都主动出网。
 
 **X 健康表不能在状态请求的共享 connection 上做任何工作。** `/api/sources/status` 是同步 handler，会被 FastAPI 线程池并发执行；`check_same_thread=False` 只允许 connection 跨线程使用，不代表同一个 connection 可以同时 `CREATE/PRAGMA/SELECT`。真实 30 并发请求曾有 3 次返回 500（`sqlite3.Connection returned NULL`）。`XSourceHealthStore` 现对每个 `Database` 实例只单飞执行一次 schema 初始化，且初始化、读取、成功/失败写入、人工冷却覆盖均使用 `Database.open_connection()` 的短连接；`record_error()` 的计数读取与更新位于同一 `BEGIN IMMEDIATE` 事务，既避开共享 connection，也不丢连续 429 计数。
 

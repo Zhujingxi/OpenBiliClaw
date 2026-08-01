@@ -192,6 +192,27 @@ async def test_xclient_likes_honors_limit(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(out) == 4
 
 
+async def test_xclient_probe_reads_authenticated_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = XClient(cookie="auth_token=a; ct0=b")
+    profile = object()
+    monkeypatch.setattr(client, "_raw_me", lambda: profile)
+
+    assert await client.probe() is profile
+
+
+async def test_xclient_probe_maps_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from twitter_cli.client import TwitterAPIError
+
+    client = XClient(cookie="auth_token=a; ct0=b")
+
+    def _boom() -> object:
+        raise TwitterAPIError(401, "unauthorized")
+
+    monkeypatch.setattr(client, "_raw_me", _boom)
+    with pytest.raises(XAuthError):
+        await client.probe()
+
+
 async def test_xclient_bookmarks_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
     client = XClient(cookie="auth_token=a; ct0=b")
     monkeypatch.setattr(client, "_raw_bookmarks", lambda *, count: [_make_tweet("666")])

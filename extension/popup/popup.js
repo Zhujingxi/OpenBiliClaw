@@ -408,9 +408,13 @@ offlineBackendPoller = createOfflineBackendPoller({
   },
 });
 const CHAT_SESSION = "popup";
+const CHAT_HISTORY_REFRESH_INTERVAL_MS = 2500;
 const CHAT_POLL_INTERVAL_MS = 1200;
 const CHAT_POLL_DEADLINE_MS = 180_000;
 const activeChatPolls = new Map();
+let chatHistoryRefreshTimer = null;
+let chatHistoryHydrationInFlight = false;
+let lastChatHistorySignature = null;
 const watchLaterToggles = createSavedToggleRegistry({
   labels: {
     checkedTitle: "取消稍后再看",
@@ -4916,6 +4920,14 @@ function scrollChatMessagesToBottom() {
   window.requestAnimationFrame(scroll);
 }
 
+function isChatMessagesNearBottom(messages) {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 48;
+}
+
+function chatHistorySignature(turns) {
+  return JSON.stringify(turns);
+}
+
 function appendChatMessage(role, content, { turnId = "", part = "" } = {}) {
   if (!(elements.chatMessages instanceof HTMLElement)) {
     return null;
@@ -5200,12 +5212,20 @@ async function hydrateChatHistory() {
   if (!(elements.chatMessages instanceof HTMLElement) || !state.online) {
     return;
   }
+  if (chatHistoryHydrationInFlight) return;
+  chatHistoryHydrationInFlight = true;
+  const messages = elements.chatMessages;
+  const shouldStickToBottom = isChatMessagesNearBottom(messages);
+  const previousScrollTop = messages.scrollTop;
   try {
     const payload = await fetchChatTurns({ session: CHAT_SESSION, limit: 100 });
-    const turns = selectDialogueTurns(payload.items || []);
+    const nextTurns = selectDialogueTurns(payload.items || []);
+    const signature = chatHistorySignature(nextTurns);
+    if (signature === lastChatHistorySignature) return;
+    lastChatHistorySignature = signature;
     elements.chatMessages.replaceChildren();
     dialogueTurnsById.clear();
-    for (const turn of turns) {
+    for (const turn of nextTurns) {
       renderChatTurn(turn);
       if (turn.scope === "chat" && turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
@@ -5214,10 +5234,30 @@ async function hydrateChatHistory() {
         });
       }
     }
-    scrollChatMessagesToBottom();
+    if (shouldStickToBottom) {
+      scrollChatMessagesToBottom();
+    } else {
+      window.requestAnimationFrame(() => {
+        messages.scrollTop = Math.min(
+          previousScrollTop,
+          Math.max(0, messages.scrollHeight - messages.clientHeight),
+        );
+      });
+    }
   } catch {
     // History is opportunistic; core panel loading should continue offline.
+  } finally {
+    chatHistoryHydrationInFlight = false;
   }
+}
+
+function startChatHistorySync() {
+  if (chatHistoryRefreshTimer !== null) return;
+  chatHistoryRefreshTimer = window.setInterval(() => {
+    if (state.activeTab !== "chat" || document.hidden || !state.online) return;
+    void hydrateChatHistory();
+    void refreshPendingConfirmations();
+  }, CHAT_HISTORY_REFRESH_INTERVAL_MS);
 }
 
 async function syncScopedChatTurns() {
@@ -9549,6 +9589,7 @@ async function initializePopup() {
   installEmbeddingBannerAutoRefresh(maybeShowEmbeddingBanner);
   await hydrateChatHistory();
   await refreshPendingConfirmations();
+  startChatHistorySync();
   // Always fetch profile-summary on startup so the messages inbox is
   // populated regardless of which tab the user lands on.  Without this
   // the inbox stays empty until the user manually opens the profile

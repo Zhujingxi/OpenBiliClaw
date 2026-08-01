@@ -98,11 +98,13 @@
 
 | 动作 | 语义 | 当前平台 |
 | --- | --- | --- |
-| `live_probe` | 当场出网探测 | bilibili、douyin、bangumi（有可选令牌时） |
-| `passive_health` | 汇报真实流量已经得出的结论，不出网 | twitter |
+| `live_probe` | 当场出网探测 | bilibili、douyin、twitter、bangumi（有可选令牌时） |
+| `passive_health` | 汇报真实流量已经得出的结论，不出网 | 暂无（保留给确实没有主动探针的来源） |
 | `browser_heartbeat` | 经 WS 发 `*_login_state_sync_requested`，等插件回报（至多 5s） | xiaohongshu、zhihu |
 | `local_file` | 重读本地凭据文件，不跑子进程 | reddit |
 | `none` | 没有可验证的东西 | youtube |
+
+X 的 `live_probe` 只调用 `twitter-cli` 的只读 `fetch_me()` 账户状态接口，不执行点赞、收藏或其它写操作；发现链路仍会把真实请求结果写入 `XSourceHealthStore`，所以状态页既能反映后台流量，也能被「测试连接」主动刷新。
 
 三个容易写错的地方：
 
@@ -155,7 +157,7 @@ body  {kind: "cookie" | "token" | "login_state", value, source}
 | --- | --- | --- | --- | --- |
 | bilibili | cookie | SESSDATA + bili_jct + DedeUserID | nav 探针 | `data/bilibili_cookie.json` + config.toml 镜像 |
 | douyin | cookie | sessionid / sessionid_ss / sid_tt 至少一个 | profile/self 探针（D11） | `data/douyin_cookie.json` |
-| twitter | cookie | auth_token + ct0 | 无（只能被动反推） | `data/x_cookie.json` |
+| twitter | cookie | auth_token + ct0 | `fetch_me()` 只读探针 | `data/x_cookie.json` |
 | reddit | cookie | reddit_session | 无（只读本地文件） | rdt-cli 凭据库 |
 | xiaohongshu | login_state / token | 类型即全部 | **架构上不可能** | DB 布尔位 / 内容令牌 |
 | zhihu | login_state | 类型即全部 | **架构上不可能** | DB 布尔位 |

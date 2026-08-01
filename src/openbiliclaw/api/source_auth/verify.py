@@ -70,7 +70,7 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     "xiaohongshu": "browser_heartbeat",
     "douyin": "live_probe",
     "youtube": "none",
-    "twitter": "passive_health",
+    "twitter": "live_probe",
     "zhihu": "browser_heartbeat",
     "reddit": "local_file",
     # Fixed as ``live_probe`` even though Bangumi's contract reports
@@ -578,10 +578,143 @@ async def _probe_bangumi(
     )
 
 
+async def _probe_twitter(
+    cfg: Config,
+    database: Any,
+    probes: LiveProbeCache,
+    *,
+    cookie: str | None,
+    record: bool,
+) -> LiveProbeOutcome:
+    """Read X's authenticated account endpoint without performing a mutation."""
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+    from openbiliclaw.sources.x_auth import resolve_x_cookie
+    from openbiliclaw.sources.x_client import (
+        XAuthError,
+        XBlockedError,
+        XClient,
+        XClientError,
+        XMissingCookieError,
+        XRateLimitError,
+    )
+
+    if cookie is None:
+        tw_cfg = getattr(cfg.sources, "twitter", None)
+        cookie_env = str(getattr(tw_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
+        try:
+            cookie = resolve_x_cookie(data_dir=cfg.data_path, cookie_env=cookie_env)
+        except Exception:  # noqa: BLE001 - an unreadable store must not 500 the click
+            logger.debug("X cookie store unreadable during verify", exc_info=True)
+            cookie = ""
+    cookie = str(cookie or "").strip()
+
+    if not cookie:
+        if record:
+            probes.clear("twitter")
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=False,
+            authenticated=False,
+            network_error=False,
+            message="未配置 X Cookie —— 在浏览器登录 x.com，插件会自动同步。",
+        )
+
+    fingerprint = credential_fingerprint("twitter", cookie)
+    health_store = None
+    if record and hasattr(database, "conn"):
+        from openbiliclaw.storage.x_health import XSourceHealthStore
+
+        health_store = XSourceHealthStore(
+            database,
+            credential_fingerprint=fingerprint,
+        )
+
+    def _record_error(exc: BaseException) -> None:
+        if health_store is not None:
+            health_store.record_error(exc, strategy="verify")
+
+    try:
+        profile = await XClient(cookie).probe()
+    except XMissingCookieError:
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=False,
+            authenticated=False,
+            network_error=False,
+            message="X Cookie 缺少 auth_token / ct0，无法验证登录态。",
+        )
+    except XAuthError as exc:
+        _record_error(exc)
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=True,
+            authenticated=False,
+            network_error=False,
+            message="X Cookie 已失效 —— 请重新登录 x.com。",
+        )
+    except XBlockedError as exc:
+        _record_error(exc)
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message="X 拒绝了验证请求（403），暂时无法判定 Cookie 是否有效。",
+        )
+    except XRateLimitError as exc:
+        _record_error(exc)
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message="X 暂时限流，无法完成登录态验证，请稍后重试。",
+        )
+    except XClientError as exc:
+        # A transport or schema error is not evidence about the cookie. Do not
+        # overwrite the last known health state with a made-up failure.
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message=f"X 登录检查请求失败（{exc}），暂时无法判定。",
+        )
+    except Exception:  # noqa: BLE001 - optional X dependency / unexpected transport failure
+        logger.warning("X login probe failed unexpectedly", exc_info=True)
+        return LiveProbeOutcome(
+            slug="twitter",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message="X 登录检查请求未能完成，暂时无法判定。",
+        )
+
+    if health_store is not None:
+        health_store.record_success(strategy="verify")
+
+    username = str(getattr(profile, "screen_name", "") or "").strip()
+    user_id = 0
+    try:
+        user_id = int(getattr(profile, "id", 0) or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    return LiveProbeOutcome(
+        slug="twitter",
+        has_credential=True,
+        authenticated=True,
+        network_error=False,
+        message=f"X 登录有效{f'（@{username}）' if username else ''}。",
+        username=username,
+        user_id=user_id,
+    )
+
+
 async def run_live_probe(
     slug: str,
     *,
     cfg: Config,
+    database: Any = None,
     cookie: str | None = None,
     probes: LiveProbeCache = LIVE_PROBES,
     record: bool = True,
@@ -599,6 +732,14 @@ async def run_live_probe(
         return await _probe_bilibili(cfg, probes, cookie=cookie, record=record)
     if slug == "douyin":
         return await _probe_douyin(cfg, probes, cookie=cookie, record=record)
+    if slug == "twitter":
+        return await _probe_twitter(
+            cfg,
+            database,
+            probes,
+            cookie=cookie,
+            record=record,
+        )
     if slug == "bangumi":
         return await _probe_bangumi(cfg, probes, cookie=cookie, record=record)
     raise KeyError(slug)
@@ -614,33 +755,6 @@ def _action_from_probe(outcome: LiveProbeOutcome) -> _ActionResult:
         outcome.message,
         conclusive=outcome.has_credential and not outcome.network_error,
     )
-
-
-def _verify_twitter(database: Any) -> _ActionResult:
-    """Report the last real request's conclusion. Never probes.
-
-    X has no endpoint we can poll for liveness without spending a real request
-    against an already rate-limit-sensitive source, so the honest thing is to
-    surface what genuine traffic ran into and say when. The button therefore
-    refreshes the *reading*, not the verdict.
-    """
-    if not hasattr(database, "conn"):
-        return _ActionResult("X 健康状态不可用（数据库未就绪）。", conclusive=False)
-
-    from openbiliclaw.api.source_auth.contract import normalize_timestamp
-    from openbiliclaw.storage.x_health import XSourceHealthStore
-
-    health = XSourceHealthStore(database).get()
-    # Normalised even though it is prose, not a parsed field: this string is
-    # printed verbatim on all three surfaces, and an unmarked UTC timestamp
-    # reads as local time to the person looking at it just as surely as to
-    # ``Date.parse``.
-    updated_at = normalize_timestamp(str(health.get("updated_at", "") or ""))
-    when = f"（最近一次真实请求：{updated_at}）" if updated_at else "（尚无真实请求记录）"
-    # Conclusive on purpose: a passive verdict comes from a request that
-    # genuinely happened, so it *is* evidence — just not fresh evidence, which
-    # is exactly what the timestamp in the message is for.
-    return _ActionResult(f"X 无法主动探测，以下结论来自被动健康记录{when}。")
 
 
 async def _verify_browser_heartbeat(slug: str, database: Any, event_hub: Any) -> _ActionResult:
@@ -763,9 +877,14 @@ async def verify_source(
     try:
         action = VERIFY_ACTIONS[slug]
         if action == "live_probe":
-            result = _action_from_probe(await run_live_probe(slug, cfg=cfg, probes=probes))
+            result = _action_from_probe(
+                await run_live_probe(slug, cfg=cfg, database=database, probes=probes)
+            )
         elif action == "passive_health":
-            result = _verify_twitter(database)
+            result = _ActionResult(
+                "该来源只能提供被动健康记录，当前没有可执行的主动验证。",
+                conclusive=False,
+            )
         elif action == "browser_heartbeat":
             result = await _verify_browser_heartbeat(slug, database, event_hub)
         elif action == "local_file":
