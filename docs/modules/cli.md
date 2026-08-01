@@ -39,6 +39,9 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
 | `db-repair` | 检查、备份并修复本地 SQLite 数据库 | ✅ |
 | `serve-api` | 启动容器友好的 API 服务 | ✅ |
+| `tls-proxy enable [--san HOST_OR_IP]...` | 持久开启可选 LAN/self-managed HTTPS 入口 | ✅ |
+| `tls-proxy disable` | 持久关闭 TLS 入口（不删除证书） | ✅ |
+| `tls-proxy status` | 显示开关、端口、证书目录与 SAN | ✅ |
 | `init` | 首次初始化 | ✅ | stage 1 的 B 站收藏事件补上 `bvid` / url / `fav_time`（2026-07-26+）：此前收藏没有身份，进不了 `seen_items`，收藏过的视频会被当新内容推回；历史事件同时补 `content_id` / 完播秒数 / 时长 / 分区，供偏好分析 prompt 与画像抽样权重区分满播与划走；2026-07-27 起 `view` 也参与满意度判定，但**只判正向**：完播 ≥80% 且观看 ≥15 秒 → `positive/finished_watch`，低完播保持 `unknown` 不判负。收藏还会带上播放量 / 发布时间 / 简介（截 200 字，仅入库不进 prompt），并按 `attr` 丢弃失效视频——它们的标题字面是「已失效视频」，占真实样本 6%，原样进画像等于凭空造出一个兴趣。导入前按 `(事件类型, 内容身份, 时间戳)` 跳过账本已有行：重跑 init 曾让账本 56% 变成重复行；键含时间戳让真实重看仍能落地，无身份的行一律保留 |
 | `fetch-douyin` | 单独触发抖音 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-xhs` | 单独触发小红书 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
@@ -354,11 +357,47 @@ $ openbiliclaw start
 $ openbiliclaw serve-api
 
 $ openbiliclaw serve-api --host 0.0.0.0 --port 8420
+
+$ openbiliclaw serve-api --tls-port 9443   # 覆盖 config.toml 的 [tls_proxy].port
 ```
 
+`--tls-port` 覆盖 `[tls_proxy].port`（默认 8443），仅在 `enabled=true` 时生效。
+TLS enabled 时，证书检查、SSL context 和 socket bind 在 uvicorn 前同步完成；任一失败会打印
+原因并让 `serve-api` 非零退出，不会继续显示“HTTPS 已启动”。API wildcard host 会转换成
+可连接的 loopback（`0.0.0.0 → 127.0.0.1`、`:: → ::1`）供代理连接。
 推荐容器内使用该命令作为启动入口。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。
+
+### `openbiliclaw tls-proxy`
+
+管理默认关闭的局域网 / 自管 TLS 入口。它不是公网生产级反向代理，且只随 `serve-api`
+运行。第一次启用时，应把远程客户端实际使用的 hostname/IP 作为 SAN：
+
+```bash
+# --san 可重复；推荐显式给出，避免交互输入歧义
+$ openbiliclaw tls-proxy enable \
+    --san 192.168.1.20 \
+    --san openbiliclaw.lan
+
+# 不传 --san 且尚无已存 SAN 时，会交互询问；直接回车只生成 localhost 证书
+$ openbiliclaw tls-proxy enable
+
+$ openbiliclaw tls-proxy status
+TLS 反代配置
+状态:   开启
+端口:   8443
+证书目录: (data/certs)
+SAN:    192.168.1.20, openbiliclaw.lan
+
+# 仅关闭下次启动，不删除/重签任何证书
+$ openbiliclaw tls-proxy disable
+```
+
+`enable` / `disable` 通过 `save_config()` 持久化 `[tls_proxy]`。若开关由
+`OPENBILICLAW_TLS_PROXY_ENABLED` 或 `config.local.toml` 管理，命令会以非零状态拒绝假成功，
+应直接修改覆盖来源。SAN 变化不会自动覆盖旧证书；下一次启动会明确列出证书缺少的 SAN，
+按 [`HTTPS 部署指南`](../https-deployment.md) 备份并重签。
 
 ### `openbiliclaw set-password`
 

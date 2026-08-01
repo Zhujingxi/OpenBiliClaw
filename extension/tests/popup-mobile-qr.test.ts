@@ -22,6 +22,17 @@ test("mobile web QR state uses the configured backend endpoint", () => {
   assert.match(state.hint, /同一个局域网/);
 });
 
+test("mobile web QR preserves HTTPS and rejects unknown schemes", () => {
+  assert.equal(
+    buildMobileWebUrl({ scheme: "https", host: "192.168.1.100", port: 8443 }),
+    "https://192.168.1.100:8443/m/",
+  );
+  assert.equal(
+    buildMobileWebUrl({ scheme: "javascript", host: "192.168.1.100", port: 8443 }),
+    "http://192.168.1.100:8443/m/",
+  );
+});
+
 test("mobile web QR URL brackets an IPv6 literal", () => {
   assert.equal(
     buildMobileWebUrl({ host: "fd12:3456:789a::7", port: 8420 }),
@@ -59,4 +70,6 @@ test("mobile QR LAN-IP lookup uses the lightweight QR endpoint", () => {
   assert.ok(renderSource, "popup.js must keep renderMobileQrPanel");
   assert.match(renderSource, /\/api\/qr-info/);
   assert.doesNotMatch(renderSource, /\/api\/health/);
+  assert.match(renderSource, /endpoint\.scheme === "https" \? "https" : "http"/);
+  assert.match(renderSource, /`\$\{scheme\}:\/\/\$\{urlHost\}:\$\{endpoint\.port\}`/);
 });

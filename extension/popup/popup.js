@@ -2948,8 +2948,11 @@ async function renderMobileQrPanel() {
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
-      const urlHost = endpoint.host.includes(":") ? `[${endpoint.host}]` : endpoint.host;
-      const base = `http://${urlHost}:${endpoint.port}`;
+      const scheme = endpoint.scheme === "https" ? "https" : "http";
+      const urlHost = endpoint.host.includes(":") && !endpoint.host.startsWith("[")
+        ? `[${endpoint.host}]`
+        : endpoint.host;
+      const base = `${scheme}://${urlHost}:${endpoint.port}`;
       const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();

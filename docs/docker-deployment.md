@@ -140,6 +140,27 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 - B 站登录态推荐用浏览器扩展：扩展装在**宿主机浏览器**里，不在容器里。你登录 bilibili.com 后，扩展会把 Cookie 自动 POST 到 `127.0.0.1:8420` 的后端接口。
 - 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入初始化和日常发现；前六者启用时需在宿主机浏览器里装扩展并登录对应站点，Bangumi 则直接使用官方匿名只读 API。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
 
+### 可选 LAN / self-managed HTTPS profile
+
+源码 `docker-compose.yml` 提供默认不启动的 `tls` profile。**首次生成证书前**必须传入
+远程客户端实际使用的 IP/hostname SAN：
+
+```bash
+export OPENBILICLAW_TLS_SAN_NAMES="192.168.1.20,openbiliclaw.lan"
+export OPENBILICLAW_TLS_PORT=8443
+docker compose --profile tls up -d --build
+```
+
+然后把 Web/扩展后端地址改为 `https://192.168.1.20:8443`，并按
+[HTTPS 部署指南](https-deployment.md) 下载、核对并信任本地 CA。`OPENBILICLAW_TLS_SAN_NAMES`
+会映射为代理容器的逗号分隔 `SAN_NAMES`；不设置时自动证书只有 localhost/127.0.0.1，
+**不能声称局域网 IP 可用**。`OPENBILICLAW_TLS_PORT` 同时改变宿主机映射与容器监听。
+
+证书持久化在 `openbiliclaw_certs` volume。改变 SAN 后，旧证书若不覆盖新值，容器会明确
+启动失败且不会覆盖证书；先查看 `docker compose logs openbiliclaw-tls-proxy`，再按指南备份
+并显式重签。该 profile 适合可信 LAN / 自管网络，不提供公网生产网关能力；原 `8420:8420`
+HTTP 映射也不会自动关闭。`docker-compose.prebuilt.yml` 当前不包含此 profile。
+
 健康状态随时可查：
 
 ```bash
